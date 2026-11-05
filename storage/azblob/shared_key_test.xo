@@ -1,0 +1,66 @@
+use std/http
+use std/json
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// Captured from azblob (testdata/shared_key_vectors.json has the source).
+const VECTORS: Str = embed("testdata/shared_key_vectors.json")
+
+/// Azurite's public development account and key, documented by
+/// Microsoft for the emulator; valid nowhere else.
+const DEV_ACCOUNT: Str = "devstoreaccount1"
+const DEV_KEY: Str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
+fn str_of(v: json.Value?) -> Str {
+  match v {
+    Some(json.Value.Str(s)) => s
+    _ => ""
+  }
+}
+
+test "Shared Key signatures match azblob's for every captured request" {
+  let cred = new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  let doc = json.parse_value(VECTORS)?
+  let vs = match doc.get("vectors") {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+  expect(vs.len()) == 6
+  for v in vs {
+    var headers: List[(Str, Str)] = []
+    if let Some(json.Value.List(hs)) = v.get("headers") {
+      for h in hs {
+        if let json.Value.List(kv) = h {
+          headers.push((str_of(Some(kv[0])), str_of(Some(kv[1]))))
+        }
+      }
+    }
+    let req = policy.Request{method: str_of(v.get("method")), url: str_of(v.get("url")), headers: headers}
+    let sts = cred.string_to_sign(req)?
+    expect("${str_of(v.get("name"))}: SharedKey ${DEV_ACCOUNT}:${cred.compute_hmac_sha256(sts)}") == "${str_of(v.get("name"))}: ${str_of(v.get("authorization"))}"
+  }
+}
+
+test "x-ms- headers sort as the service sorts them: dashes weigh nothing first" {
+  expect(sort_headers(["x-ms-meta-ac", "x-ms-meta-a-c", "x-ms-meta-ab", "x-ms-meta-a_b", "x-ms-date"])) == ["x-ms-date", "x-ms-meta-a_b", "x-ms-meta-ab", "x-ms-meta-ac", "x-ms-meta-a-c"]
+  expect(canonicalized_headers([("X-Ms-Date", "d"), ("x-ms-meta-k", "1"), ("x-ms-meta-k", "2"), ("Content-Type", "x")])) == "x-ms-date:d\nx-ms-meta-k:1,2"
+}
+
+test "the policy dates and signs a request" {
+  let seen = Mutex[List[http.Request]].new([])
+  os.net.handle("GET http://127.0.0.1:10000/devstoreaccount1/c", fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(200, "")
+  })
+  let cred = new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  let date = http_date(os.clock.now())
+  expect(date.ends_with(" GMT")) == true
+  expect(http_date(Time.parse_rfc3339("2026-11-05T03:04:05Z") ?? os.clock.now())) == "Thu, 05 Nov 2026 03:04:05 GMT"
+  let p = runtime.new_pipeline("azblob", "v0.1.0", os.net, os.clock, os.rand, runtime.PipelineOptions{per_retry: [shared_key_policy(cred, os.clock)]}, policy.ClientOptions{})
+  p.send(policy.Request{method: "GET", url: "http://127.0.0.1:10000/devstoreaccount1/c?restype=container"})?
+  let r = seen.with_read(fn(xs: List[http.Request]) -> http.Request { xs[0] })
+  expect(r.header("x-ms-date")) == Some(date)
+  let auth = r.header("Authorization") ?? ""
+  expect(auth.starts_with("SharedKey devstoreaccount1:")) == true
+  expect(new_shared_key_credential("a", "not base64!").is_err()) == true
+}
