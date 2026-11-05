@@ -34,9 +34,14 @@ Xo main 820d19c50 (2026-11-05).
    file are handled by background tasks serving channels. Needed: a way
    for a value to carry a closure whose effects were granted when it was
    made. Workaround: the background task pattern.
-5. **Int to hex formatting** (`n.to_hex()` or `${n:x}`): small, but
-   both SDKs write their own (chunk sizes, request IDs). Workaround: a
-   helper.
+5. ~~Int to hex formatting~~: not a gap (amended 2026-11-05, the lead):
+   `Int.to_str_base(16)` (Go's FormatInt) and `Int.to_str_width(width,
+   base: 16, zero: true)` exist (`xo doc Int`); both SDKs use them.
+
+Status of the others (the lead, 2026-11-05): items 1 to 3 are queued
+with the xo repository's std owner; item 4 is a language design question
+against Xo's effect rules and is parked, so the background task pattern
+stays.
 
 ## Consequences
 
