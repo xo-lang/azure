@@ -37,10 +37,17 @@ hits=$(echo "$files" | xargs grep -n -I -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-
 
 gl=${GITLEAKS_CONFIG:-../xo-publish-tools/gitleaks.toml}
 if [ -f "$gl" ]; then
-  if ! gitleaks git --no-banner -c "$gl" . >/dev/null 2>&1; then
-    echo "check-public: gitleaks found leaks (run: gitleaks git -c $gl .)" >&2
+  # the shared rules, extended with this repository's path allowlist
+  # gitleaks reads the format from the extension
+  cfgdir=$(mktemp -d "${TMPDIR:-/tmp}/gitleaks-azure.XXXXXX")
+  cfg="$cfgdir/gitleaks.toml"
+  printf '[extend]\npath = "%s"\n\n' "$(cd "$(dirname "$gl")" && pwd)/$(basename "$gl")" >"$cfg"
+  cat scripts/gitleaks-extra.toml >>"$cfg"
+  if ! gitleaks git --no-banner -c "$cfg" . >/dev/null 2>&1 || ! gitleaks dir --no-banner -c "$cfg" . >/dev/null 2>&1; then
+    echo "check-public: gitleaks found leaks (run: gitleaks git -c $cfg .)" >&2
     fail=1
   fi
+  rm -rf "$cfgdir"
 else
   echo "check-public: no gitleaks config at $gl; set GITLEAKS_CONFIG" >&2
   fail=1

@@ -1,0 +1,54 @@
+// The bearer token policy, as azcore's runtime.BearerTokenPolicy (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): a token for the
+// client's scopes, kept and shared by the client's calls, refreshed at
+// its refresh time (or 5 minutes before it expires) by one call while
+// the others wait. Tokens are sent only over HTTPS unless allowed.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+pub struct BearerTokenPolicy {
+  pub credential: azcore.TokenCredential
+  pub scopes: List[Str]
+  pub clock: Clock
+  /// Send tokens over plain HTTP too (emulators and tests only).
+  pub insecure_allow_http: Bool = false
+  /// Extra tenants whose tokens go in `x-ms-authorization-auxiliary`.
+  pub auxiliary_tenants: List[Str] = []
+  token: Mutex[azcore.AccessToken?]
+}
+
+pub fn bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, insecure_allow_http: Bool = false, auxiliary_tenants: List[Str] = []) -> BearerTokenPolicy {
+  BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: insecure_allow_http, auxiliary_tenants: auxiliary_tenants, token: Mutex.new(None)}
+}
+
+fn (p: BearerTokenPolicy) current() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    if let Some(have) = t {
+      if !azcore.needs_refresh(have, p.clock.now()) {
+        return Ok(have)
+      }
+    }
+    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+fn (p: BearerTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if !req.url.starts_with("https://") && !p.insecure_allow_http {
+    return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
+  }
+  let t = p.current() ?? e => return Err(policy.SendErr.Auth(e.display()))
+  var r = req.with_header("Authorization", "Bearer ${t.token.reveal()}")
+  if !p.auxiliary_tenants.is_empty() {
+    var aux: List[Str] = []
+    for tenant in p.auxiliary_tenants {
+      let at = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, tenant_id: tenant}) ?? e => return Err(policy.SendErr.Auth(e.display()))
+      aux.push("Bearer ${at.token.reveal()}")
+    }
+    r = r.with_header("x-ms-authorization-auxiliary", aux.join(", "))
+  }
+  next.send(r)
+}

@@ -1,0 +1,170 @@
+use std/crypto
+use std/http
+use std/json
+use std/jwt
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const TENANT: Str = "00000000-0000-0000-0000-000000000000"
+const CLIENT: Str = "00000000-0000-0000-0000-000000000000"
+const AUTHORITY: Str = "https://login.example.test/"
+const SCOPE: Str = "https://management.core.windows.net//.default"
+
+fn opts() -> Options {
+  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: AUTHORITY}}}
+}
+
+fn token_json(token: Str, expires_in: Int) -> Str {
+  "{\"token_type\":\"Bearer\",\"expires_in\":${expires_in},\"access_token\":\"${token}\"}"
+}
+
+/// An invented self-signed certificate and key (testdata/README.md).
+const TEST_PEM: Str = embed("testdata/test-certificate.pem")
+
+test "a client secret is sent in the client credentials grant, and the token is cached" {
+  let n = Atomic[Int].new(0)
+  let form = Mutex[Str].new("")
+  os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
+    n.add(1)
+    form.reset(req.body.to_str_lossy())
+    http.text(200, token_json("tok-1", 3600))
+  })
+  let c = new_client_secret_credential(TENANT, CLIENT, "invented-secret", os.net, os.clock, os.rand, opts())?
+  let t = c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?
+  expect(t.token.reveal()) == "tok-1"
+  expect(t.expires_on.unix_millis() - os.clock.now().unix_millis()) == 3600000
+  let q = url.parse_query(form.with_read(fn(s: Str) -> Str { s }))?
+  expect(q.get("grant_type")) == Some("client_credentials")
+  expect(q.get("client_secret")) == Some("invented-secret")
+  expect(q.get("scope")) == Some(SCOPE)
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?
+  expect(n.get()) == 1
+  // within 5 minutes of expiry it asks again
+  os.clock.advance(56m)
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?
+  expect(n.get()) == 2
+}
+
+test "an error response names the code and description; tenants are checked" {
+  os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
+    http.text(401, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: Invalid client secret provided.\"}")
+  })
+  let c = new_client_secret_credential(TENANT, CLIENT, "wrong", os.net, os.clock, os.rand, opts())?
+  match c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]}) {
+    Err(e) => expect(e.msg.contains("invalid_client: AADSTS7000215")) == true
+    Ok(_) => expect("Ok") == "Err"
+  }
+  match c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE], tenant_id: "other"}) {
+    Err(e) => expect(e.msg.contains("not allowed")) == true
+    Ok(_) => expect("Ok") == "Err"
+  }
+  match new_client_secret_credential("bad tenant/x", CLIENT, "s", os.net, os.clock, os.rand, opts()) {
+    Err(e) => expect(e.msg.contains("invalid tenant ID")) == true
+    Ok(_) => expect("Ok") == "Err"
+  }
+}
+
+test "a client assertion is a PS256 JWT with x5t#S256 and MSAL's claims" {
+  let (certs, key) = parse_certificates(TEST_PEM.bytes())?
+  expect(certs[0].subject.common_name) == "xo-azure-test-only"
+  // the x5t#S256 header is the base64url SHA-256 of the certificate
+  expect(thumbprint_s256(certs[0])) == crypto.digest(crypto.Hash.Sha256, certs[0].raw).to_base64().replace("+", "-").replace("/", "_").trim_end_chars("=")
+  let endpoint = "${AUTHORITY}${TENANT}/oauth2/v2.0/token"
+  let a = client_assertion(os.rand, key, "thumb", [], CLIENT, endpoint, os.clock.now())?
+  let h = jwt.peek_header(a)?
+  expect(h.alg) == jwt.Alg.PS256
+  expect(h.extra.get("x5t#S256")) == Some("thumb")
+  let claims = jwt.verify_with[json.Value](a, jwt.Key.Public(key.public_key()), jwt.Options{algs: [jwt.Alg.PS256], now: os.clock.now(), audience: Some(endpoint), issuer: Some(CLIENT), subject: Some(CLIENT)})?
+  let num = fn(k: Str) -> Int {
+    match claims.get(k) {
+      Some(json.Value.Int(v)) => v
+      _ => 0
+    }
+  }
+  let exp = num("exp")
+  let nbf = num("nbf")
+  expect(exp - nbf) == 600
+  match claims.get("jti") {
+    Some(json.Value.Str(j)) => expect(j.len()) == 36
+    _ => expect("no jti") == "jti"
+  }
+}
+
+test "a workload identity sends the token file as its assertion" {
+  os.fs.write("/var/run/token", b"federated-token\n")?
+  let form = Mutex[Str].new("")
+  os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
+    form.reset(req.body.to_str_lossy())
+    http.text(200, token_json("wi", 3600))
+  })
+  let w = new_workload_identity_credential(TENANT, CLIENT, "/var/run/token", os.fs, os.net, os.clock, os.rand, opts())?
+  expect(w.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?.token.reveal()) == "wi"
+  let q = url.parse_query(form.with_read(fn(s: Str) -> Str { s }))?
+  expect(q.get("client_assertion")) == Some("federated-token")
+  expect(q.get("client_assertion_type")) == Some(ASSERTION_TYPE)
+}
+
+test "managed identity sources and their requests" {
+  let env = os.env
+  expect(source_of(env) is Source.Imds) == true
+  let imds = token_request(Source.Imds, Some(UserAssigned.ClientId("cid")), "https://vault.azure.net")
+  expect(imds.url) == "${IMDS_ENDPOINT}?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net&client_id=cid"
+  expect(imds.header("Metadata")) == Some("true")
+  env.set("IDENTITY_ENDPOINT", "http://127.0.0.1:41000/msi/token")
+  env.set("IDENTITY_HEADER", "invented-header")
+  let app = token_request(source_of(env), None, "https://management.azure.com")
+  expect(app.url) == "http://127.0.0.1:41000/msi/token?api-version=2019-08-01&resource=https%3A%2F%2Fmanagement.azure.com"
+  expect(app.header("X-IDENTITY-HEADER")) == Some("invented-header")
+  expect(resource_of(["https://vault.azure.net/.default"])) == Ok("https://vault.azure.net")
+}
+
+test "IMDS gives a token with expires_on; without IMDS the credential is unavailable" {
+  let expires = os.clock.now().unix_millis() / 1000 + 3600
+  os.net.handle("GET ${IMDS_ENDPOINT}", fn(req: http.Request) -> http.Response {
+    if req.header("Metadata") != Some("true") {
+      return http.text(400, "")
+    }
+    http.text(200, "{\"access_token\":\"mi\",\"expires_on\":\"${expires}\",\"resource\":\"https://management.azure.com\",\"token_type\":\"Bearer\"}")
+  })
+  let m = new_managed_identity_credential(os.env.only([]), os.net, os.clock, os.rand)
+  expect(m.get_token(azcore.TokenRequestOptions{scopes: ["https://management.azure.com/.default"]})?.token.reveal()) == "mi"
+  let none = new_managed_identity_credential(os.env.only([]), os.net.only([]), os.clock, os.rand, ManagedIdentityOptions{probe: true})
+  match none.get_token(azcore.TokenRequestOptions{scopes: ["https://management.azure.com/.default"]}) {
+    Err(e) => expect(e.unavailable) == true
+    Ok(_) => expect("Ok") == "Err"
+  }
+}
+
+test "the default chain skips what is not set up and uses the environment's secret" {
+  os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
+    http.text(200, token_json("env", 3600))
+  })
+  let env = os.env
+  env.set("AZURE_TENANT_ID", TENANT)
+  env.set("AZURE_CLIENT_ID", CLIENT)
+  env.set("AZURE_CLIENT_SECRET", "invented-secret")
+  env.set("AZURE_AUTHORITY_HOST", AUTHORITY)
+  let d = new_default_azure_credential(env, os.fs, os.net, os.clock, os.rand)?
+  expect(d.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?.token.reveal()) == "env"
+  // nothing set up and no IMDS: every reason is listed
+  let empty = new_default_azure_credential(os.env.only([]), os.fs, os.net.only([]), os.clock, os.rand)?
+  match empty.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]}) {
+    Err(e) => {
+      expect(e.msg.contains("EnvironmentCredential")) == true
+      expect(e.msg.contains("WorkloadIdentityCredential")) == true
+      expect(e.msg.contains("ManagedIdentityCredential")) == true
+    }
+    Ok(_) => expect("Ok") == "Err"
+  }
+  env.set("AZURE_TOKEN_CREDENTIALS", "dev")
+  match new_default_azure_credential(env, os.fs, os.net, os.clock, os.rand) {
+    Err(e) => expect(e.msg.contains("not supported")) == true
+    Ok(_) => expect("Ok") == "Err"
+  }
+}
+
+test "the ARM scope keeps azcore's double slash" {
+  expect(arm_scope(cloud.AZURE_PUBLIC)) == SCOPE
+}

@@ -1,0 +1,125 @@
+// ManagedIdentityCredential, as azidentity with MSAL Go's managed
+// identity sources (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md), chosen from the environment when the credential is built:
+// App Service (IDENTITY_ENDPOINT and IDENTITY_HEADER), Azure ML
+// (MSI_ENDPOINT and MSI_SECRET), Cloud Shell (MSI_ENDPOINT), else IMDS.
+// Service Fabric (it pins the server's certificate) and Azure Arc (it
+// reads a key file the server names) come later (decision 0003).
+
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const IMDS_ENDPOINT: Str = "http://169.254.169.254/metadata/identity/oauth2/token"
+
+pub enum Source {
+  Imds
+  AppService(endpoint: Str, header: Secret[Str])
+  AzureMl(endpoint: Str, secret: Secret[Str])
+  CloudShell(endpoint: Str)
+}
+
+/// A user-assigned identity, or None for the system-assigned one.
+pub enum UserAssigned {
+  ClientId(id: Str)
+  ObjectId(id: Str)
+  ResourceId(id: Str)
+}
+
+pub struct ManagedIdentityOptions {
+  pub id: UserAssigned? = None
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Inside DefaultAzureCredential: one quick try at IMDS (1 s, no
+  /// retries), so a machine without it moves on.
+  pub probe: Bool = false
+}
+
+pub struct ManagedIdentityCredential {
+  pub source: Source
+  id: UserAssigned?
+  pipeline: runtime.Pipeline
+  clock: Clock
+  cache: Mutex[List[(Str, azcore.AccessToken)]]
+}
+
+/// The source the environment `env` names.
+pub fn source_of(env: Env) -> Source uses env {
+  let get = fn(k: Str) -> Str { env.get(k) ?? "" }
+  if get("IDENTITY_ENDPOINT") != "" && get("IDENTITY_HEADER") != "" {
+    return Source.AppService(endpoint: get("IDENTITY_ENDPOINT"), header: Secret.new(get("IDENTITY_HEADER")))
+  }
+  if get("MSI_ENDPOINT") != "" {
+    if get("MSI_SECRET") != "" {
+      return Source.AzureMl(endpoint: get("MSI_ENDPOINT"), secret: Secret.new(get("MSI_SECRET")))
+    }
+    return Source.CloudShell(endpoint: get("MSI_ENDPOINT"))
+  }
+  Source.Imds
+}
+
+pub fn new_managed_identity_credential(env: Env, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential uses env {
+  let src = source_of(env)
+  var client = opts.client
+  if opts.probe && src is Source.Imds {
+    client = client with {timeout: 1s, retry: client.retry with {max_retries: 0}}
+  } else {
+    // IMDS answers 404 and 410 while it starts (MSAL retries them)
+    client = client with {retry: client.retry with {status_codes: client.retry.status_codes + [404, 410]}}
+  }
+  ManagedIdentityCredential{source: src, id: opts.id, pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client), clock: clock, cache: Mutex.new([])}
+}
+
+/// The resource of a scope (`https://vault.azure.net/.default` is
+/// `https://vault.azure.net`): managed identity takes one resource.
+pub fn resource_of(scopes: List[Str]) -> Str ! Str {
+  if scopes.len() != 1 {
+    return Err("managed identity takes exactly one scope, got ${scopes.len()}")
+  }
+  Ok(scopes[0].trim_suffix("/.default"))
+}
+
+/// The request for `resource` from `src`.
+pub fn token_request(src: Source, id: UserAssigned?, resource: Str) -> policy.Request {
+  let r = url.query_escape(resource)
+  let ua = fn(names: (Str, Str, Str)) -> Str {
+    match id {
+      Some(UserAssigned.ClientId(v)) => "&${names.0}=${url.query_escape(v)}"
+      Some(UserAssigned.ObjectId(v)) => "&${names.1}=${url.query_escape(v)}"
+      Some(UserAssigned.ResourceId(v)) => "&${names.2}=${url.query_escape(v)}"
+      None => ""
+    }
+  }
+  match src {
+    Imds => policy.Request{method: "GET", url: "${IMDS_ENDPOINT}?api-version=2018-02-01&resource=${r}${ua(("client_id", "object_id", "msi_res_id"))}", headers: [("Metadata", "true")]}
+    AppService(endpoint, header) => policy.Request{method: "GET", url: "${endpoint}?api-version=2019-08-01&resource=${r}${ua(("client_id", "object_id", "mi_res_id"))}", headers: [("X-IDENTITY-HEADER", header.reveal())]}
+    AzureMl(endpoint, secret) => policy.Request{method: "GET", url: "${endpoint}?api-version=2017-09-01&resource=${r}${ua(("clientid", "object_id", "mi_res_id"))}", headers: [("secret", secret.reveal())]}
+    CloudShell(endpoint) => policy.Request{method: "POST", url: endpoint, headers: [("Metadata", "true"), ("Content-Type", "application/x-www-form-urlencoded")], body: "resource=${r}".bytes()}
+  }
+}
+
+pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let name = "ManagedIdentityCredential"
+  let resource = resource_of(opts.scopes) ?? e => return Err(azcore.AuthErr{credential: name, msg: e})
+  // one call fetches while the others wait for its token
+  m.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    let now = m.clock.now()
+    for (k, t) in xs {
+      if k == resource && !azcore.needs_refresh(t, now) {
+        return Ok(t)
+      }
+    }
+    let resp = match m.pipeline.send(token_request(m.source, m.id, resource)) {
+      Ok(r) => r
+      // no endpoint here: a chain tries the next credential
+      Err(e) => return Err(azcore.AuthErr{credential: name, msg: "no managed identity endpoint answered: ${e.display()}", unavailable: true})
+    }
+    if resp.status == 400 && m.source is Source.Imds && m.id.is_none() {
+      return Err(azcore.AuthErr{credential: name, msg: "IMDS has no system-assigned identity here (HTTP 400)", unavailable: true})
+    }
+    let t = parse_token_response(name, resp, now)?
+    xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != resource })
+    xs.push((resource, t))
+    Ok(t)
+  })
+}

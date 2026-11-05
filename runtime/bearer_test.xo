@@ -1,0 +1,63 @@
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const ARM: Str = "https://example.management.test/subscriptions/x"
+
+/// A credential that counts its calls; tokens last an hour.
+struct Counting {
+  calls: Atomic[Int]
+  clock: Clock
+}
+
+fn (c: Counting) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.calls.add(1)
+  let who = if opts.tenant_id == "" { "home" } else { opts.tenant_id }
+  Ok(azcore.AccessToken{token: Secret.new("tok-${who}-${n}"), expires_on: Time.from_unix_millis(c.clock.now().unix_millis() + 3600 * 1000)})
+}
+
+fn capture(net: testing.FakeNet, url: Str) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle("GET ${url}", fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(200, "{}")
+  })
+  seen
+}
+
+test "the bearer policy sends a token and keeps it until it needs a refresh" {
+  let seen = capture(os.net, ARM)
+  let cred = Counting{calls: Atomic.new(0), clock: os.clock}
+  let bp = bearer_token_policy(cred, ["https://management.test/.default"], os.clock)
+  let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bp]}, policy.ClientOptions{})
+  p.send(policy.Request{method: "GET", url: ARM})?
+  p.send(policy.Request{method: "GET", url: ARM})?
+  expect(cred.calls.get()) == 1
+  // 56 minutes later the token is within 5 minutes of expiring
+  os.clock.sleep(56m)
+  p.send(policy.Request{method: "GET", url: ARM})?
+  expect(cred.calls.get()) == 2
+  let auth = seen.with_read(fn(xs: List[http.Request]) -> List[Str] { xs.map(fn(r: http.Request) -> Str { r.header("Authorization") ?? "" }) })
+  expect(auth) == ["Bearer tok-home-1", "Bearer tok-home-1", "Bearer tok-home-2"]
+}
+
+test "the bearer policy refuses plain HTTP unless allowed" {
+  let cred = Counting{calls: Atomic.new(0), clock: os.clock}
+  let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock)]}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: 0}})
+  let r = p.send(policy.Request{method: "GET", url: "http://example.test/x"})
+  expect(r.is_err()) == true
+  expect(cred.calls.get()) == 0
+  let seen = capture(os.net, "http://emulator.test/x")
+  let open = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock, insecure_allow_http: true)]}, policy.ClientOptions{})
+  expect(open.send(policy.Request{method: "GET", url: "http://emulator.test/x"})?.status) == 200
+  expect(seen.with_read(fn(xs: List[http.Request]) -> Str { xs[0].header("Authorization") ?? "" })) == "Bearer tok-home-1"
+}
+
+test "auxiliary tenants' tokens go in x-ms-authorization-auxiliary" {
+  let seen = capture(os.net, ARM)
+  let cred = Counting{calls: Atomic.new(0), clock: os.clock}
+  let bp = bearer_token_policy(cred, ["s"], os.clock, auxiliary_tenants: ["t1", "t2"])
+  new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bp]}, policy.ClientOptions{}).send(policy.Request{method: "GET", url: ARM})?
+  expect(seen.with_read(fn(xs: List[http.Request]) -> Str { xs[0].header("x-ms-authorization-auxiliary") ?? "" })) == "Bearer tok-t1-2, Bearer tok-t2-3"
+}

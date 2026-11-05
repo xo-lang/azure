@@ -1,0 +1,155 @@
+// The OAuth 2.0 client credentials grant at the Entra ID token endpoint
+// (`<authority>/<tenant>/oauth2/v2.0/token`), shared by the secret,
+// certificate and workload identity credentials, with a token cache per
+// credential. azidentity uses MSAL Go for this; only this
+// grant is needed (decision 0003). Behavior follows azidentity and MSAL
+// Go (MIT, Copyright (c) Microsoft Corporation; NOTICE.md).
+
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const VERSION: Str = "v0.1.0"
+
+/// Options every credential takes.
+pub struct Options {
+  /// The pipeline options of the credential's own requests; `cloud`
+  /// gives the authority host.
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Tenants besides the credential's that a token may be asked for;
+  /// `*` allows any.
+  pub additionally_allowed_tenants: List[Str] = []
+}
+
+/// A credential that asks the token endpoint for an app's tokens.
+pub struct Confidential {
+  pub name: Str
+  pub tenant_id: Str
+  pub client_id: Str
+  pub authority_host: Str
+  pub allowed: List[Str]
+  pub pipeline: runtime.Pipeline
+  pub clock: Clock
+  cache: Mutex[List[(Str, azcore.AccessToken)]]
+}
+
+/// Whether `t` can be a tenant id or domain (azidentity's check).
+pub fn valid_tenant(t: Str) -> Bool {
+  t != "" && t.runes().all(fn(r: Rune) -> Bool { (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.' })
+}
+
+pub fn confidential(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options) -> Confidential ! azcore.AuthErr {
+  if !valid_tenant(tenant_id) {
+    return Err(azcore.AuthErr{credential: name, msg: "invalid tenant ID ${tenant_id}: use letters, digits, `.` and `-`"})
+  }
+  if client_id == "" {
+    return Err(azcore.AuthErr{credential: name, msg: "no client ID"})
+  }
+  let host = opts.client.cloud.authority_host
+  Ok(Confidential{
+    name: name,
+    tenant_id: tenant_id,
+    client_id: client_id,
+    authority_host: if host.ends_with("/") { host } else { "${host}/" },
+    allowed: opts.additionally_allowed_tenants,
+    pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, opts.client),
+    clock: clock,
+    cache: Mutex.new([]),
+  })
+}
+
+/// The tenant a request is for: the credential's, or an allowed other.
+pub fn (c: Confidential) tenant_for(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
+  if opts.tenant_id == "" || opts.tenant_id == c.tenant_id {
+    return Ok(c.tenant_id)
+  }
+  if c.allowed.contains("*") || c.allowed.contains(opts.tenant_id) {
+    return Ok(opts.tenant_id)
+  }
+  Err(azcore.AuthErr{credential: c.name, msg: "tenant ${opts.tenant_id} is not allowed: add it to additionally_allowed_tenants (AZURE_ADDITIONALLY_ALLOWED_TENANTS)"})
+}
+
+/// The token endpoint of `tenant`.
+pub fn (c: Confidential) endpoint(tenant: Str) -> Str {
+  "${c.authority_host}${tenant}/oauth2/v2.0/token"
+}
+
+/// A cached token for `opts`, if still fresh.
+pub fn (c: Confidential) cached(key: Str) -> azcore.AccessToken? uses clock {
+  let now = c.clock.now()
+  c.cache.with_read(fn(xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken? {
+    for (k, t) in xs {
+      if k == key && !azcore.needs_refresh(t, now) {
+        return Some(t)
+      }
+    }
+    None
+  })
+}
+
+/// Asks the token endpoint of `tenant` with the grant's `fields`
+/// (client_secret, or client_assertion and its type), and caches it.
+pub fn (c: Confidential) request(tenant: Str, key: Str, scopes: List[Str], fields: List[(Str, Str)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  var form: List[Str] = ["client_id=${url.query_escape(c.client_id)}", "grant_type=client_credentials", "scope=${url.query_escape(scopes.join(" "))}"]
+  for (k, v) in fields {
+    form.push("${k}=${url.query_escape(v)}")
+  }
+  let req = policy.Request{method: "POST", url: c.endpoint(tenant), headers: [("Content-Type", "application/x-www-form-urlencoded")], body: form.join("&").bytes()}
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display()})
+  let t = parse_token_response(c.name, resp, c.clock.now())?
+  c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {
+    xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
+    xs.push((key, t))
+  })
+  Ok(t)
+}
+
+fn num_field(doc: json.Value, k: Str) -> Int? {
+  match doc.get(k) {
+    Some(json.Value.Int(n)) => Some(n)
+    Some(json.Value.Num(f)) => Some(Int(f))
+    Some(json.Value.Str(s)) => Int.parse(s)
+    _ => None
+  }
+}
+
+fn str_field(doc: json.Value, k: Str) -> Str {
+  match doc.get(k) {
+    Some(json.Value.Str(s)) => s
+    _ => ""
+  }
+}
+
+/// An OAuth token response (`access_token`, `expires_in`, `refresh_in`),
+/// or the error it carries (`error`, `error_description`).
+pub fn parse_token_response(name: Str, resp: http.Response, now: Time) -> azcore.AccessToken ! azcore.AuthErr {
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status}: the token response is not JSON"})
+  if resp.status != 200 {
+    let code = str_field(doc, "error")
+    let desc = str_field(doc, "error_description")
+    return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status} ${code}: ${desc}".trim()})
+  }
+  let token = str_field(doc, "access_token")
+  if token == "" {
+    return Err(azcore.AuthErr{credential: name, msg: "the token response has no access_token"})
+  }
+  let at = now.unix_millis()
+  // managed identity endpoints send expires_on (epoch seconds) instead
+  let expires = match num_field(doc, "expires_in") {
+    Some(s) => Time.from_unix_millis(at + s * 1000)
+    None => match num_field(doc, "expires_on") {
+      Some(e) => Time.from_unix_millis(e * 1000)
+      None => return Err(azcore.AuthErr{credential: name, msg: "the token response has no expires_in"})
+    }
+  }
+  let refresh = num_field(doc, "refresh_in").map(fn(s: Int) -> Time { Time.from_unix_millis(at + s * 1000) })
+  Ok(azcore.AccessToken{token: Secret.new(token), expires_on: expires, refresh_on: refresh})
+}
+
+/// The cache key of a token request.
+pub fn key_of(tenant: Str, scopes: List[Str]) -> Str {
+  "${tenant} ${scopes.join(" ")}"
+}

@@ -6,8 +6,11 @@ This project ports code, behavior and tests from the following works,
 each under the MIT License, Copyright (c) Microsoft Corporation:
 
 - github.com/Azure/azure-sdk-for-go: `sdk/azcore` (cloud, policy,
-  runtime: the pipeline, retry, telemetry and request ID policies,
-  ResponseError), and later `sdk/azidentity` and the data plane
+  runtime: the pipeline, retry, telemetry, request ID and bearer token
+  policies, pagers, pollers, ResponseError, TokenCredential),
+  `sdk/azidentity` (client secret, client certificate, workload
+  identity, managed identity, environment, chained and default
+  credentials, with MSAL's token requests), and later the data plane
   packages. Each ported file names its source in a header comment.
 - github.com/Azure/azure-rest-api-specs: the service specifications
   the generator reads (decision 0002), at the commit in
