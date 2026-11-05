@@ -1,6 +1,6 @@
 # 0008: Continuous integration
 
-Status: Proposed (Xo Azure 1, 2026-11-05)
+Status: Accepted (owner, 2026-11-05; proposed by Xo Azure 1, 2026-11-05): the workflow is enabled only once the repository is public, so a private repository uses no Actions minutes
 
 ## Context
 

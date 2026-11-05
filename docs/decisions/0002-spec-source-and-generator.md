@@ -1,6 +1,6 @@
 # 0002: The specification source and the generator
 
-Status: Proposed (Xo Azure 1, 2026-11-05)
+Status: Accepted (owner, 2026-11-05; proposed by Xo Azure 1, 2026-11-05)
 
 ## Context
 

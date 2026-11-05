@@ -5,11 +5,11 @@ Status, Context, Decision, Consequences, Alternatives. A reversed decision
 gets a new record and the old one is marked `Superseded by NNNN`; none is
 deleted.
 
-- [0001](0001-architecture-and-module-layout.md): a core module plus azidentity and one module per service, at azure-sdk-for-go's paths without `sdk/`, each tagged `<dir>/vX.Y.Z` (Proposed)
-- [0002](0002-spec-source-and-generator.md): read the OpenAPI 2.0 JSON of azure-rest-api-specs (hand written and TypeSpec emitted), at the api-versions azure-sdk-for-go ships, with a generator in Xo and committed output (Proposed)
-- [0003](0003-core.md): the hand written core: azcore's pipeline and policies, errors, pagers, pollers, ARM extras, the Entra ID credentials without MSAL, Storage, Key Vault and Cosmos signing (Proposed)
-- [0004](0004-api-shape.md): azure-sdk-for-go's shape in Xo style: clients, options structs, pagers, pollers, snake_case names (Proposed)
-- [0005](0005-testing.md): testing without real Azure: fakes, signing vectors, replayed Go recordings, Azurite and the Cosmos emulator, loopback-only networks (Proposed)
-- [0006](0006-xo-gaps.md): Xo gaps: AMQP 1.0, PKCS#12, JWT header fields, closures with effects, hex formatting (Proposed)
-- [0007](0007-license-and-hygiene.md): MIT, attribution to Microsoft's MIT sources, the trademark notice, no sensitive data, checks before every push (Proposed)
-- [0008](0008-continuous-integration.md): a weekly workflow: newest Xo, newest specs, every check, merge and tag on green, no Azure in CI (Proposed)
+- [0001](0001-architecture-and-module-layout.md): a core module plus azidentity and one module per service, at azure-sdk-for-go's paths without `sdk/`, each tagged `<dir>/vX.Y.Z` (Accepted)
+- [0002](0002-spec-source-and-generator.md): read the OpenAPI 2.0 JSON of azure-rest-api-specs (hand written and TypeSpec emitted), at the api-versions azure-sdk-for-go ships, with a generator in Xo and committed output (Accepted)
+- [0003](0003-core.md): the hand written core: azcore's pipeline and policies, errors, pagers, pollers, ARM extras, the Entra ID credentials without MSAL, Storage, Key Vault and Cosmos signing (Accepted)
+- [0004](0004-api-shape.md): azure-sdk-for-go's shape in Xo style: clients, options structs, pagers, pollers, snake_case names (Accepted)
+- [0005](0005-testing.md): testing without real Azure: fakes, signing vectors, replayed Go recordings, Azurite and the Cosmos emulator, loopback-only networks (Accepted)
+- [0006](0006-xo-gaps.md): Xo gaps: AMQP 1.0, PKCS#12, JWT header fields, closures with effects, hex formatting (Accepted)
+- [0007](0007-license-and-hygiene.md): MIT, attribution to Microsoft's MIT sources, the trademark notice, no sensitive data, checks before every push (Accepted)
+- [0008](0008-continuous-integration.md): a weekly workflow: newest Xo, newest specs, every check, merge and tag on green, no Azure in CI (Accepted)
