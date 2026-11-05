@@ -1,0 +1,269 @@
+// Long-running operations, as azcore's runtime.Poller and its pollers
+// (internal/pollers: async, op, loc, body; MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). The kind comes from the first response:
+// `Azure-AsyncOperation`, then `Operation-Location`, then `Location`,
+// then a PUT or PATCH body's provisioningState; otherwise the operation
+// is already done. The final result is fetched by method and
+// `final-state-via`, as azcore does. Resume tokens are azcore's JSON.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+pub enum Kind {
+  Async
+  Op
+  Loc
+  Body
+  /// Done with the first response.
+  Done
+}
+
+fn kind_name(k: Kind) -> Str {
+  match k {
+    Async => "async"
+    Op => "op"
+    Loc => "loc"
+    Body => "body"
+    Done => "nop"
+  }
+}
+
+/// `final-state-via` values (x-ms-long-running-operation-options).
+pub const AZURE_ASYNC_OPERATION: Str = "azure-async-operation"
+pub const LOCATION: Str = "location"
+pub const ORIGINAL_URI: Str = "original-uri"
+pub const OPERATION_LOCATION: Str = "operation-location"
+
+pub struct Poller[T] {
+  pub pipeline: Pipeline
+  pub decode: fn(http.Response) -> T ! Str
+  /// The result type's name in resume tokens (Go's, such as
+  /// `armstorage.AccountsClientCreateResponse`).
+  pub type_name: Str
+  kind: Kind
+  method: Str
+  orig_url: Str
+  poll_url: Str = ""
+  loc_url: Str = ""
+  final_state: Str = ""
+  /// InProgress, Succeeded, Failed, Canceled (as the service writes it).
+  state: Str = "InProgress"
+  last: http.Response? = None
+}
+
+/// The poller of the operation `req` started with `resp`.
+pub fn new_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+  if ![200, 201, 202, 204].contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: req.method, orig_url: req.url, final_state: final_state_via, last: Some(resp)}
+  let loc = resp.header("Location").map(fn(l: Str) -> Str { resolve(req.url, l) }) ?? ""
+  if let Some(a) = resp.header("Azure-AsyncOperation") {
+    return Ok(base with {kind: Kind.Async, poll_url: resolve(req.url, a), loc_url: loc, state: "InProgress"})
+  }
+  if let Some(o) = resp.header("Operation-Location") {
+    return Ok(base with {kind: Kind.Op, poll_url: resolve(req.url, o), loc_url: loc, state: "InProgress"})
+  }
+  if loc != "" {
+    return Ok(base with {kind: Kind.Loc, poll_url: loc, state: if resp.status == 202 { "InProgress" } else { state_from_body(resp) ?? "Succeeded" }})
+  }
+  if req.method == "PUT" || req.method == "PATCH" {
+    let st = match state_from_body(resp) {
+      Some(s) => s
+      None => if resp.status == 201 { "InProgress" } else { "Succeeded" }
+    }
+    return Ok(base with {kind: Kind.Body, poll_url: req.url, state: st})
+  }
+  Ok(base with {state: "Succeeded"})
+}
+
+/// `properties.provisioningState`, as the body poller reads it.
+fn state_from_body(resp: http.Response) -> Str? {
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return None
+  match doc.get("properties").and_then(fn(p: json.Value) -> json.Value? { p.get("provisioningState") }) {
+    Some(json.Value.Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+/// The `status` field of an operation status body (async and op).
+fn status_of(resp: http.Response) -> Str? {
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return None
+  match doc.get("status") {
+    Some(json.Value.Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn succeeded(s: Str) -> Bool {
+  let l = s.to_lower()
+  l == "succeeded" || l == "completed"
+}
+
+fn failed(s: Str) -> Bool {
+  let l = s.to_lower()
+  l == "failed" || l == "canceled" || l == "cancelled"
+}
+
+/// `ref` made absolute against `base`'s scheme and host.
+pub fn resolve(base: Str, ref: Str) -> Str {
+  if ref.starts_with("http://") || ref.starts_with("https://") {
+    return ref
+  }
+  let after = (base.find("://") ?? 0) + 3
+  let host_end = base[after..base.len()].find("/").map(fn(i: Int) -> Int { after + i }) ?? base.len()
+  let path = if ref.starts_with("/") { ref } else { "/${ref}" }
+  "${base[0..host_end]}${path}"
+}
+
+/// Whether the operation reached a terminal state.
+pub fn (p: Poller[T]) done() -> Bool {
+  succeeded(p.state) || failed(p.state)
+}
+
+/// The operation's state as last seen.
+pub fn (p: Poller[T]) status() -> Str {
+  p.state
+}
+
+/// Polls once; returns the poll's response.
+pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  if p.done() {
+    return Ok(p.last ?? http.text(200, ""))
+  }
+  let req = policy.Request{method: "GET", url: p.poll_url}
+  let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  match p.kind {
+    Async | Op => {
+      if resp.status != 200 {
+        return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      }
+      p.state = status_of(resp) ?? return Err(azcore.CallErr.Decode("the operation status has no status field"))
+    }
+    Loc => {
+      if let Some(l) = resp.header("Location") {
+        p.poll_url = resolve(p.poll_url, l)
+      }
+      p.state = match resp.status {
+        202 => "InProgress"
+        200 | 201 | 204 => state_from_body(resp) ?? "Succeeded"
+        408 | 429 | 500 | 502 | 503 | 504 => "InProgress"
+        _ => return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      }
+    }
+    Body => {
+      p.state = match resp.status {
+        200 | 201 => state_from_body(resp) ?? if resp.status == 201 { "InProgress" } else { "Succeeded" }
+        204 => "Succeeded"
+        _ => return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      }
+    }
+    Done => {}
+  }
+  p.last = Some(resp)
+  Ok(resp)
+}
+
+/// The final result: an error when the operation failed, else the
+/// result body, fetched by method and final-state-via as azcore does.
+pub fn (var p: Poller[T]) result() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  let last = p.last ?? http.text(200, "")
+  if failed(p.state) {
+    return Err(azcore.CallErr.Response(azcore.response_error(p.method, p.orig_url, last)))
+  }
+  if !p.done() {
+    return Err(azcore.CallErr.InvalidInput("the operation has not finished"))
+  }
+  let url = match p.kind {
+    Async | Op => final_url(p, last)
+    Loc | Body | Done => None
+  }
+  let resp = match url {
+    Some(u) => {
+      let r = p.pipeline.send(policy.Request{method: "GET", url: u}) ?? e => return Err(azcore.CallErr.Send(e))
+      if r.status != 200 {
+        return Err(azcore.CallErr.Response(azcore.response_error("GET", u, r)))
+      }
+      r
+    }
+    None => if p.method == "DELETE" && p.kind is Kind.Async { http.text(200, "") } else { last }
+  }
+  (p.decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// Where the result of a finished async or op operation is.
+fn final_url[T](p: Poller[T], last: http.Response) -> Str? {
+  if p.kind is Kind.Op {
+    let doc = json.parse_value(last.body.to_str_lossy()).ok()
+    if let Some(json.Value.Str(r)) = doc.and_then(fn(d: json.Value) -> json.Value? { d.get("resourceLocation") }) {
+      return Some(r)
+    }
+  }
+  match p.method {
+    "PUT" | "PATCH" => Some(p.orig_url)
+    "POST" => if p.final_state == AZURE_ASYNC_OPERATION || p.final_state == OPERATION_LOCATION {
+      None
+    } else if p.final_state == ORIGINAL_URI {
+      Some(p.orig_url)
+    } else if p.loc_url != "" {
+      Some(p.loc_url)
+    } else {
+      None
+    }
+    _ => None
+  }
+}
+
+/// Polls until done, waiting `frequency` (at least 1 s) or the
+/// response's Retry-After between polls, then gives the result.
+pub fn (var p: Poller[T]) poll_until_done(clock: Clock, frequency: Duration = 30s) -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  let every = if frequency < 1s { 1s } else { frequency }
+  while !p.done() {
+    let resp = p.poll()?
+    if !p.done() {
+      clock.sleep(retry_after(resp, clock.now()) ?? every)
+    }
+  }
+  p.result()
+}
+
+/// azcore's resume token: `{"type": ..., "token": {...}}`.
+pub fn (p: Poller[T]) resume_token() -> Str ! Str {
+  if p.done() {
+    return Err("the operation is done: there is nothing to resume")
+  }
+  var fields: List[(Str, json.Value)] = [("type", json.Value.Str(kind_name(p.kind)))]
+  match p.kind {
+    Async => fields = fields + [("asyncURL", json.Value.Str(p.poll_url)), ("locURL", json.Value.Str(p.loc_url)), ("origURL", json.Value.Str(p.orig_url)), ("method", json.Value.Str(p.method)), ("finalState", json.Value.Str(p.final_state)), ("state", json.Value.Str(p.state))]
+    Op => fields = fields + [("oplocURL", json.Value.Str(p.poll_url)), ("locURL", json.Value.Str(p.loc_url)), ("origURL", json.Value.Str(p.orig_url)), ("method", json.Value.Str(p.method)), ("finalState", json.Value.Str(p.final_state)), ("state", json.Value.Str(p.state))]
+    Loc => fields = fields + [("pollURL", json.Value.Str(p.poll_url)), ("state", json.Value.Str(p.state))]
+    Body => fields = fields + [("pollURL", json.Value.Str(p.poll_url)), ("state", json.Value.Str(p.state))]
+    Done => return Err("the operation is done: there is nothing to resume")
+  }
+  Ok(json.Value.Object([("type", json.Value.Str(p.type_name)), ("token", json.Value.Object(fields))]).encode())
+}
+
+/// A poller from `token` (resume_token's, or a Go program's).
+pub fn resume_poller[T](pipeline: Pipeline, token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+  let doc = json.parse_value(token) ?? e => return Err(azcore.CallErr.InvalidInput("a resume token is JSON: ${e.display()}"))
+  let f = fn(v: json.Value?, k: Str) -> Str {
+    match v.and_then(fn(x: json.Value) -> json.Value? { x.get(k) }) {
+      Some(json.Value.Str(s)) => s
+      _ => ""
+    }
+  }
+  if f(Some(doc), "type") != type_name {
+    return Err(azcore.CallErr.InvalidInput("the resume token is for ${f(Some(doc), "type")}, not ${type_name}"))
+  }
+  let t = doc.get("token")
+  let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: f(t, "method"), orig_url: f(t, "origURL"), loc_url: f(t, "locURL"), final_state: f(t, "finalState"), state: f(t, "state")}
+  match f(t, "type") {
+    "async" => Ok(base with {kind: Kind.Async, poll_url: f(t, "asyncURL")})
+    "op" => Ok(base with {kind: Kind.Op, poll_url: f(t, "oplocURL")})
+    "loc" => Ok(base with {kind: Kind.Loc, poll_url: f(t, "pollURL")})
+    "body" => Ok(base with {kind: Kind.Body, poll_url: f(t, "pollURL"), orig_url: f(t, "pollURL"), method: "PUT"})
+    other => Err(azcore.CallErr.InvalidInput("unknown poller kind ${other}"))
+  }
+}

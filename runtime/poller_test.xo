@@ -1,0 +1,124 @@
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const BASE: Str = "https://example.management.test"
+
+fn pl(net: testing.FakeNet, clock: Clock, rand: Rand) -> Pipeline {
+  new_pipeline("armtest", "v0.1.0", net, clock, rand, PipelineOptions{}, policy.ClientOptions{})
+}
+
+fn name_of(resp: http.Response) -> Str ! Str {
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(e.display())
+  match doc.get("name") {
+    Some(json.Value.Str(s)) => Ok(s)
+    _ => Err("no name")
+  }
+}
+
+test "an Azure-AsyncOperation PUT polls the status, then GETs the resource" {
+  let polls = Atomic[Int].new(0)
+  os.net.handle("GET ${BASE}/ops/1", fn(req: http.Request) -> http.Response {
+    if polls.add(1) < 2 {
+      return http.text(200, "{\"status\":\"InProgress\"}").with_header("Retry-After", "2")
+    }
+    http.text(200, "{\"status\":\"Succeeded\"}")
+  })
+  os.net.handle("GET ${BASE}/res/a", fn(req: http.Request) -> http.Response { http.text(200, "{\"name\":\"a\"}") })
+  let req = policy.Request{method: "PUT", url: "${BASE}/res/a"}
+  let first = http.text(201, "{\"name\":\"a\",\"properties\":{\"provisioningState\":\"Creating\"}}").with_header("Azure-AsyncOperation", "${BASE}/ops/1")
+  var p = new_poller(pl(os.net, os.clock, os.rand), req, first, "", "armtest.CreateResponse", name_of)?
+  expect(p.done()) == false
+  let start = os.clock.now()
+  expect(p.poll_until_done(os.clock, frequency: 5s)?) == "a"
+  expect(polls.get()) == 2
+  // the first wait is the Retry-After's 2 s, not the 5 s frequency
+  expect(os.clock.since(start)) == 2s
+}
+
+test "a Location POST polls until 200 and returns that body" {
+  let polls = Atomic[Int].new(0)
+  os.net.handle("GET ${BASE}/loc/9", fn(req: http.Request) -> http.Response {
+    if polls.add(1) < 3 { http.text(202, "") } else { http.text(200, "{\"name\":\"done\"}") }
+  })
+  let req = policy.Request{method: "POST", url: "${BASE}/res/a/restart"}
+  var p = new_poller(pl(os.net, os.clock, os.rand), req, http.text(202, "").with_header("Location", "/loc/9"), "", "armtest.RestartResponse", name_of)?
+  expect(p.poll_until_done(os.clock, frequency: 1s)?) == "done"
+  expect(polls.get()) == 3
+}
+
+test "a PUT without headers uses its provisioningState, and a failure is an error" {
+  os.net.handle("GET ${BASE}/res/b", fn(req: http.Request) -> http.Response {
+    http.text(200, "{\"name\":\"b\",\"properties\":{\"provisioningState\":\"Failed\"}}")
+  })
+  let req = policy.Request{method: "PUT", url: "${BASE}/res/b"}
+  var p = new_poller(pl(os.net, os.clock, os.rand), req, http.text(201, "{\"name\":\"b\"}"), "", "armtest.CreateResponse", name_of)?
+  match p.poll_until_done(os.clock) {
+    Err(azcore.CallErr.Response(_)) => {}
+    other => expect("${other:?}") == "Response"
+  }
+  expect(p.status()) == "Failed"
+  // a 200 with a terminal state is done at once
+  var q = new_poller(pl(os.net, os.clock, os.rand), req, http.text(200, "{\"name\":\"b\",\"properties\":{\"provisioningState\":\"Succeeded\"}}"), "", "armtest.CreateResponse", name_of)?
+  expect(q.done()) == true
+  expect(q.result()?) == "b"
+}
+
+test "a resume token has azcore's shape and resumes" {
+  let req = policy.Request{method: "POST", url: "${BASE}/res/a/act"}
+  let first = http.text(202, "").with_header("Azure-AsyncOperation", "${BASE}/ops/7").with_header("Location", "${BASE}/loc/7")
+  let p = new_poller(pl(os.net, os.clock, os.rand), req, first, LOCATION, "armtest.ActResponse", name_of)?
+  let tok = p.resume_token()?
+  let doc = json.parse_value(tok)?
+  expect(doc.get("type")) == Some(json.Value.Str("armtest.ActResponse"))
+  expect(doc.get("token").and_then(fn(t: json.Value) -> json.Value? { t.get("asyncURL") })) == Some(json.Value.Str("${BASE}/ops/7"))
+  os.net.handle("GET ${BASE}/ops/7", fn(r: http.Request) -> http.Response { http.text(200, "{\"status\":\"Succeeded\"}") })
+  os.net.handle("GET ${BASE}/loc/7", fn(r: http.Request) -> http.Response { http.text(200, "{\"name\":\"acted\"}") })
+  var q = resume_poller(pl(os.net, os.clock, os.rand), tok, "armtest.ActResponse", name_of)?
+  // POST with final-state-via location GETs the Location at the end
+  expect(q.poll_until_done(os.clock)?) == "acted"
+  match resume_poller(pl(os.net, os.clock, os.rand), tok, "armtest.Other", name_of) {
+    Err(azcore.CallErr.InvalidInput(_)) => {}
+    other => expect("${other:?}") == "InvalidInput"
+  }
+}
+
+struct Page {
+  names: List[Str]
+  next: Str?
+}
+
+fn page_of(resp: http.Response) -> Page ! Str {
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(e.display())
+  var names: List[Str] = []
+  if let Some(json.Value.List(vs)) = doc.get("value") {
+    for v in vs {
+      if let Some(json.Value.Str(n)) = v.get("name") {
+        names.push(n)
+      }
+    }
+  }
+  let next = match doc.get("nextLink") {
+    Some(json.Value.Str(s)) => Some(s)
+    _ => None
+  }
+  Ok(Page{names: names, next: next})
+}
+
+test "a pager follows nextLink, its query re-encoded, until there is none" {
+  os.net.handle("GET ${BASE}/things", fn(r: http.Request) -> http.Response {
+    if r.url.query.get("skip") == Some("a b") {
+      return http.text(200, "{\"value\":[{\"name\":\"c\"}]}")
+    }
+    http.text(200, "{\"value\":[{\"name\":\"a\"},{\"name\":\"b\"}],\"nextLink\":\"${BASE}/things?skip=a b&api-version=1\"}")
+  })
+  var p = new_pager(pl(os.net, os.clock, os.rand), policy.Request{method: "GET", url: "${BASE}/things"}, page_of, fn(pg: Page) -> Str? { pg.next })
+  var all: List[Str] = []
+  while p.more() {
+    all = all + p.next_page()?.names
+  }
+  expect(all) == ["a", "b", "c"]
+  expect(encode_query("${BASE}/x?b=2&a=1 2")) == "${BASE}/x?a=1+2&b=2"
+}

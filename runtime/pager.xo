@@ -1,0 +1,61 @@
+// Pages of a list operation, as azcore's runtime.Pager and
+// FetcherForNextLink (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): the first request, then a GET of each page's next link
+// (its query re-encoded) until a page has none.
+//
+// A Pager holds the pipeline and two pure functions, the page decoder
+// and the next link reader; the sends are its own, since Xo does not
+// store a closure that uses the network (decision 0006, item 4).
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+pub struct Pager[T] {
+  pub pipeline: Pipeline
+  pub first: policy.Request
+  pub decode: fn(http.Response) -> T ! Str
+  /// The page's next link, None or "" on the last page.
+  pub next_link: fn(T) -> Str?
+  /// Statuses of a page besides 200.
+  pub ok_status: List[Int] = []
+  started: Bool = false
+  link: Str? = None
+}
+
+pub fn new_pager[T](pipeline: Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, next_link: fn(T) -> Str?) -> Pager[T] {
+  Pager{pipeline: pipeline, first: first, decode: decode, next_link: next_link}
+}
+
+/// Whether another page can be fetched.
+pub fn (p: Pager[T]) more() -> Bool {
+  !p.started || (p.link ?? "") != ""
+}
+
+/// The next page.
+pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = if !p.started { p.first } else {
+    let link = p.link ?? ""
+    if link == "" {
+      return Err(azcore.CallErr.InvalidInput("no more pages"))
+    }
+    p.first with {method: "GET", url: encode_query(link), body: b""}
+  }
+  let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status != 200 && !p.ok_status.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  let page = (p.decode)(resp) ?? e => return Err(azcore.CallErr.Decode(e))
+  p.started = true
+  p.link = (p.next_link)(page)
+  Ok(page)
+}
+
+/// `link` with its query re-encoded (sorted, escaped), as azcore's
+/// EncodeQueryParams.
+pub fn encode_query(link: Str) -> Str {
+  let i = link.find("?") ?? return link
+  let q = url.parse_query(link[i + 1..link.len()]) ?? _ => return link
+  "${link[0..i]}?${q.encode()}"
+}
