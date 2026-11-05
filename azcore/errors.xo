@@ -1,0 +1,56 @@
+// azcore's ResponseError (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): a response whose status the operation does not expect.
+
+use std/http
+use std/json
+use std/regexp
+
+pub struct ResponseError {
+  pub status_code: Int
+  /// The `x-ms-error-code` header, else the body's error code.
+  pub error_code: Str
+  pub method: Str
+  pub url: Str
+  pub response: http.Response
+}
+
+/// The error for `resp` to a `method` request of `url`.
+pub fn response_error(method: Str, url: Str, resp: http.Response) -> ResponseError {
+  ResponseError{status_code: resp.status, error_code: error_code_of(resp), method: method, url: url, response: resp}
+}
+
+/// The error code: the header, then JSON `error.code`, `odata.error.code`
+/// or `code`, then an XML `<Code>`.
+pub fn error_code_of(resp: http.Response) -> Str {
+  if let Some(c) = resp.header("x-ms-error-code") {
+    if c != "" {
+      return c
+    }
+  }
+  let text = resp.body.to_str_lossy()
+  if let Ok(doc) = json.parse_value(text) {
+    for path in [["error", "code"], ["odata.error", "code"], ["code"]] {
+      var v: json.Value? = Some(doc)
+      for k in path {
+        v = v.and_then(fn(x: json.Value) -> json.Value? { x.get(k) })
+      }
+      if let Some(json.Value.Str(s)) = v {
+        return s
+      }
+    }
+    return ""
+  }
+  let re = regexp.compile("<(?:\\w+:)?[Cc]ode>\\s*(\\w+)\\s*</(?:\\w+:)?[Cc]ode>") ?? _ => return ""
+  match re.captures(text) {
+    Some(cs) => if cs.len() > 1 { cs[1] ?? "" } else { "" }
+    None => ""
+  }
+}
+
+pub fn (e: ResponseError) display() -> Str {
+  var s = "${e.method} ${e.url}\nRESPONSE ${e.status_code}\nERROR CODE: ${if e.error_code == "" { "UNAVAILABLE" } else { e.error_code }}"
+  if !e.response.body.is_empty() {
+    s = "${s}\n${e.response.body.to_str_lossy()}"
+  }
+  s
+}

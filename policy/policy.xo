@@ -1,0 +1,116 @@
+// The request a pipeline sends, its policies, and the client options
+// every Azure client takes, as azcore's policy package (MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md). A policy sees the request, may
+// change it, and calls `next.send` for the rest of the pipeline.
+
+use std/http
+use github.com/xo-lang/azure/cloud
+
+/// One HTTP request through the pipeline.
+pub struct Request {
+  pub method: Str
+  /// The absolute URL, query included.
+  pub url: Str
+  pub headers: List[(Str, Str)] = []
+  pub body: Bytes = b""
+  /// How long one try may take (the retry policy's try timeout).
+  pub timeout: Duration? = None
+}
+
+/// The first value of header `name` (any case).
+pub fn (r: Request) header(name: Str) -> Str? {
+  let n = name.to_lower()
+  for (k, v) in r.headers {
+    if k.to_lower() == n {
+      return Some(v)
+    }
+  }
+  None
+}
+
+/// `r` with header `name` set to `value`, replacing any value it had.
+pub fn (r: Request) with_header(name: Str, value: Str) -> Request {
+  let n = name.to_lower()
+  var hs = r.headers.filter(fn(h: (Str, Str)) -> Bool { h.0.to_lower() != n })
+  hs.push((name, value))
+  r with {headers: hs}
+}
+
+/// Why a request got no response.
+pub enum SendErr {
+  /// The transport failed (connect, timeout, protocol).
+  Http(e: http.ClientErr)
+  /// A credential could not give a token.
+  Auth(msg: Str)
+}
+
+pub fn (e: SendErr) display() -> Str {
+  match e {
+    Http(he) => he.display()
+    Auth(m) => "authentication failed: ${m}"
+  }
+}
+
+/// A step of the pipeline.
+pub interface Policy {
+  fn send(self, req: Request, next: Next) -> http.Response ! SendErr uses (net.dial, clock, rand)
+}
+
+/// The rest of a pipeline after the current policy.
+pub struct Next {
+  pub policies: List[Policy]
+  pub at: Int = 0
+  pub transport: http.Client
+}
+
+/// Sends `req` through the remaining policies, then the transport.
+pub fn (n: Next) send(req: Request) -> http.Response ! SendErr uses (net.dial, clock, rand) {
+  if n.at < n.policies.len() {
+    return n.policies[n.at].send(req, n with {at: n.at + 1})
+  }
+  var hreq = http.new_request(req.method, req.url, {}, req.body)
+  for (k, v) in req.headers {
+    hreq = hreq.add_header(k, v)
+  }
+  if let Some(d) = req.timeout {
+    hreq = hreq.with_timeout(d)
+  }
+  // bodies are kept as sent (a gzip blob comes back gzip)
+  if hreq.header("Accept-Encoding").is_none() {
+    hreq = hreq.with_header("Accept-Encoding", "identity")
+  }
+  n.transport.send(hreq) ?? e => Err(SendErr.Http(e))
+}
+
+/// azcore's retry options and defaults.
+pub struct RetryOptions {
+  /// Retries after the first try; 0 turns retries off.
+  pub max_retries: Int = 3
+  /// The first retry's delay, doubled each retry, with jitter.
+  pub retry_delay: Duration = 800ms
+  pub max_retry_delay: Duration = 60s
+  pub status_codes: List[Int] = [408, 429, 500, 502, 503, 504]
+  /// How long one try may take; None for the client's timeout.
+  pub try_timeout: Duration? = None
+}
+
+pub struct TelemetryOptions {
+  /// Put in front of the User-Agent (at most 24 characters, spaces made `/`).
+  pub application_id: Str = ""
+  pub disabled: Bool = false
+}
+
+/// The options every client takes.
+pub struct ClientOptions {
+  pub cloud: cloud.Configuration = cloud.AZURE_PUBLIC
+  pub retry: RetryOptions = RetryOptions{}
+  pub telemetry: TelemetryOptions = TelemetryOptions{}
+  /// Run once per call, before retries.
+  pub per_call_policies: List[Policy] = []
+  /// Run on every try.
+  pub per_retry_policies: List[Policy] = []
+  /// Overrides the client's api-version.
+  pub api_version: Str = ""
+  /// How long one request may take in all.
+  pub timeout: Duration = 60s
+}

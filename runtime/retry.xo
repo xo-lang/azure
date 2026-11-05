@@ -1,0 +1,83 @@
+// azcore's retry policy (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): up to max_retries more tries on a transport error or a
+// retried status, waiting (2^try - 1) * retry_delay with jitter in
+// [0.8, 1.3), at most max_retry_delay, or the server's delay
+// (Retry-After-Ms, x-ms-retry-after-ms, Retry-After). A server delay
+// longer than max_retry_delay is not waited for: the response is
+// returned.
+
+use std/http
+use std/time
+use github.com/xo-lang/azure/policy
+
+pub struct RetryPolicy {
+  pub opts: policy.RetryOptions
+  pub clock: Clock
+  pub rand: Rand
+}
+
+fn (p: RetryPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let one = if let Some(d) = p.opts.try_timeout { req with {timeout: Some(d)} } else { req }
+  var try = 1
+  while true {
+    let r = next.send(one)
+    let last = try > p.opts.max_retries
+    match r {
+      Ok(resp) => {
+        if !p.opts.status_codes.contains(resp.status) || last {
+          return Ok(resp)
+        }
+        let wait = match retry_after(resp, p.clock.now()) {
+          Some(d) => if d > p.opts.max_retry_delay { return Ok(resp) } else { d }
+          None => delay(p.opts, try, p.rand.float())
+        }
+        p.clock.sleep(wait)
+      }
+      Err(e) => {
+        if last || !retryable(e) {
+          return Err(e)
+        }
+        p.clock.sleep(delay(p.opts, try, p.rand.float()))
+      }
+    }
+    try += 1
+  }
+  Err(policy.SendErr.Auth("unreachable"))
+}
+
+fn retryable(e: policy.SendErr) -> Bool {
+  match e {
+    Http(he) => match he {
+      InvalidUrl(_) | Canceled => false
+      _ => true
+    }
+    Auth(_) => false
+  }
+}
+
+/// The delay before retry `try` (1 for the first), with `jitter` in
+/// [0, 1) mapped to azcore's [0.8, 1.3).
+pub fn delay(opts: policy.RetryOptions, try: Int, jitter: Float) -> Duration {
+  let base = ((1 << try) - 1) * opts.retry_delay.millis()
+  let ms = Int(Float(base) * (0.8 + jitter * 0.5))
+  let d = Duration.from_millis(ms)
+  if d > opts.max_retry_delay { opts.max_retry_delay } else { d }
+}
+
+/// The server's requested delay, in azcore's order of headers.
+pub fn retry_after(resp: http.Response, now: Time) -> Duration? {
+  for h in ["Retry-After-Ms", "x-ms-retry-after-ms"] {
+    if let Some(v) = resp.header(h) {
+      if let Some(n) = Int.parse(v.trim()) {
+        return Some(Duration.from_millis(n))
+      }
+    }
+  }
+  let v = resp.header("Retry-After") ?? return None
+  if let Some(n) = Int.parse(v.trim()) {
+    return Some(Duration.from_millis(n * 1000))
+  }
+  let t = time.parse(v.trim(), time.RFC1123, time.utc()) ?? _ => return None
+  let ms = t.unix_millis() - now.unix_millis()
+  Some(Duration.from_millis(if ms > 0 { ms } else { 0 }))
+}

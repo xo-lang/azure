@@ -1,0 +1,118 @@
+// The pipeline every client sends through, in azcore's order (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): api-version,
+// telemetry, request ID, the per-call policies, retry, the per-retry
+// policies, then the transport (decision 0003).
+
+use std/http
+use std/uuid
+use std/url
+use github.com/xo-lang/azure/policy
+
+/// What the client itself adds (its generated code).
+pub struct PipelineOptions {
+  /// The query parameter of the api-version (`api-version`).
+  pub api_version_name: Str = "api-version"
+  /// The client's api-version, overridden by ClientOptions.api_version.
+  pub api_version: Str = ""
+  pub per_call: List[policy.Policy] = []
+  pub per_retry: List[policy.Policy] = []
+}
+
+pub struct Pipeline {
+  pub policies: List[policy.Policy]
+  pub transport: http.Client
+}
+
+/// The pipeline of a client of module `module` (`armstorage`) at
+/// `version`.
+pub fn new_pipeline(module: Str, version: Str, net: Net, clock: Clock, rand: Rand, pl: PipelineOptions, opts: policy.ClientOptions) -> Pipeline {
+  var ps: List[policy.Policy] = []
+  let api = if opts.api_version != "" { opts.api_version } else { pl.api_version }
+  if api != "" {
+    ps.push(ApiVersionPolicy{name: pl.api_version_name, version: api})
+  }
+  if !opts.telemetry.disabled {
+    ps.push(TelemetryPolicy{user_agent: user_agent(module, version, opts.telemetry.application_id)})
+  }
+  ps.push(RequestIdPolicy{rand: rand})
+  ps = ps + pl.per_call + opts.per_call_policies
+  ps.push(RetryPolicy{opts: opts.retry, clock: clock, rand: rand})
+  ps = ps + pl.per_retry + opts.per_retry_policies
+  Pipeline{policies: ps, transport: http.client(net, opts.timeout)}
+}
+
+/// Sends `req` through every policy.
+pub fn (p: Pipeline) send(req: policy.Request) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  policy.Next{policies: p.policies, transport: p.transport}.send(req)
+}
+
+/// `xo-lang-azure-<module>/<version> (xo/<xo version>; <os>)`, with the
+/// application id in front: azcore's shape under this SDK's own name
+/// (decision 0003).
+pub fn user_agent(module: Str, version: Str, application_id: Str) -> Str {
+  let base = "xo-lang-azure-${module}/${version} (xo; ${os_name()})"
+  if application_id == "" {
+    return base
+  }
+  var id = application_id.replace(" ", "/")
+  if id.len() > 24 {
+    id = id[0..24]
+  }
+  "${id} ${base}"
+}
+
+fn os_name() -> Str {
+  match target.os {
+    Linux => "linux"
+    Darwin => "darwin"
+    Windows => "windows"
+    Wasi => "wasi"
+  }
+}
+
+/// Sets the api-version query parameter, replacing one already there.
+pub struct ApiVersionPolicy {
+  pub name: Str
+  pub version: Str
+}
+
+fn (p: ApiVersionPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req with {url: set_query(req.url, p.name, p.version)})
+}
+
+/// `u` with query parameter `name` set to `value` (others kept in order).
+pub fn set_query(u: Str, name: Str, value: Str) -> Str {
+  let (base, query) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var parts = query.split("&").filter(fn(p: Str) -> Bool { p != "" && (p.split("=").first() ?? "") != name })
+  parts.push("${name}=${url.query_escape(value)}")
+  "${base}?${parts.join("&")}"
+}
+
+/// Sets the User-Agent, keeping any the caller set after it.
+pub struct TelemetryPolicy {
+  pub user_agent: Str
+}
+
+fn (p: TelemetryPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let ua = match req.header("User-Agent") {
+    Some(v) => "${p.user_agent} ${v}"
+    None => p.user_agent
+  }
+  next.send(req.with_header("User-Agent", ua))
+}
+
+/// Sets `x-ms-client-request-id` to a new UUID when the request has none
+/// (decision 0003: on by default, as the other Azure SDKs).
+pub struct RequestIdPolicy {
+  pub rand: Rand
+}
+
+fn (p: RequestIdPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if req.header("x-ms-client-request-id").is_some() {
+    return next.send(req)
+  }
+  next.send(req.with_header("x-ms-client-request-id", uuid.v4(p.rand).display()))
+}
