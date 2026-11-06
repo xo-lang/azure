@@ -1,0 +1,154 @@
+// The sender, as azservicebus's Sender and MessageBatch (sender.go,
+// message_batch.go) (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/amqp
+use std/uuid
+
+pub struct NewSenderOptions {}
+
+pub struct Sender {
+  client: Client
+  entity: Str
+  link: amqp.Sender
+  name: Str
+}
+
+/// A sender to a queue or a topic. It attaches its link now (Go attaches
+/// on first send).
+pub fn (c: Client) new_sender(queue_or_topic: Str, options: NewSenderOptions = NewSenderOptions{}) -> Sender ! ServiceBusErr uses (net.dial, clock, rand) {
+  let conn = c.open()?
+  c.authorize(conn, queue_or_topic)?
+  let name = c.link_name("sender", queue_or_topic)
+  let l = conn.c.new_sender(conn.s, queue_or_topic, amqp.SenderOptions{name: name}) ?? e => return Err(from_amqp(e))
+  Ok(Sender{client: c, entity: queue_or_topic, link: l, name: name})
+}
+
+/// The outcome of a send as an error, None when accepted.
+fn outcome(s: amqp.DeliveryState?) -> ServiceBusErr? {
+  match s {
+    None | Some(amqp.DeliveryState.Accepted) => None
+    Some(amqp.DeliveryState.Rejected(Some(w))) => Some(from_wire(w))
+    Some(other) => Some(ServiceBusErr{msg: "the message was not accepted: ${other:?}"})
+  }
+}
+
+pub struct SendMessageOptions {}
+
+/// Sends one message and waits for the service to accept it.
+pub fn (s: Sender) send_message(message: Message, options: SendMessageOptions = SendMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock) {
+  let st = s.link.send(message.to_amqp()) ?? e => return Err(from_amqp(e))
+  if let Some(e) = outcome(st) {
+    return Err(e)
+  }
+  Ok(())
+}
+
+pub struct MessageBatchOptions {
+  /// The batch's size limit in bytes; 0 for the link's (Go reads it from
+  /// the attach; here 256 KiB, the Standard tier's).
+  pub max_bytes: Int = 0
+}
+
+/// Messages sent as one transfer (message format 0x80013700, each data
+/// section one encoded message).
+pub struct MessageBatch {
+  max_bytes: Int
+  size: Int = 0
+  encoded: List[Bytes] = []
+}
+
+pub const ERR_MESSAGE_TOO_LARGE: Str = "the message is too large"
+
+/// An empty batch.
+pub fn (s: Sender) new_message_batch(options: MessageBatchOptions = MessageBatchOptions{}) -> MessageBatch ! ServiceBusErr {
+  Ok(MessageBatch{max_bytes: if options.max_bytes > 0 { options.max_bytes } else { 262144 }})
+}
+
+pub struct AddMessageOptions {}
+
+/// Adds a message; ERR_MESSAGE_TOO_LARGE when it would pass the limit.
+pub fn (var b: MessageBatch) add_message(m: Message, options: AddMessageOptions = AddMessageOptions{}) -> () ! ServiceBusErr {
+  let bs = amqp.encode_message(m.to_amqp()) ?? e => return Err(from_amqp(e))
+  // Each data section costs its bytes plus a 5 byte vbin32 header.
+  let grown = b.size + bs.len() + 5
+  if grown > b.max_bytes {
+    return Err(ServiceBusErr{msg: ERR_MESSAGE_TOO_LARGE})
+  }
+  b.encoded.push(bs)
+  b.size = grown
+  Ok(())
+}
+
+pub fn (b: MessageBatch) num_bytes() -> Int {
+  b.size
+}
+
+pub fn (b: MessageBatch) num_messages() -> Int {
+  b.encoded.len()
+}
+
+pub struct SendMessageBatchOptions {}
+
+/// Sends the batch's messages. Go sends them in one transfer of message
+/// format 0x80013700; std/amqp's send has no message format yet, so each
+/// goes in its own transfer, in order, and the first refusal stops it.
+pub fn (s: Sender) send_message_batch(batch: MessageBatch, options: SendMessageBatchOptions = SendMessageBatchOptions{}) -> () ! ServiceBusErr uses (net.dial, clock) {
+  for bs in batch.encoded {
+    let m = amqp.decode_message(bs) ?? e => return Err(from_amqp(e))
+    let st = s.link.send(m) ?? e => return Err(from_amqp(e))
+    if let Some(e) = outcome(st) {
+      return Err(e)
+    }
+  }
+  Ok(())
+}
+
+pub struct ScheduleMessagesOptions {}
+
+/// Schedules the messages to appear at `scheduled_enqueue_time` and
+/// returns their sequence numbers, to cancel them with.
+pub fn (s: Sender) schedule_messages(messages: List[Message], scheduled_enqueue_time: Time, options: ScheduleMessagesOptions = ScheduleMessagesOptions{}) -> List[Int] ! ServiceBusErr uses (net.dial, clock, rand) {
+  if messages.is_empty() {
+    return Err(ServiceBusErr{msg: "expected one or more messages"})
+  }
+  var entries: List[amqp.Value] = []
+  for m0 in messages {
+    var m = m0
+    m.scheduled_enqueue_time = Some(scheduled_enqueue_time)
+    if m.message_id.is_none() {
+      m.message_id = Some(uuid.v4(s.client.rand).display())
+    }
+    let bs = amqp.encode_message(m.to_amqp()) ?? e => return Err(from_amqp(e))
+    var e: List[(amqp.Value, amqp.Value)] = [(sym("message-id"), amqp.Value.Str(v: m.message_id ?? "")), (sym("message"), amqp.Value.Binary(v: bs))]
+    if let Some(sid) = m.session_id {
+      e.push((sym("session-id"), amqp.Value.Str(v: sid)))
+    }
+    if let Some(pk) = m.partition_key {
+      e.push((sym("partition-key"), amqp.Value.Str(v: pk)))
+    }
+    entries.push(amqp.Value.Map(pairs: e))
+  }
+  let mg = s.client.mgmt(s.entity, s.name)?
+  let r = mg.call(s.client.rand, "schedule-message", [("messages", amqp.Value.List(items: entries))], s.client.opts.timeout_ms)
+  mg.close()
+  let reply = r?
+  Ok(items(field(reply.body, "sequence-numbers")).map(fn(v: amqp.Value) -> Int { val_int(v) ?? 0 }))
+}
+
+pub struct CancelScheduledMessagesOptions {}
+
+/// Cancels scheduled messages by their sequence numbers.
+pub fn (s: Sender) cancel_scheduled_messages(sequence_numbers: List[Int], options: CancelScheduledMessagesOptions = CancelScheduledMessagesOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  let mg = s.client.mgmt(s.entity, s.name)?
+  let r = mg.call(s.client.rand, "cancel-scheduled-message", [("sequence-numbers", longs(sequence_numbers))], s.client.opts.timeout_ms)
+  mg.close()
+  r?
+  Ok(())
+}
+
+/// Detaches the sender's link.
+pub fn (s: Sender) close() -> () ! ServiceBusErr uses (net.dial, clock) {
+  s.link.close() ?? e => return Err(from_amqp(e))
+  Ok(())
+}

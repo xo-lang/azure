@@ -1,0 +1,200 @@
+// The Service Bus client, as azservicebus's Client, its connection string
+// parser (internal/conn) and SAS signer (internal/sas) (MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md). One AMQP connection and session
+// per client, opened on first use; each link's entity is authorized
+// with a CBS put-token first, as Go's Namespace.NegotiateClaim.
+
+use std/amqp
+use std/base64
+use std/crypto
+use std/url
+use github.com/xo-lang/azure/azcore
+
+/// The parts of a connection string (`Endpoint=sb://...;SharedAccessKeyName=...`).
+pub struct ConnectionStringProperties {
+  pub endpoint: Str = ""
+  pub fully_qualified_namespace: Str = ""
+  pub entity_path: Str? = None
+  pub shared_access_key_name: Str? = None
+  pub shared_access_key: Secret[Str]? = None
+  pub shared_access_signature: Secret[Str]? = None
+  /// `UseDevelopmentEmulator=true`: plain `amqp://` without TLS, and the
+  /// endpoint may carry a port (`sb://localhost:5672`).
+  pub emulator: Bool = false
+}
+
+/// Parses a Service Bus connection string as Go's ParseConnectionString:
+/// keys are case-insensitive, unknown keys are ignored, and it needs an
+/// endpoint and either a key name with a key or a signature.
+pub fn parse_connection_string(s: Str) -> ConnectionStringProperties ! Str {
+  var p = ConnectionStringProperties{}
+  for part in s.split(";") {
+    if part == "" {
+      continue
+    }
+    let i = part.find("=") ?? return Err("failed parsing connection string due to unmatched key value separated by '='")
+    let key = part[0..i].to_lower()
+    let value = part[i + 1..part.len()]
+    if key == "endpoint" {
+      // Go's url.Parse(value).Host: what follows `scheme://`, up to a `/`.
+      let i = value.find("://") ?? return Err("failed parsing connection string due to an incorrectly formatted Endpoint value")
+      let rest = value[i + 3..value.len()]
+      p.endpoint = value
+      p.fully_qualified_namespace = match rest.find("/") {
+        Some(j) => rest[0..j]
+        None => rest
+      }
+    } else if key == "sharedaccesskeyname" {
+      p.shared_access_key_name = Some(value)
+    } else if key == "sharedaccesskey" {
+      p.shared_access_key = Some(Secret.new(value))
+    } else if key == "entitypath" {
+      p.entity_path = Some(value)
+    } else if key == "sharedaccesssignature" {
+      p.shared_access_signature = Some(Secret.new(value))
+    } else if key == "usedevelopmentemulator" {
+      p.emulator = match value.to_lower() {
+        "true" | "1" | "t" => true
+        "false" | "0" | "f" => false
+        _ => return Err("strconv.ParseBool: parsing \"${value}\": invalid syntax")
+      }
+    }
+  }
+  if p.emulator && !p.endpoint.starts_with("sb://") {
+    return Err("UseDevelopmentEmulator=true can only be used with sb://<emulator hostname> or sb://<emulator hostname>:<port number>, not ${p.endpoint}")
+  }
+  if p.fully_qualified_namespace == "" {
+    return Err("key \"Endpoint\" must not be empty")
+  }
+  if p.shared_access_signature.is_none() && p.shared_access_key_name.is_none() {
+    return Err("key \"SharedAccessKeyName\" must not be empty")
+  }
+  if p.shared_access_key.is_none() && p.shared_access_signature.is_none() {
+    return Err("key \"SharedAccessKey\" or \"SharedAccessSignature\" cannot both be empty")
+  }
+  Ok(p)
+}
+
+/// A SAS token for `uri` signed with the key, expiring at `expiry` (Unix
+/// seconds): `SharedAccessSignature sr=...&sig=...&se=...&skn=...`, as
+/// Go's Signer.SignWithExpiry.
+pub fn sign_sas(key_name: Str, key: Secret[Str], uri: Str, expiry: Int) -> Str {
+  let audience = url.query_escape(uri).to_lower()
+  let sig = url.query_escape(base64.encode(crypto.hmac_sha256(key.reveal().bytes(), "${audience}\n${expiry}".bytes())))
+  "SharedAccessSignature sr=${audience}&sig=${sig}&se=${expiry}&skn=${key_name}"
+}
+
+/// How the client authorizes its links.
+enum Auth {
+  /// A key: a SAS token per entity, valid for two hours.
+  Key(name: Str, key: Secret[Str])
+  /// A ready signature from the connection string, sent as it is.
+  Signature(sig: Secret[Str])
+  /// Entra ID tokens for `https://servicebus.azure.net//.default`.
+  Credential(c: azcore.TokenCredential)
+}
+
+pub struct ClientOptions {
+  /// Prefixed to the AMQP connection's user agent property.
+  pub application_id: Str = ""
+  /// How long a connect, a put-token or a management call may wait.
+  pub timeout_ms: Int = 60000
+}
+
+/// The open connection.
+struct Conn {
+  c: amqp.Connection
+  s: amqp.Session
+}
+
+pub struct Client {
+  net: Net
+  clock: Clock
+  rand: Rand
+  namespace: Str
+  tls: Bool
+  auth: Auth
+  opts: ClientOptions
+  conn: Mutex[Conn?]
+  links: Atomic[Int]
+}
+
+/// A client for the namespace (`<name>.servicebus.windows.net`) with an
+/// Entra ID credential.
+pub fn new_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, credential: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  if fully_qualified_namespace == "" {
+    return Err("fullyQualifiedNamespace must not be empty")
+  }
+  Ok(Client{net: net, clock: clock, rand: rand, namespace: fully_qualified_namespace, tls: true, auth: Auth.Credential(credential), opts: options, conn: Mutex[Conn?].new(None), links: Atomic[Int].new(0)})
+}
+
+/// A client from a connection string with a key or a signature.
+pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let p = parse_connection_string(connection_string)?
+  let auth = match (p.shared_access_signature, p.shared_access_key_name, p.shared_access_key) {
+    (Some(sig), _, _) => Auth.Signature(sig)
+    (None, Some(n), Some(k)) => Auth.Key(name: n, key: k)
+    _ => return Err("key \"SharedAccessKey\" or \"SharedAccessSignature\" cannot both be empty")
+  }
+  Ok(Client{net: net, clock: clock, rand: rand, namespace: p.fully_qualified_namespace, tls: !p.emulator, auth: auth, opts: options, conn: Mutex[Conn?].new(None), links: Atomic[Int].new(0)})
+}
+
+/// The CBS audience of an entity: `amqps://<namespace>/<entity>`.
+fn (c: Client) audience(entity: Str) -> Str {
+  "${if c.tls { "amqps" } else { "amqp" }}://${c.namespace}/${entity}"
+}
+
+/// The connection, opened on first use.
+fn (c: Client) open() -> Conn ! ServiceBusErr uses (net.dial, clock) {
+  let addr = "${if c.tls { "amqps" } else { "amqp" }}://${c.namespace}"
+  let net = c.net
+  let clock = c.clock
+  let opts = c.opts
+  let host = c.namespace.split(":")[0]
+  c.conn.with(fn(var slot: Conn?) -> Conn ! ServiceBusErr uses (net.dial, clock) {
+    if let Some(x) = slot {
+      return Ok(x)
+    }
+    let agent = if opts.application_id == "" { "azsdk-xo-azservicebus/v0.1.0" } else { "${opts.application_id} azsdk-xo-azservicebus/v0.1.0" }
+    let conn = amqp.dial(net, addr, amqp.ConnOptions{hostname: host, clock: Some(clock), sasl: amqp.Sasl.Anonymous, timeout_ms: opts.timeout_ms, properties: [("user-agent", amqp.Value.Str(v: agent))]}) ?? e => return Err(from_amqp(e))
+    let s = conn.begin() ?? e => return Err(from_amqp(e))
+    let x = Conn{c: conn, s: s}
+    slot = Some(x)
+    Ok(x)
+  })
+}
+
+/// Puts a token for the entity on the connection's `$cbs` node.
+fn (c: Client) authorize(conn: Conn, entity: Str) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  let aud = c.audience(entity)
+  let now = c.clock.now().unix()
+  let (token, kind, expiry) = match c.auth {
+    Auth.Key(name: n, key: k) => (sign_sas(n, k, aud, now + 7200), "servicebus.windows.net:sastoken", (now + 7200) * 1000)
+    Auth.Signature(sig) => (sig.reveal(), "servicebus.windows.net:sastoken", 0)
+    Auth.Credential(cred) => {
+      let t = cred.get_token(azcore.TokenRequestOptions{scopes: ["https://servicebus.azure.net//.default"]}) ?? e => return Err(ServiceBusErr{code: CODE_UNAUTHORIZED_ACCESS, msg: e.display()})
+      (t.token.reveal(), "jwt", t.expires_on.unix_millis())
+    }
+  }
+  amqp.cbs_put_token(conn.c, conn.s, aud, token, token_type: kind, expiry_ms: expiry) ?? e => return Err(from_amqp(e))
+  Ok(())
+}
+
+/// A link name unique within the client.
+fn (c: Client) link_name(kind: Str, entity: Str) -> Str {
+  "${kind}-${entity}-${c.links.add(1)}"
+}
+
+/// Closes the connection; links made from the client stop working.
+pub fn (c: Client) close() -> () ! ServiceBusErr uses (net.dial, clock) {
+  let x = c.conn.with(fn(var slot: Conn?) -> Conn? {
+    let was = slot
+    slot = None
+    was
+  })
+  match x {
+    Some(conn) => conn.c.close() ?? e => return Err(from_amqp(e))
+    None => {}
+  }
+  Ok(())
+}

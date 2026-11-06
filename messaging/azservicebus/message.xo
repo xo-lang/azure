@@ -1,0 +1,226 @@
+// Messages, as azservicebus's Message, ReceivedMessage and their AMQP
+// mapping (message.go) (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/amqp
+
+/// Where a received message stands.
+pub type MessageState = Int
+
+pub const MESSAGE_STATE_ACTIVE: MessageState = 0
+pub const MESSAGE_STATE_DEFERRED: MessageState = 1
+pub const MESSAGE_STATE_SCHEDULED: MessageState = 2
+
+/// A message to send.
+pub struct Message {
+  pub application_properties: Map[Str, amqp.Value] = {}
+  pub body: Bytes = b""
+  pub content_type: Str? = None
+  pub correlation_id: Str? = None
+  pub message_id: Str? = None
+  pub partition_key: Str? = None
+  pub reply_to: Str? = None
+  pub reply_to_session_id: Str? = None
+  pub scheduled_enqueue_time: Time? = None
+  pub session_id: Str? = None
+  pub subject: Str? = None
+  pub time_to_live: Duration? = None
+  pub to: Str? = None
+}
+
+/// A message from a receiver or a peek.
+pub struct ReceivedMessage {
+  pub application_properties: Map[Str, amqp.Value] = {}
+  pub body: Bytes = b""
+  pub content_type: Str? = None
+  pub correlation_id: Str? = None
+  pub dead_letter_error_description: Str? = None
+  pub dead_letter_reason: Str? = None
+  pub dead_letter_source: Str? = None
+  /// The number of deliveries, this one included.
+  pub delivery_count: Int = 0
+  pub enqueued_sequence_number: Int? = None
+  pub enqueued_time: Time? = None
+  pub expires_at: Time? = None
+  pub locked_until: Time? = None
+  /// The lock to settle or renew with (16 bytes), empty when not locked.
+  pub lock_token: Bytes = b""
+  pub message_id: Str = ""
+  pub partition_key: Str? = None
+  pub reply_to: Str? = None
+  pub reply_to_session_id: Str? = None
+  pub scheduled_enqueue_time: Time? = None
+  pub sequence_number: Int? = None
+  pub session_id: Str? = None
+  pub state: MessageState = MESSAGE_STATE_ACTIVE
+  pub subject: Str? = None
+  pub time_to_live: Duration? = None
+  pub to: Str? = None
+  /// The AMQP message as it came.
+  pub raw_amqp_message: amqp.Message = amqp.Message{}
+  /// The delivery it came in, to settle it on its link; None for a
+  /// peeked or deferred message (settled on the management link).
+  delivery: amqp.Delivery? = None
+}
+
+/// The message to send again (Go's ReceivedMessage.Message).
+pub fn (rm: ReceivedMessage) message() -> Message {
+  Message{
+    application_properties: rm.application_properties, body: rm.body, content_type: rm.content_type,
+    correlation_id: rm.correlation_id, message_id: Some(rm.message_id), partition_key: rm.partition_key,
+    reply_to: rm.reply_to, reply_to_session_id: rm.reply_to_session_id,
+    scheduled_enqueue_time: rm.scheduled_enqueue_time, session_id: rm.session_id, subject: rm.subject,
+    time_to_live: rm.time_to_live, to: rm.to,
+  }
+}
+
+const PARTITION_KEY: Str = "x-opt-partition-key"
+const SCHEDULED_ENQUEUE_TIME: Str = "x-opt-scheduled-enqueue-time"
+const LOCKED_UNTIL: Str = "x-opt-locked-until"
+const SEQUENCE_NUMBER: Str = "x-opt-sequence-number"
+const ENQUEUED_TIME: Str = "x-opt-enqueued-time"
+const DEAD_LETTER_SOURCE: Str = "x-opt-deadletter-source"
+const ENQUEUED_SEQUENCE_NUMBER: Str = "x-opt-enqueue-sequence-number"
+const MESSAGE_STATE: Str = "x-opt-message-state"
+const LOCK_TOKEN: Str = "x-opt-lock-token"
+
+fn opt_str(s: Str?) -> amqp.Value {
+  match s {
+    Some(v) => amqp.Value.Str(v: v)
+    None => amqp.Value.Null
+  }
+}
+
+/// The AMQP message, as Go's Message.toAMQPMessage.
+fn (m: Message) to_amqp() -> amqp.Message {
+  var annotations: List[(amqp.Value, amqp.Value)] = []
+  if let Some(k) = m.partition_key {
+    annotations.push((amqp.Value.Symbol(v: PARTITION_KEY), amqp.Value.Str(v: k)))
+  }
+  if let Some(t) = m.scheduled_enqueue_time {
+    annotations.push((amqp.Value.Symbol(v: SCHEDULED_ENQUEUE_TIME), amqp.Value.Timestamp(ms: t.unix_millis())))
+  }
+  var app: List[(Str, amqp.Value)] = []
+  for (k, v) in m.application_properties {
+    app.push((k, v))
+  }
+  amqp.Message{
+    header: m.time_to_live.map(fn(d: Duration) -> amqp.Header { amqp.Header{ttl_ms: d.millis()} }),
+    annotations: Some(annotations),
+    properties: Some(amqp.Properties{
+      message_id: opt_str(m.message_id), to: m.to, subject: m.subject, reply_to: m.reply_to,
+      correlation_id: opt_str(m.correlation_id), content_type: m.content_type, group_id: m.session_id,
+      reply_to_group_id: m.reply_to_session_id,
+    }),
+    app_properties: if app.is_empty() { None } else { Some(app) },
+    body: amqp.Body.Data(sections: [m.body]),
+  }
+}
+
+fn val_str(v: amqp.Value) -> Str? {
+  match v {
+    amqp.Value.Str(s) => Some(s)
+    amqp.Value.Symbol(s) => Some(s)
+    _ => None
+  }
+}
+
+fn val_int(v: amqp.Value) -> Int? {
+  match v {
+    amqp.Value.Long(x) => Some(Int(x))
+    amqp.Value.Int(x) => Some(Int(x))
+    amqp.Value.ULong(x) => Some(Int(x))
+    amqp.Value.UInt(x) => Some(Int(x))
+    amqp.Value.Short(x) => Some(Int(x))
+    amqp.Value.UShort(x) => Some(Int(x))
+    amqp.Value.Byte(x) => Some(Int(x))
+    amqp.Value.UByte(x) => Some(Int(x))
+    _ => None
+  }
+}
+
+fn val_time(v: amqp.Value) -> Time? {
+  match v {
+    amqp.Value.Timestamp(ms) => Some(Time.from_unix_millis(ms))
+    _ => None
+  }
+}
+
+/// The value under symbol or string key `k`.
+fn lookup(pairs: List[(amqp.Value, amqp.Value)], k: Str) -> amqp.Value? {
+  for (key, v) in pairs {
+    if val_str(key) == Some(k) {
+      return Some(v)
+    }
+  }
+  None
+}
+
+/// A received message from its AMQP message, as Go's newReceivedMessage.
+fn received(am: amqp.Message, delivery: amqp.Delivery?) -> ReceivedMessage {
+  var rm = ReceivedMessage{raw_amqp_message: am, delivery: delivery}
+  match am.body {
+    amqp.Body.Data(sections) => if sections.len() == 1 { rm.body = sections[0] }
+    _ => {}
+  }
+  if let Some(p) = am.properties {
+    rm.message_id = val_str(p.message_id) ?? ""
+    rm.session_id = p.group_id
+    rm.correlation_id = val_str(p.correlation_id)
+    rm.content_type = p.content_type
+    rm.subject = p.subject
+    rm.to = p.to
+    rm.reply_to = p.reply_to
+    rm.reply_to_session_id = p.reply_to_group_id
+    if let Some(h) = am.header {
+      rm.delivery_count = h.delivery_count + 1
+      rm.time_to_live = Some(Duration.from_millis(h.ttl_ms))
+    }
+  }
+  if let Some(app) = am.app_properties {
+    var m: Map[Str, amqp.Value] = {}
+    for (k, v) in app {
+      m[k] = v
+      if k == "DeadLetterErrorDescription" {
+        rm.dead_letter_error_description = val_str(v)
+      } else if k == "DeadLetterReason" {
+        rm.dead_letter_reason = val_str(v)
+      }
+    }
+    rm.application_properties = m
+  }
+  if let Some(a) = am.annotations {
+    rm.locked_until = lookup(a, LOCKED_UNTIL).and_then(val_time)
+    rm.sequence_number = lookup(a, SEQUENCE_NUMBER).and_then(val_int)
+    rm.partition_key = lookup(a, PARTITION_KEY).and_then(val_str)
+    rm.enqueued_time = lookup(a, ENQUEUED_TIME).and_then(val_time)
+    rm.dead_letter_source = lookup(a, DEAD_LETTER_SOURCE).and_then(val_str)
+    rm.scheduled_enqueue_time = lookup(a, SCHEDULED_ENQUEUE_TIME).and_then(val_time)
+    rm.enqueued_sequence_number = lookup(a, ENQUEUED_SEQUENCE_NUMBER).and_then(val_int)
+    rm.state = match lookup(a, MESSAGE_STATE).and_then(val_int) {
+      Some(1) => MESSAGE_STATE_DEFERRED
+      Some(2) => MESSAGE_STATE_SCHEDULED
+      _ => MESSAGE_STATE_ACTIVE
+    }
+  }
+  // The delivery tag is the lock token in .NET's GUID byte order; the
+  // delivery annotation, when present, is the token as it is.
+  if let Some(d) = delivery {
+    if d.tag.len() == 16 {
+      rm.lock_token = guid_order(d.tag)
+    }
+  }
+  if let Some(Uuid(bs)) = am.delivery_annotations.and_then(fn(a: List[(amqp.Value, amqp.Value)]) -> amqp.Value? { lookup(a, LOCK_TOKEN) }) {
+    rm.lock_token = bs
+  }
+  if let (Some(t), Some(ttl)) = (rm.enqueued_time, rm.time_to_live) {
+    rm.expires_at = Some(Time.from_unix_millis(t.unix_millis() + ttl.millis()))
+  }
+  rm
+}
+
+/// A 16 byte delivery tag as a UUID: the first three groups swapped
+/// from little endian, as Go's lockTokenFromMessageTag.
+fn guid_order(t: Bytes) -> Bytes {
+  t[3..4] + t[2..3] + t[1..2] + t[0..1] + t[5..6] + t[4..5] + t[7..8] + t[6..7] + t[8..16]
+}

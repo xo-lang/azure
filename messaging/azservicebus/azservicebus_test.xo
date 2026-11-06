@@ -1,0 +1,222 @@
+// The Service Bus client against std/amqptest's in-process broker on the
+// test world's in-memory network (no emulator, no namespace; invented
+// hosts and keys). Each receive asks for the messages that are there: a
+// receive that has to time out deadlocks on the in-memory network
+// (reported to Xo; it times out on a loopback listener with --real).
+
+use std/amqp
+use std/amqptest
+use std/crypto
+
+fn conn_str(addr: Str) -> Str {
+  "Endpoint=sb://${addr};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=aW52ZW50ZWQta2V5;UseDevelopmentEmulator=true"
+}
+
+/// Waits for the broker to apply a settlement (a disposition is not
+/// answered), up to two seconds.
+fn until(clk: Clock, cond: fn() -> Bool) {
+  for _ in 0..400 {
+    if cond() {
+      return
+    }
+    clk.sleep(5ms)
+  }
+}
+
+fn text(m: ReceivedMessage) -> Str {
+  m.body.to_str_lossy()
+}
+
+test "parse_connection_string reads the keys case-insensitively and checks what it needs" {
+  let p = parse_connection_string("endpoint=sb://ns1.servicebus.example.test/;sharedaccesskeyname=k1;SharedAccessKey=s1;EntityPath=q1")?
+  expect(p.fully_qualified_namespace) == "ns1.servicebus.example.test"
+  expect(p.shared_access_key_name) == Some("k1")
+  expect(p.entity_path) == Some("q1")
+  expect(p.emulator) == false
+  expect(parse_connection_string("Endpoint=sb://ns1.servicebus.example.test/").err()) == Some("key \"SharedAccessKeyName\" must not be empty")
+  expect(parse_connection_string("Endpoint=sb://ns1.servicebus.example.test/;SharedAccessKeyName=k1").err()) == Some("key \"SharedAccessKey\" or \"SharedAccessSignature\" cannot both be empty")
+  expect(parse_connection_string("Endpoint=http://h1;SharedAccessKeyName=k;SharedAccessKey=s;UseDevelopmentEmulator=true").is_err()) == true
+  expect(parse_connection_string("Endpoint=sb://localhost:5672;SharedAccessKeyName=k;SharedAccessKey=s;UseDevelopmentEmulator=true")?.fully_qualified_namespace) == "localhost:5672"
+}
+
+test "sign_sas matches Go's Signer.SignWithExpiry" {
+  // Go: sas.NewSigner("k1", "invented-key").SignWithExpiry("amqps://ns1.servicebus.example.test/q1", "1793847845")
+  let s = sign_sas("k1", Secret.new("invented-key"), "amqps://ns1.servicebus.example.test/q1", 1793847845)
+  // The token itself is a signature, so the test holds Go's token's SHA-256.
+  expect(s.starts_with("SharedAccessSignature sr=amqps%3a%2f%2fns1.servicebus.example.test%2fq1&sig=")) == true
+  expect(s.ends_with("&se=1793847845&skn=k1")) == true
+  expect(crypto.sha256(s.bytes()).to_hex()) == "196c9e5473ebe13d829e4cc8fb0b63407838037741f7a31240b0861a2871c2c1"
+}
+
+test "send, receive and complete, with a SAS token put on $cbs for the entity" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  b.require_token(true)
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    snd.send_message(Message{body: b"hello", message_id: Some("m1"), subject: Some("greeting"), application_properties: {"n": amqp.Value.Long(v: 7)}})?
+    expect(b.ready("q1").len()) == 1
+    let r = c.new_receiver_for_queue("q1")?
+    let got = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(got.len()) == 1
+    let m = got[0]
+    expect(text(m)) == "hello"
+    expect(m.message_id) == "m1"
+    expect(m.subject) == Some("greeting")
+    expect(m.application_properties.get("n")) == Some(amqp.Value.Long(v: 7))
+    expect(m.delivery_count) == 1
+    expect(m.sequence_number.is_some()) == true
+    expect(m.lock_token.len()) == 16
+    r.complete_message(m)?
+    expect(b.ready("q1").len()) == 0
+    let toks = b.tokens()
+    expect(toks.len() >= 2) == true
+    expect(toks[0].0.ends_with("/q1")) == true
+    expect(toks[0].1.starts_with("SharedAccessSignature sr=amqp%3a%2f%2f")) == true
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "abandon redelivers with the count up, dead_letter_message moves it to $DeadLetterQueue" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    c.new_sender("q1")?.send_message(Message{body: b"once"})?
+    let r = c.new_receiver_for_queue("q1")?
+    let m1 = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    r.abandon_message(m1)?
+    let m2 = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    expect(m2.delivery_count) == 2
+    r.dead_letter_message(m2, DeadLetterOptions{reason: Some("bad-input"), error_description: Some("the body is not JSON")})?
+    until(os.clock, fn() -> Bool { b.dead_letters("q1").len() == 1 })
+    expect(b.dead_letters("q1").len()) == 1
+    let dlq = c.new_receiver_for_queue("q1", ReceiverOptions{sub_queue: SubQueue.DeadLetter, receive_mode: ReceiveMode.ReceiveAndDelete})?
+    let d = dlq.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(d.map(text)) == ["once"]
+    expect(dlq.complete_message(d[0]).is_err()) == true
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "defer, then receive_deferred_messages by sequence number and complete on $management" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    c.new_sender("q1")?.send_message(Message{body: b"later"})?
+    let r = c.new_receiver_for_queue("q1")?
+    let m = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    let seq = m.sequence_number ?? -1
+    r.defer_message(m)?
+    until(os.clock, fn() -> Bool { b.deferred("q1").len() == 1 })
+    expect(b.deferred("q1").len()) == 1
+    let back = r.receive_deferred_messages([seq])?
+    expect(back.map(text)) == ["later"]
+    expect(back[0].state) == MESSAGE_STATE_DEFERRED
+    r.complete_message(back[0])?
+    until(os.clock, fn() -> Bool { b.deferred("q1").len() == 0 })
+    expect(b.deferred("q1").len()) == 0
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "peek_messages does not lock; renew_message_lock returns a later expiry" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1", amqptest.QueueOptions{lock_ms: 30000})
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    snd.send_message(Message{body: b"a"})?
+    snd.send_message(Message{body: b"b"})?
+    let r = c.new_receiver_for_queue("q1")?
+    expect(r.peek_messages(5)?.map(text)) == ["a", "b"]
+    expect(b.locked("q1")) == 0
+    expect(r.peek_messages(5)?.len()) == 0
+    let m = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    let until = m.locked_until ?? Time.UNIX_EPOCH
+    os.clock.sleep(20ms)
+    let renewed = r.renew_message_lock(m)?
+    expect(renewed.unix_millis() > until.unix_millis()) == true
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "schedule_messages returns sequence numbers; cancel_scheduled_messages drops them" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    let when = Time.from_unix_millis(os.clock.now().unix_millis() + 3600000)
+    let seqs = snd.schedule_messages([Message{body: b"x"}, Message{body: b"y"}], when)?
+    expect(seqs.len()) == 2
+    expect(b.scheduled("q1").len()) == 2
+    snd.cancel_scheduled_messages([seqs[0]])?
+    expect(b.scheduled("q1").len()) == 1
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "a topic's subscriptions each get a copy; a batch sends its messages" {
+  let b = amqptest.new(os.clock)
+  b.topic("t1")
+  b.subscription("t1", "s1")
+  b.subscription("t1", "s2")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("t1")?
+    var batch = snd.new_message_batch()?
+    batch.add_message(Message{body: b"one"})?
+    batch.add_message(Message{body: b"two"})?
+    expect(batch.num_messages()) == 2
+    snd.send_message_batch(batch)?
+    let r = c.new_receiver_for_subscription("t1", "s2", ReceiverOptions{receive_mode: ReceiveMode.ReceiveAndDelete})?
+    expect(r.receive_messages(2, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["one", "two"]
+    expect(b.ready("t1/Subscriptions/s1").len()) == 2
+    var small = snd.new_message_batch(MessageBatchOptions{max_bytes: 40})?
+    expect(small.add_message(Message{body: b"0123456789012345678901234567890123456789"}).err().map(fn(e: ServiceBusErr) -> Str { e.msg })) == Some(ERR_MESSAGE_TOO_LARGE)
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "errors keep Go's codes: an unknown entity is notfound, a rejected token unauthorized" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=sb://${l.addr()};SharedAccessSignature=sig-rejected;UseDevelopmentEmulator=true")?
+    b.reject_token("sig-rejected")
+    match c.new_sender("q1") {
+      Err(e) => expect(e.code) == CODE_UNAUTHORIZED_ACCESS
+      Ok(_) => expect("ok") == "an unauthorized error"
+    }
+    b.clear_failures()
+    let c2 = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    match c2.new_receiver_for_queue("missing")?.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000}) {
+      Err(e) => expect(e.code) == CODE_NOT_FOUND
+      Ok(_) => expect("ok") == "a notfound error"
+    }
+    s.cancel()
+  }
+}

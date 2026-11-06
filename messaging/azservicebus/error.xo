@@ -1,0 +1,52 @@
+// Errors, as azservicebus's Error and its Codes (internal/exported,
+// internal/errors.go) (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/amqp
+
+/// What kind of failure an Error is; "" for one with no code.
+pub type Code = Str
+
+pub const CODE_UNAUTHORIZED_ACCESS: Code = "unauthorized"
+pub const CODE_CONNECTION_LOST: Code = "connlost"
+pub const CODE_LOCK_LOST: Code = "locklost"
+pub const CODE_TIMEOUT: Code = "timeout"
+pub const CODE_NOT_FOUND: Code = "notfound"
+pub const CODE_CLOSED: Code = "closed"
+
+pub struct ServiceBusErr {
+  pub code: Code = ""
+  pub msg: Str
+  /// The AMQP error condition (`com.microsoft:message-lock-lost`), when
+  /// the service sent one.
+  pub condition: Str = ""
+}
+
+pub fn (e: ServiceBusErr) display() -> Str {
+  "(${if e.code == "" { "unknown" } else { e.code }}): ${e.msg}"
+}
+
+/// The code of an AMQP condition, as Go's GetRecoveryKind and
+/// TransformError map them.
+fn code_of(condition: Str) -> Code {
+  match condition {
+    "amqp:unauthorized-access" => CODE_UNAUTHORIZED_ACCESS
+    "amqp:not-found" | "com.microsoft:entity-disabled" => CODE_NOT_FOUND
+    "com.microsoft:message-lock-lost" | "com.microsoft:session-lock-lost" => CODE_LOCK_LOST
+    "com.microsoft:timeout" | "com.microsoft:operation-timeout" => CODE_TIMEOUT
+    "amqp:connection:forced" | "amqp:connection:framing-error" | "amqp:link:detach-forced" => CODE_CONNECTION_LOST
+    _ => ""
+  }
+}
+
+fn from_wire(w: amqp.WireError) -> ServiceBusErr {
+  ServiceBusErr{code: code_of(w.condition), msg: if w.description == "" { w.condition } else { "${w.condition}: ${w.description}" }, condition: w.condition}
+}
+
+fn from_amqp(e: amqp.AmqpErr) -> ServiceBusErr {
+  match e {
+    amqp.AmqpErr.Peer(w) => from_wire(w)
+    amqp.AmqpErr.Net(m) => ServiceBusErr{code: if m.contains("i/o timeout") { CODE_TIMEOUT } else { CODE_CONNECTION_LOST }, msg: m}
+    other => ServiceBusErr{msg: "${other:?}"}
+  }
+}

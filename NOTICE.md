@@ -19,7 +19,12 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `storage/azblob/sas/testdata`), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
   its tests, ParseID), `sdk/security/keyvault/azsecrets`, `azkeys` and `azcertificates`
   (their hand written clients, options and ID types, and
-  azcertificates' ErrorInfo; the rest is generated), and later the other data plane packages. Each ported file names its source in a header comment.
+  azcertificates' ErrorInfo; the rest is generated), `sdk/messaging/azservicebus`
+  v1.11.0 (the Client, Sender, MessageBatch, Receiver and message
+  settlement, Message and ReceivedMessage and their AMQP mapping, the
+  connection string parser and SAS signer, and the `$management`
+  requests of `internal/mgmt.go`, hand written over std/amqp; the
+  signing vector checked against its algorithm), and later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:
   initialisms, the package name dropped from type names, `Client` for

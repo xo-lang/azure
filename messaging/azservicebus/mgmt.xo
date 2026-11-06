@@ -1,0 +1,127 @@
+// The `$management` node's requests, as azservicebus's internal/rpc.go
+// and internal/mgmt.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): a request message with an `operation` and a map body,
+// answered on a receiver whose target is the reply address, matched by
+// correlation id.
+
+use std/amqp
+use std/uuid
+
+/// A management link pair on an entity.
+struct Mgmt {
+  snd: amqp.Sender
+  rcv: amqp.Receiver
+  reply_to: Str
+  /// The link the requests are on behalf of (`associated-link-name`).
+  link: Str
+}
+
+fn (c: Client) mgmt(entity: Str, link: Str) -> Mgmt ! ServiceBusErr uses (net.dial, clock, rand) {
+  let conn = c.open()?
+  c.authorize(conn, entity)?
+  let name = c.link_name("mgmt", entity)
+  let reply_to = "${name}-reply"
+  let snd = conn.c.new_sender(conn.s, "${entity}/$management", amqp.SenderOptions{name: "${name}-s"}) ?? e => return Err(from_amqp(e))
+  let rcv = conn.c.new_receiver(conn.s, "${entity}/$management", amqp.ReceiverOptions{name: "${name}-r", target: reply_to, credit: 1}) ?? e => return Err(from_amqp(e))
+  Ok(Mgmt{snd: snd, rcv: rcv, reply_to: reply_to, link: link})
+}
+
+fn sym(k: Str) -> amqp.Value {
+  amqp.Value.Str(v: k)
+}
+
+/// A management response: its status, description and body.
+struct Reply {
+  code: Int
+  description: Str
+  condition: Str
+  body: amqp.Value
+}
+
+/// Sends `op` with `body` and returns the reply. A status other than 2xx
+/// is an Error with the reply's condition.
+fn (m: Mgmt) call(rand: Rand, op: Str, body: List[(Str, amqp.Value)], timeout_ms: Int) -> Reply ! ServiceBusErr uses (net.dial, clock, rand) {
+  let id = uuid.v4(rand).display()
+  var props: List[(Str, amqp.Value)] = [("operation", amqp.Value.Str(v: "com.microsoft:${op}"))]
+  if m.link != "" {
+    props.push(("associated-link-name", amqp.Value.Str(v: m.link)))
+  }
+  let req = amqp.Message{
+    properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: id), reply_to: Some(m.reply_to)}),
+    app_properties: Some(props),
+    body: amqp.Body.Value(v: amqp.Value.Map(pairs: body.map(fn(kv: (Str, amqp.Value)) -> (amqp.Value, amqp.Value) { (sym(kv.0), kv.1) }))),
+  }
+  m.snd.send(req) ?? e => return Err(from_amqp(e))
+  while {
+    let d = m.rcv.receive(timeout_ms) ?? e => return Err(from_amqp(e))
+    m.rcv.accept(d) ?? e => return Err(from_amqp(e))
+    let corr = d.message.properties.map(fn(p: amqp.Properties) -> amqp.Value { p.correlation_id }) ?? amqp.Value.Null
+    if corr != amqp.Value.Str(v: id) {
+      continue
+    }
+    var r = Reply{code: 0, description: "", condition: "", body: amqp.Value.Null}
+    for (k, v) in d.message.app_properties ?? [] {
+      if k == "statusCode" || k == "status-code" {
+        r.code = val_int(v) ?? 0
+      } else if k == "statusDescription" || k == "status-description" {
+        r.description = val_str(v) ?? ""
+      } else if k == "errorCondition" || k == "error-condition" {
+        r.condition = val_str(v) ?? ""
+      }
+    }
+    if let amqp.Body.Value(v) = d.message.body {
+      r.body = v
+    }
+    if r.code < 200 || r.code > 299 {
+      let cond = if r.condition != "" { r.condition } else if r.code == 410 { "com.microsoft:message-lock-lost" } else { "" }
+      return Err(ServiceBusErr{code: code_of(cond), msg: "management ${op}: ${r.code} ${r.description}", condition: cond})
+    }
+    return Ok(r)
+  }
+}
+
+fn (m: Mgmt) close() uses (net.dial, clock) {
+  m.snd.close() ?? _ => {}
+  m.rcv.close() ?? _ => {}
+}
+
+/// The value under key `k` of a map value.
+fn field(v: amqp.Value, k: Str) -> amqp.Value? {
+  match v {
+    amqp.Value.Map(pairs) => lookup(pairs, k)
+    _ => None
+  }
+}
+
+fn items(v: amqp.Value?) -> List[amqp.Value] {
+  match v {
+    Some(amqp.Value.List(xs)) => xs
+    Some(amqp.Value.Array(xs)) => xs
+    _ => []
+  }
+}
+
+/// The messages of a peek or receive-by-sequence-number reply.
+fn messages_of(r: Reply) -> List[ReceivedMessage] ! ServiceBusErr {
+  var out: List[ReceivedMessage] = []
+  if r.code == 204 {
+    return Ok(out)
+  }
+  for entry in items(field(r.body, "messages")) {
+    let raw = match field(entry, "message") {
+      Some(amqp.Value.Binary(bs)) => bs
+      _ => return Err(ServiceBusErr{msg: "the management reply's message is not binary"})
+    }
+    let am = amqp.decode_message(raw) ?? e => return Err(from_amqp(e))
+    var rm = received(am, None)
+    if let Some(amqp.Value.Uuid(bs)) = field(entry, "lock-token") {
+      rm.lock_token = bs
+    }
+    out.push(rm)
+  }
+  Ok(out)
+}
+
+fn longs(xs: List[Int]) -> amqp.Value {
+  amqp.Value.Array(items: xs.map(fn(x: Int) -> amqp.Value { amqp.Value.Long(v: Int64(x)) }))
+}

@@ -1,0 +1,255 @@
+// The receiver, as azservicebus's Receiver and messageSettler
+// (receiver.go, messageSettler.go) (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md).
+
+use std/amqp
+
+/// How messages are taken: locked until settled, or deleted as they are
+/// delivered.
+pub enum ReceiveMode {
+  PeekLock
+  ReceiveAndDelete
+}
+
+/// A queue's or subscription's sub-queue.
+pub enum SubQueue {
+  None
+  DeadLetter
+  TransferDeadLetter
+}
+
+pub struct ReceiverOptions {
+  pub receive_mode: ReceiveMode = ReceiveMode.PeekLock
+  pub sub_queue: SubQueue = SubQueue.None
+}
+
+pub struct Receiver {
+  client: Client
+  /// The entity the links are on (`q`, `t/Subscriptions/s`, with a
+  /// sub-queue suffix).
+  entity: Str
+  mode: ReceiveMode
+  /// The link, attached on first receive as Go's (its credit would lock
+  /// a message before anyone asked for one).
+  link: Mutex[amqp.Receiver?]
+  opts: amqp.ReceiverOptions
+  name: Str
+  /// The last peeked sequence number, where the next peek starts.
+  last_peeked: Atomic[Int]
+}
+
+fn entity_of(base: Str, sub: SubQueue) -> Str {
+  match sub {
+    SubQueue.None => base
+    SubQueue.DeadLetter => "${base}/$DeadLetterQueue"
+    SubQueue.TransferDeadLetter => "${base}/$Transfer/$DeadLetterQueue"
+  }
+}
+
+fn (c: Client) receiver(entity: Str, options: ReceiverOptions) -> Receiver ! ServiceBusErr {
+  let name = c.link_name("receiver", entity)
+  let opts = match options.receive_mode {
+    ReceiveMode.PeekLock => amqp.ReceiverOptions{name: name, credit: 1, settle_mode: Some(amqp.ReceiverSettleMode.Second), sender_settle_mode: Some(amqp.SenderSettleMode.Unsettled)}
+    ReceiveMode.ReceiveAndDelete => amqp.ReceiverOptions{name: name, credit: 1, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled)}
+  }
+  Ok(Receiver{client: c, entity: entity, mode: options.receive_mode, link: Mutex[amqp.Receiver?].new(None), opts: opts, name: name, last_peeked: Atomic[Int].new(0)})
+}
+
+/// The receiving link, attached (after a put-token) on first use.
+fn (r: Receiver) attached() -> amqp.Receiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  if let Some(l) = r.link.with_read(fn(x: amqp.Receiver?) -> amqp.Receiver? { x }) {
+    return Ok(l)
+  }
+  let conn = r.client.open()?
+  r.client.authorize(conn, r.entity)?
+  let l = conn.c.new_receiver(conn.s, r.entity, r.opts) ?? e => return Err(from_amqp(e))
+  r.link.with(fn(var x: amqp.Receiver?) { x = Some(l) })
+  Ok(l)
+}
+
+/// The link a received message came on.
+fn (r: Receiver) current() -> amqp.Receiver ! ServiceBusErr {
+  match r.link.with_read(fn(x: amqp.Receiver?) -> amqp.Receiver? { x }) {
+    Some(l) => Ok(l)
+    None => Err(ServiceBusErr{code: CODE_CLOSED, msg: "the receiver has no link"})
+  }
+}
+
+/// A receiver for a queue.
+pub fn (c: Client) new_receiver_for_queue(queue_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver ! ServiceBusErr {
+  c.receiver(entity_of(queue_name, options.sub_queue), options)
+}
+
+/// A receiver for a topic's subscription.
+pub fn (c: Client) new_receiver_for_subscription(topic_name: Str, subscription_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver ! ServiceBusErr {
+  c.receiver(entity_of("${topic_name}/Subscriptions/${subscription_name}", options.sub_queue), options)
+}
+
+pub struct ReceiveMessagesOptions {
+  /// How long to wait for the first message; 0 waits for the client's
+  /// timeout. Go waits until its context ends.
+  pub timeout_ms: Int = 0
+  /// After the first message, how long to wait for each further one (Go's
+  /// 20 ms, "TimeAfterFirstMessage").
+  pub time_after_first_message_ms: Int = 20
+}
+
+/// Up to `max_messages` messages: it waits for the first, then takes
+/// what arrives within `time_after_first_message_ms` of each. An empty
+/// list when none came in time.
+pub fn (r: Receiver) receive_messages(max_messages: Int, options: ReceiveMessagesOptions = ReceiveMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  let link = r.attached()?
+  var out: List[ReceivedMessage] = []
+  let first = if options.timeout_ms > 0 { options.timeout_ms } else { r.client.opts.timeout_ms }
+  while out.len() < max_messages {
+    let wait = if out.is_empty() { first } else { options.time_after_first_message_ms }
+    match link.receive(wait) {
+      Ok(d) => out.push(received(d.message, Some(d)))
+      Err(amqp.AmqpErr.Net(m)) => if m.contains("i/o timeout") { break } else { return Err(from_amqp(amqp.AmqpErr.Net(m))) }
+      Err(e) => return Err(from_amqp(e))
+    }
+  }
+  Ok(out)
+}
+
+/// The delivery of a message received on this receiver's link, or an
+/// error when it must be settled on the management link.
+fn delivery_of(m: ReceivedMessage) -> amqp.Delivery? {
+  m.delivery
+}
+
+/// Settles through `$management` (a deferred or peeked message).
+fn (r: Receiver) settle_mgmt(m: ReceivedMessage, status: Str, extra: List[(Str, amqp.Value)]) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  if m.lock_token.len() != 16 {
+    return Err(ServiceBusErr{msg: "lock token on the message is not set, thus cannot send disposition"})
+  }
+  let mg = r.client.mgmt(r.entity, r.name)?
+  let res = mg.call(r.client.rand, "update-disposition", [("disposition-status", amqp.Value.Str(v: status)), ("lock-tokens", amqp.Value.Array(items: [amqp.Value.Uuid(bytes: m.lock_token)]))] + extra, r.client.opts.timeout_ms)
+  mg.close()
+  res?
+  Ok(())
+}
+
+fn (r: Receiver) check_lock() -> () ! ServiceBusErr {
+  match r.mode {
+    ReceiveMode.ReceiveAndDelete => Err(ServiceBusErr{msg: "messages that are received in `ReceiveModeReceiveAndDelete` mode are not settleable"})
+    ReceiveMode.PeekLock => Ok(())
+  }
+}
+
+pub struct CompleteMessageOptions {}
+
+/// Completes the message: the service deletes it.
+pub fn (r: Receiver) complete_message(message: ReceivedMessage, options: CompleteMessageOptions = CompleteMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.check_lock()?
+  match delivery_of(message) {
+    Some(d) => r.current()?.accept(d) ?? e => return Err(from_amqp(e))
+    None => r.settle_mgmt(message, "completed", [])?
+  }
+  Ok(())
+}
+
+pub struct AbandonMessageOptions {}
+
+/// Gives the message back: it can be received again, its delivery count
+/// up by one.
+pub fn (r: Receiver) abandon_message(message: ReceivedMessage, options: AbandonMessageOptions = AbandonMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.check_lock()?
+  match delivery_of(message) {
+    Some(d) => r.current()?.modify(d, false, false) ?? e => return Err(from_amqp(e))
+    None => r.settle_mgmt(message, "abandoned", [])?
+  }
+  Ok(())
+}
+
+pub struct DeferMessageOptions {}
+
+/// Defers the message: it is only received again by its sequence number
+/// (receive_deferred_messages).
+pub fn (r: Receiver) defer_message(message: ReceivedMessage, options: DeferMessageOptions = DeferMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.check_lock()?
+  match delivery_of(message) {
+    Some(d) => r.current()?.modify(d, false, true) ?? e => return Err(from_amqp(e))
+    None => r.settle_mgmt(message, "defered", [])?
+  }
+  Ok(())
+}
+
+pub struct DeadLetterOptions {
+  pub reason: Str? = None
+  pub error_description: Str? = None
+}
+
+/// Moves the message to the dead letter queue with the reason and
+/// description as its DeadLetterReason and DeadLetterErrorDescription.
+pub fn (r: Receiver) dead_letter_message(message: ReceivedMessage, options: DeadLetterOptions = DeadLetterOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.check_lock()?
+  let reason = options.reason ?? ""
+  let desc = options.error_description ?? ""
+  match delivery_of(message) {
+    Some(d) => r.current()?.reject(d, Some(amqp.WireError{condition: "com.microsoft:dead-letter", info: [("DeadLetterReason", amqp.Value.Str(v: reason)), ("DeadLetterErrorDescription", amqp.Value.Str(v: desc))]})) ?? e => return Err(from_amqp(e))
+    None => r.settle_mgmt(message, "suspended", [("deadletter-reason", amqp.Value.Str(v: reason)), ("deadletter-description", amqp.Value.Str(v: desc))])?
+  }
+  Ok(())
+}
+
+pub struct ReceiveDeferredMessagesOptions {}
+
+/// The deferred messages with these sequence numbers, locked for
+/// settling.
+pub fn (r: Receiver) receive_deferred_messages(sequence_numbers: List[Int], options: ReceiveDeferredMessagesOptions = ReceiveDeferredMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  let mode = match r.mode {
+    ReceiveMode.PeekLock => 1
+    ReceiveMode.ReceiveAndDelete => 0
+  }
+  let mg = r.client.mgmt(r.entity, r.name)?
+  let res = mg.call(r.client.rand, "receive-by-sequence-number", [("sequence-numbers", longs(sequence_numbers)), ("receiver-settle-mode", amqp.Value.UInt(v: UInt32(mode)))], r.client.opts.timeout_ms)
+  mg.close()
+  let out = messages_of(res?)?
+  Ok(out.map(fn(m: ReceivedMessage) -> ReceivedMessage { m with {state: MESSAGE_STATE_DEFERRED} }))
+}
+
+pub struct PeekMessagesOptions {
+  /// Where to start; None continues after the last peeked message.
+  pub from_sequence_number: Int? = None
+}
+
+/// Up to `max_message_count` messages without locking them.
+pub fn (r: Receiver) peek_messages(max_message_count: Int, options: PeekMessagesOptions = PeekMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  let from = options.from_sequence_number ?? (r.last_peeked.get() + 1)
+  let mg = r.client.mgmt(r.entity, r.name)?
+  let res = mg.call(r.client.rand, "peek-message", [("from-sequence-number", amqp.Value.Long(v: Int64(from))), ("message-count", amqp.Value.Int(v: Int32.wrapping_from(max_message_count)))], r.client.opts.timeout_ms)
+  mg.close()
+  let out = messages_of(res?)?
+  if let Some(last) = out.last() {
+    r.last_peeked.set(last.sequence_number ?? from)
+  }
+  Ok(out)
+}
+
+pub struct RenewMessageLockOptions {}
+
+/// Renews the message's lock and returns its new expiry.
+pub fn (r: Receiver) renew_message_lock(message: ReceivedMessage, options: RenewMessageLockOptions = RenewMessageLockOptions{}) -> Time ! ServiceBusErr uses (net.dial, clock, rand) {
+  let mg = r.client.mgmt(r.entity, r.name)?
+  let res = mg.call(r.client.rand, "renew-lock", [("lock-tokens", amqp.Value.Array(items: [amqp.Value.Uuid(bytes: message.lock_token)]))], r.client.opts.timeout_ms)
+  mg.close()
+  let reply = res?
+  match items(field(reply.body, "expirations")).get(0).and_then(val_time) {
+    Some(t) => Ok(t)
+    None => Err(ServiceBusErr{msg: "the renew-lock reply has no expiration"})
+  }
+}
+
+/// Detaches the receiver's link.
+pub fn (r: Receiver) close() -> () ! ServiceBusErr uses (net.dial, clock) {
+  let l = r.link.with(fn(var x: amqp.Receiver?) -> amqp.Receiver? {
+    let was = x
+    x = None
+    was
+  })
+  if let Some(link) = l {
+    link.close() ?? e => return Err(from_amqp(e))
+  }
+  Ok(())
+}
