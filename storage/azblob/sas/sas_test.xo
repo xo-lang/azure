@@ -29,23 +29,28 @@ fn blob_values(i: json.Value) -> BlobSignatureValues {
     content_disposition: s(i, "content_disposition"), content_encoding: s(i, "content_encoding"),
     content_language: s(i, "content_language"), content_type: s(i, "content_type"), blob_version: s(i, "blob_version"),
     authorized_object_id: s(i, "authorized_object_id"), correlation_id: s(i, "correlation_id"),
+    signed_delegated_user_object_id: s(i, "signed_delegated_user_object_id"),
+    signed_request_headers: if s(i, "srh") == "" { [] } else { [(s(i, "srh"), s(i, "srh_value"))] },
+    signed_request_query_parameters: if s(i, "srq") == "" { [] } else { [(s(i, "srq"), s(i, "srq_value"))] },
   }
 }
 
 test "SAS query strings match azblob's for every vector" {
   let cred = exported.new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
   let doc = json.parse_value(VECTORS)?
-  let udc = exported.new_user_delegation_credential(DEV_ACCOUNT, exported.UserDelegationKey{
+  let key = exported.UserDelegationKey{
     signed_oid: ZERO_ID, signed_tid: ZERO_ID,
     signed_start: Time.parse_rfc3339("2026-11-05T00:00:00Z") ?? Time.UNIX_EPOCH,
     signed_expiry: Time.parse_rfc3339("2026-11-06T00:00:00Z") ?? Time.UNIX_EPOCH,
     signed_service: "b", signed_version: "2025-05-05", value: Secret.new(s(doc, "udk_value")),
-  })
+  }
+  let udc = exported.new_user_delegation_credential(DEV_ACCOUNT, key)
+  let udc_tenant = exported.new_user_delegation_credential(DEV_ACCOUNT, key with {signed_delegated_user_tenant_id: "tenant-1"})
   let vs = match doc.get("vectors") {
     Some(json.Value.List(xs)) => xs
     _ => []
   }
-  expect(vs.len()) == 8
+  expect(vs.len()) == 14
   for v in vs {
     let i = v.get("input") ?? json.Value.Null
     let got = match s(v, "kind") {
@@ -54,12 +59,13 @@ test "SAS query strings match azblob's for every vector" {
         ip_range: s(i, "ip_range"), resource_types: s(i, "resource_types"), encryption_scope: s(i, "encryption_scope"),
       }.sign_with_shared_key(cred)
       "blob" => blob_values(i).sign_with_shared_key(cred)
+      "delegation_tenant" => blob_values(i).sign_with_user_delegation(udc_tenant)
       _ => blob_values(i).sign_with_user_delegation(udc)
     }
     let want = s(v, "query")
     let shown = match got {
       Ok(q) => q.encode()
-      Err(_) => if want.starts_with("ERROR: ") { want } else { "an error" }
+      Err(e) => "ERROR: ${e}"
     }
     expect("${s(v, "name")}: ${shown}") == "${s(v, "name")}: ${want}"
   }

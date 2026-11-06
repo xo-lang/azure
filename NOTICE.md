@@ -11,7 +11,7 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
-  (the Blob client's container, blob, block and list calls, hand
+  v1.8.3 (the Blob client's container, blob, block and list calls, hand
   written ahead of the generator; Shared Key, the user delegation
   credential, and the `sas` package:
   account, service and user delegation SAS; signing vectors captured
