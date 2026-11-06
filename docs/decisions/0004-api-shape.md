@@ -66,8 +66,8 @@ Azure 1, 2026-11-05)
 
 ## Amendment 2
 
-Status: Proposed (Xo Azure 1, 2026-11-05, for the owner through the Xo
-Lead)
+Status: Accepted (owner, 2026-11-06, through the Xo Lead; proposed by Xo
+Azure 1, 2026-11-05)
 
 - **Explicit null in PATCH bodies is typed.** A model that only PATCH
   bodies reach (Go's update models: `VirtualMachineUpdate`,
