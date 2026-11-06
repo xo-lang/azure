@@ -16,7 +16,9 @@ What it does:
   `ContainerClient` (create, delete, restore, properties, metadata,
   access policy, account info, SAS URL), `BlobClient` (properties, HTTP
   headers, metadata, tags, delete, `download_stream`,
-  `download_buffer`), and `BlobLeaseClient` and `ContainerLeaseClient`
+  `download_buffer`, `download_file`), `BlockBlobClient` (`upload`,
+  `stage_block`, `commit_block_list`, `upload_buffer`, `upload_file`),
+  and `BlobLeaseClient` and `ContainerLeaseClient`
   (acquire, break, change, release, renew). Each is built from a token,
   a Shared Key, no credential, or a connection string, as Go's are, and
   every request and response is checked byte for byte against Go
@@ -43,6 +45,11 @@ Where it differs from Go v1.8.3:
 - `download_buffer` returns the bytes rather than filling a caller's
   buffer, and asks for its blocks one at a time in order (Go asks five
   at a time). Its requests are Go's.
+- `upload_buffer` and `upload_file` stage their blocks one at a time in
+  order (Go runs `Concurrency` at once; the option is accepted), and
+  hold each request's body in memory: one block, or the whole data for
+  one Upload (up to 256 MiB). `download_file` writes its blocks the same
+  way. `Progress` and `TransactionalValidation` are not ported.
 - A download reads its whole body, so there is no retry reader: a
   failed read is a failed send, which the retry policy repeats.
 - Go's `DownloadStreamResponse.ObjectReplicationRules` list is never
@@ -56,10 +63,11 @@ Where it differs from Go v1.8.3:
   Go's options pass on; container `set_metadata` sends only
   If-Modified-Since, as Go's does.
 - Not ported yet: `blob.ParseURL` and `URLParts`, `with_snapshot` and
-  `with_version_id`, a blob SAS URL, `DownloadFile`, structured message
-  (transactional CRC64) downloads, the container and blob pagers on the
-  new clients, the block blob, append blob and page blob clients,
-  batch, and the parallel and checksummed uploads.
+  `with_version_id`, a blob SAS URL, structured message (transactional CRC64) downloads,
+  the container and blob pagers on the new clients, the block blob
+  client's other calls (`get_block_list`, `upload_stream`,
+  `upload_blob_from_url`, `stage_block_from_url`, ...), the append blob
+  and page blob clients, batch, and checksummed uploads.
 - Go names that are Xo keywords: none in what is ported (the lease
   calls are Go's `AcquireLease` to `RenewLease`, so `break_lease` is
   Go's own name).

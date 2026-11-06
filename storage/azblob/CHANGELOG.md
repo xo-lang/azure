@@ -1,5 +1,37 @@
 # azblob changes
 
+## v0.12.0
+
+New: the block blob client and file transfers, as azblob v1.8.3's.
+
+- `BlockBlobClient` (from a token, a Shared Key, no credential or a
+  connection string, or `ContainerClient.new_block_blob_client`):
+  `upload`, `stage_block`, `commit_block_list`, `upload_buffer` and
+  `upload_file`, with Go's options and responses. Data of at most
+  `MAX_UPLOAD_BLOB_BYTES` (256 MiB) goes in one Upload whatever the
+  block size; more goes in blocks (the block size, or the size over
+  `MAX_BLOCKS` and at least 4 MiB) with Go's block IDs (the base64 of a
+  version 4 UUID), staged in order until one fails, then committed.
+  The commit sends no access conditions and each block only the lease,
+  as Go's.
+- `BlobClient.download_file`: Go's DownloadFile, the blocks
+  `download_buffer` asks for written into the file where they belong
+  (`File.write_at`), then the file truncated to the bytes downloaded
+  when its size differs. A failure leaves the blocks already written and
+  does not truncate, as Go's.
+- `TransferErr` is either one's error: the service's (`Call`) or the
+  file's (`File`).
+- Checked against Go on a fake service (`uploadvectors_test.xo`): every
+  option of Upload, StageBlock and CommitBlockList, a denied upload,
+  UploadBuffer, UploadFile small, empty and of 256 MiB and 5 bytes (65
+  blocks), and seven DownloadFile cases (blocks, a range, an empty
+  blob, a blob that changes between blocks, an offset past the end, a
+  file longer than the blob and one the same size).
+- Blocks go one at a time; Go's `Concurrency` is accepted and changes
+  nothing. Each request body is held in memory (one block, or up to 256
+  MiB for one Upload). Not ported: `Progress` and
+  `TransactionalValidation`.
+
 ## v0.11.0
 
 Behavior fix (URLs change): the `Client` calls and the list pagers

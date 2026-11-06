@@ -1,0 +1,283 @@
+// Block blob uploads and blob downloads into a file against a fake that
+// answers as the Go program's fake does (uploadvectors_test.xo): a PUT
+// is a 201 with the encryption headers (and, but for a block, an ETag,
+// a Last-Modified and a version ID; for a plain upload, a Content-MD5),
+// a blob named "denied" a 403, and a GET as download_test.xo's. Block
+// IDs are random, so the log names them id1, id2, ... as Go's program
+// does, with a line on each one's form.
+
+use std/crypto
+use std/http
+use std/url
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+fn upload_answer(req: http.Request) -> http.Response {
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), common + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  if req.method != "PUT" {
+    return download_answer(req)
+  }
+  let comp = req.url.query.get("comp") ?? ""
+  var hs = common + [("x-ms-content-crc64", "CQk="), ("x-ms-request-server-encrypted", "true"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1")]
+  if comp != "block" {
+    hs = hs + [("ETag", "\"0x8D2\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT"), ("x-ms-version-id", "v2")]
+  }
+  if comp == "" {
+    hs = hs + [("Content-MD5", "AQID")]
+  }
+  with_hs(http.empty(201), hs)
+}
+
+/// Whether `raw` is the base64 of a lowercase version 4 UUID with
+/// azcore's variant (`[4-7]`), as the Go program's pattern checks.
+fn is_uuid4(raw: Str) -> Bool {
+  let s = (Bytes.from_base64(raw) ?? return false).to_str() ?? return false
+  if s.len() != 36 {
+    return false
+  }
+  for (i, c) in s.runes().indexed() {
+    let ok = if i == 8 || i == 13 || i == 18 || i == 23 { c == '-' } else if i == 14 { c == '4' } else if i == 19 { c >= '4' && c <= '7' } else { (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') }
+    if !ok {
+      return false
+    }
+  }
+  true
+}
+
+/// The Go program's name for block ID `raw`, and a line on its form the
+/// first time it is seen.
+fn block_name(ids: Mutex[Map[Str, Str]], raw: Str) -> (Str, Str?) {
+  ids.with(fn(var m: Map[Str, Str]) -> (Str, Str?) {
+    if let Some(n) = m.get(raw) {
+      return (n, None)
+    }
+    let n = "id${m.len() + 1}"
+    m.put(raw, n)
+    (n, Some("  ${n} len=${raw.len()} uuid4=${is_uuid4(raw)}"))
+  })
+}
+
+/// Logs `req` as log_request does, but with block IDs named and a body
+/// over 64 bytes its length and a short sha256, as the Go program prints.
+fn upload_log(req: http.Request, log: Mutex[List[Str]], ids: Mutex[Map[Str, Str]]) {
+  var notes: List[Str] = []
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "authorization" {
+      // a block ID is random, so the signature over it is too
+      hs.push(if req.url.query.get("blockid").is_some() { "${lk}=SharedKey acct1:(signed with a block ID)" } else { "${lk}=${hide_shared_key(v)}" })
+    } else if lk != "user-agent" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  if req.method == "PUT" || req.method == "POST" {
+    hs.push("content-length=${req.body.len()}")
+  }
+  var qv = url.values()
+  for k in req.url.query.keys().sort() {
+    var v = req.url.query.get(k) ?? ""
+    if k == "blockid" {
+      let (n, note) = block_name(ids, v)
+      v = n
+      if let Some(x) = note { notes.push(x) }
+    }
+    qv.add(k, v)
+  }
+  var body = req.body
+  if req.url.query.get("comp") == Some("blocklist") {
+    var s = body.to_str_lossy()
+    var out = ""
+    while let Some(i) = s.find("<Latest>") {
+      let rest = s[i + 8..s.len()]
+      let j = rest.find("</Latest>") ?? break
+      let (n, note) = block_name(ids, rest[0..j])
+      if let Some(x) = note { notes.push(x) }
+      out = out + s[0..i] + "<Latest>" + n + "</Latest>"
+      s = rest[j + 9..rest.len()]
+    }
+    body = (out + s).bytes()
+  }
+  let shown = if body.len() > 64 { "len=${body.len()} sha256:${crypto.sha256(body).to_hex()[0..16]}" } else { goq_bytes(body) }
+  let qs = qv.encode()
+  let ep = if req.escaped_path() == "" { "/" } else { req.escaped_path() }
+  let uri = if qs == "" { ep } else { "${ep}?${qs}" }
+  let lines = ["REQ ${req.method} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${shown}"] + notes
+  log.with(fn(var l: List[Str]) { l = l + lines })
+}
+
+fn serve_upload(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let ids = Mutex[Map[Str, Str]].new({})
+  let h = fn(req: http.Request) -> http.Response {
+    upload_log(req, log, ids)
+    upload_answer(req)
+  }
+  for m in ["GET", "PUT"] {
+    for p in ["/{a}/{b}"] {
+      net.handle("${m} ${BEP}${p}", h)
+    }
+  }
+  log
+}
+
+fn upload_dump(r: Response, crc: Bytes?, md5: Bytes?, etag: Str?, key: Str?, scope: Str?, enc: Bool?, lm: Time?, version: Str?) -> Dump {
+  var d = Dump{}
+  d.r(r)
+  d.q("ContentCRC64", crc)
+  d.q("ContentMD5", md5)
+  d.s("ETag", etag)
+  d.s("EncryptionKeySHA256", key)
+  d.s("EncryptionScope", scope)
+  d.b("IsServerEncrypted", enc)
+  d.t("LastModified", lm)
+  d.s("VersionID", version)
+  d
+}
+
+fn upload_lines(name: Str, r: Result[UploadResponse, azcore.CallErr]) -> List[Str] {
+  shown(name, r, fn(x: UploadResponse) -> Dump { upload_dump(x.response, x.content_crc64, x.content_md5, x.etag, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, x.last_modified, x.version_id) })
+}
+
+fn reader_dump(x: UploadFromReaderResponse) -> Dump {
+  upload_dump(x.response, x.content_crc64, x.content_md5, x.etag, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, x.last_modified, x.version_id)
+}
+
+fn transfer_lines(name: Str, r: Result[UploadFromReaderResponse, TransferErr]) -> List[Str] {
+  match r {
+    Ok(x) => reader_dump(x).show(name)
+    Err(Call(e)) => err_lines(name, e)
+    Err(File(e)) => ["== ${name}", "  error ${e.display()}"]
+  }
+}
+
+/// Go's byte(i*7 + i/251) for each i below n.
+fn pattern(n: Int) -> Bytes {
+  var b = BytesBuilder.with_capacity(n)
+  for i in 0..n {
+    b.write_byte(UInt8((i * 7 + i / 251) & 0xff))
+  }
+  b.freeze()
+}
+
+/// A file holding `data`, open for reading.
+fn file_of(fs: Fs, path: Str, data: Bytes) -> File ! FsErr uses fs {
+  fs.write(path, data)?
+  fs.open(path)
+}
+
+/// Go's downloadFile: `prefill` written to a fresh file, the blob
+/// downloaded into it through the same handle, then the count (or the
+/// error) and the file's bytes.
+fn download_file_lines(fs: Fs, b: BlobClient, name: Str, path: Str, prefill: Str, o: DownloadFileOptions) -> List[Str] ! FsErr uses (net.dial, clock, rand, fs) {
+  let f = fs.create(path)?
+  f.write(prefill.bytes())?
+  let r = b.download_file(f, o)
+  f.close()?
+  let head = match r {
+    Ok(n) => ["== ${name}", "  n=${n}"]
+    Err(Call(e)) => err_lines(name, e)
+    Err(File(e)) => ["== ${name}", "  error ${e.display()}"]
+  }
+  Ok(head + ["  file=${goq_bytes(fs.read(path)?)}"])
+}
+
+fn upload_run(net: testing.FakeNet, clock: Clock, rand: Rand, fs: Fs) -> List[Str] ! Str uses (net.dial, clock, rand, fs) {
+  let log = serve_upload(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let bb = c.new_block_blob_client("b.txt")
+  fs.create_dir_all("/uf").map_err(fn(e: FsErr) -> Str { e.display() })?
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let hh = HTTPHeaders{blob_cache_control: Some("no-cache"), blob_content_disposition: Some("inline"), blob_content_encoding: Some("identity"), blob_content_language: Some("en"), blob_content_md5: Some(b"\x01\x02\x03"), blob_content_type: Some("text/plain")}
+  let meta = {"color": "blue"}
+  let tags = {"team": "a&b c"}
+
+  out = out + add(upload_lines("u1 upload with every option", bb.upload(b"hello", UploadOptions{tags: Some(tags), metadata: Some(meta), tier: Some(ACCESS_TIER_COOL), http_headers: Some(hh), cpk_info: Some(cpk), encryption_scope: Some("scope1"), conditions: ac, legal_hold: Some(true), immutability_policy_mode: Some(IMMUTABILITY_POLICY_SETTING_UNLOCKED), immutability_policy_expiry_time: Some(when), transactional_content_md5: Some(b"\x09\x09")})))
+  out = out + add(upload_lines("u2 upload, empty", bb.upload(b"")))
+  let stage = bb.stage_block("blk-0001".bytes().to_base64(), b"part", StageBlockOptions{cpk_info: Some(cpk), encryption_scope: Some("scope1"), lease_id: Some("l1")})
+  out = out + add(shown("u3 stage block with a key, a scope and a lease", stage, fn(x: StageBlockResponse) -> Dump { upload_dump(x.response, x.content_crc64, x.content_md5, None, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, None, None) }))
+  let commit = bb.commit_block_list(["blk-0001".bytes().to_base64(), "YWI8Pg=="], CommitBlockListOptions{tags: Some(tags), metadata: Some(meta), tier: Some(ACCESS_TIER_COOL), http_headers: Some(hh), cpk_info: Some(cpk), encryption_scope: Some("scope1"), conditions: ac, legal_hold: Some(false), immutability_policy_mode: Some(IMMUTABILITY_POLICY_SETTING_LOCKED), immutability_policy_expiry_time: Some(when)})
+  out = out + add(shown("u4 commit block list with every option", commit, fn(x: CommitBlockListResponse) -> Dump { upload_dump(x.response, x.content_crc64, x.content_md5, x.etag, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, x.last_modified, x.version_id) }))
+  out = out + add(quiet("u5 upload, denied", c.new_block_blob_client("denied").upload(b"x")))
+
+  out = out + add(shown("u6 upload buffer, small (one request, the block size ignored)", bb.upload_buffer(b"buffered data", UploadBufferOptions{block_size: 4, concurrency: 1, metadata: Some(meta), tags: Some(tags), conditions: ac, http_headers: Some(hh)}), reader_dump))
+  let small = file_of(fs, "/uf/small.bin", b"file data").map_err(fn(e: FsErr) -> Str { e.display() })?
+  out = out + add(transfer_lines("u7 upload file, small", bb.upload_file(small, UploadFileOptions{concurrency: 1, access_tier: Some(ACCESS_TIER_COOL), encryption_scope: Some("scope1")})))
+  let empty = file_of(fs, "/uf/empty.bin", b"").map_err(fn(e: FsErr) -> Str { e.display() })?
+  out = out + add(transfer_lines("u8 upload file, empty", bb.upload_file(empty)))
+  let big = file_of(fs, "/uf/big.bin", pattern(MAX_UPLOAD_BLOB_BYTES + 5)).map_err(fn(e: FsErr) -> Str { e.display() })?
+  out = out + add(transfer_lines("u9 upload file, 65 blocks of 4 MiB with every option", c.new_block_blob_client("big.bin").upload_file(big, UploadFileOptions{concurrency: 1, metadata: Some(meta), tags: Some(tags), access_tier: Some(ACCESS_TIER_COOL), http_headers: Some(hh), cpk_info: Some(cpk), conditions: ac})))
+  fs.remove("/uf/big.bin").map_err(fn(e: FsErr) -> Str { e.display() })?
+
+  let b = c.new_blob_client("b.txt")
+  let dl = fn(blob: BlobClient, name: Str, path: Str, prefill: Str, o: DownloadFileOptions) -> List[Str] ! Str uses (net.dial, clock, rand, fs) {
+    download_file_lines(fs, blob, name, path, prefill, o).map_err(fn(e: FsErr) -> Str { e.display() })
+  }
+  out = out + add(dl(b, "f1 download file, whole blob in blocks of 4 over a longer file", "/uf/f1", "previous content here", DownloadFileOptions{block_size: 4, conditions: AccessConditions{lease_id: Some("l1"), if_modified_since: Some(when), if_tags: Some("t='1'")}, cpk_info: Some(cpk)})?)
+  out = out + add(dl(b, "f2 download file, a range in blocks of 3", "/uf/f2", "", DownloadFileOptions{range: HTTPRange{offset: 1, count: 7}, block_size: 3})?)
+  out = out + add(dl(c.new_blob_client("empty"), "f3 download file, an empty blob over a file", "/uf/f3", "old", DownloadFileOptions{block_size: 4})?)
+  out = out + add(dl(c.new_blob_client("changing"), "f4 download file, a blob that changes", "/uf/f4", "", DownloadFileOptions{block_size: 4})?)
+  out = out + add(dl(b, "f5 download file, an offset past the end", "/uf/f5", "keep?", DownloadFileOptions{range: HTTPRange{offset: 12}, block_size: 4})?)
+  out = out + add(dl(b, "f6 download file, the default block, from an offset", "/uf/f6", "", DownloadFileOptions{range: HTTPRange{offset: 3}})?)
+  out = out + add(dl(b, "f7 download file, the same size file", "/uf/f7", "abcdefghij", DownloadFileOptions{block_size: 6})?)
+  out = out + drain(log)
+  Ok(out)
+}
+
+test "uploads and downloads into a file send what Go sends and read what Go reads" {
+  let got = upload_run(os.net, os.clock, os.rand, os.fs)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < UPLOAD_OUTPUT.len() && got[i] != UPLOAD_OUTPUT[i] {
+      expect(got[i]) == UPLOAD_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == UPLOAD_OUTPUT.len()
+}
+
+/// upload_plan's block size and count, or its error.
+fn plan(size: Int, block_size: Int) -> Str {
+  match upload_plan(size, block_size) {
+    Ok((b, n)) => "${b} x ${n}"
+    Err(InvalidInput(m)) => m
+    Err(e) => e.display()
+  }
+}
+
+test "a block that fails stops the upload before the commit" {
+  let log = Mutex[List[Str]].new([])
+  os.net.handle("PUT ${BEP}/{a}/{b}", fn(req: http.Request) -> http.Response {
+    log.with(fn(var l: List[Str]) { l = l + ["${req.url.query.get("comp") ?? "-"}"] })
+    let n = log.with_read(fn(l: List[Str]) -> Int { l.len() })
+    if n == 2 { http.empty(500) } else { http.empty(201) }
+  })
+  let bb = new_block_blob_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/c1/b", go_options(""))
+  // ten bytes fit one request, whatever the block size
+  expect(bb.upload_buffer(pattern(10), UploadBufferOptions{block_size: 4}).is_ok()) == true
+  expect(drain(log)) == ["-"]
+  // in blocks: the second block's 500 stops it, with no third block and
+  // no commit
+  expect(bb.upload_in_blocks(pattern(10), 4, 3, UploadBufferOptions{}).is_err()) == true
+  expect(drain(log)) == ["block", "block"]
+  expect(plan(MAX_UPLOAD_BLOB_BYTES + 1, 0)) == "4194304 x 65"
+  expect(plan(MAX_UPLOAD_BLOB_BYTES, 0)) == "268435456 x 0"
+  expect(plan(MAX_UPLOAD_BLOB_BYTES + 1, 1)) == "block limit exceeded"
+  expect(plan(MAX_STAGE_BLOCK_BYTES * MAX_BLOCKS + 1, 0)) == "buffer is too large to upload to a block blob"
+  expect(plan(300000000000, 0)) == "6000000 x 50000"
+}
+
+test "block IDs are Go's: the base64 of a version 4 UUID, each 48 characters" {
+  let id = new_block_id(os.rand)
+  expect(id.len()) == 48
+  expect(is_uuid4(id)) == true
+}

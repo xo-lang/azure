@@ -244,3 +244,95 @@ pub fn (b: BlobClient) download_buffer(options: DownloadBufferOptions = Download
   }
   Ok(head + b.download_chunks(o, conditions, o.range.offset + initial, count - initial, block)?)
 }
+
+/// Options of download_file (Go's DownloadFileOptions).
+pub type DownloadFileOptions = DownloadBufferOptions
+
+fn call_err(e: azcore.CallErr) -> TransferErr {
+  TransferErr.Call(e)
+}
+
+fn file_err(e: FsErr) -> TransferErr {
+  TransferErr.File(e)
+}
+
+/// Writes `count` bytes from `start` into `file` at `at` onward, in
+/// chunks of `block`, each written as it arrives (Go's
+/// parallelDownloadFrom, one chunk at a time in order).
+fn (b: BlobClient) download_chunks_to(file: File, o: DownloadBufferOptions, conditions: AccessConditions, start: Int, at: Int, count: Int, block: Int) -> Int ! TransferErr uses (net.dial, clock, rand, fs.write) {
+  let chunks = (count - 1) / block + 1
+  var written = 0
+  var n = 0
+  while n < chunks {
+    let size = if n == chunks - 1 { count - n * block } else { block }
+    let r = b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: start + n * block, count: size}, conditions: conditions, cpk_info: o.cpk_info}) ?? e => return Err(call_err(e))
+    file.write_at(at + n * block, r.body) ?? e => return Err(file_err(e))
+    written += r.body.len()
+    n += 1
+  }
+  Ok(written)
+}
+
+/// The bytes download_file writes, as Go's downloadBuffer into a WriterAt:
+/// the blob's byte `options.range.offset + i` goes to the file's byte `i`.
+fn (b: BlobClient) download_to_file(file: File, o: DownloadBufferOptions) -> Int ! TransferErr uses (net.dial, clock, rand, fs.write) {
+  let block = if o.block_size == 0 { DEFAULT_DOWNLOAD_BLOCK_SIZE } else { o.block_size }
+  if o.range.count != 0 {
+    b.download_chunks_to(file, o, o.conditions, o.range.offset, 0, o.range.count, block)?
+    return Ok(o.range.count)
+  }
+  let first = match b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: o.range.offset, count: block}, conditions: o.conditions, cpk_info: o.cpk_info}) {
+    Ok(r) => r
+    Err(e) => return if is_invalid_range(e) { Ok(0) } else { Err(call_err(e)) }
+  }
+  if first.content_range.is_none() && first.content_length.is_none() {
+    return Err(call_err(azcore.CallErr.InvalidInput("response contained no content headers; this may indicate a 304 Not Modified due to access conditions")))
+  }
+  let total = match first.content_range {
+    Some(cr) => {
+      let t = content_range_total(cr)
+      if t <= 0 {
+        return Err(call_err(azcore.CallErr.InvalidInput("unable to parse total size from Content-Range header: ${cr}")))
+      }
+      t
+    }
+    None => (first.content_length ?? 0) + o.range.offset
+  }
+  let count = total - o.range.offset
+  if count <= 0 {
+    return Ok(0)
+  }
+  let conditions = match first.etag {
+    Some(e) => o.conditions with {if_match: Some(e)}
+    None => o.conditions
+  }
+  let initial = match first.content_range {
+    Some(cr) => content_range_length(cr)
+    None => first.content_length ?? 0
+  }
+  if initial <= 0 {
+    return Ok(0)
+  }
+  let head = if first.body.len() > initial { first.body[0..initial] } else { first.body }
+  file.write_at(0, head) ?? e => return Err(file_err(e))
+  if initial >= count {
+    return Ok(initial)
+  }
+  let rest = b.download_chunks_to(file, o, conditions, o.range.offset + initial, initial, count - initial, block)?
+  Ok(initial + rest)
+}
+
+/// Downloads the blob (or `options.range` of it) into `file` from its
+/// first byte, as Go's DownloadFile: blocks as download_buffer asks for
+/// them, each written where it belongs (write_at, so the file's position
+/// is unchanged), then the file truncated to the bytes downloaded if its
+/// size differs. Returns that count. On a failure the blocks already
+/// written stay and the file is not truncated, as Go's.
+pub fn (b: BlobClient) download_file(file: File, options: DownloadFileOptions = DownloadFileOptions{}) -> Int ! TransferErr uses (net.dial, clock, rand, fs.read, fs.write) {
+  let downloaded = b.download_to_file(file, options)?
+  let size = (file.stat() ?? e => return Err(file_err(e))).size
+  if size != downloaded {
+    file.truncate(downloaded) ?? e => return Err(file_err(e))
+  }
+  Ok(downloaded)
+}

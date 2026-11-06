@@ -1,0 +1,396 @@
+// Block blobs, as azblob v1.8.3's blockblob/client.go, models.go,
+// responses.go and constants.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), with the requests of its generated
+// BlockBlobClient: Upload, StageBlock, CommitBlockList, and UploadBuffer
+// and UploadFile over them. Uploads in blocks go one block at a time, in
+// order, where Go's run `Concurrency` at once; the requests are the same.
+
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+/// The most one Upload sends; a larger buffer or file goes in blocks
+/// (blockblob.MaxUploadBlobBytes, 256 MiB).
+pub const MAX_UPLOAD_BLOB_BYTES: Int = 268435456
+/// The most one block holds (blockblob.MaxStageBlockBytes, 4000 MiB).
+pub const MAX_STAGE_BLOCK_BYTES: Int = 4194304000
+/// The most blocks a blob has (blockblob.MaxBlocks).
+pub const MAX_BLOCKS: Int = 50000
+
+pub const ACCESS_TIER_ARCHIVE: Str = "Archive"
+pub const ACCESS_TIER_COLD: Str = "Cold"
+pub const ACCESS_TIER_COOL: Str = "Cool"
+pub const ACCESS_TIER_HOT: Str = "Hot"
+pub const ACCESS_TIER_PREMIUM: Str = "Premium"
+
+pub const IMMUTABILITY_POLICY_SETTING_LOCKED: Str = "Locked"
+pub const IMMUTABILITY_POLICY_SETTING_UNLOCKED: Str = "Unlocked"
+
+/// A client of one block blob.
+pub struct BlockBlobClient {
+  /// The blob's URL.
+  pub url: Str
+  core: Core
+}
+
+fn block_blob_of(c: Core) -> BlockBlobClient {
+  BlockBlobClient{url: c.url, core: c}
+}
+
+/// A block blob client with Entra ID tokens (blockblob.NewClient).
+pub fn new_block_blob_client(net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> BlockBlobClient {
+  block_blob_of(core_with_token(net, clock, rand, blob_url, cred, options))
+}
+
+pub fn new_block_blob_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> BlockBlobClient {
+  block_blob_of(core_with_shared_key(net, clock, rand, blob_url, cred, options))
+}
+
+/// A block blob client with no credential: a SAS in `blob_url`, or
+/// public access.
+pub fn new_block_blob_client_with_no_credential(net: Net, clock: Clock, rand: Rand, blob_url: Str, options: ClientOptions = ClientOptions{}) -> BlockBlobClient {
+  block_blob_of(core_with_no_credential(net, clock, rand, blob_url, options))
+}
+
+pub fn new_block_blob_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, container_name: Str, blob_name: Str, options: ClientOptions = ClientOptions{}) -> BlockBlobClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, container_name), blob_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_block_blob_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_block_blob_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The block blob `blob_name` in this container, on the same pipeline
+/// (ContainerClient.NewBlockBlobClient; the name escaped as one segment).
+pub fn (c: ContainerClient) new_block_blob_client(blob_name: Str) -> BlockBlobClient {
+  block_blob_of(c.core with {url: join_paths(c.url, url.path_escape(blob_name))})
+}
+
+/// The same blob as a BlobClient (BlockBlobClient.BlobClient).
+pub fn (b: BlockBlobClient) blob_client() -> BlobClient {
+  blob_of(b.core)
+}
+
+/// The `x-ms-tags` value: each tag query escaped, `key=value`, joined by
+/// `&`, in key order (Go writes them in its map's order).
+fn tags_header(tags: Map[Str, Str]?) -> List[(Str, Str)] {
+  match tags {
+    Some(t) => if t.is_empty() { [] } else { [("x-ms-tags", t.keys().sort().map(fn(k: Str) -> Str { "${url.query_escape(k)}=${url.query_escape(t.get(k) ?? "")}" }).join("&"))] }
+    None => []
+  }
+}
+
+fn http_headers_headers(h: HTTPHeaders?) -> List[(Str, Str)] {
+  match h {
+    Some(x) => h_str("x-ms-blob-cache-control", x.blob_cache_control) + h_str("x-ms-blob-content-disposition", x.blob_content_disposition) + h_str("x-ms-blob-content-encoding", x.blob_content_encoding) + h_str("x-ms-blob-content-language", x.blob_content_language) + h_str("x-ms-blob-content-md5", b64(x.blob_content_md5)) + h_str("x-ms-blob-content-type", x.blob_content_type)
+    None => []
+  }
+}
+
+// Upload.
+
+pub struct UploadOptions {
+  pub tags: Map[Str, Str]? = None
+  pub metadata: Map[Str, Str]? = None
+  /// An access tier (`ACCESS_TIER_COOL`, ...).
+  pub tier: Str? = None
+  pub http_headers: HTTPHeaders? = None
+  pub cpk_info: CPKInfo? = None
+  /// An encryption scope (Go's CPKScopeInfo).
+  pub encryption_scope: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub legal_hold: Bool? = None
+  /// `IMMUTABILITY_POLICY_SETTING_LOCKED` or `..._UNLOCKED`.
+  pub immutability_policy_mode: Str? = None
+  pub immutability_policy_expiry_time: Time? = None
+  /// The body's MD5, which the service checks (`Content-MD5`).
+  pub transactional_content_md5: Bytes? = None
+}
+
+pub struct UploadResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub structured_body_type: Str? = None
+  pub version_id: Str? = None
+}
+
+/// Writes `body` as the whole blob in one request, replacing it
+/// (blockblob.Client.Upload).
+pub fn (b: BlockBlobClient) upload(body: Bytes, options: UploadOptions = UploadOptions{}) -> UploadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_str("Content-MD5", b64(o.transactional_content_md5)) + conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + http_headers_headers(o.http_headers) + [("x-ms-blob-type", "BlockBlob")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-immutability-policy-mode", o.immutability_policy_mode) + h_time("x-ms-immutability-policy-until-date", o.immutability_policy_expiry_time) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + tags_header(o.tags)
+  let resp = b.core.send(Call{method: "PUT", headers: hs, body: Some(body), content_type: "application/octet-stream", ok: [201]})?
+  Ok(UploadResponse{
+    response: response_of(resp), content_crc64: r_b64(resp, "x-ms-content-crc64"), content_md5: r_b64(resp, "Content-MD5"), etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"), last_modified: r_time(resp, "Last-Modified"),
+    structured_body_type: r_str(resp, "x-ms-structured-body"), version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Stage block.
+
+pub struct StageBlockOptions {
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  /// The blob's lease (Go's LeaseAccessConditions).
+  pub lease_id: Str? = None
+}
+
+pub struct StageBlockResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub structured_body_type: Str? = None
+}
+
+/// Uploads one uncommitted block, `base64_block_id` naming it (every
+/// block of a blob has an ID of the same length; blockblob.StageBlock).
+pub fn (b: BlockBlobClient) stage_block(base64_block_id: Str, body: Bytes, options: StageBlockOptions = StageBlockOptions{}) -> StageBlockResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-lease-id", o.lease_id)
+  let resp = b.core.send(Call{method: "PUT", query: [("blockid", base64_block_id), ("comp", "block")], headers: hs, body: Some(body), content_type: "application/octet-stream", ok: [201]})?
+  Ok(StageBlockResponse{
+    response: response_of(resp), content_crc64: r_b64(resp, "x-ms-content-crc64"), content_md5: r_b64(resp, "Content-MD5"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"), structured_body_type: r_str(resp, "x-ms-structured-body"),
+  })
+}
+
+// Commit block list.
+
+pub struct CommitBlockListOptions {
+  pub tags: Map[Str, Str]? = None
+  pub metadata: Map[Str, Str]? = None
+  pub tier: Str? = None
+  pub http_headers: HTTPHeaders? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub legal_hold: Bool? = None
+  pub immutability_policy_mode: Str? = None
+  pub immutability_policy_expiry_time: Time? = None
+}
+
+pub struct CommitBlockListResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// The `<BlockList>` body naming `ids` as Latest, with Go's XML header.
+fn latest_block_list(ids: List[Str]) -> Str {
+  XML_HEADER + "<BlockList>${ids.map(fn(id: Str) -> Str { "<Latest>${xml.escape(id)}</Latest>" }).join("")}</BlockList>"
+}
+
+/// Makes the blob the blocks `base64_block_ids`, in order, each the
+/// latest staged or committed block of that ID
+/// (blockblob.CommitBlockList).
+pub fn (b: BlockBlobClient) commit_block_list(base64_block_ids: List[Str], options: CommitBlockListOptions = CommitBlockListOptions{}) -> CommitBlockListResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + http_headers_headers(o.http_headers) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-immutability-policy-mode", o.immutability_policy_mode) + h_time("x-ms-immutability-policy-until-date", o.immutability_policy_expiry_time) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + tags_header(o.tags)
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "blocklist")], headers: hs, body: Some(latest_block_list(base64_block_ids).bytes()), ok: [201]})?
+  Ok(CommitBlockListResponse{
+    response: response_of(resp), content_crc64: r_b64(resp, "x-ms-content-crc64"), content_md5: r_b64(resp, "Content-MD5"), etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"), last_modified: r_time(resp, "Last-Modified"), version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Upload buffer and upload file.
+
+/// Options of upload_buffer and upload_file (Go's uploadFromReaderOptions).
+pub struct UploadBufferOptions {
+  /// The block size when the data goes in blocks; 0 picks one. Data of
+  /// at most `MAX_UPLOAD_BLOB_BYTES` goes in one request whatever this is.
+  pub block_size: Int = 0
+  /// Accepted for Go's shape; blocks go one at a time.
+  pub concurrency: Int = 0
+  pub http_headers: HTTPHeaders? = None
+  pub metadata: Map[Str, Str]? = None
+  /// For one request, all of them; in blocks, the lease goes with each
+  /// block and the rest are not sent (as Go's).
+  pub conditions: AccessConditions = AccessConditions{}
+  pub access_tier: Str? = None
+  pub tags: Map[Str, Str]? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+}
+
+pub type UploadFileOptions = UploadBufferOptions
+
+/// What upload_buffer and upload_file give: the one Upload's or the
+/// CommitBlockList's response.
+pub struct UploadFromReaderResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+pub type UploadBufferResponse = UploadFromReaderResponse
+pub type UploadFileResponse = UploadFromReaderResponse
+
+/// An upload_file failure: the service's, or the file's.
+pub enum TransferErr {
+  Call(e: azcore.CallErr)
+  File(e: FsErr)
+}
+
+pub fn (e: TransferErr) display() -> Str {
+  match e {
+    Call(c) => c.display()
+    File(f) => f.display()
+  }
+}
+
+/// The block size and count for `size` bytes, as uploadFromReader picks
+/// them; a count of 0 is one Upload.
+fn upload_plan(size: Int, block_size: Int) -> (Int, Int) ! azcore.CallErr {
+  var block = block_size
+  if block == 0 {
+    if size > MAX_STAGE_BLOCK_BYTES * MAX_BLOCKS {
+      return Err(azcore.CallErr.InvalidInput("buffer is too large to upload to a block blob"))
+    }
+    if size <= MAX_UPLOAD_BLOB_BYTES {
+      block = MAX_UPLOAD_BLOB_BYTES
+    } else {
+      // ceil(size / MAX_BLOCKS), at least the 4 MiB download block
+      block = (size + MAX_BLOCKS - 1) / MAX_BLOCKS
+      if block < DEFAULT_DOWNLOAD_BLOCK_SIZE {
+        block = DEFAULT_DOWNLOAD_BLOCK_SIZE
+      }
+    }
+  }
+  if size <= MAX_UPLOAD_BLOB_BYTES {
+    return Ok((block, 0))
+  }
+  let n = (size - 1) / block + 1
+  if n > MAX_BLOCKS {
+    return Err(azcore.CallErr.InvalidInput("block limit exceeded"))
+  }
+  Ok((block, n))
+}
+
+fn upload_options_of(o: UploadBufferOptions) -> UploadOptions {
+  UploadOptions{tags: o.tags, metadata: o.metadata, tier: o.access_tier, http_headers: o.http_headers, conditions: o.conditions, cpk_info: o.cpk_info, encryption_scope: o.encryption_scope}
+}
+
+fn from_upload(r: UploadResponse) -> UploadFromReaderResponse {
+  UploadFromReaderResponse{response: r.response, content_crc64: r.content_crc64, content_md5: r.content_md5, etag: r.etag, encryption_key_sha256: r.encryption_key_sha256, encryption_scope: r.encryption_scope, is_server_encrypted: r.is_server_encrypted, last_modified: r.last_modified, version_id: r.version_id}
+}
+
+fn from_commit(r: CommitBlockListResponse) -> UploadFromReaderResponse {
+  UploadFromReaderResponse{response: r.response, content_crc64: r.content_crc64, content_md5: r.content_md5, etag: r.etag, encryption_key_sha256: r.encryption_key_sha256, encryption_scope: r.encryption_scope, is_server_encrypted: r.is_server_encrypted, last_modified: r.last_modified, version_id: r.version_id}
+}
+
+/// A block ID as Go's uploadFromReader makes one: the base64 of a random
+/// UUID's text, with azcore's uuid.New version and variant bits.
+fn new_block_id(rand: Rand) -> Str {
+  let u = rand.bytes(16)
+  let hex = fn(b: Int) -> Str { b.to_str_width(2, base: 16, zero: true) }
+  var s = ""
+  for i in 0..16 {
+    let b = Int(u[i])
+    let v = if i == 6 { (b & 0x0f) | 0x40 } else if i == 8 { (b | 0x40) & 0x7f } else { b }
+    if i == 4 || i == 6 || i == 8 || i == 10 {
+      s = s + "-"
+    }
+    s = s + hex(v)
+  }
+  s.bytes().to_base64()
+}
+
+fn stage_options_of(o: UploadBufferOptions) -> StageBlockOptions {
+  StageBlockOptions{cpk_info: o.cpk_info, encryption_scope: o.encryption_scope, lease_id: o.conditions.lease_id}
+}
+
+fn commit_options_of(o: UploadBufferOptions) -> CommitBlockListOptions {
+  // Go's getCommitBlockListOptions passes no access conditions
+  CommitBlockListOptions{tags: o.tags, metadata: o.metadata, tier: o.access_tier, http_headers: o.http_headers, cpk_info: o.cpk_info, encryption_scope: o.encryption_scope}
+}
+
+/// Uploads `data` as the blob: in one request when it fits
+/// (`MAX_UPLOAD_BLOB_BYTES`), else in blocks, then commits them
+/// (blockblob.Client.UploadBuffer).
+pub fn (b: BlockBlobClient) upload_buffer(data: Bytes, options: UploadBufferOptions = UploadBufferOptions{}) -> UploadBufferResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let (block, n) = upload_plan(data.len(), options.block_size)?
+  if n == 0 {
+    return Ok(from_upload(b.upload(data, upload_options_of(options))?))
+  }
+  b.upload_in_blocks(data, block, n, options)
+}
+
+/// `data` as `n` blocks of `block` bytes (the last one the rest), staged
+/// in order until one fails, then committed.
+fn (b: BlockBlobClient) upload_in_blocks(data: Bytes, block: Int, n: Int, options: UploadBufferOptions) -> UploadBufferResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var ids: List[Str] = []
+  for i in 0..n {
+    let start = i * block
+    let end = if start + block > data.len() { data.len() } else { start + block }
+    let id = new_block_id(b.core.rand)
+    b.stage_block(id, data[start..end], stage_options_of(options))?
+    ids.push(id)
+  }
+  Ok(from_commit(b.commit_block_list(ids, commit_options_of(options))?))
+}
+
+/// `n` bytes of `file` from `offset`: ReadAt's whole section (each read_at
+/// reads once).
+fn read_section(file: File, offset: Int, n: Int) -> Bytes ! FsErr uses fs.read {
+  var out = b""
+  while out.len() < n {
+    match file.read_at(offset + out.len(), n - out.len())? {
+      Some(chunk) => out = out + chunk
+      None => break
+    }
+  }
+  Ok(out)
+}
+
+/// Uploads the file's contents as the blob, its size from its stat: in
+/// one request when it fits (`MAX_UPLOAD_BLOB_BYTES`), else in blocks,
+/// then commits them (blockblob.Client.UploadFile). The file is read
+/// with read_at, so its position is unchanged; each request's body is
+/// held in memory (one block, or the whole file in one request).
+pub fn (b: BlockBlobClient) upload_file(file: File, options: UploadFileOptions = UploadFileOptions{}) -> UploadFileResponse ! TransferErr uses (net.dial, clock, rand, fs.read) {
+  let size = (file.stat() ?? e => return Err(TransferErr.File(e))).size
+  let (block, n) = upload_plan(size, options.block_size) ?? e => return Err(TransferErr.Call(e))
+  if n == 0 {
+    let data = read_section(file, 0, size) ?? e => return Err(TransferErr.File(e))
+    let r = b.upload(data, upload_options_of(options)) ?? e => return Err(TransferErr.Call(e))
+    return Ok(from_upload(r))
+  }
+  var ids: List[Str] = []
+  for i in 0..n {
+    let start = i * block
+    let count = if start + block > size { size - start } else { block }
+    let chunk = read_section(file, start, count) ?? e => return Err(TransferErr.File(e))
+    let id = new_block_id(b.core.rand)
+    b.stage_block(id, chunk, stage_options_of(options)) ?? e => return Err(TransferErr.Call(e))
+    ids.push(id)
+  }
+  let r = b.commit_block_list(ids, commit_options_of(options)) ?? e => return Err(TransferErr.Call(e))
+  Ok(from_commit(r))
+}
