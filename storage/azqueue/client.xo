@@ -120,7 +120,7 @@ pub struct GetStatisticsResponse {
 
 pub fn (s: ServiceClient) get_statistics() -> GetStatisticsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let resp = s.core.call("GET", with_query(s.url, [("comp", "stats"), ("restype", "service")]), [200])?
-  Ok(GetStatisticsResponse{response: response_of(resp), stats: decoded(resp, parse_stats)?})
+  Ok(GetStatisticsResponse{response: strict_response(resp)?, stats: decoded(resp, parse_stats)?})
 }
 
 pub struct ListQueuesOptions {
@@ -143,7 +143,13 @@ fn list_url(base: Str, o: ListQueuesOptions, marker: Str?) -> Str {
 /// next page asks from the last one's NextMarker until it is empty.
 pub fn (s: ServiceClient) new_list_queues_pager(options: ListQueuesOptions = ListQueuesOptions{}) -> runtime.Pager[ListQueuesSegmentResponse] {
   let base = s.url
-  runtime.new_pager_with(s.core.pipeline, policy.Request{method: "GET", url: list_url(base, options, options.marker), headers: [("Accept", "application/xml")]}, fn(r: http.Response) -> ListQueuesSegmentResponse ! Str { parse_queues(r.body.to_str_lossy()) }, fn(prev: policy.Request, page: ListQueuesSegmentResponse) -> policy.Request? {
+  runtime.new_pager_with(s.core.pipeline, policy.Request{method: "GET", url: list_url(base, options, options.marker), headers: [("Accept", "application/xml")]}, fn(r: http.Response) -> ListQueuesSegmentResponse ! Str {
+    let resp = strict_response(r) ?? e => return Err(match e {
+      Decode(m) => m
+      _ => e.display()
+    })
+    Ok(parse_queues(r.body.to_str_lossy())? with {response: resp})
+  }, fn(prev: policy.Request, page: ListQueuesSegmentResponse) -> policy.Request? {
     let m = page.next_marker ?? return None
     if m == "" {
       return None
@@ -183,16 +189,16 @@ pub struct CreateOptions {
 
 /// Creates the queue (201, or 204 when it exists with the same metadata).
 pub fn (q: QueueClient) create(options: CreateOptions = CreateOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("PUT", q.url, [201, 204], headers: meta_headers(options.metadata))?))
+  strict_response(q.core.call("PUT", q.url, [201, 204], headers: meta_headers(options.metadata))?)
 }
 
 pub fn (q: QueueClient) delete() -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("DELETE", q.url, [204])?))
+  strict_response(q.core.call("DELETE", q.url, [204])?)
 }
 
 /// Replaces the queue's metadata.
 pub fn (q: QueueClient) set_metadata(metadata: Map[Str, Str] = {}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("PUT", with_query(q.url, [("comp", "metadata")]), [204], headers: meta_headers(metadata))?))
+  strict_response(q.core.call("PUT", with_query(q.url, [("comp", "metadata")]), [204], headers: meta_headers(metadata))?)
 }
 
 pub struct GetQueuePropertiesResponse {
@@ -204,7 +210,12 @@ pub struct GetQueuePropertiesResponse {
 
 pub fn (q: QueueClient) get_properties() -> GetQueuePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let resp = q.core.call("GET", with_query(q.url, [("comp", "metadata")]), [200])?
-  Ok(GetQueuePropertiesResponse{response: response_of(resp), metadata: metadata_of(resp), approximate_messages_count: Int.parse(resp.header("x-ms-approximate-messages-count") ?? "")})
+  let r = strict_response(resp)?
+  let count = match resp.header("x-ms-approximate-messages-count") {
+    Some(v) if v != "" => Some(Int.parse(v) ?? return Err(azcore.CallErr.Decode("strconv.ParseInt: parsing ${go_quote(v)}: invalid syntax")))
+    _ => None
+  }
+  Ok(GetQueuePropertiesResponse{response: r, metadata: metadata_of(resp), approximate_messages_count: count})
 }
 
 pub struct GetAccessPolicyResponse {
@@ -214,12 +225,12 @@ pub struct GetAccessPolicyResponse {
 
 pub fn (q: QueueClient) get_access_policy() -> GetAccessPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let resp = q.core.call("GET", with_query(q.url, [("comp", "acl")]), [200])?
-  Ok(GetAccessPolicyResponse{response: response_of(resp), signed_identifiers: decoded(resp, parse_signed_identifiers)?})
+  Ok(GetAccessPolicyResponse{response: strict_response(resp)?, signed_identifiers: decoded(resp, parse_signed_identifiers)?})
 }
 
 /// Replaces the queue's stored access policies.
 pub fn (q: QueueClient) set_access_policy(queue_acl: List[SignedIdentifier] = []) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("PUT", with_query(q.url, [("comp", "acl")]), [204], body: Some(signed_identifiers_xml(queue_acl)))?))
+  strict_response(q.core.call("PUT", with_query(q.url, [("comp", "acl")]), [204], body: Some(signed_identifiers_xml(queue_acl)))?)
 }
 
 pub struct EnqueueMessageOptions {
@@ -243,7 +254,7 @@ pub fn (q: QueueClient) enqueue_message(content: Str, options: EnqueueMessageOpt
   if let Some(t) = options.time_to_live { qp.push(("messagettl", "${t}")) }
   if let Some(v) = options.visibility_timeout { qp.push(("visibilitytimeout", "${v}")) }
   let resp = q.core.call("POST", with_query(messages_url(q), qp), [201], body: Some(queue_message_xml(content)))?
-  Ok(EnqueueMessagesResponse{response: response_of(resp), messages: decoded(resp, parse_enqueued)?})
+  Ok(EnqueueMessagesResponse{response: strict_response(resp)?, messages: decoded(resp, parse_enqueued)?})
 }
 
 pub struct DequeueMessagesOptions {
@@ -268,7 +279,7 @@ pub fn (q: QueueClient) dequeue_messages(options: DequeueMessagesOptions = Deque
   if let Some(n) = options.number_of_messages { qp.push(("numofmessages", "${n}")) }
   if let Some(v) = options.visibility_timeout { qp.push(("visibilitytimeout", "${v}")) }
   let resp = q.core.call("GET", with_query(messages_url(q), qp), [200])?
-  Ok(DequeueMessagesResponse{response: response_of(resp), messages: decoded(resp, parse_dequeued)?})
+  Ok(DequeueMessagesResponse{response: strict_response(resp)?, messages: decoded(resp, parse_dequeued)?})
 }
 
 pub struct UpdateMessageResponse {
@@ -283,11 +294,12 @@ pub struct UpdateMessageResponse {
 pub fn (q: QueueClient) update_message(message_id: Str, pop_receipt: Str, content: Str, visibility_timeout: Int = 0) -> UpdateMessageResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let u = with_query(join_paths(messages_url(q), message_id), [("popreceipt", pop_receipt), ("visibilitytimeout", "${visibility_timeout}")])
   let resp = q.core.call("PUT", u, [204], body: Some(queue_message_xml(content)))?
-  Ok(UpdateMessageResponse{response: response_of(resp), pop_receipt: resp.header("x-ms-popreceipt"), time_next_visible: rfc1123(resp.header("x-ms-time-next-visible") ?? "")})
+  let r = strict_response(resp)?
+  Ok(UpdateMessageResponse{response: r, pop_receipt: resp.header("x-ms-popreceipt"), time_next_visible: strict_time(resp, "x-ms-time-next-visible")?})
 }
 
 pub fn (q: QueueClient) delete_message(message_id: Str, pop_receipt: Str) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("DELETE", with_query(join_paths(messages_url(q), message_id), [("popreceipt", pop_receipt)]), [204])?))
+  strict_response(q.core.call("DELETE", with_query(join_paths(messages_url(q), message_id), [("popreceipt", pop_receipt)]), [204])?)
 }
 
 pub struct PeekMessagesResponse {
@@ -304,12 +316,12 @@ pub fn (q: QueueClient) peek_messages(number_of_messages: Int? = None) -> PeekMe
   var qp = [("peekonly", "true")]
   if let Some(n) = number_of_messages { qp.push(("numofmessages", "${n}")) }
   let resp = q.core.call("GET", with_query(messages_url(q), qp), [200])?
-  Ok(PeekMessagesResponse{response: response_of(resp), messages: decoded(resp, parse_peeked)?})
+  Ok(PeekMessagesResponse{response: strict_response(resp)?, messages: decoded(resp, parse_peeked)?})
 }
 
 /// Deletes every message.
 pub fn (q: QueueClient) clear_messages() -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(response_of(q.core.call("DELETE", messages_url(q), [204])?))
+  strict_response(q.core.call("DELETE", messages_url(q), [204])?)
 }
 
 /// A queue SAS URL over HTTPS with the letters of `raup` (Go's

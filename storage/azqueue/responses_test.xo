@@ -1,0 +1,410 @@
+// What every call reads back, and its errors, printed as Go's reflective
+// dump prints Go's responses (respvectors_test.xo), against a fake that
+// answers as the Go program's fake does, queue by queue.
+
+use std/http
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const RDATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+const RMSGS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList><QueueMessage><MessageId>m1</MessageId><InsertionTime>Thu, 05 Nov 2026 03:04:05 GMT</InsertionTime><ExpirationTime>Thu, 12 Nov 2026 03:04:05 GMT</ExpirationTime><PopReceipt>p1</PopReceipt><TimeNextVisible>Thu, 05 Nov 2026 03:04:35 GMT</TimeNextVisible><DequeueCount>2</DequeueCount><MessageText>hello &amp; bye</MessageText></QueueMessage></QueueMessagesList>"
+
+fn rx(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/xml")
+}
+
+/// The Go program's fake: a queue (or a service path) by its first path
+/// segment picks a failure, else the plain answers.
+fn r_answer(req: http.Request) -> http.Response {
+  let date = if req.path.starts_with("/baddate") { "yesterday" } else if req.path.starts_with("/nodate") { "" } else { RDATE }
+  r_answer_for(req).with_header("x-ms-request-id", "r1").with_header("x-ms-version", "2024-08-04").with_header("Date", date)
+}
+
+fn r_answer_for(req: http.Request) -> http.Response {
+  let comp = req.url.query.get("comp") ?? ""
+  let p = req.path
+  let seg = p.trim_start_chars("/").split("/")[0]
+  let get = req.method == "GET"
+  let msgs_path = p.ends_with("/messages")
+  if seg == "exists" {
+    return http.text(409, "").with_header("x-ms-error-code", "QueueAlreadyExists")
+  }
+  if seg == "busy" {
+    return http.text(500, "oops").with_header("Content-Type", "text/plain")
+  }
+  if seg == "badcount" && comp == "metadata" {
+    return http.text(200, "").with_header("x-ms-approximate-messages-count", "many")
+  }
+  if seg == "nometa" && comp == "metadata" {
+    return http.text(200, "")
+  }
+  if seg == "badxml" && (get || req.method == "POST") {
+    return rx(200, "<QueueMessagesList><QueueMessage><MessageId>m1")
+  }
+  if seg == "badvis" && req.method == "PUT" && (req.url.query.get("popreceipt") ?? "") != "" {
+    return http.text(204, "").with_header("x-ms-popreceipt", "p2").with_header("x-ms-time-next-visible", "never")
+  }
+  if seg == "tzbad" && comp == "acl" && get {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>p1</Id><AccessPolicy><Start>later-</Start></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if seg == "tztime" && comp == "acl" && get {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>p1</Id><AccessPolicy><Start>2026-11-05T01:00:00+01:00</Start><Expiry>2026-11-06t00:00:00.5</Expiry></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if seg == "badtime" && comp == "acl" && get {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>p1</Id><AccessPolicy><Start>soon</Start></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if seg == "badtime" && get && msgs_path {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList><QueueMessage><MessageId>m1</MessageId><InsertionTime>soon</InsertionTime></QueueMessage></QueueMessagesList>")
+  }
+  if seg == "empty" {
+    if comp == "acl" && get { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers />") }
+    if comp == "list" { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.queue.example.test/\"><MaxResults>5</MaxResults></EnumerationResults>") }
+    if comp == "properties" && get { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties />") }
+    if comp == "stats" { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats />") }
+    if get && msgs_path { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList />") }
+    if req.method == "POST" { return rx(201, "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList />") }
+  }
+  if seg == "bad" {
+    if comp == "stats" { return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats><GeoReplication><Status>live</Status><LastSyncTime>soon</LastSyncTime></GeoReplication></StorageServiceStats>") }
+    if get { return rx(200, "<StorageServiceProperties><Logging>") }
+  }
+  if seg == "status" {
+    let pr = req.url.query.get("popreceipt") ?? ""
+    if req.method == "PUT" && comp == "" && pr == "" { return http.text(204, "") }
+    if req.method == "DELETE" { return http.text(200, "") }
+  }
+  if p.ends_with("/missing") {
+    return rx(404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>QueueNotFound</Code><Message>The specified queue does not exist.</Message></Error>").with_header("x-ms-error-code", "QueueNotFound")
+  }
+  if comp == "properties" && get {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><Write>false</Write><Delete>true</Delete><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><HourMetrics><Version>1.0</Version><Enabled>true</Enabled><IncludeAPIs>false</IncludeAPIs><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></HourMetrics><MinuteMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></MinuteMetrics><Cors><CorsRule><AllowedOrigins>https://app.example.test</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods><MaxAgeInSeconds>60</MaxAgeInSeconds><ExposedHeaders>x-ms-*</ExposedHeaders><AllowedHeaders></AllowedHeaders></CorsRule></Cors></StorageServiceProperties>")
+  }
+  if comp == "properties" { return http.text(202, "") }
+  if comp == "stats" {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats><GeoReplication><Status>live</Status><LastSyncTime>Thu, 05 Nov 2026 02:00:00 GMT</LastSyncTime></GeoReplication></StorageServiceStats>")
+  }
+  if comp == "list" {
+    if (req.url.query.get("marker") ?? "") == "" {
+      return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.queue.example.test/\"><Prefix>q</Prefix><MaxResults>2</MaxResults><Queues><Queue><Name>q1</Name><Metadata><color>blue</color></Metadata></Queue><Queue><Name>q2</Name><Metadata /></Queue></Queues><NextMarker>/acct1/q3</NextMarker></EnumerationResults>")
+    }
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.queue.example.test/\"><Prefix>q</Prefix><Marker>/acct1/q3</Marker><MaxResults>2</MaxResults><Queues><Queue><Name>q3</Name></Queue></Queues><NextMarker /></EnumerationResults>")
+  }
+  if comp == "metadata" && get {
+    return http.text(200, "").with_header("x-ms-meta-color", "blue").with_header("x-ms-approximate-messages-count", "17")
+  }
+  if comp == "metadata" { return http.text(204, "") }
+  if comp == "acl" && get {
+    return rx(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>pol1</Id><AccessPolicy><Start>2026-11-05T00:00:00.0000000Z</Start><Expiry>2026-11-06T00:00:00.0000000Z</Expiry><Permission>raup</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if comp == "acl" { return http.text(204, "") }
+  if req.method == "PUT" && (req.url.query.get("popreceipt") ?? "") != "" {
+    return http.text(204, "").with_header("x-ms-popreceipt", "p2").with_header("x-ms-time-next-visible", "Thu, 05 Nov 2026 03:05:05 GMT")
+  }
+  if req.method == "PUT" { return http.text(201, "") }
+  if req.method == "DELETE" { return http.text(204, "") }
+  if req.method == "POST" {
+    return rx(201, "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList><QueueMessage><MessageId>m1</MessageId><InsertionTime>Thu, 05 Nov 2026 03:04:05 GMT</InsertionTime><ExpirationTime>Thu, 12 Nov 2026 03:04:05 GMT</ExpirationTime><PopReceipt>p1</PopReceipt><TimeNextVisible>Thu, 05 Nov 2026 03:04:35 GMT</TimeNextVisible></QueueMessage></QueueMessagesList>")
+  }
+  if get && msgs_path { return rx(200, RMSGS) }
+  http.text(400, "")
+}
+
+/// Go's dump: one `Path=value` line a set field, sorted.
+struct RDump {
+  lines: List[Str] = []
+}
+
+fn rq(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else { "${c}" })
+  }
+  out + "\""
+}
+
+/// Go's RFC3339Nano in UTC: the fraction without trailing zeros.
+fn rtime(t: Time) -> Str {
+  let base = time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}")
+  let ns = (t - Time.UNIX_EPOCH).nanos() % 1000000000
+  if ns == 0 {
+    return "${base}Z"
+  }
+  "${base}.${ns.to_str_width(9, zero: true).trim_end_chars("0")}Z"
+}
+
+fn (var d: RDump) s(name: Str, v: Str?) {
+  if let Some(x) = v { d.lines.push("${name}=${rq(x)}") }
+}
+
+fn (var d: RDump) i(name: Str, v: Int?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: RDump) b(name: Str, v: Bool?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: RDump) t(name: Str, v: Time?) {
+  if let Some(x) = v { d.lines.push("${name}=${rtime(x)}") }
+}
+
+fn (var d: RDump) m(name: Str, v: Map[Str, Str]) {
+  if v.len() == 0 {
+    return
+  }
+  d.lines.push("${name}.len=${v.len()}")
+  for k in v.keys().sort() {
+    d.lines.push("${name}[${k}]=${rq(v.get(k) ?? "")}")
+  }
+}
+
+/// RequestID and Version (Go sets each only when the header is there),
+/// and Date when Go's response has one.
+fn (var d: RDump) r(r: Response, with_date: Bool) {
+  d.s("RequestID", if r.request_id == "" { None } else { Some(r.request_id) })
+  d.s("Version", if r.version == "" { None } else { Some(r.version) })
+  if with_date { d.t("Date", r.date) }
+}
+
+fn r_err(name: Str, e: azcore.CallErr) -> List[Str] {
+  let text = match e {
+    Response(r) => "status ${r.status_code} code ${r.error_code}"
+    Decode(m) => m
+    InvalidInput(m) => m
+    _ => e.display()
+  }
+  ["== ${name}", "  error ${text}"]
+}
+
+fn r_shown[T](name: Str, r: Result[T, azcore.CallErr], dump: fn(T) -> RDump) -> List[Str] {
+  match r {
+    Ok(x) => ["== ${name}"] + dump(x).lines.sort().map(fn(l: Str) -> Str { "  ${l}" })
+    Err(e) => r_err(name, e)
+  }
+}
+
+fn plain(r: Response) -> RDump {
+  var d = RDump{}
+  d.r(r, true)
+  d
+}
+
+fn plain_no_date(r: Response) -> RDump {
+  var d = RDump{}
+  d.r(r, false)
+  d
+}
+
+fn retention(var d: RDump, p: Str, r: RetentionPolicy?) -> RDump {
+  if let Some(x) = r {
+    d.i("${p}.RetentionPolicy.Days", x.days)
+    d.b("${p}.RetentionPolicy.Enabled", x.enabled)
+  }
+  d
+}
+
+fn metrics(var d: RDump, p: Str, m: Metrics?) -> RDump {
+  if let Some(x) = m {
+    d.b("${p}.Enabled", x.enabled)
+    d.b("${p}.IncludeAPIs", x.include_apis)
+    d.s("${p}.Version", x.version)
+    d = retention(d, p, x.retention_policy)
+  }
+  d
+}
+
+fn props_dump(x: GetServicePropertiesResponse) -> RDump {
+  var d = RDump{}
+  d.r(x.response, false)
+  let p = x.properties
+  if let Some(rules) = p.cors {
+    d.lines.push("CORS.len=${rules.len()}")
+    for i in 0..rules.len() {
+      let c = rules[i]
+      d.s("CORS[${i}].AllowedHeaders", c.allowed_headers)
+      d.s("CORS[${i}].AllowedMethods", c.allowed_methods)
+      d.s("CORS[${i}].AllowedOrigins", c.allowed_origins)
+      d.s("CORS[${i}].ExposedHeaders", c.exposed_headers)
+      d.i("CORS[${i}].MaxAgeInSeconds", c.max_age_in_seconds)
+    }
+  }
+  d = metrics(d, "HourMetrics", p.hour_metrics)
+  d = metrics(d, "MinuteMetrics", p.minute_metrics)
+  if let Some(l) = p.logging {
+    d.b("Logging.Delete", l.delete)
+    d.b("Logging.Read", l.read)
+    d.b("Logging.Write", l.write)
+    d.s("Logging.Version", l.version)
+    d = retention(d, "Logging", l.retention_policy)
+  }
+  d
+}
+
+fn stats_dump(x: GetStatisticsResponse) -> RDump {
+  var d = plain(x.response)
+  if let Some(g) = x.stats.geo_replication {
+    d.t("GeoReplication.LastSyncTime", g.last_sync_time)
+    d.s("GeoReplication.Status", g.status)
+  }
+  d
+}
+
+fn page_dump(x: ListQueuesSegmentResponse) -> RDump {
+  var d = plain(x.response)
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d.s("Prefix", x.prefix)
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  if x.queues.len() > 0 {
+    d.lines.push("Queues.len=${x.queues.len()}")
+  }
+  for i in 0..x.queues.len() {
+    d.s("Queues[${i}].Name", x.queues[i].name)
+    d.m("Queues[${i}].Metadata", x.queues[i].metadata)
+  }
+  d
+}
+
+/// Go's http.Header canonical form of a name (`color` is `Color`).
+fn canonical(k: Str) -> Str {
+  k.split("-").map(fn(w: Str) -> Str { if w == "" { w } else { w[0..1].to_upper() + w[1..w.len()].to_lower() } }).join("-")
+}
+
+fn qprops_dump(x: GetQueuePropertiesResponse) -> RDump {
+  var d = plain(x.response)
+  d.i("ApproximateMessagesCount", x.approximate_messages_count)
+  // Xo keeps the names as sent (README); Go canonicalizes them.
+  var m: Map[Str, Str] = {}
+  for k in x.metadata.keys() { m[canonical(k)] = x.metadata.get(k) ?? "" }
+  d.m("Metadata", m)
+  d
+}
+
+fn acl_dump(x: GetAccessPolicyResponse) -> RDump {
+  var d = plain(x.response)
+  let ids = x.signed_identifiers
+  if ids.len() > 0 {
+    d.lines.push("SignedIdentifiers.len=${ids.len()}")
+  }
+  for i in 0..ids.len() {
+    d.s("SignedIdentifiers[${i}].ID", ids[i].id)
+    if let Some(a) = ids[i].access_policy {
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Expiry", a.expiry)
+      d.s("SignedIdentifiers[${i}].AccessPolicy.Permission", a.permission)
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Start", a.start)
+    }
+  }
+  d
+}
+
+fn enq_dump(x: EnqueueMessagesResponse) -> RDump {
+  var d = plain(x.response)
+  if x.messages.len() > 0 { d.lines.push("Messages.len=${x.messages.len()}") }
+  for i in 0..x.messages.len() {
+    let m = x.messages[i]
+    d.t("Messages[${i}].ExpirationTime", m.expiration_time)
+    d.t("Messages[${i}].InsertionTime", m.insertion_time)
+    d.s("Messages[${i}].MessageID", m.message_id)
+    d.s("Messages[${i}].PopReceipt", m.pop_receipt)
+    d.t("Messages[${i}].TimeNextVisible", m.time_next_visible)
+  }
+  d
+}
+
+fn deq_dump(x: DequeueMessagesResponse) -> RDump {
+  var d = plain(x.response)
+  if x.messages.len() > 0 { d.lines.push("Messages.len=${x.messages.len()}") }
+  for i in 0..x.messages.len() {
+    let m = x.messages[i]
+    d.i("Messages[${i}].DequeueCount", m.dequeue_count)
+    d.t("Messages[${i}].ExpirationTime", m.expiration_time)
+    d.t("Messages[${i}].InsertionTime", m.insertion_time)
+    d.s("Messages[${i}].MessageID", m.message_id)
+    d.s("Messages[${i}].MessageText", m.message_text)
+    d.s("Messages[${i}].PopReceipt", m.pop_receipt)
+    d.t("Messages[${i}].TimeNextVisible", m.time_next_visible)
+  }
+  d
+}
+
+fn peek_dump(x: PeekMessagesResponse) -> RDump {
+  var d = plain(x.response)
+  if x.messages.len() > 0 { d.lines.push("Messages.len=${x.messages.len()}") }
+  for i in 0..x.messages.len() {
+    let m = x.messages[i]
+    d.i("Messages[${i}].DequeueCount", m.dequeue_count)
+    d.t("Messages[${i}].ExpirationTime", m.expiration_time)
+    d.t("Messages[${i}].InsertionTime", m.insertion_time)
+    d.s("Messages[${i}].MessageID", m.message_id)
+    d.s("Messages[${i}].MessageText", m.message_text)
+  }
+  d
+}
+
+fn upd_dump(x: UpdateMessageResponse) -> RDump {
+  var d = plain(x.response)
+  d.s("PopReceipt", x.pop_receipt)
+  d.t("TimeNextVisible", x.time_next_visible)
+  d
+}
+
+test "every response and error reads as Go's" {
+  for m in ["GET", "PUT", "POST", "DELETE"] {
+    for p in ["/", "/{q}", "/{q}/", "/{q}/messages", "/{q}/messages/{id}"] {
+      os.net.handle("${m} ${EP}${p}", r_answer)
+    }
+  }
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let svc_at = fn(p: Str) -> ServiceClient { new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}${p}", cred, opts) }
+  let svc = svc_at("/")
+  var out: List[Str] = []
+  for (name, s) in [("", svc), ("empty ", svc_at("/empty/")), ("bad ", svc_at("/bad/")), ("busy ", svc_at("/busy/")), ("baddate ", svc_at("/baddate/"))] {
+    out = out + r_shown("${name}GetServiceProperties", s.get_service_properties(), props_dump)
+    out = out + r_shown("${name}SetProperties", s.set_properties(), plain_no_date)
+    out = out + r_shown("${name}GetStatistics", s.get_statistics(), stats_dump)
+    var pager = s.new_list_queues_pager(ListQueuesOptions{include_metadata: true, prefix: Some("q"), max_results: Some(2)})
+    var i = 0
+    while pager.more() && i < 3 {
+      match pager.next_page() {
+        Ok(pg) => out = out + r_shown("${name}ListQueues page ${i}", Ok(pg), page_dump)
+        Err(e) => {
+          out = out + r_err("${name}ListQueues page ${i}", e)
+          break
+        }
+      }
+      i = i + 1
+    }
+  }
+  out = out + r_shown("CreateQueue", svc.create_queue("q9"), plain)
+  out = out + r_shown("DeleteQueue", svc.delete_queue("q9"), plain)
+  out = out + r_shown("CreateQueue exists", svc.create_queue("exists"), plain)
+  out = out + r_shown("DeleteQueue missing", svc.delete_queue("missing"), plain)
+  for name in ["q1", "missing", "exists", "busy", "baddate", "badcount", "nometa", "badxml", "badtime", "tztime", "nodate", "badvis", "tzbad", "empty", "status"] {
+    let q = svc.new_queue_client(name)
+    out = out + r_shown("${name} Create", q.create(), plain)
+    out = out + r_shown("${name} SetMetadata", q.set_metadata({"color": "red"}), plain)
+    out = out + r_shown("${name} GetProperties", q.get_properties(), qprops_dump)
+    out = out + r_shown("${name} GetAccessPolicy", q.get_access_policy(), acl_dump)
+    out = out + r_shown("${name} SetAccessPolicy", q.set_access_policy(), plain)
+    out = out + r_shown("${name} EnqueueMessage", q.enqueue_message("hi"), enq_dump)
+    out = out + r_shown("${name} DequeueMessages", q.dequeue_messages(), deq_dump)
+    out = out + r_shown("${name} UpdateMessage", q.update_message("m1", "p1", "x"), upd_dump)
+    out = out + r_shown("${name} DeleteMessage", q.delete_message("m1", "p2"), plain)
+    out = out + r_shown("${name} PeekMessages", q.peek_messages(), peek_dump)
+    out = out + r_shown("${name} ClearMessages", q.clear_messages(), plain)
+    out = out + r_shown("${name} Delete", q.delete(), plain)
+  }
+  out = out + r_shown("q1 DequeueMessage", svc.new_queue_client("q1").dequeue_message(), deq_dump)
+  out = out + r_shown("q1 PeekMessage", svc.new_queue_client("q1").peek_message(), peek_dump)
+  expect(out) == RESPONSES_OUTPUT.map(cut_time_tail)
+}
+
+/// Go's time error goes on to say which part did not parse; Xo's stops
+/// at the layout (README).
+fn cut_time_tail(l: Str) -> Str {
+  if l.contains("parsing time") { l.split(": cannot parse")[0] } else { l }
+}

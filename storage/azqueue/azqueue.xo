@@ -126,12 +126,40 @@ fn rfc1123(v: Str) -> Time? {
   time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
 }
 
-/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time.
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time, as Go's
+/// generated timeRFC3339 reads it: upper-cased, UTC when it has no zone.
 fn rfc3339(v: Str) -> Time? {
-  if v == "" {
-    return None
+  rfc3339_strict(v).ok()
+}
+
+/// As rfc3339, with Go's error up to the layout (an empty text is one).
+fn rfc3339_strict(v: Str) -> Time ! Str {
+  let u = v.to_upper()
+  let tz = tz_offset(u)
+  let layout = if tz { "2006-01-02T15:04:05.999999999Z07:00" } else { "2006-01-02T15:04:05.999999999" }
+  let t = Time.parse_rfc3339(if tz { u } else { "${u}Z" }) ?? return Err("parsing time ${go_quote(u)} as ${go_quote(layout)}")
+  Ok(t)
+}
+
+/// Go's tzOffsetRegex, `(Z|z|\+|-)(\d+:\d+)*"*$`, on upper-cased text.
+fn tz_offset(v: Str) -> Bool {
+  var s = v.trim_end_chars("\"")
+  while {
+    let bs = s.bytes()
+    let n = bs.len()
+    var i = n
+    while i > 0 && bs[i - 1] >= 0x30 && bs[i - 1] <= 0x39 { i = i - 1 }
+    if i == n || i == 0 || bs[i - 1] != 0x3a {
+      break
+    }
+    var j = i - 1
+    while j > 0 && bs[j - 1] >= 0x30 && bs[j - 1] <= 0x39 { j = j - 1 }
+    if j == i - 1 {
+      break
+    }
+    s = s[0..j]
   }
-  time.parse(v.to_upper(), time.RFC3339, time.utc()).ok()
+  s.ends_with("Z") || s.ends_with("+") || s.ends_with("-")
 }
 
 /// What every call returns: the service's request ID, version and date.
@@ -143,6 +171,42 @@ pub struct Response {
 
 fn response_of(resp: http.Response) -> Response {
   Response{request_id: resp.header("x-ms-request-id") ?? "", version: resp.header("x-ms-version") ?? "", date: rfc1123(resp.header("Date") ?? "")}
+}
+
+/// Go's error for an HTTP date that does not parse. (Go's goes on to say
+/// which part did not parse; this one stops at the layout.)
+fn rfc1123_err(v: Str) -> Str {
+  "parsing time ${go_quote(v)} as \"Mon, 02 Jan 2006 15:04:05 MST\""
+}
+
+/// A header's HTTP date as Go's generated handlers read it: None when the
+/// header is absent or empty, an error when it does not parse.
+fn strict_time(resp: http.Response, name: Str) -> Time? ! azcore.CallErr {
+  let v = resp.header(name) ?? ""
+  if v == "" {
+    return Ok(None)
+  }
+  match rfc1123(v) {
+    Some(t) => Ok(Some(t))
+    None => Err(azcore.CallErr.Decode(rfc1123_err(v)))
+  }
+}
+
+/// The response as the calls whose Go response has a Date read it: a Date
+/// that does not parse fails the call, as in Go. (Go's service properties
+/// calls read no Date; they use response_of.)
+fn strict_response(resp: http.Response) -> Response ! azcore.CallErr {
+  let date = strict_time(resp, "Date")?
+  Ok(response_of(resp) with {date: date})
+}
+
+/// Go's strconv.Quote of ASCII text.
+fn go_quote(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else { "${c}" })
+  }
+  out + "\""
 }
 
 /// A parsed connection string: the service URL (with the SAS when it

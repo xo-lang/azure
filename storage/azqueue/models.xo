@@ -112,6 +112,9 @@ pub struct ListQueuesSegmentResponse {
   pub max_results: Int? = None
   pub queues: List[Queue] = []
   pub next_marker: Str? = None
+  /// The page's request ID, version and date (Go's ListQueuesResponse
+  /// fields).
+  pub response: Response = Response{}
 }
 
 // Writing.
@@ -206,12 +209,40 @@ fn metrics_of(e: xml.Element, name: Str) -> Metrics? {
   e.child(name).map(fn(m: xml.Element) -> Metrics { Metrics{enabled: child_bool(m, "Enabled"), include_apis: child_bool(m, "IncludeAPIs"), retention_policy: retention_of(m), version: child_text(m, "Version")} })
 }
 
-fn parse_xml(text: Str, what: Str) -> xml.Element ! Str {
-  xml.parse(text) ?? e => Err("the ${what} is not XML: ${e.display()}")
+/// The elements Go's generated models read as HTTP dates.
+const RFC1123_ELEMENTS: List[Str] = ["InsertionTime", "ExpirationTime", "TimeNextVisible", "LastSyncTime"]
+/// The elements they read as ISO 8601 times (an access policy's).
+const RFC3339_ELEMENTS: List[Str] = ["Start", "Expiry"]
+
+/// `text` as XML, with Go's error for a body that is not XML or a date
+/// that does not parse, named for the Go type it decodes (`ty`).
+fn parse_xml(text: Str, ty: Str) -> xml.Element ! Str {
+  let what = "unmarshalling type *generated.${ty}"
+  let d = xml.parse(text) ?? e => return Err("${what}: ${e.display()}")
+  check_times(d) ?? e => return Err("${what}: ${e}")
+  Ok(d)
+}
+
+fn check_times(e: xml.Element) -> () ! Str {
+  for n in e.children {
+    if let xml.Node.Elem(c) = n {
+      if RFC1123_ELEMENTS.contains(c.name.local) {
+        let t = c.text()
+        if rfc1123(t).is_none() {
+          return Err(rfc1123_err(t))
+        }
+      }
+      if RFC3339_ELEMENTS.contains(c.name.local) {
+        rfc3339_strict(c.text())?
+      }
+      check_times(c)?
+    }
+  }
+  Ok(())
 }
 
 pub fn parse_properties(text: Str) -> StorageServiceProperties ! Str {
-  let d = parse_xml(text, "service properties")?
+  let d = parse_xml(text, "StorageServiceProperties")?
   Ok(StorageServiceProperties{
     cors: d.child("Cors").map(fn(c: xml.Element) -> List[CorsRule] {
       c.children_named("CorsRule").map(fn(r: xml.Element) -> CorsRule {
@@ -225,12 +256,12 @@ pub fn parse_properties(text: Str) -> StorageServiceProperties ! Str {
 }
 
 pub fn parse_stats(text: Str) -> StorageServiceStats ! Str {
-  let d = parse_xml(text, "service statistics")?
+  let d = parse_xml(text, "StorageServiceStats")?
   Ok(StorageServiceStats{geo_replication: d.child("GeoReplication").map(fn(g: xml.Element) -> GeoReplication { GeoReplication{status: child_text(g, "Status"), last_sync_time: child_1123(g, "LastSyncTime")} })})
 }
 
 pub fn parse_queues(text: Str) -> ListQueuesSegmentResponse ! Str {
-  let d = parse_xml(text, "queue list")?
+  let d = parse_xml(text, "ListQueuesSegmentResponse")?
   let qs = d.child("Queues").map(fn(q: xml.Element) -> List[Queue] {
     q.children_named("Queue").map(fn(x: xml.Element) -> Queue {
       var m: Map[Str, Str] = {}
@@ -248,30 +279,30 @@ pub fn parse_queues(text: Str) -> ListQueuesSegmentResponse ! Str {
 }
 
 pub fn parse_signed_identifiers(text: Str) -> List[SignedIdentifier] ! Str {
-  let d = parse_xml(text, "access policy")?
+  let d = parse_xml(text, "QueueClientGetAccessPolicyResponse")?
   Ok(d.children_named("SignedIdentifier").map(fn(s: xml.Element) -> SignedIdentifier {
     SignedIdentifier{id: child_text(s, "Id"), access_policy: s.child("AccessPolicy").map(fn(a: xml.Element) -> AccessPolicy { AccessPolicy{start: child_3339(a, "Start"), expiry: child_3339(a, "Expiry"), permission: child_text(a, "Permission")} })}
   }))
 }
 
-fn messages_of(text: Str) -> List[xml.Element] ! Str {
-  Ok(parse_xml(text, "message list")?.children_named("QueueMessage"))
+fn messages_of(text: Str, ty: Str) -> List[xml.Element] ! Str {
+  Ok(parse_xml(text, ty)?.children_named("QueueMessage"))
 }
 
 pub fn parse_enqueued(text: Str) -> List[EnqueuedMessage] ! Str {
-  Ok(messages_of(text)?.map(fn(m: xml.Element) -> EnqueuedMessage {
+  Ok(messages_of(text, "MessagesClientEnqueueResponse")?.map(fn(m: xml.Element) -> EnqueuedMessage {
     EnqueuedMessage{message_id: child_text(m, "MessageId"), insertion_time: child_1123(m, "InsertionTime"), expiration_time: child_1123(m, "ExpirationTime"), pop_receipt: child_text(m, "PopReceipt"), time_next_visible: child_1123(m, "TimeNextVisible")}
   }))
 }
 
 pub fn parse_dequeued(text: Str) -> List[DequeuedMessage] ! Str {
-  Ok(messages_of(text)?.map(fn(m: xml.Element) -> DequeuedMessage {
+  Ok(messages_of(text, "MessagesClientDequeueResponse")?.map(fn(m: xml.Element) -> DequeuedMessage {
     DequeuedMessage{message_id: child_text(m, "MessageId"), insertion_time: child_1123(m, "InsertionTime"), expiration_time: child_1123(m, "ExpirationTime"), pop_receipt: child_text(m, "PopReceipt"), time_next_visible: child_1123(m, "TimeNextVisible"), dequeue_count: child_int(m, "DequeueCount"), message_text: child_text(m, "MessageText")}
   }))
 }
 
 pub fn parse_peeked(text: Str) -> List[PeekedMessage] ! Str {
-  Ok(messages_of(text)?.map(fn(m: xml.Element) -> PeekedMessage {
+  Ok(messages_of(text, "MessagesClientPeekResponse")?.map(fn(m: xml.Element) -> PeekedMessage {
     PeekedMessage{message_id: child_text(m, "MessageId"), insertion_time: child_1123(m, "InsertionTime"), expiration_time: child_1123(m, "ExpirationTime"), dequeue_count: child_int(m, "DequeueCount"), message_text: child_text(m, "MessageText")}
   }))
 }

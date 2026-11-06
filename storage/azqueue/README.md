@@ -24,7 +24,13 @@ What it does:
 Each request is Go's byte for byte: the test replays a Go program's
 calls against the same fake service and compares every request
 (method, URL, headers with the Shared Key signature, body) and what is
-read back.
+read back. A second test compares every call's response, field by
+field as Go's reflective dump prints it, and its errors: statuses Go
+does not accept, a body that is not XML, and a date, time or count that
+does not parse, each failing the call as Go's generated handlers do,
+with Go's error text (`unmarshalling type *generated.X: ...`). A list
+page carries the request ID, version and date (`response`), as Go's
+ListQueuesResponse does.
 
 Where it differs from Go v1.0.1:
 
@@ -43,4 +49,9 @@ Where it differs from Go v1.0.1:
 - Bearer tokens use azcore's bearer token policy with the Storage scope;
   Go's storage challenge policy (a tenant from a 401 challenge) is not
   ported yet.
+- A date or time that does not parse gives Go's error text up to the
+  layout (`parsing time "x" as "Mon, 02 Jan 2006 15:04:05 MST"`), not
+  the part after it that names the element.
+- As in Go, the service properties calls read no Date, so a bad one
+  does not fail them.
 - Go names that are Xo keywords: none.
