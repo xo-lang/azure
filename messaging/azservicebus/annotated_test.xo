@@ -1,0 +1,64 @@
+// AMQPAnnotatedMessage: sending, scheduling and batching AMQP messages
+// with all their sections.
+
+use std/amqp
+use std/amqptest
+use std/crypto
+
+test "a batch of annotated messages encodes as Go's MessageBatch, byte for byte" {
+  // Go: newMessageBatch(10000) and AddAMQPAnnotatedMessage of the same
+  // three messages, then toAMQPMessage().MarshalBinary() (azservicebus
+  // v1.11.0, run locally).
+  let ms: List[AMQPAnnotatedMessage] = [
+    amqp.Message{
+      header: Some(amqp.Header{durable: true, priority: 7, ttl_ms: 1500}),
+      properties: Some(amqp.Properties{message_id: amqp.Value.ULong(v: 5), subject: Some("s1"), to: Some("t1")}),
+      annotations: Some([(amqp.Value.Symbol(v: "x-opt-k"), amqp.Value.Str(v: "v"))]),
+      app_properties: Some([("a", amqp.Value.Long(v: 2))]),
+      footer: Some([(amqp.Value.Symbol(v: "f"), amqp.Value.Str(v: "x"))]),
+      body: amqp.Body.Data(sections: [b"d1", b"d2"]),
+    },
+    amqp.Message{properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: "m2")}), body: amqp.Body.Value(v: amqp.Value.Str(v: "v1"))},
+    amqp.Message{properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: "m3"), group_id: Some("g1")}), body: amqp.Body.Sequence(sections: [[amqp.Value.Long(v: 1), amqp.Value.Str(v: "x")]])},
+  ]
+  var b = MessageBatch{max_bytes: 10000, rand: os.rand}
+  for m in ms {
+    b.add_amqp_annotated_message(m)?
+  }
+  expect(b.num_bytes()) == 326
+  let env = b.envelope ?? return Err(ServiceBusErr{msg: "no envelope"})
+  let w = amqp.encode_message(env with {body: amqp.Body.Data(sections: b.encoded)}) ?? e => return Err(from_amqp(e))
+  expect(crypto.sha256(w).to_hex()) == "f27c21b5d8160958bdac529ace33d3c7d8ea4e4de81b6fa0215d714a6d719c1a"
+}
+
+test "an annotated message is sent with its sections; scheduled ones get the time annotation and an id" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    snd.send_amqp_annotated_message(amqp.Message{
+      annotations: Some([(amqp.Value.Symbol(v: "x-opt-k"), amqp.Value.Str(v: "v"))]),
+      app_properties: Some([("a", amqp.Value.Long(v: 2))]),
+      body: amqp.Body.Value(v: amqp.Value.Str(v: "as a value")),
+    })?
+    let r = c.new_receiver_for_queue("q1")?
+    let got = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(got.len()) == 1
+    expect(got[0].raw_amqp_message.body) == amqp.Body.Value(v: amqp.Value.Str(v: "as a value"))
+    expect(got[0].application_properties.get("a")) == Some(amqp.Value.Long(v: 2))
+    expect(lookup(got[0].raw_amqp_message.annotations ?? [], "x-opt-k")) == Some(amqp.Value.Str(v: "v"))
+    r.complete_message(got[0])?
+    let at = Time.from_unix_millis(os.clock.now().unix_millis() + 3600 * 1000)
+    let seqs = snd.schedule_amqp_annotated_messages([amqp.Message{body: amqp.Body.Data(sections: [b"later"])}], at)?
+    expect(seqs.len()) == 1
+    let sch = b.scheduled("q1")
+    expect(sch.len()) == 1
+    expect(lookup(sch[0].annotations ?? [], "x-opt-scheduled-enqueue-time")) == Some(amqp.Value.Timestamp(ms: at.unix_millis()))
+    expect(sch[0].properties.and_then(fn(p: amqp.Properties) -> Str? { val_str(p.message_id) }).map(fn(id: Str) -> Int { id.len() })) == Some(36)
+    c.close()?
+    s.cancel()
+  }
+}

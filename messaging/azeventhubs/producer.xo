@@ -143,20 +143,29 @@ fn payload_size(n: Int) -> Int {
 /// The batch's partition key as a message annotation.
 fn (b: EventDataBatch) keyed(m: amqp.Message) -> amqp.Message {
   let pk = b.partition_key ?? return m
-  var anns = m.annotations ?? []
-  anns.push((amqp.Value.Symbol(v: PARTITION_KEY), amqp.Value.Str(v: pk)))
-  m with {annotations: Some(anns)}
+  m with {annotations: Some(set_annotation(m.annotations ?? [], PARTITION_KEY, amqp.Value.Str(v: pk)))}
 }
 
 /// Adds an event (given a message id when it has none, and the batch's
 /// partition key, as Go's); ERR_EVENT_DATA_TOO_LARGE when it would pass
 /// the limit.
 pub fn (var b: EventDataBatch) add_event_data(event: EventData, options: AddEventDataOptions = AddEventDataOptions{}) -> () ! EventHubsErr uses rand {
-  var e = event
-  if (e.message_id ?? "") == "" {
-    e.message_id = Some(uuid.v4(b.rand).display())
+  b.add_amqp(event.to_amqp())
+}
+
+/// Adds an AMQP message with all its sections, as add_event_data.
+pub fn (var b: EventDataBatch) add_amqp_annotated_message(annotated_message: AMQPAnnotatedMessage, options: AddEventDataOptions = AddEventDataOptions{}) -> () ! EventHubsErr uses rand {
+  b.add_amqp(annotated_to_amqp(annotated_message))
+}
+
+/// Go's addAMQPMessage: a UUID message id when it has none (Null or ""),
+/// the partition key, then the size check.
+fn (var b: EventDataBatch) add_amqp(m: amqp.Message) -> () ! EventHubsErr uses rand {
+  var p = m.properties ?? amqp.Properties{}
+  if p.message_id == amqp.Value.Null || p.message_id == amqp.Value.Str(v: "") {
+    p.message_id = amqp.Value.Str(v: uuid.v4(b.rand).display())
   }
-  let am = b.keyed(e.to_amqp())
+  let am = b.keyed(m with {properties: Some(p)})
   let bs = amqp.encode_message(am) ?? x => return Err(from_amqp(x))
   var size = b.size
   var envelope = b.envelope

@@ -15,6 +15,10 @@ What it does:
   authorized with a CBS put-token first.
 - Sending one message, batches, scheduling and cancelling scheduled
   messages.
+- `AMQPAnnotatedMessage` (std/amqp's `Message`, every section):
+  `send_amqp_annotated_message`, `schedule_amqp_annotated_messages` and
+  `add_amqp_annotated_message`, sent as Go's (a batch of them checked
+  byte for byte against Go's).
 - Receiving in peek-lock or receive-and-delete mode, from queues,
   subscriptions and their dead letter sub-queues; complete, abandon,
   defer and dead letter (on the link, or on `$management` for deferred

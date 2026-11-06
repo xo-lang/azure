@@ -97,6 +97,13 @@ pub fn (s: Sender) send_message(message: Message, options: SendMessageOptions = 
   s.send_amqp(message.to_amqp())
 }
 
+pub struct SendAMQPAnnotatedMessageOptions {}
+
+/// Sends an AMQP message with all its sections, as send_message.
+pub fn (s: Sender) send_amqp_annotated_message(message: AMQPAnnotatedMessage, options: SendAMQPAnnotatedMessageOptions = SendAMQPAnnotatedMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.send_amqp(annotated_to_amqp(message))
+}
+
 pub struct MessageBatchOptions {
   /// The batch's size limit in bytes; 0 for the link's: its
   /// `com.microsoft:max-message-batch-size` property, else its max
@@ -160,11 +167,24 @@ fn payload_size(n: Int) -> Int {
 /// Adds a message (given a message id when it has none, as Go's);
 /// ERR_MESSAGE_TOO_LARGE when it would pass the limit.
 pub fn (var b: MessageBatch) add_message(m: Message, options: AddMessageOptions = AddMessageOptions{}) -> () ! ServiceBusErr uses rand {
-  var msg = m
-  if (msg.message_id ?? "") == "" {
-    msg.message_id = Some(uuid.v4(b.rand).display())
+  b.add_amqp(m.to_amqp())
+}
+
+pub struct AddAMQPAnnotatedMessageOptions {}
+
+/// Adds an AMQP message with all its sections, as add_message.
+pub fn (var b: MessageBatch) add_amqp_annotated_message(m: AMQPAnnotatedMessage, options: AddAMQPAnnotatedMessageOptions = AddAMQPAnnotatedMessageOptions{}) -> () ! ServiceBusErr uses rand {
+  b.add_amqp(annotated_to_amqp(m))
+}
+
+/// Go's addAMQPMessage: a UUID message id when it has none (Null or
+/// ""), then the size check.
+fn (var b: MessageBatch) add_amqp(m: amqp.Message) -> () ! ServiceBusErr uses rand {
+  var p = m.properties ?? amqp.Properties{}
+  if p.message_id == amqp.Value.Null || p.message_id == amqp.Value.Str(v: "") {
+    p.message_id = amqp.Value.Str(v: uuid.v4(b.rand).display())
   }
-  let am = msg.to_amqp()
+  let am = m with {properties: Some(p)}
   let bs = amqp.encode_message(am) ?? e => return Err(from_amqp(e))
   var size = b.size
   var envelope = b.envelope
@@ -209,23 +229,41 @@ pub struct ScheduleMessagesOptions {}
 /// Schedules the messages to appear at `scheduled_enqueue_time` and
 /// returns their sequence numbers, to cancel them with.
 pub fn (s: Sender) schedule_messages(messages: List[Message], scheduled_enqueue_time: Time, options: ScheduleMessagesOptions = ScheduleMessagesOptions{}) -> List[Int] ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.schedule_amqp(messages.map(fn(m: Message) -> amqp.Message { m.to_amqp() }), scheduled_enqueue_time)
+}
+
+pub struct ScheduleAMQPAnnotatedMessagesOptions {}
+
+/// Schedules AMQP messages with all their sections, as schedule_messages.
+pub fn (s: Sender) schedule_amqp_annotated_messages(messages: List[AMQPAnnotatedMessage], scheduled_enqueue_time: Time, options: ScheduleAMQPAnnotatedMessagesOptions = ScheduleAMQPAnnotatedMessagesOptions{}) -> List[Int] ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.schedule_amqp(messages.map(annotated_to_amqp), scheduled_enqueue_time)
+}
+
+/// Go's internal ScheduleMessages: each message gets the scheduled time
+/// annotation and a UUID id when it has none, and goes as an entry with
+/// its id, encoding, session id and partition keys.
+fn (s: Sender) schedule_amqp(messages: List[amqp.Message], t: Time) -> List[Int] ! ServiceBusErr uses (net.dial, clock, rand) {
   if messages.is_empty() {
     return Err(ServiceBusErr{msg: "expected one or more messages"})
   }
   var entries: List[amqp.Value] = []
   for m0 in messages {
-    var m = m0
-    m.scheduled_enqueue_time = Some(scheduled_enqueue_time)
-    if m.message_id.is_none() {
-      m.message_id = Some(uuid.v4(s.client.rand).display())
+    let anns = m0.annotations ?? return Err(ServiceBusErr{msg: "message does not have an initialized Annotations property"})
+    var p = m0.properties ?? amqp.Properties{}
+    if p.message_id == amqp.Value.Null {
+      p.message_id = amqp.Value.Str(v: uuid.v4(s.client.rand).display())
     }
-    let bs = amqp.encode_message(m.to_amqp()) ?? e => return Err(from_amqp(e))
-    var e: List[(amqp.Value, amqp.Value)] = [(key("message-id"), amqp.Value.Str(v: m.message_id ?? "")), (key("message"), amqp.Value.Binary(v: bs))]
-    if let Some(sid) = m.session_id {
+    let m = m0 with {annotations: Some(set_annotation(anns, SCHEDULED_ENQUEUE_TIME, amqp.Value.Timestamp(ms: t.unix_millis()))), properties: Some(p)}
+    let bs = amqp.encode_message(m) ?? e => return Err(from_amqp(e))
+    var e: List[(amqp.Value, amqp.Value)] = [(key("message-id"), p.message_id), (key("message"), amqp.Value.Binary(v: bs))]
+    if let Some(sid) = p.group_id {
       e.push((key("session-id"), amqp.Value.Str(v: sid)))
     }
-    if let Some(pk) = m.partition_key {
+    if let Some(pk) = lookup(m.annotations ?? [], PARTITION_KEY).and_then(val_str) {
       e.push((key("partition-key"), amqp.Value.Str(v: pk)))
+    }
+    if let Some(vpk) = lookup(m.annotations ?? [], "x-opt-via-partition-key").and_then(val_str) {
+      e.push((key("via-partition-key"), amqp.Value.Str(v: vpk)))
     }
     entries.push(amqp.Value.Map(pairs: e))
   }

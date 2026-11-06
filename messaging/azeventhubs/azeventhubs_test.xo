@@ -312,3 +312,41 @@ test "after a forced detach the producer and the partition client attach again; 
     s.cancel()
   }
 }
+
+fn annotated_vectors() -> List[AMQPAnnotatedMessage] {
+  [
+    amqp.Message{
+      header: Some(amqp.Header{durable: true, priority: 7, ttl_ms: 1500}),
+      properties: Some(amqp.Properties{message_id: amqp.Value.ULong(v: 5), subject: Some("s1"), to: Some("t1")}),
+      annotations: Some([(amqp.Value.Symbol(v: "x-opt-k"), amqp.Value.Str(v: "v"))]),
+      app_properties: Some([("a", amqp.Value.Long(v: 2))]),
+      footer: Some([(amqp.Value.Symbol(v: "f"), amqp.Value.Str(v: "x"))]),
+      body: amqp.Body.Data(sections: [b"d1", b"d2"]),
+    },
+    amqp.Message{properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: "m2")}), body: amqp.Body.Value(v: amqp.Value.Str(v: "v1"))},
+    amqp.Message{properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: "m3"), group_id: Some("g1")}), body: amqp.Body.Sequence(sections: [[amqp.Value.Long(v: 1), amqp.Value.Str(v: "x")]])},
+  ]
+}
+
+test "annotated messages encode and batch as Go's AMQPAnnotatedMessage, byte for byte" {
+  // Go: AMQPAnnotatedMessage.toAMQPMessage().MarshalBinary() and
+  // AddAMQPAnnotatedMessage into a keyed batch (azeventhubs v1.4.0, run
+  // locally).
+  let want = [
+    (116, "4511ccc0b7bb6397beb5d660d205d3e01f4224cf1a35facdb0ab0bf188637afd"),
+    (35, "890fc576894c33f47ee4f4f388628d0f657216c69bbace9a609c77b94a228787"),
+    (58, "b23a5c780d86338f5be58df4968b94ce46fc4a1722a082c8d1999305f28cc7e4"),
+  ]
+  let ms = annotated_vectors()
+  for i in 0..3 {
+    let w = amqp.encode_message(annotated_to_amqp(ms[i])) ?? e => return Err(from_amqp(e))
+    expect((w.len(), crypto.sha256(w).to_hex())) == want[i]
+  }
+  var b = EventDataBatch{max_bytes: 10000, rand: os.rand, partition_id: None, partition_key: Some("k1")}
+  for m in ms {
+    b.add_amqp_annotated_message(m)?
+  }
+  expect(b.num_bytes()) == 426
+  let w = wire(b)?
+  expect(crypto.sha256(w).to_hex()) == "de816fa62393b80a2104dabf7d12d916885396c9efc3248ff8eef1055a14063c"
+}

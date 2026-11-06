@@ -22,6 +22,9 @@ What it does:
   gets a UUID message id when it has none. The sizes and the encoded
   transfer match Go's byte for byte (checked against Go's own
   EventDataBatch).
+- `AMQPAnnotatedMessage` (std/amqp's `Message`, every section) added
+  to a batch with `add_amqp_annotated_message`, sent with a properties
+  and an annotations section as Go's (checked byte for byte).
 - Partition clients for a consumer group with Go's start positions
   (earliest, latest, offset, sequence number, enqueued time, inclusive
   or not) as selector filters, an owner level (`com.microsoft:epoch`;
@@ -75,8 +78,7 @@ Where it differs from Go v1.4.0:
   its lists hold only the asked hub and group.
 
 Not yet: the Blob checkpoint store (`checkpoints` package, over
-azblob), `AMQPAnnotatedMessage` (`add_amqp_annotated_message`), web
-sockets and custom endpoints.
+azblob), web sockets and custom endpoints.
 
 Tests run against std/amqptest's in-process broker in its event hub
 mode on the test world's network (`xo test .`).
