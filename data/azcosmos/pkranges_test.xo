@@ -1,0 +1,228 @@
+// ReadFeedRanges and the partition key range cache, compared with Go's
+// azcosmos v1.5.0 on the same fake account (pkvectors_test.xo), and the
+// routing map's rules.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+struct FeedAnswer {
+  status: Int
+  etag: Str = ""
+  body: Str = ""
+}
+
+struct PkFake {
+  log: Mutex[List[Str]]
+  feeds: Mutex[Map[Str, List[FeedAnswer]]]
+}
+
+fn rng(id: Str, lo: Str, hi: Str, parents: List[Str] = []) -> Str {
+  let p = if parents.is_empty() { "" } else { ",\"parents\":[\"${parents.join("\",\"")}\"]" }
+  "{\"id\":\"${id}\",\"_rid\":\"r${id}\",\"minInclusive\":\"${lo}\",\"maxExclusive\":\"${hi}\"${p}}"
+}
+
+fn ranges_body(rs: List[Str]) -> Str {
+  "{\"_rid\":\"cr\",\"PartitionKeyRanges\":[${rs.join(",")}],\"_count\":${rs.len()}}"
+}
+
+fn (f: PkFake) answer(req: http.Request) -> http.Response {
+  let p = req.escaped_path()
+  var line = "${req.method} ${p}"
+  for k in ["A-IM", "x-ms-max-item-count", "If-None-Match"] {
+    if let Some(v) = req.header(k) { line = "${line} ${k}=${v}" }
+  }
+  if p == "/" {
+    return js_resp(200, "{\"id\":\"acct1\",\"writableLocations\":[],\"readableLocations\":[]}")
+  }
+  f.log.with(fn(var l: List[Str]) { l.push(line) })
+  let segs = p.split("/")
+  let c = segs[4]
+  if p.ends_with("/pkranges") {
+    let a = f.feeds.with(fn(var m: Map[Str, List[FeedAnswer]]) -> FeedAnswer {
+      let q = m.get(c) ?? []
+      if q.is_empty() {
+        return FeedAnswer{status: 304}
+      }
+      m[c] = q[1..q.len()]
+      q[0]
+    })
+    let body = if a.status >= 400 && a.body == "" { "{\"code\":\"Err\",\"message\":\"x\"}" } else { a.body }
+    let r = js_resp(a.status, body)
+    return if a.etag != "" { r.with_header("etag", a.etag) } else { r }
+  }
+  if c == "missing" {
+    return js_resp(404, "{\"code\":\"Err\",\"message\":\"x\"}")
+  }
+  js_resp(200, "{\"id\":\"${c}\",\"_rid\":\"rid-${c}\",\"partitionKey\":{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}}")
+}
+
+fn pk_serve(net: testing.FakeNet) -> PkFake {
+  let f = PkFake{log: Mutex[List[Str]].new([]), feeds: Mutex[Map[Str, List[FeedAnswer]]].new({})}
+  let h = fn(req: http.Request) -> http.Response { f.answer(req) }
+  for path in ["/", "/{a}/{b}/{c}/{d}", "/{a}/{b}/{c}/{d}/{e}"] {
+    net.handle("GET ${EP}${path}", h)
+  }
+  f
+}
+
+fn (f: PkFake) feed(c: Str, answers: List[FeedAnswer]) {
+  f.feeds.with(fn(var m: Map[Str, List[FeedAnswer]]) { m[c] = answers })
+}
+
+fn (f: PkFake) take() -> List[Str] {
+  f.log.with(fn(var l: List[Str]) -> List[Str] {
+    let xs = l
+    l = []
+    xs
+  })
+}
+
+fn pk_client(net: Net, clock: Clock, rand: Rand) -> Client ! Str {
+  let cred = new_key_credential(KEY)?
+  Ok(new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}))
+}
+
+test "ReadFeedRanges sends what Go sends and gives the caller what Go gives" {
+  let f = pk_serve(os.net)
+  let e1 = "\"e1\""
+  f.feed("c1", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("0", "", "FF"), rng("1", "", "80", ["0"]), rng("2", "80", "FF", ["0"])])}, FeedAnswer{status: 304, etag: e1}])
+  f.feed("c2", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "40"), rng("2", "40", "80")])}, FeedAnswer{status: 200, etag: "\"e2\"", body: ranges_body([rng("3", "80", "FF")])}])
+  f.feed("c3", [FeedAnswer{status: 429}, FeedAnswer{status: 429}, FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "FF")])}])
+  f.feed("c4", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "40"), rng("2", "80", "FF")])}])
+  f.feed("c5", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "05C1", "FF")])}])
+  f.feed("c6", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "80"), rng("2", "70", "FF")])}])
+  f.feed("c7", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "80")])}])
+  f.feed("c8", [FeedAnswer{status: 500}, FeedAnswer{status: 500}])
+  f.feed("c9", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("b", "80", ""), rng("a", "", "80")])}])
+  f.feed("c10", [FeedAnswer{status: 200, etag: e1, body: "{\"PartitionKeyRanges\":[]}"}])
+  f.feed("c11", [FeedAnswer{status: 200, etag: e1, body: "not json"}])
+
+  let c = pk_client(os.net, os.clock, os.rand)?
+  var out: List[Str] = []
+  let report = fn(name: Str, r: Result[List[FeedRange], azcore.CallErr]) -> List[Str] {
+    var add = ["== ${name}"]
+    for l in f.take() { add.push("  ${l}") }
+    match r {
+      Ok(frs) => {
+        for x in frs { add.push("  range [${x.min_inclusive}, ${x.max_exclusive})") }
+        add.push("  ok")
+      }
+      Err(azcore.CallErr.Response(e)) => add.push("  error status ${e.status_code}")
+      Err(azcore.CallErr.Decode(m)) if m.starts_with("partition key range cache") => add.push("  error ${m}")
+      Err(_) => add.push("  error other")
+    }
+    add
+  }
+  let rf = fn(id: Str) -> Result[List[FeedRange], azcore.CallErr] uses (net.dial, clock, rand) {
+    let ct = c.new_container("db1", id) ?? e => return Err(e)
+    ct.read_feed_ranges()
+  }
+  out = out + report("p1 the container is read, then the feed until 304; parents are gone", rf("c1"))
+  out = out + report("p2 the second call is cached", rf("c1"))
+  out = out + report("p3 pages accumulate with each etag", rf("c2"))
+  let before = os.clock.now()
+  let r4 = rf("c3")
+  let slept = os.clock.now() - before
+  out = out + report("p4 a throttled page is retried", r4)
+  out = out + report("p5 a gap is an error", rf("c4"))
+  out = out + report("p6 a first range not at the start is an error", rf("c5"))
+  out = out + report("p7 an overlap is an error", rf("c6"))
+  out = out + report("p8 a last range short of FF is an error", rf("c7"))
+  out = out + report("p9 a failed page fails the call", rf("c8"))
+  out = out + report("p9b a failed refresh is not cached", rf("c8"))
+  out = out + report("p10 a missing container", rf("missing"))
+  out = out + report("p11 ranges are ordered by min, an empty max is the end", rf("c9"))
+  out = out + report("p12 no ranges", rf("c10"))
+  out = out + report("p13 a page that is not JSON", rf("c11"))
+  let x = c.new_container("db1", "c12")?
+  x.read()?
+  f.take()
+  f.feed("c12", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "FF")])}])
+  out = out + report("p14 a container read fills the properties cache", x.read_feed_ranges())
+
+  expect(out) == PKRANGES_OUTPUT
+  // Two throttled tries: 100ms and 200ms, each plus under 50ms of jitter.
+  expect(slept >= Duration.from_millis(300)) == true
+  expect(slept < Duration.from_millis(400)) == true
+}
+
+fn pr(id: Str, lo: Str, hi: Str, parents: List[Str] = []) -> PkRange {
+  PkRange{id: id, min_inclusive: lo, max_exclusive: hi, parents: parents}
+}
+
+fn ids(rs: List[PkRange]) -> List[Str] {
+  rs.map(fn(r: PkRange) -> Str { r.id })
+}
+
+test "a routing map drops parents and orders by the effective partition key" {
+  let m = new_routing_map([pr("2", "80", "FF", ["0"]), pr("0", "", "FF"), pr("1", "", "80", ["0"])], "e1")
+  expect(ids(m.ordered)) == ["1", "2"]
+  expect(m.is_gone("0")) == true
+  expect(m.is_gone("1")) == false
+  // Trailing zeros do not order: "8" and "80" are the same key.
+  let z = new_routing_map([pr("b", "81", "FF"), pr("a", "8", "81"), pr("s", "", "8")], "")
+  expect(ids(z.ordered)) == ["s", "a", "b"]
+  expect(is_complete_set(z.ordered)) == true
+}
+
+test "try_combine applies a split and refuses an incomplete result" {
+  let m = new_routing_map([pr("1", "", "80"), pr("2", "80", "FF")], "e1")
+  let split = m.try_combine([pr("3", "80", "C0", ["2"]), pr("4", "C0", "FF", ["2"])], "e2") ?? fault("no combine")
+  expect(ids(split.ordered)) == ["1", "3", "4"]
+  expect(split.etag) == "e2"
+  expect(split.is_gone("2")) == true
+  // Half a split leaves a gap.
+  expect(m.try_combine([pr("3", "80", "C0", ["2"])], "e2").is_none()) == true
+  // A merge.
+  let merged = split.try_combine([pr("5", "80", "FF", ["3", "4"])], "e3") ?? fault("no combine")
+  expect(ids(merged.ordered)) == ["1", "5"]
+}
+
+test "overlapping ranges, as Go's getOverlappingRanges" {
+  let m = new_routing_map([pr("1", "", "40"), pr("2", "40", "80"), pr("3", "80", "FF")], "")
+  expect(ids(m.overlapping("", "FF"))) == ["1", "2", "3"]
+  expect(ids(m.overlapping("40", "80"))) == ["2"]
+  expect(ids(m.overlapping("50", "90"))) == ["2", "3"]
+  expect(ids(m.overlapping("", "40"))) == ["1"]
+  expect(ids(m.overlapping("90", "90"))) == ["3"]
+  expect(ids(new_routing_map([], "").overlapping("", "FF"))) == []
+}
+
+test "feed ranges overlap partition key ranges with an empty max as the end" {
+  let rs = [pr("1", "", "40"), pr("2", "40", "80"), pr("3", "80", "")]
+  expect(ids(overlapping_ranges(FeedRange{min_inclusive: "30", max_exclusive: "90"}, rs))) == ["1", "2", "3"]
+  expect(ids(overlapping_ranges(FeedRange{min_inclusive: "40", max_exclusive: ""}, rs))) == ["2", "3"]
+  expect(ids(overlapping_ranges(FeedRange{min_inclusive: "80", max_exclusive: "80"}, rs))) == []
+}
+
+test "describe_discontinuity names the first problem" {
+  expect(describe_discontinuity([])) == "no ranges returned"
+  expect(describe_discontinuity([pr("1", "", "40"), pr("2", "40", "FF")])) == ""
+  expect(describe_discontinuity([pr("1", "", "")])) == ""
+}
+
+test "an incremental refresh combines the feed's changes from the cached etag" {
+  let f = pk_serve(os.net)
+  f.feed("c1", [FeedAnswer{status: 200, etag: "\"e1\"", body: ranges_body([rng("1", "", "80"), rng("2", "80", "FF")])}])
+  let ct = pk_client(os.net, os.clock, os.rand)?.new_container("db1", "c1")?
+  expect(ct.read_feed_ranges()?.len()) == 2
+  f.take()
+  f.feed("c1", [FeedAnswer{status: 200, etag: "\"e2\"", body: ranges_body([rng("3", "80", "C0", ["2"]), rng("4", "C0", "FF", ["2"])])}])
+  let m = ct.refresh_routing_map("rid-c1", false)?
+  expect(ids(m.ordered)) == ["1", "3", "4"]
+  expect(f.take()) == [
+    "GET /dbs/db1/colls/c1/pkranges A-IM=Incremental Feed x-ms-max-item-count=-1 If-None-Match=\"e1\"",
+    "GET /dbs/db1/colls/c1/pkranges A-IM=Incremental Feed x-ms-max-item-count=-1 If-None-Match=\"e2\"",
+  ]
+  // Nothing new keeps the map; an invalidated refresh reads it all.
+  expect(ids(ct.refresh_routing_map("rid-c1", false)?.ordered)) == ["1", "3", "4"]
+  f.take()
+  f.feed("c1", [FeedAnswer{status: 200, etag: "\"e9\"", body: ranges_body([rng("1", "", "FF")])}])
+  expect(ids(ct.refresh_routing_map("rid-c1", true)?.ordered)) == ["1"]
+  expect(f.take()) == [
+    "GET /dbs/db1/colls/c1/pkranges A-IM=Incremental Feed x-ms-max-item-count=-1",
+    "GET /dbs/db1/colls/c1/pkranges A-IM=Incremental Feed x-ms-max-item-count=-1 If-None-Match=\"e9\"",
+  ]
+  expect(ct.read_feed_ranges()?.len()) == 1
+}

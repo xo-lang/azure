@@ -1,0 +1,364 @@
+// Partition key ranges and their cache, as azcosmos's
+// cosmos_partition_key_range.go, cosmos_collection_routing_map.go,
+// cosmos_partition_key_range_cache.go, cosmos_container_properties_cache.go
+// and cosmos_feed_range.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): a container's ranges read through the pkranges change feed,
+// kept per container resource id, and refreshed incrementally from the
+// feed's etag.
+
+use std/json
+use github.com/xo-lang/azure/azcore
+
+/// A range of effective partition keys, [min_inclusive, max_exclusive);
+/// "" as the minimum is the start and "FF" (or "") as the maximum the end.
+pub struct FeedRange {
+  pub min_inclusive: Str = ""
+  pub max_exclusive: Str = ""
+}
+
+/// One partition key range as the service lists it.
+struct PkRange {
+  id: Str
+  min_inclusive: Str = ""
+  max_exclusive: Str = ""
+  /// The ranges this one was split or merged from; they are gone.
+  parents: List[Str] = []
+}
+
+fn pk_range_of(v: json.Value) -> PkRange {
+  PkRange{id: str_of(v, "id"), min_inclusive: str_of(v, "minInclusive"), max_exclusive: str_of(v, "maxExclusive"), parents: strs_of(v, "parents")}
+}
+
+/// The order of CompareEPK as a sort key: with hex digits, comparing with
+/// zero-padded tails equal is comparing with trailing zeros dropped.
+fn epk_key(s: Str) -> Str {
+  s.trim_end_chars("0")
+}
+
+fn sorted_ranges(rs: List[PkRange]) -> List[PkRange] {
+  rs.sort_by(fn(r: PkRange) -> Str { epk_key(r.min_inclusive) })
+}
+
+/// Go's collectionRoutingMap: the current ranges in order, by id, the
+/// gone ids, and the change feed's etag.
+struct RoutingMap {
+  ordered: List[PkRange] = []
+  by_id: Map[Str, PkRange] = {}
+  gone: Map[Str, Bool] = {}
+  etag: Str = ""
+}
+
+fn new_routing_map(ranges: List[PkRange], etag: Str) -> RoutingMap {
+  var gone: Map[Str, Bool] = {}
+  for r in ranges {
+    for p in r.parents { gone[p] = true }
+  }
+  let live = sorted_ranges(ranges.filter(fn(r: PkRange) -> Bool { !gone.contains(r.id) }))
+  var by_id: Map[Str, PkRange] = {}
+  for r in live { by_id[r.id] = r }
+  RoutingMap{ordered: live, by_id: by_id, gone: gone, etag: etag}
+}
+
+/// The map with `new_ranges` (a change feed's pages) applied; None when
+/// the result does not cover the whole key space.
+fn (m: RoutingMap) try_combine(new_ranges: List[PkRange], new_etag: Str) -> RoutingMap? {
+  var gone = m.gone
+  for r in new_ranges {
+    for p in r.parents { gone[p] = true }
+  }
+  var by_id: Map[Str, PkRange] = {}
+  for (id, r) in m.by_id.entries() {
+    if !gone.contains(id) { by_id[id] = r }
+  }
+  for r in new_ranges {
+    if !gone.contains(r.id) { by_id[r.id] = r }
+  }
+  let combined = sorted_ranges(by_id.values())
+  if !is_complete_set(combined) {
+    return None
+  }
+  Some(RoutingMap{ordered: combined, by_id: by_id, gone: gone, etag: new_etag})
+}
+
+fn (m: RoutingMap) is_gone(id: Str) -> Bool {
+  m.gone.contains(id)
+}
+
+/// The ranges that overlap [min_inclusive, max_exclusive), as Go's
+/// getOverlappingRanges (at least one when there are any).
+fn (m: RoutingMap) overlapping(min_inclusive: Str, max_exclusive: Str) -> List[PkRange] {
+  let n = m.ordered.len()
+  if n == 0 {
+    return []
+  }
+  var start = 0
+  while start < n && compare_epk(m.ordered[start].min_inclusive, min_inclusive) <= 0 { start += 1 }
+  start = if start - 1 < 0 { 0 } else { start - 1 }
+  var end = start
+  while end < n && compare_epk(m.ordered[end].min_inclusive, max_exclusive) < 0 { end += 1 }
+  if end <= start { end = start + 1 }
+  if end > n { end = n }
+  m.ordered[start..end]
+}
+
+fn is_complete_set(rs: List[PkRange]) -> Bool {
+  if rs.is_empty() || rs[0].min_inclusive != "" {
+    return false
+  }
+  for i in 1..rs.len() {
+    if compare_epk(rs[i].min_inclusive, rs[i - 1].max_exclusive) != 0 {
+      return false
+    }
+  }
+  let last = rs[rs.len() - 1].max_exclusive
+  last == "FF" || last == ""
+}
+
+/// Go's describeRangeDiscontinuity, word for word.
+fn describe_discontinuity(rs: List[PkRange]) -> Str {
+  if rs.is_empty() {
+    return "no ranges returned"
+  }
+  if rs[0].min_inclusive != "" {
+    return "first range (id=${rs[0].id}) starts at ${jstr(rs[0].min_inclusive)} instead of \"\""
+  }
+  for i in 1..rs.len() {
+    let c = compare_epk(rs[i].min_inclusive, rs[i - 1].max_exclusive)
+    if c > 0 {
+      return "gap between range id=${rs[i - 1].id} (max=${rs[i - 1].max_exclusive}) and range id=${rs[i].id} (min=${rs[i].min_inclusive})"
+    }
+    if c < 0 {
+      return "overlap between range id=${rs[i - 1].id} (max=${rs[i - 1].max_exclusive}) and range id=${rs[i].id} (min=${rs[i].min_inclusive})"
+    }
+  }
+  let last = rs[rs.len() - 1]
+  if last.max_exclusive != "FF" && last.max_exclusive != "" {
+    return "last range (id=${last.id}) ends at ${jstr(last.max_exclusive)} instead of \"FF\""
+  }
+  ""
+}
+
+/// Go's normalizeMaxBoundary.
+fn normalize_max(max_exclusive: Str) -> Str {
+  if max_exclusive == "" { "FF" } else { max_exclusive }
+}
+
+fn ranges_overlap(a_min: Str, a_max: Str, b_min: Str, b_max: Str) -> Bool {
+  compare_epk(a_max, b_min) > 0 && compare_epk(b_max, a_min) > 0
+}
+
+/// The ranges that overlap `fr`, in their order (Go's
+/// overlappingPartitionKeyRanges).
+fn overlapping_ranges(fr: FeedRange, rs: List[PkRange]) -> List[PkRange] {
+  let lo = fr.min_inclusive
+  let hi = normalize_max(fr.max_exclusive)
+  if compare_epk(lo, hi) >= 0 {
+    return []
+  }
+  rs.filter(fn(r: PkRange) -> Bool { ranges_overlap(lo, hi, r.min_inclusive, normalize_max(r.max_exclusive)) })
+}
+
+// The caches.
+
+/// Go's client-level caches: container properties by link and routing
+/// maps by container resource id. Each entry has its own lock, held
+/// while it is read or refreshed, so one container's callers share one
+/// read (Go's single flight) and other containers' callers do not wait.
+struct Caches {
+  containers: Mutex[Map[Str, Mutex[ContainerProperties?]]]
+  routing: Mutex[Map[Str, Mutex[RoutingMap?]]]
+}
+
+fn new_caches() -> Caches {
+  Caches{containers: Mutex.new({}), routing: Mutex.new({})}
+}
+
+fn entry_of[T](m: Mutex[Map[Str, Mutex[T]]], key: Str, init: T) -> Mutex[T] {
+  m.with(fn(var es: Map[Str, Mutex[T]]) -> Mutex[T] {
+    match es.get(key) {
+      Some(e) => e
+      None => {
+        let e = Mutex.new(init)
+        es[key] = e
+        e
+      }
+    }
+  })
+}
+
+/// Records what a read or replace of the container returned.
+fn (c: ContainerClient) cache_properties(r: ContainerResponse) {
+  if let Some(p) = r.container_properties {
+    let e = entry_of(c.core.caches.containers, c.link, None)
+    e.with(fn(var v: ContainerProperties?) { v = Some(p) })
+  }
+}
+
+/// The container's properties, read once (Go's getProperties).
+fn (c: ContainerClient) cached_properties() -> ContainerProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  let e = entry_of(c.core.caches.containers, c.link, None)
+  let out = e.with(fn(var v: ContainerProperties?) -> Result[ContainerProperties, azcore.CallErr] uses (net.dial, clock, rand) {
+    if let Some(p) = v {
+      return Ok(p)
+    }
+    let r = match c.read_raw() {
+      Ok(r) => r
+      Err(e) => return Err(e)
+    }
+    match r.container_properties {
+      Some(p) => {
+        v = Some(p)
+        Ok(p)
+      }
+      None => Err(azcore.CallErr.Decode("container properties response contained no properties"))
+    }
+  })
+  out
+}
+
+/// Forgets the container's properties (Go's invalidate).
+fn (c: ContainerClient) invalidate_properties() {
+  let e = entry_of(c.core.caches.containers, c.link, None)
+  e.with(fn(var v: ContainerProperties?) { v = None })
+}
+
+fn (c: ContainerClient) container_rid() -> Str ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(c.cached_properties()?.resource_id)
+}
+
+/// The container's routing map, read on first use (Go's getRoutingMap).
+fn (c: ContainerClient) routing_map() -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+  let rid = c.container_rid()?
+  let e = entry_of(c.core.caches.routing, rid, None)
+  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand) {
+    if let Some(m) = v {
+      return Ok(m)
+    }
+    match refresh_routing(c.core, c.link, None) {
+      Ok(m) => {
+        v = Some(m)
+        Ok(m)
+      }
+      Err(e) => Err(e)
+    }
+  })
+  out
+}
+
+/// Reads the routing map again from the cached one's etag, or in full
+/// when it has none or the changes do not combine (Go's forceRefresh
+/// after invalidate: an invalidated entry refreshes in full).
+fn (c: ContainerClient) refresh_routing_map(rid: Str, invalidate: Bool) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+  let e = entry_of(c.core.caches.routing, rid, None)
+  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand) {
+    let prev = if invalidate { None } else { v }
+    match refresh_routing(c.core, c.link, prev) {
+      Ok(m) => {
+        v = Some(m)
+        Ok(m)
+      }
+      Err(e) => {
+        if invalidate { v = None }
+        Err(e)
+      }
+    }
+  })
+  out
+}
+
+// The pkranges change feed.
+
+const MAX_CHANGE_FEED_ITERATIONS: Int = 1000
+/// Go retries a throttled page until its context ends; with no context,
+/// the port stops after this many throttled tries of one page.
+const MAX_THROTTLED_PAGE_TRIES: Int = 100
+
+struct FeedPage {
+  ranges: List[PkRange] = []
+  etag: Str = ""
+  not_modified: Bool = false
+}
+
+fn fetch_page(core: Core, link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = [("A-IM", "Incremental Feed"), ("x-ms-max-item-count", "-1")]
+  if etag != "" { hs.push(("If-None-Match", etag)) }
+  let resp = core.send(Call{method: "GET", path: "${link}/pkranges", headers: hs})?
+  let new_etag = resp.header("etag") ?? ""
+  if resp.status == 304 {
+    return Ok(FeedPage{etag: new_etag, not_modified: true})
+  }
+  let v = parse_json(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(FeedPage{ranges: list_of(v, "PartitionKeyRanges").map(pk_range_of), etag: new_etag})
+}
+
+/// Go's fetchOneChangeFeedPageWithRetry: a 429 waits 100ms per try so
+/// far (at most 5s) plus up to 50ms of jitter.
+fn fetch_page_with_retry(core: Core, link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand) {
+  for attempt in 0..MAX_THROTTLED_PAGE_TRIES - 1 {
+    match fetch_page(core, link, etag) {
+      Ok(p) => return Ok(p)
+      Err(azcore.CallErr.Response(e)) if e.status_code == 429 => {
+        let n = if attempt + 1 > 50 { 50 } else { attempt + 1 }
+        core.clock.sleep(Duration.from_millis(n * 100 + core.rand.int(0, 50)))
+      }
+      Err(e) => return Err(e)
+    }
+  }
+  fetch_page(core, link, etag)
+}
+
+struct FeedResult {
+  ranges: List[PkRange] = []
+  etag: Str = ""
+  /// Whether the feed ended with 304 Not Modified.
+  completed: Bool = false
+}
+
+fn fetch_all_pages(core: Core, link: Str, start_etag: Str) -> FeedResult ! azcore.CallErr uses (net.dial, clock, rand) {
+  var all: List[PkRange] = []
+  var etag = start_etag
+  for _ in 0..MAX_CHANGE_FEED_ITERATIONS {
+    let p = fetch_page_with_retry(core, link, etag)?
+    if p.etag != "" { etag = p.etag }
+    if p.not_modified {
+      return Ok(FeedResult{ranges: all, etag: etag, completed: true})
+    }
+    all = all + p.ranges
+  }
+  Ok(FeedResult{ranges: all, etag: etag})
+}
+
+/// Go's refreshEntryDetached: the changes since `prev`'s etag combined
+/// into it, else every range from the start of the feed.
+fn refresh_routing(core: Core, link: Str, prev: RoutingMap?) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(pm) = prev {
+    if pm.etag != "" {
+      let r = fetch_all_pages(core, link, pm.etag)?
+      if r.completed {
+        if r.ranges.is_empty() {
+          return Ok(pm with {etag: r.etag})
+        }
+        if let Some(m) = pm.try_combine(r.ranges, r.etag) {
+          return Ok(m)
+        }
+      }
+    }
+  }
+  let r = fetch_all_pages(core, link, "")?
+  if !r.completed {
+    return Err(azcore.CallErr.Decode("partition key range cache refresh failed: change-feed pagination did not terminate after ${MAX_CHANGE_FEED_ITERATIONS} iterations for container ${link} (accumulated ${r.ranges.len()} ranges)"))
+  }
+  let m = new_routing_map(r.ranges, r.etag)
+  if !is_complete_set(m.ordered) {
+    return Err(azcore.CallErr.Decode("partition key range cache refresh failed: service returned an incomplete set of ranges for container ${link} (raw ranges=${r.ranges.len()}, final ranges=${m.ordered.len()}, issue: ${describe_discontinuity(m.ordered)}). This may indicate a transient issue during a partition split"))
+  }
+  Ok(m)
+}
+
+/// The container's feed ranges, one per partition key range, in order.
+/// The ranges are cached per container; Go shares its cache between
+/// clients of the same endpoint, the port within one Client.
+pub fn (c: ContainerClient) read_feed_ranges() -> List[FeedRange] ! azcore.CallErr uses (net.dial, clock, rand) {
+  let m = c.routing_map()?
+  Ok(m.ordered.map(fn(r: PkRange) -> FeedRange { FeedRange{min_inclusive: r.min_inclusive, max_exclusive: r.max_exclusive} }))
+}

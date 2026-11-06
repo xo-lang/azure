@@ -1,0 +1,245 @@
+// Effective partition keys, as azcosmos's internal/epk (MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md): a partition key's place on the
+// hash ring, MurmurHash3 x86_32 for version 1 and x64_128 for version 2
+// (hierarchical keys hash each component), and their comparison with
+// zero-padded tails equal. 64-bit words are Ints read as unsigned
+// (wrapping_mul, shr_logical, rotate_right).
+
+/// One component of a partition key as the hash sees it.
+enum EpkValue {
+  Undefined
+  Null
+  Bool(b: Bool)
+  Num(f: Float)
+  Str(s: Str)
+}
+
+const M32: Int = 0xFFFFFFFF
+
+fn byte_at(data: Bytes, i: Int) -> Int {
+  Int(data[i])
+}
+
+fn rotl32(x: Int, r: Int) -> Int {
+  ((x << r) | x.shr_logical(32 - r)) & M32
+}
+
+/// MurmurHash3 x86_32 (Go's murmurhash3_32).
+fn murmur3_32(data: Bytes, seed: Int) -> Int {
+  let c1 = 0xcc9e2d51
+  let c2 = 0x1b873593
+  var h1 = seed & M32
+  let n = data.len()
+  let rounded = n & ~3
+  var i = 0
+  while i < rounded {
+    var k1 = byte_at(data, i) | (byte_at(data, i + 1) << 8) | (byte_at(data, i + 2) << 16) | (byte_at(data, i + 3) << 24)
+    k1 = k1.wrapping_mul(c1) & M32
+    k1 = rotl32(k1, 15)
+    k1 = k1.wrapping_mul(c2) & M32
+    h1 = h1 ^ k1
+    h1 = rotl32(h1, 13)
+    h1 = (h1.wrapping_mul(5) + 0xe6546b64) & M32
+    i += 4
+  }
+  var k1 = 0
+  let tail = n & 3
+  if tail == 3 { k1 = k1 ^ (byte_at(data, rounded + 2) << 16) }
+  if tail >= 2 { k1 = k1 ^ (byte_at(data, rounded + 1) << 8) }
+  if tail >= 1 {
+    k1 = k1 ^ byte_at(data, rounded)
+    k1 = k1.wrapping_mul(c1) & M32
+    k1 = rotl32(k1, 15)
+    k1 = k1.wrapping_mul(c2) & M32
+    h1 = h1 ^ k1
+  }
+  h1 = h1 ^ n
+  h1 = h1 ^ h1.shr_logical(16)
+  h1 = h1.wrapping_mul(0x85ebca6b) & M32
+  h1 = h1 ^ h1.shr_logical(13)
+  h1 = h1.wrapping_mul(0xc2b2ae35) & M32
+  h1 ^ h1.shr_logical(16)
+}
+
+fn rotl64(v: Int, k: Int) -> Int {
+  v.rotate_right(64 - k)
+}
+
+fn fmix64(v: Int) -> Int {
+  var x = v ^ v.shr_logical(33)
+  x = x.wrapping_mul(-49064778989728563)    // 0xff51afd7ed558ccd
+  x = x ^ x.shr_logical(33)
+  x = x.wrapping_mul(-4265267296055464877)  // 0xc4ceb9fe1a85ec53
+  x ^ x.shr_logical(33)
+}
+
+fn le64(data: Bytes, at: Int) -> Int {
+  var v = 0
+  for j in 0..8 {
+    v = v | (byte_at(data, at + j).wrapping_shl(8 * j))
+  }
+  v
+}
+
+/// MurmurHash3 x64_128 (Go's murmurhash3_128): (low, high).
+fn murmur3_128(data: Bytes) -> (Int, Int) {
+  let c1 = -8663945395140668459   // 0x87c37b91114253d5
+  let c2 = 0x4cf5ad432745937f
+  var h1 = 0
+  var h2 = 0
+  let n = data.len()
+  var pos = 0
+  while pos < n - 15 {
+    var k1 = le64(data, pos)
+    var k2 = le64(data, pos + 8)
+    k1 = rotl64(k1.wrapping_mul(c1), 31).wrapping_mul(c2)
+    h1 = h1 ^ k1
+    h1 = rotl64(h1, 27).wrapping_add(h2)
+    h1 = h1.wrapping_mul(5).wrapping_add(0x52dce729)
+    k2 = rotl64(k2.wrapping_mul(c2), 33).wrapping_mul(c1)
+    h2 = h2 ^ k2
+    h2 = rotl64(h2, 31).wrapping_add(h1)
+    h2 = h2.wrapping_mul(5).wrapping_add(0x38495ab5)
+    pos += 16
+  }
+  let rest = n & 15
+  var k2 = 0
+  var j = 15
+  while j >= 9 {
+    if rest >= j { k2 = k2 ^ byte_at(data, pos + j - 1).wrapping_shl(8 * (j - 9)) }
+    j -= 1
+  }
+  k2 = rotl64(k2.wrapping_mul(c2), 33).wrapping_mul(c1)
+  h2 = h2 ^ k2
+  var k1 = 0
+  j = 8
+  while j >= 1 {
+    if rest >= j { k1 = k1 ^ byte_at(data, pos + j - 1).wrapping_shl(8 * (j - 1)) }
+    j -= 1
+  }
+  k1 = rotl64(k1.wrapping_mul(c1), 31).wrapping_mul(c2)
+  h1 = h1 ^ k1
+  h1 = h1 ^ n
+  h2 = h2 ^ n
+  h1 = h1.wrapping_add(h2)
+  h2 = h2.wrapping_add(h1)
+  h1 = fmix64(h1)
+  h2 = fmix64(h2)
+  h1 = h1.wrapping_add(h2)
+  h2 = h2.wrapping_add(h1)
+  (h1, h2)
+}
+
+/// A component's bytes for hashing; a string ends with `suffix` (0x00
+/// for version 1, 0xFF for version 2).
+fn write_for_hashing(var b: BytesBuilder, v: EpkValue, suffix: Int) {
+  match v {
+    Undefined => b.write_byte(UInt8.wrapping_from(0x00))
+    Null => b.write_byte(UInt8.wrapping_from(0x01))
+    Bool(x) => b.write_byte(UInt8.wrapping_from(if x { 0x03 } else { 0x02 }))
+    Num(f) => {
+      b.write_byte(UInt8.wrapping_from(0x05))
+      let bits = f.to_bits()
+      for j in 0..8 {
+        b.write_byte(UInt8.wrapping_from(bits.shr_logical(8 * j)))
+      }
+    }
+    Str(s) => {
+      b.write_byte(UInt8.wrapping_from(0x08))
+      b.write_str(s)
+      b.write_byte(UInt8.wrapping_from(suffix))
+    }
+  }
+}
+
+fn hex_word(v: Int, digits: Int) -> Str {
+  let hex = "0123456789ABCDEF"
+  var out = ""
+  var i = digits - 1
+  while i >= 0 {
+    let d = v.shr_logical(4 * i) & 15
+    out = out + hex[d..d + 1]
+    i -= 1
+  }
+  out
+}
+
+/// Version 1: each component's 32-bit hash, 24 zeros before each.
+fn epk_v1(values: List[EpkValue]) -> Str {
+  var out = ""
+  for v in values {
+    var b = BytesBuilder.new()
+    write_for_hashing(b, v, 0x00)
+    out = out + "000000000000000000000000" + hex_word(murmur3_32(b.freeze(), 0), 8)
+  }
+  out
+}
+
+/// The 128-bit hash as Go writes it: its 16 little-endian bytes
+/// reversed, uppercase hex (the high word, then the low word).
+fn hash128_hex(lo: Int, hi: Int) -> Str {
+  hex_word(hi, 16) + hex_word(lo, 16)
+}
+
+/// Version 2 over the whole key (Go's computeV2Hash).
+fn epk_v2(values: List[EpkValue]) -> Str {
+  var b = BytesBuilder.new()
+  for v in values {
+    write_for_hashing(b, v, 0xFF)
+  }
+  let (lo, hi) = murmur3_128(b.freeze())
+  hash128_hex(lo, hi)
+}
+
+/// Version 2 for a hierarchical key: each component hashed alone.
+fn epk_v2_multi(values: List[EpkValue]) -> Str {
+  var out = ""
+  for v in values {
+    var b = BytesBuilder.new()
+    write_for_hashing(b, v, 0xFF)
+    let (lo, hi) = murmur3_128(b.freeze())
+    out = out + hash128_hex(lo, hi)
+  }
+  out
+}
+
+/// The top two bits cleared, as the service routes (Go's
+/// maskTopBitsForRouting).
+fn mask_top_bits(h: Str) -> Str {
+  if h.len() < 2 {
+    return h
+  }
+  let first = (Int.parse_base(h[0..2], 16) ?? 0) & 0x3F
+  hex_word(first, 2) + h[2..h.len()]
+}
+
+fn epk_v2_routing(values: List[EpkValue]) -> Str {
+  mask_top_bits(epk_v2(values))
+}
+
+fn epk_v2_multi_routing(values: List[EpkValue]) -> Str {
+  var out = ""
+  for v in values {
+    out = out + mask_top_bits(epk_v2([v]))
+  }
+  out
+}
+
+/// Go's CompareEPK: the common prefix compared as strings; then the
+/// longer one's tail counts only when it is not all zeros.
+fn compare_epk(a: Str, b: Str) -> Int {
+  let n = if a.len() < b.len() { a.len() } else { b.len() }
+  let pa = a[0..n]
+  let pb = b[0..n]
+  if pa < pb {
+    return -1
+  }
+  if pa > pb {
+    return 1
+  }
+  let tail = if a.len() > b.len() { a[n..a.len()] } else { b[n..b.len()] }
+  if tail.trim_start_chars("0") == "" {
+    return 0
+  }
+  if a.len() > b.len() { 1 } else { -1 }
+}

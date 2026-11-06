@@ -39,11 +39,19 @@ What it does:
   item as the service wrote it; `success` is false on 207 Multi-Status.
 - Priority-based execution and throughput buckets, for the client and
   for each item operation or batch.
+- Feed ranges: `read_feed_ranges` lists a container's partition key
+  ranges, read through the pkranges change feed (each page's etag sent
+  back until 304 Not Modified, a 429 page retried with Go's backoff)
+  and cached per container resource id, with split and merge parents
+  dropped and an incomplete set reported as Go reports it. Effective
+  partition keys (MurmurHash3 for version 1 and 2 keys, hierarchical
+  keys per component) match Go's baselines.
 
 Each request is Go's byte for byte: the test replays Go programs' 36
 requests against the same fake account and compares the host, path and
 query as sent, the headers with the master key signature (activity ids
-normalized), and the body, and what is read back.
+normalized), and the body, and what is read back. Feed ranges replay
+15 cases of Go's requests and results against scripted feeds.
 
 Where it differs from Go v1.5.0:
 
@@ -70,9 +78,15 @@ Where it differs from Go v1.5.0:
   when 5 minutes have passed; here the call that needs it reads it
   first. The regions each attempt goes to are Go's (the test replays
   14 failover cases against Go's output).
-- Not ported yet: the partition key range cache and cross partition
-  query execution (ORDER BY, aggregates), ReadMany, the change feed,
-  throughput read and replace (offers), and vector or full text
-  policies.
+- Cross partition ORDER BY and aggregates are not supported, matching
+  Go v1.5.0 (its query engine is only in the 1.6.0 preview).
+- Go shares its container and partition key range caches between
+  clients of the same endpoint; here they belong to one `Client` and
+  the database and container clients made from it.
+- Go retries a throttled pkranges page until the call's context ends;
+  here a page gets at most 100 tries. An invalidation waits for a
+  refresh in progress instead of cancelling it.
+- Not ported yet: ReadMany, the change feed, throughput read and
+  replace (offers), and vector or full text policies.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.
