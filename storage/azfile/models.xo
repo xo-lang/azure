@@ -1,0 +1,333 @@
+// The File service's share and service models, as azfile's generated
+// zz_models.go and zz_models_serde.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). Request bodies are written as Go's
+// encoding/xml writes them: a `<?xml ...?>` line, elements in Go's field
+// order (a field the serde overrides goes last), an unset field left out.
+
+use std/json
+use std/xml
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+const XML_HEADER: Str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+
+pub struct RetentionPolicy {
+  pub enabled: Bool? = None
+  pub days: Int? = None
+}
+
+pub struct Metrics {
+  pub enabled: Bool? = None
+  /// Always "1.0" in set_properties, as Go's format() sets it.
+  pub version: Str? = None
+  pub include_apis: Bool? = None
+  pub retention_policy: RetentionPolicy? = None
+}
+
+pub struct CorsRule {
+  pub allowed_headers: Str? = None
+  pub allowed_methods: Str? = None
+  pub allowed_origins: Str? = None
+  pub exposed_headers: Str? = None
+  pub max_age_in_seconds: Int? = None
+}
+
+pub struct EncryptionInTransit {
+  pub required: Bool? = None
+}
+
+pub struct SmbMultichannel {
+  pub enabled: Bool? = None
+}
+
+pub struct SmbSettings {
+  pub encryption_in_transit: EncryptionInTransit? = None
+  pub multichannel: SmbMultichannel? = None
+}
+
+pub struct NfsSettings {
+  pub encryption_in_transit: EncryptionInTransit? = None
+}
+
+pub struct ProtocolSettings {
+  pub nfs: NfsSettings? = None
+  pub smb: SmbSettings? = None
+}
+
+pub struct StorageServiceProperties {
+  pub cors: List[CorsRule]? = None
+  pub hour_metrics: Metrics? = None
+  pub minute_metrics: Metrics? = None
+  pub protocol: ProtocolSettings? = None
+}
+
+pub struct ShareProperties {
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub quota: Int? = None
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_transition_state: Str? = None
+  pub deleted_time: Time? = None
+  pub enable_smb_directory_lease: Bool? = None
+  pub enable_snapshot_virtual_directory_access: Bool? = None
+  pub enabled_protocols: Str? = None
+  pub included_burst_iops: Int? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub max_burst_credits_for_iops: Int? = None
+  pub next_allowed_provisioned_bandwidth_downgrade_time: Time? = None
+  pub next_allowed_provisioned_iops_downgrade_time: Time? = None
+  pub next_allowed_quota_downgrade_time: Time? = None
+  pub paid_bursting_enabled: Bool? = None
+  pub paid_bursting_max_bandwidth_mibps: Int? = None
+  pub paid_bursting_max_iops: Int? = None
+  pub provisioned_bandwidth_mibps: Int? = None
+  pub provisioned_egress_mbps: Int? = None
+  pub provisioned_ingress_mbps: Int? = None
+  pub provisioned_iops: Int? = None
+  pub remaining_retention_days: Int? = None
+  pub root_squash: Str? = None
+}
+
+/// A listed share.
+pub struct Share {
+  pub name: Str? = None
+  pub properties: ShareProperties? = None
+  pub deleted: Bool? = None
+  /// Names lowercased, as Go's XML metadata reader keeps them.
+  pub metadata: Map[Str, Str]? = None
+  pub snapshot: Str? = None
+  pub version: Str? = None
+}
+
+pub struct AccessPolicy {
+  pub expiry: Time? = None
+  /// Letters of `rcwdl`.
+  pub permission: Str? = None
+  pub start: Time? = None
+}
+
+/// A stored access policy (at most five a share).
+pub struct SignedIdentifier {
+  pub id: Str? = None
+  pub access_policy: AccessPolicy? = None
+}
+
+/// The times a user delegation key is valid, as ISO 8601 text.
+pub struct KeyInfo {
+  pub expiry: Str? = None
+  pub delegated_user_tenant_id: Str? = None
+  pub start: Str? = None
+}
+
+// Writing.
+
+fn el(name: Str, inner: Str) -> Str {
+  "<${name}>${inner}</${name}>"
+}
+
+fn opt_str(name: Str, v: Str?) -> Str {
+  v.map(fn(x: Str) -> Str { el(name, xml.escape(x)) }) ?? ""
+}
+
+fn opt_bool(name: Str, v: Bool?) -> Str {
+  v.map(fn(x: Bool) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn opt_int(name: Str, v: Int?) -> Str {
+  v.map(fn(x: Int) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn retention_xml(r: RetentionPolicy?) -> Str {
+  r.map(fn(x: RetentionPolicy) -> Str { el("RetentionPolicy", opt_bool("Enabled", x.enabled) + opt_int("Days", x.days)) }) ?? ""
+}
+
+fn metrics_xml(name: Str, m: Metrics?) -> Str {
+  m.map(fn(x: Metrics) -> Str { el(name, opt_bool("Enabled", x.enabled) + opt_str("Version", x.version) + opt_bool("IncludeAPIs", x.include_apis) + retention_xml(x.retention_policy)) }) ?? ""
+}
+
+fn transit_xml(e: EncryptionInTransit?) -> Str {
+  e.map(fn(x: EncryptionInTransit) -> Str { el("EncryptionInTransit", opt_bool("Required", x.required)) }) ?? ""
+}
+
+fn protocol_xml(p: ProtocolSettings?) -> Str {
+  p.map(fn(x: ProtocolSettings) -> Str {
+    let nfs = x.nfs.map(fn(n: NfsSettings) -> Str { el("NFS", transit_xml(n.encryption_in_transit)) }) ?? ""
+    let smb = x.smb.map(fn(s: SmbSettings) -> Str { el("SMB", transit_xml(s.encryption_in_transit) + (s.multichannel.map(fn(m: SmbMultichannel) -> Str { el("Multichannel", opt_bool("Enabled", m.enabled)) }) ?? "")) }) ?? ""
+    el("ProtocolSettings", nfs + smb)
+  }) ?? ""
+}
+
+fn cors_xml(rules: List[CorsRule]?) -> Str {
+  rules.map(fn(rs: List[CorsRule]) -> Str {
+    el("Cors", rs.map(fn(r: CorsRule) -> Str {
+      el("CorsRule", opt_str("AllowedHeaders", r.allowed_headers) + opt_str("AllowedMethods", r.allowed_methods) + opt_str("AllowedOrigins", r.allowed_origins) + opt_str("ExposedHeaders", r.exposed_headers) + opt_int("MaxAgeInSeconds", r.max_age_in_seconds))
+    }).join(""))
+  }) ?? ""
+}
+
+/// The set_properties body (Cors last: its serde override).
+pub fn properties_xml(p: StorageServiceProperties) -> Str {
+  XML_HEADER + el("StorageServiceProperties", metrics_xml("HourMetrics", p.hour_metrics) + metrics_xml("MinuteMetrics", p.minute_metrics) + protocol_xml(p.protocol) + cors_xml(p.cors))
+}
+
+fn opt_time3339(name: Str, t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { el(name, blobsas.format_time(x)) }) ?? ""
+}
+
+/// The set_access_policy body (Permission first in a policy: Expiry and
+/// Start are the serde's overrides). Times are written to the second in
+/// UTC, as azfile truncates them.
+pub fn signed_identifiers_xml(ids: List[SignedIdentifier]) -> Str {
+  XML_HEADER + el("SignedIdentifiers", ids.map(fn(s: SignedIdentifier) -> Str {
+    let ap = s.access_policy.map(fn(a: AccessPolicy) -> Str { el("AccessPolicy", opt_str("Permission", a.permission) + opt_time3339("Expiry", a.expiry) + opt_time3339("Start", a.start)) }) ?? ""
+    el("SignedIdentifier", opt_str("Id", s.id) + ap)
+  }).join(""))
+}
+
+pub fn key_info_xml(k: KeyInfo) -> Str {
+  XML_HEADER + el("KeyInfo", opt_str("Expiry", k.expiry) + opt_str("DelegatedUserTid", k.delegated_user_tenant_id) + opt_str("Start", k.start))
+}
+
+/// A share permission as Go's json.Marshal of its map writes it (keys
+/// sorted).
+fn permission_json(permission: Str, format: Str?) -> Str {
+  var parts: List[Str] = []
+  if let Some(f) = format { parts.push("\"format\":${jstr(f)}") }
+  parts.push("\"permission\":${jstr(permission)}")
+  "{${parts.join(",")}}"
+}
+
+/// A JSON string as Go's json.Marshal writes it (HTML characters
+/// escaped).
+fn jstr(s: Str) -> Str {
+  var w = json.json_writer(escape_html: true)
+  w.str(s)
+  w.finish().to_str_lossy().trim_end_chars("\n")
+}
+
+// Reading.
+
+fn child_text(e: xml.Element, name: Str) -> Str? {
+  e.child(name).map(fn(x: xml.Element) -> Str { x.text() })
+}
+
+fn child_bool(e: xml.Element, name: Str) -> Bool? {
+  child_text(e, name).and_then(fn(t: Str) -> Bool? { parse_bool(t) })
+}
+
+fn child_int(e: xml.Element, name: Str) -> Int? {
+  child_text(e, name).and_then(fn(t: Str) -> Int? { Int.parse(t) })
+}
+
+fn child_1123(e: xml.Element, name: Str) -> Time? {
+  child_text(e, name).and_then(fn(t: Str) -> Time? { rfc1123(t) })
+}
+
+fn child_3339(e: xml.Element, name: Str) -> Time? {
+  child_text(e, name).and_then(fn(t: Str) -> Time? { rfc3339(t) })
+}
+
+fn parse_xml(text: Str, what: Str) -> xml.Element ! Str {
+  xml.parse(text) ?? e => Err("the ${what} is not XML: ${e.display()}")
+}
+
+fn retention_of(e: xml.Element) -> RetentionPolicy? {
+  e.child("RetentionPolicy").map(fn(r: xml.Element) -> RetentionPolicy { RetentionPolicy{enabled: child_bool(r, "Enabled"), days: child_int(r, "Days")} })
+}
+
+fn metrics_of(e: xml.Element, name: Str) -> Metrics? {
+  e.child(name).map(fn(m: xml.Element) -> Metrics { Metrics{enabled: child_bool(m, "Enabled"), include_apis: child_bool(m, "IncludeAPIs"), retention_policy: retention_of(m), version: child_text(m, "Version")} })
+}
+
+fn transit_of(e: xml.Element) -> EncryptionInTransit? {
+  e.child("EncryptionInTransit").map(fn(x: xml.Element) -> EncryptionInTransit { EncryptionInTransit{required: child_bool(x, "Required")} })
+}
+
+pub fn parse_properties(text: Str) -> StorageServiceProperties ! Str {
+  let d = parse_xml(text, "service properties")?
+  Ok(StorageServiceProperties{
+    cors: d.child("Cors").map(fn(c: xml.Element) -> List[CorsRule] {
+      c.children_named("CorsRule").map(fn(r: xml.Element) -> CorsRule {
+        CorsRule{allowed_origins: child_text(r, "AllowedOrigins"), allowed_methods: child_text(r, "AllowedMethods"), allowed_headers: child_text(r, "AllowedHeaders"), exposed_headers: child_text(r, "ExposedHeaders"), max_age_in_seconds: child_int(r, "MaxAgeInSeconds")}
+      })
+    }),
+    hour_metrics: metrics_of(d, "HourMetrics"),
+    minute_metrics: metrics_of(d, "MinuteMetrics"),
+    protocol: d.child("ProtocolSettings").map(fn(p: xml.Element) -> ProtocolSettings {
+      ProtocolSettings{
+        nfs: p.child("NFS").map(fn(n: xml.Element) -> NfsSettings { NfsSettings{encryption_in_transit: transit_of(n)} }),
+        smb: p.child("SMB").map(fn(s: xml.Element) -> SmbSettings { SmbSettings{encryption_in_transit: transit_of(s), multichannel: s.child("Multichannel").map(fn(m: xml.Element) -> SmbMultichannel { SmbMultichannel{enabled: child_bool(m, "Enabled")} })} }),
+      }
+    }),
+  })
+}
+
+fn share_properties_of(p: xml.Element) -> ShareProperties {
+  ShareProperties{
+    etag: child_text(p, "Etag"), last_modified: child_1123(p, "Last-Modified"), quota: child_int(p, "Quota"),
+    access_tier: child_text(p, "AccessTier"), access_tier_change_time: child_1123(p, "AccessTierChangeTime"), access_tier_transition_state: child_text(p, "AccessTierTransitionState"),
+    deleted_time: child_1123(p, "DeletedTime"), enable_smb_directory_lease: child_bool(p, "EnableSMBDirectoryLease"), enable_snapshot_virtual_directory_access: child_bool(p, "EnableSnapshotVirtualDirectoryAccess"),
+    enabled_protocols: child_text(p, "EnabledProtocols"), included_burst_iops: child_int(p, "IncludedBurstIops"),
+    lease_duration: child_text(p, "LeaseDuration"), lease_state: child_text(p, "LeaseState"), lease_status: child_text(p, "LeaseStatus"),
+    max_burst_credits_for_iops: child_int(p, "MaxBurstCreditsForIops"),
+    next_allowed_provisioned_bandwidth_downgrade_time: child_1123(p, "NextAllowedProvisionedBandwidthDowngradeTime"),
+    next_allowed_provisioned_iops_downgrade_time: child_1123(p, "NextAllowedProvisionedIopsDowngradeTime"),
+    next_allowed_quota_downgrade_time: child_1123(p, "NextAllowedQuotaDowngradeTime"),
+    paid_bursting_enabled: child_bool(p, "PaidBurstingEnabled"), paid_bursting_max_bandwidth_mibps: child_int(p, "PaidBurstingMaxBandwidthMibps"), paid_bursting_max_iops: child_int(p, "PaidBurstingMaxIops"),
+    provisioned_bandwidth_mibps: child_int(p, "ProvisionedBandwidthMiBps"), provisioned_egress_mbps: child_int(p, "ProvisionedEgressMBps"), provisioned_ingress_mbps: child_int(p, "ProvisionedIngressMBps"), provisioned_iops: child_int(p, "ProvisionedIops"),
+    remaining_retention_days: child_int(p, "RemainingRetentionDays"), root_squash: child_text(p, "RootSquash"),
+  }
+}
+
+/// Go's additionalProperties: each element's name lowercased, its text
+/// the value.
+fn metadata_xml_of(e: xml.Element) -> Map[Str, Str] {
+  var m: Map[Str, Str] = {}
+  for n in e.children {
+    if let xml.Node.Elem(x) = n {
+      m[x.name.local.to_lower()] = x.text()
+    }
+  }
+  m
+}
+
+/// One page of the account's shares.
+pub struct ListSharesSegmentResponse {
+  pub response: Response
+  pub next_marker: Str? = None
+  pub service_endpoint: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+  pub shares: List[Share] = []
+}
+
+fn parse_shares(text: Str) -> ListSharesSegmentResponse ! Str {
+  let d = parse_xml(text, "share list")?
+  let shares = d.child("Shares").map(fn(s: xml.Element) -> List[Share] {
+    s.children_named("Share").map(fn(x: xml.Element) -> Share {
+      Share{name: child_text(x, "Name"), properties: x.child("Properties").map(share_properties_of), deleted: child_bool(x, "Deleted"), metadata: x.child("Metadata").map(metadata_xml_of), snapshot: child_text(x, "Snapshot"), version: child_text(x, "Version")}
+    })
+  }) ?? []
+  Ok(ListSharesSegmentResponse{response: Response{}, next_marker: child_text(d, "NextMarker"), service_endpoint: d.attr("ServiceEndpoint"), marker: child_text(d, "Marker"), max_results: child_int(d, "MaxResults"), prefix: child_text(d, "Prefix"), shares: shares})
+}
+
+pub fn parse_signed_identifiers(text: Str) -> List[SignedIdentifier] ! Str {
+  let d = parse_xml(text, "access policy")?
+  Ok(d.children_named("SignedIdentifier").map(fn(s: xml.Element) -> SignedIdentifier {
+    SignedIdentifier{id: child_text(s, "Id"), access_policy: s.child("AccessPolicy").map(fn(a: xml.Element) -> AccessPolicy { AccessPolicy{start: child_3339(a, "Start"), expiry: child_3339(a, "Expiry"), permission: child_text(a, "Permission")} })}
+  }))
+}
+
+fn parse_share_stats(text: Str) -> Int? ! Str {
+  Ok(child_int(parse_xml(text, "share statistics")?, "ShareUsageBytes"))
+}
+
+fn parse_user_delegation_key(text: Str) -> exported.UserDelegationKey ! Str {
+  let d = parse_xml(text, "user delegation key")?
+  let s = fn(n: Str) -> Str { child_text(d, n) ?? "" }
+  Ok(exported.UserDelegationKey{signed_oid: s("SignedOid"), signed_tid: s("SignedTid"), signed_start: child_3339(d, "SignedStart") ?? Time.UNIX_EPOCH, signed_expiry: child_3339(d, "SignedExpiry") ?? Time.UNIX_EPOCH, signed_service: s("SignedService"), signed_version: s("SignedVersion"), value: Secret.new(s("Value"))})
+}

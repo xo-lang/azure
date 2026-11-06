@@ -1,0 +1,622 @@
+// The service and share clients against a fake file service that answers
+// as the Go program's fake does (fvectors_test.xo): every request must be
+// Go's, byte for byte (the Shared Key signature included), and what is
+// read back must print as Go's reflective dump of its response printed it.
+
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/storage/azfile/fileerror
+
+const EP: Str = "http://acct1.file.example.test"
+const KEY: Str = "aW52ZW50ZWQta2V5"
+/// The date of the Go run: Go's signer always sets its own clock's date,
+/// so the test sends that one.
+const GO_DATE: Str = "Fri, 06 Nov 2026 09:42:13 GMT"
+const DATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+struct Fixed {}
+
+fn (p: Fixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", GO_DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+const SVC_PROPS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><HourMetrics><Version>1.0</Version><Enabled>true</Enabled><IncludeAPIs>false</IncludeAPIs><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></HourMetrics><MinuteMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></MinuteMetrics><Cors><CorsRule><AllowedOrigins>https://app.example.test</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods><AllowedHeaders>x-ms-meta-*</AllowedHeaders><ExposedHeaders></ExposedHeaders><MaxAgeInSeconds>60</MaxAgeInSeconds></CorsRule></Cors><ProtocolSettings><SMB><Multichannel><Enabled>true</Enabled></Multichannel><EncryptionInTransit><Required>false</Required></EncryptionInTransit></SMB><NFS><EncryptionInTransit><Required>true</Required></EncryptionInTransit></NFS></ProtocolSettings></StorageServiceProperties>"
+
+const LIST1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.file.example.test/\"><Prefix>s</Prefix><MaxResults>2</MaxResults><Shares><Share><Name>s1</Name><Properties><Last-Modified>Thu, 05 Nov 2026 01:02:03 GMT</Last-Modified><Etag>\"0x8D1\"</Etag><Quota>100</Quota><AccessTier>Hot</AccessTier><AccessTierChangeTime>Wed, 04 Nov 2026 01:02:03 GMT</AccessTierChangeTime><EnabledProtocols>SMB</EnabledProtocols><LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState><ProvisionedIops>3000</ProvisionedIops><ProvisionedBandwidthMiBps>125</ProvisionedBandwidthMiBps><PaidBurstingEnabled>true</PaidBurstingEnabled><EnableSnapshotVirtualDirectoryAccess>false</EnableSnapshotVirtualDirectoryAccess></Properties><Metadata><color>blue</color><Size>L</Size></Metadata></Share><Share><Name>s1</Name><Snapshot>2026-11-05T01:00:00.0000000Z</Snapshot><Properties><Last-Modified>Thu, 05 Nov 2026 01:00:00 GMT</Last-Modified><Etag>\"0x8D0\"</Etag><Quota>100</Quota></Properties></Share></Shares><NextMarker>/acct1/s2</NextMarker></EnumerationResults>"
+
+const LIST2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.file.example.test/\"><Prefix>s</Prefix><Marker>/acct1/s2</Marker><MaxResults>2</MaxResults><Shares><Share><Name>s2</Name><Deleted>true</Deleted><Version>01D2</Version><Properties><Last-Modified>Thu, 05 Nov 2026 01:02:03 GMT</Last-Modified><Etag>\"0x8D2\"</Etag><Quota>5</Quota><DeletedTime>Thu, 05 Nov 2026 02:02:03 GMT</DeletedTime><RemainingRetentionDays>6</RemainingRetentionDays><RootSquash>RootSquash</RootSquash><EnabledProtocols>NFS</EnabledProtocols></Properties></Share></Shares><NextMarker /></EnumerationResults>"
+
+const ACL: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>pol1</Id><AccessPolicy><Start>2026-11-05T00:00:00.0000000Z</Start><Expiry>2026-11-06T00:00:00.0000000Z</Expiry><Permission>rcwdl</Permission></AccessPolicy></SignedIdentifier><SignedIdentifier><Id>pol2</Id></SignedIdentifier></SignedIdentifiers>"
+
+const SDDL: Str = "O:S-1-5-32-548G:S-1-5-21-397955417-626881126-188441444-512D:(A;;RPWPCCDCLCSWRCWDWOGA;;;S-1-0-0)"
+
+/// Go's `%q` of ASCII text.
+fn goq(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else if c == '\n' { "\\n" } else if c == '\t' { "\\t" } else if c == '\r' { "\\r" } else { "${c}" })
+  }
+  out + "\""
+}
+
+fn xml_resp(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/xml")
+}
+
+/// The Go program's fake, answer for answer; each request logged in its
+/// format.
+fn answer(req: http.Request, log: Mutex[List[Str]]) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // FakeNet leaves Content-Length out; Go's client sends it on a PUT or
+  // POST, 0 for no body.
+  if req.method == "PUT" || req.method == "POST" {
+    hs.push("content-length=${req.body.len()}")
+  }
+  var qv = url.values()
+  for k in req.url.query.keys().sort() {
+    qv.add(k, req.url.query.get(k) ?? "")
+  }
+  let qs = qv.encode()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let lines = ["REQ ${req.method} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${goq(req.body.to_str_lossy())}"]
+  log.with(fn(var l: List[Str]) { l = l + lines })
+  answer_for(req).with_header("x-ms-request-id", "r1").with_header("x-ms-version", "2026-06-06").with_header("Date", DATE)
+}
+
+fn tagged(r: http.Response) -> http.Response {
+  r.with_header("ETag", "\"0x8DE\"").with_header("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")
+}
+
+fn answer_for(req: http.Request) -> http.Response {
+  let q = req.url.query
+  let comp = q.get("comp") ?? ""
+  let svc = (q.get("restype") ?? "") == "service"
+  let p = req.path
+  let m = req.method
+  if p.starts_with("/missing") {
+    return xml_resp(404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ShareNotFound</Code><Message>The specified share does not exist.</Message></Error>").with_header("x-ms-error-code", "ShareNotFound")
+  }
+  if svc && comp == "properties" && m == "GET" { return xml_resp(200, SVC_PROPS) }
+  if svc && comp == "properties" { return http.text(202, "") }
+  if svc && comp == "userdelegationkey" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>oid1</SignedOid><SignedTid>tid1</SignedTid><SignedStart>2026-11-05T00:00:00Z</SignedStart><SignedExpiry>2026-11-06T00:00:00Z</SignedExpiry><SignedService>f</SignedService><SignedVersion>2026-06-06</SignedVersion><Value>a2V5</Value></UserDelegationKey>")
+  }
+  if comp == "list" {
+    return xml_resp(200, if (q.get("marker") ?? "") == "" { LIST1 } else { LIST2 })
+  }
+  if comp == "undelete" {
+    return tagged(http.text(201, "")).with_header("x-ms-share-quota", "5").with_header("x-ms-share-provisioned-iops", "3000")
+  }
+  if comp == "snapshot" {
+    return tagged(http.text(201, "")).with_header("x-ms-snapshot", "2026-11-05T03:00:00.0000000Z")
+  }
+  if comp == "acl" && m == "GET" { return tagged(xml_resp(200, ACL)) }
+  if comp == "acl" || comp == "metadata" { return tagged(http.text(200, "")) }
+  if comp == "properties" {
+    return tagged(http.text(200, "")).with_header("x-ms-share-quota", "200").with_header("x-ms-share-next-allowed-quota-downgrade-time", "Fri, 06 Nov 2026 03:00:00 GMT")
+  }
+  if comp == "stats" {
+    return tagged(xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><ShareStats><ShareUsageBytes>123456</ShareUsageBytes></ShareStats>"))
+  }
+  if comp == "filepermission" && m == "PUT" {
+    return http.text(201, "").with_header("x-ms-file-permission-key", "12345*67890")
+  }
+  if comp == "filepermission" {
+    return http.text(200, "{\"permission\":\"${SDDL}\",\"format\":\"Sddl\"}").with_header("Content-Type", "application/json")
+  }
+  if m == "PUT" {
+    return tagged(http.text(201, "")).with_header("x-ms-share-quota", "100").with_header("x-ms-share-provisioned-iops", "3000").with_header("x-ms-share-provisioned-bandwidth-mibps", "125").with_header("x-ms-share-included-burst-iops", "10000").with_header("x-ms-share-max-burst-credits-for-iops", "36000000")
+  }
+  if m == "DELETE" {
+    return http.text(202, "").with_header("x-ms-file-share-usage-bytes", "1024").with_header("x-ms-file-share-snapshot-usage-bytes", "512")
+  }
+  if m == "GET" {
+    var r = tagged(http.text(200, ""))
+    for (k, v) in [
+      ("x-ms-meta-color", "blue"), ("x-ms-meta-Size", "L"), ("x-ms-share-quota", "100"), ("x-ms-access-tier", "Hot"),
+      ("x-ms-access-tier-change-time", "Wed, 04 Nov 2026 01:02:03 GMT"), ("x-ms-access-tier-transition-state", "pending-from-cool"),
+      ("x-ms-enabled-protocols", "SMB"), ("x-ms-root-squash", "NoRootSquash"), ("x-ms-enable-snapshot-virtual-directory-access", "true"),
+      ("x-ms-enable-smb-directory-lease", "false"), ("x-ms-lease-status", "locked"), ("x-ms-lease-state", "leased"), ("x-ms-lease-duration", "infinite"),
+      ("x-ms-share-provisioned-iops", "3000"), ("x-ms-share-provisioned-ingress-mbps", "60"), ("x-ms-share-provisioned-egress-mbps", "90"),
+      ("x-ms-share-provisioned-bandwidth-mibps", "125"), ("x-ms-share-included-burst-iops", "10000"), ("x-ms-share-max-burst-credits-for-iops", "36000000"),
+      ("x-ms-share-paid-bursting-enabled", "true"), ("x-ms-share-paid-bursting-max-iops", "20000"), ("x-ms-share-paid-bursting-max-bandwidth-mibps", "500"),
+      ("x-ms-share-next-allowed-provisioned-iops-downgrade-time", "Sat, 07 Nov 2026 03:00:00 GMT"),
+      ("x-ms-share-next-allowed-provisioned-bandwidth-downgrade-time", "Sun, 08 Nov 2026 03:00:00 GMT"),
+      ("x-ms-share-next-allowed-quota-downgrade-time", "Fri, 06 Nov 2026 03:00:00 GMT"),
+    ] {
+      r = r.with_header(k, v)
+    }
+    return r
+  }
+  http.text(400, "")
+}
+
+fn serve(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response { answer(req, log) }
+  for m in ["GET", "PUT", "POST", "DELETE"] {
+    for path in ["/", "/{a}", "/{a}/{b}"] {
+      net.handle("${m} ${EP}${path}", h)
+    }
+  }
+  log
+}
+
+/// Go's reflective dump: one `Path=value` line a set field, sorted.
+struct Dump {
+  lines: List[Str] = []
+}
+
+fn go_time(t: Time) -> Str {
+  time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}Z")
+}
+
+fn (var d: Dump) s(name: Str, v: Str?) {
+  if let Some(x) = v { d.lines.push("${name}=${goq(x)}") }
+}
+
+fn (var d: Dump) i(name: Str, v: Int?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: Dump) b(name: Str, v: Bool?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: Dump) t(name: Str, v: Time?) {
+  if let Some(x) = v { d.lines.push("${name}=${go_time(x)}") }
+}
+
+fn (var d: Dump) m(name: Str, v: Map[Str, Str]?) {
+  if let Some(x) = v {
+    d.lines.push("${name}.len=${x.len()}")
+    for k in x.keys().sort() { d.s("${name}[${k}]", x.get(k)) }
+  }
+}
+
+fn (var d: Dump) r(r: Response) {
+  d.s("RequestID", r.request_id)
+  d.s("Version", r.version)
+}
+
+fn (d: Dump) show(name: Str) -> List[Str] {
+  ["== ${name}"] + d.lines.sort().map(fn(l: Str) -> Str { "  ${l}" })
+}
+
+fn err_lines(name: Str, e: azcore.CallErr) -> List[Str] {
+  let text = match e {
+    Response(r) => "status ${r.status_code} code ${r.error_code}"
+    _ => e.display()
+  }
+  ["== ${name}", "  error ${text}"]
+}
+
+fn (var d: Dump) retention(p: Str, r: RetentionPolicy?) {
+  if let Some(x) = r {
+    d.i("${p}.Days", x.days)
+    d.b("${p}.Enabled", x.enabled)
+  }
+}
+
+fn (var d: Dump) metrics(p: Str, m: Metrics?) {
+  if let Some(x) = m {
+    d.b("${p}.Enabled", x.enabled)
+    d.b("${p}.IncludeAPIs", x.include_apis)
+    d.retention("${p}.RetentionPolicy", x.retention_policy)
+    d.s("${p}.Version", x.version)
+  }
+}
+
+fn (var d: Dump) share_props(p: Str, x: ShareProperties) {
+  d.s("${p}.AccessTier", x.access_tier)
+  d.t("${p}.AccessTierChangeTime", x.access_tier_change_time)
+  d.s("${p}.AccessTierTransitionState", x.access_tier_transition_state)
+  d.t("${p}.DeletedTime", x.deleted_time)
+  d.s("${p}.ETag", x.etag)
+  d.b("${p}.EnableSMBDirectoryLease", x.enable_smb_directory_lease)
+  d.b("${p}.EnableSnapshotVirtualDirectoryAccess", x.enable_snapshot_virtual_directory_access)
+  d.s("${p}.EnabledProtocols", x.enabled_protocols)
+  d.i("${p}.IncludedBurstIops", x.included_burst_iops)
+  d.t("${p}.LastModified", x.last_modified)
+  d.s("${p}.LeaseDuration", x.lease_duration)
+  d.s("${p}.LeaseState", x.lease_state)
+  d.s("${p}.LeaseStatus", x.lease_status)
+  d.i("${p}.MaxBurstCreditsForIops", x.max_burst_credits_for_iops)
+  d.t("${p}.NextAllowedProvisionedBandwidthDowngradeTime", x.next_allowed_provisioned_bandwidth_downgrade_time)
+  d.t("${p}.NextAllowedProvisionedIopsDowngradeTime", x.next_allowed_provisioned_iops_downgrade_time)
+  d.t("${p}.NextAllowedQuotaDowngradeTime", x.next_allowed_quota_downgrade_time)
+  d.b("${p}.PaidBurstingEnabled", x.paid_bursting_enabled)
+  d.i("${p}.PaidBurstingMaxBandwidthMibps", x.paid_bursting_max_bandwidth_mibps)
+  d.i("${p}.PaidBurstingMaxIops", x.paid_bursting_max_iops)
+  d.i("${p}.ProvisionedBandwidthMiBps", x.provisioned_bandwidth_mibps)
+  d.i("${p}.ProvisionedEgressMBps", x.provisioned_egress_mbps)
+  d.i("${p}.ProvisionedIngressMBps", x.provisioned_ingress_mbps)
+  d.i("${p}.ProvisionedIops", x.provisioned_iops)
+  d.i("${p}.Quota", x.quota)
+  d.i("${p}.RemainingRetentionDays", x.remaining_retention_days)
+  d.s("${p}.RootSquash", x.root_squash)
+}
+
+fn dump_service_props(r: GetServicePropertiesResponse) -> Dump {
+  var d = Dump{}
+  let p = r.properties
+  if let Some(rs) = p.cors {
+    d.lines.push("CORS.len=${rs.len()}")
+    for (i, c) in rs.indexed() {
+      d.s("CORS[${i}].AllowedHeaders", c.allowed_headers)
+      d.s("CORS[${i}].AllowedMethods", c.allowed_methods)
+      d.s("CORS[${i}].AllowedOrigins", c.allowed_origins)
+      d.s("CORS[${i}].ExposedHeaders", c.exposed_headers)
+      d.i("CORS[${i}].MaxAgeInSeconds", c.max_age_in_seconds)
+    }
+  }
+  d.metrics("HourMetrics", p.hour_metrics)
+  d.metrics("MinuteMetrics", p.minute_metrics)
+  if let Some(pr) = p.protocol {
+    if let Some(n) = pr.nfs {
+      d.b("Protocol.NFS.EncryptionInTransit.Required", n.encryption_in_transit.and_then(fn(e: EncryptionInTransit) -> Bool? { e.required }))
+    }
+    if let Some(s) = pr.smb {
+      d.b("Protocol.Smb.EncryptionInTransit.Required", s.encryption_in_transit.and_then(fn(e: EncryptionInTransit) -> Bool? { e.required }))
+      d.b("Protocol.Smb.Multichannel.Enabled", s.multichannel.and_then(fn(m: SmbMultichannel) -> Bool? { m.enabled }))
+    }
+  }
+  d.r(r.response)
+  d
+}
+
+fn dump_list(page: ListSharesSegmentResponse) -> Dump {
+  var d = Dump{}
+  d.s("Marker", page.marker)
+  d.i("MaxResults", page.max_results)
+  d.s("NextMarker", page.next_marker)
+  d.s("Prefix", page.prefix)
+  d.s("ServiceEndpoint", page.service_endpoint)
+  d.lines.push("Shares.len=${page.shares.len()}")
+  for (i, s) in page.shares.indexed() {
+    let p = "Shares[${i}]"
+    d.b("${p}.Deleted", s.deleted)
+    d.m("${p}.Metadata", s.metadata)
+    d.s("${p}.Name", s.name)
+    if let Some(x) = s.properties { d.share_props("${p}.Properties", x) }
+    d.s("${p}.Snapshot", s.snapshot)
+    d.s("${p}.Version", s.version)
+  }
+  d.r(page.response)
+  d
+}
+
+fn write_dump(w: ShareWriteResponse) -> Dump {
+  var d = Dump{}
+  d.t("Date", w.date)
+  d.s("ETag", w.etag)
+  d.t("LastModified", w.last_modified)
+  d.r(w.response)
+  d
+}
+
+fn create_dump(c: CreateShareResponse) -> Dump {
+  var d = Dump{}
+  d.t("Date", c.date)
+  d.s("ETag", c.etag)
+  d.t("LastModified", c.last_modified)
+  d.i("MaxBurstCreditsForIops", c.max_burst_credits_for_iops)
+  d.i("Quota", c.quota)
+  d.i("ShareIncludedBurstIops", c.share_included_burst_iops)
+  d.i("ShareProvisionedBandwidthMibps", c.share_provisioned_bandwidth_mibps)
+  d.i("ShareProvisionedIops", c.share_provisioned_iops)
+  d.r(c.response)
+  d
+}
+
+fn delete_dump(x: DeleteShareResponse) -> Dump {
+  var d = Dump{}
+  d.t("Date", x.date)
+  d.i("FileShareSnapshotUsageBytes", x.file_share_snapshot_usage_bytes)
+  d.i("FileShareUsageBytes", x.file_share_usage_bytes)
+  d.r(x.response)
+  d
+}
+
+fn props_dump(g: GetSharePropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.s("AccessTier", g.access_tier)
+  d.t("AccessTierChangeTime", g.access_tier_change_time)
+  d.s("AccessTierTransitionState", g.access_tier_transition_state)
+  d.t("Date", g.date)
+  d.s("ETag", g.etag)
+  d.b("EnableSMBDirectoryLease", g.enable_smb_directory_lease)
+  d.b("EnableSnapshotVirtualDirectoryAccess", g.enable_snapshot_virtual_directory_access)
+  d.s("EnabledProtocols", g.enabled_protocols)
+  d.i("IncludedBurstIops", g.included_burst_iops)
+  d.t("LastModified", g.last_modified)
+  d.s("LeaseDuration", g.lease_duration)
+  d.s("LeaseState", g.lease_state)
+  d.s("LeaseStatus", g.lease_status)
+  d.i("MaxBurstCreditsForIops", g.max_burst_credits_for_iops)
+  d.m("Metadata", if g.metadata.is_empty() { None } else { Some(g.metadata) })
+  d.t("NextAllowedProvisionedBandwidthDowngradeTime", g.next_allowed_provisioned_bandwidth_downgrade_time)
+  d.t("NextAllowedProvisionedIopsDowngradeTime", g.next_allowed_provisioned_iops_downgrade_time)
+  d.t("NextAllowedQuotaDowngradeTime", g.next_allowed_quota_downgrade_time)
+  d.b("PaidBurstingEnabled", g.paid_bursting_enabled)
+  d.i("PaidBurstingMaxBandwidthMibps", g.paid_bursting_max_bandwidth_mibps)
+  d.i("PaidBurstingMaxIops", g.paid_bursting_max_iops)
+  d.i("ProvisionedBandwidthMiBps", g.provisioned_bandwidth_mibps)
+  d.i("ProvisionedEgressMBps", g.provisioned_egress_mbps)
+  d.i("ProvisionedIngressMBps", g.provisioned_ingress_mbps)
+  d.i("ProvisionedIops", g.provisioned_iops)
+  d.i("Quota", g.quota)
+  d.s("RootSquash", g.root_squash)
+  d.r(g.response)
+  d
+}
+
+test "the service and share clients send what Go sends and read what Go reads" {
+  let log = serve(os.net)
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  var out: List[Str] = []
+  let take = fn() -> List[Str] {
+    log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+  }
+  let add = fn(lines: List[Str]) -> List[Str] { take() + lines }
+
+  out = out + add(match svc.get_properties() {
+    Ok(r) => dump_service_props(r).show("s1 service properties")
+    Err(e) => err_lines("s1 service properties", e)
+  })
+  let set1 = StorageServiceProperties{
+    hour_metrics: Some(Metrics{enabled: Some(true), include_apis: Some(true), retention_policy: Some(RetentionPolicy{enabled: Some(true), days: Some(3)})}),
+    minute_metrics: Some(Metrics{enabled: Some(false)}),
+    cors: Some([CorsRule{allowed_origins: Some("https://app.example.test"), allowed_methods: Some("GET"), max_age_in_seconds: Some(5)}]),
+    protocol: Some(ProtocolSettings{smb: Some(SmbSettings{multichannel: Some(SmbMultichannel{enabled: Some(true)})})}),
+  }
+  for (name, p) in [("s2 set service properties", set1), ("s3 set service properties, no options", StorageServiceProperties{})] {
+    out = out + add(match svc.set_properties(p) {
+      Ok(r) => {
+        var d = Dump{}
+        d.r(r)
+        d.show(name)
+      }
+      Err(e) => err_lines(name, e)
+    })
+  }
+  var pager = svc.new_list_shares_pager(ListSharesOptions{include_metadata: true, include_snapshots: true, include_deleted: true, prefix: Some("s"), max_results: Some(2)})
+  for i in 1..10 {
+    if !pager.more() {
+      break
+    }
+    let name = "s4 list shares page ${i}"
+    out = out + add(match pager.next_page() {
+      Ok(page) => dump_list(page).show(name)
+      Err(e) => err_lines(name, e)
+    })
+  }
+  var bare = svc.new_list_shares_pager()
+  out = out + add(match bare.next_page() {
+    Ok(page) => {
+      var d = Dump{}
+      d.s("", page.next_marker)
+      d.show("s5 list shares, no options")
+    }
+    Err(e) => err_lines("s5 list shares, no options", e)
+  })
+  out = out + add(match svc.get_user_delegation_credential(KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-06T00:00:00Z")}) {
+    Ok(_) => ["== s6 user delegation credential", "  =true"]
+    Err(e) => err_lines("s6 user delegation credential", e)
+  })
+  let every = CreateShareOptions{
+    access_tier: Some(ACCESS_TIER_HOT), enabled_protocols: Some("SMB"), metadata: Some({"color": "blue", "Size": "L"}), quota: Some(100),
+    root_squash: Some(ROOT_SQUASH_NO_ROOT_SQUASH), enable_snapshot_virtual_directory_access: Some(true), enable_smb_directory_lease: Some(false),
+    paid_bursting_enabled: Some(true), paid_bursting_max_bandwidth_mibps: Some(500), paid_bursting_max_iops: Some(20000),
+    share_provisioned_bandwidth_mibps: Some(125), share_provisioned_iops: Some(3000),
+  }
+  out = out + add(match svc.create_share("s1", every) {
+    Ok(c) => create_dump(c).show("s7 create share with every option")
+    Err(e) => err_lines("s7 create share with every option", e)
+  })
+  out = out + add(match svc.delete_share("s1", DeleteShareOptions{delete_snapshots: Some(DELETE_SNAPSHOTS_INCLUDE_LEASED), lease_id: Some("lease-1")}) {
+    Ok(x) => delete_dump(x).show("s8 delete share with snapshots")
+    Err(e) => err_lines("s8 delete share with snapshots", e)
+  })
+  out = out + add(match svc.restore_share("s2", "01D2") {
+    Ok(x) => {
+      var d = Dump{}
+      d.s("ClientRequestID", x.client_request_id)
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.i("IncludedBurstIops", x.included_burst_iops)
+      d.t("LastModified", x.last_modified)
+      d.i("MaxBurstCreditsForIops", x.max_burst_credits_for_iops)
+      d.i("ProvisionedBandwidthMibps", x.provisioned_bandwidth_mibps)
+      d.i("ProvisionedIops", x.provisioned_iops)
+      d.i("Quota", x.quota)
+      d.r(x.response)
+      d.show("s9 restore share")
+    }
+    Err(e) => err_lines("s9 restore share", e)
+  })
+  match svc.create_share("missing") {
+    Ok(_) => fault("missing share created")
+    Err(e) => {
+      out = out + add(err_lines("s10 an error", e))
+      out.push("  has ShareNotFound=${fileerror.has_code(e, [fileerror.SHARE_NOT_FOUND])} ShareAlreadyExists=${fileerror.has_code(e, [fileerror.SHARE_ALREADY_EXISTS])}")
+    }
+  }
+
+  let svc2 = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  out = out + add(match svc2.set_properties() {
+    Ok(r) => {
+      var d = Dump{}
+      d.r(r)
+      d.show("s11 a service client with a file request intent sends none")
+    }
+    Err(e) => err_lines("s11", e)
+  })
+  out = out + add(match svc2.create_share("s5") {
+    Ok(c) => ["== s12 its share clients send it", "  =${goq(c.etag ?? "")}"]
+    Err(e) => err_lines("s12", e)
+  })
+
+  let sh = svc.new_share_client("s1")
+  out = out + add(match sh.create() {
+    Ok(c) => create_dump(c).show("h1 create, no options")
+    Err(e) => err_lines("h1 create, no options", e)
+  })
+  out = out + add(match sh.get_properties(GetSharePropertiesOptions{share_snapshot: Some("2026-11-05T01:00:00.0000000Z"), lease_id: Some("lease-1")}) {
+    Ok(g) => props_dump(g).show("h2 properties of a snapshot")
+    Err(e) => err_lines("h2 properties of a snapshot", e)
+  })
+  out = out + add(match sh.set_properties(SetSharePropertiesOptions{access_tier: Some(ACCESS_TIER_COOL), quota: Some(200), root_squash: Some(ROOT_SQUASH_ALL_SQUASH), enable_smb_directory_lease: Some(true), paid_bursting_enabled: Some(false), share_provisioned_iops: Some(4000)}) {
+    Ok(x) => {
+      var d = Dump{}
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.i("IncludedBurstIops", x.included_burst_iops)
+      d.t("LastModified", x.last_modified)
+      d.i("MaxBurstCreditsForIops", x.max_burst_credits_for_iops)
+      d.t("NextAllowedProvisionedBandwidthDowngradeTime", x.next_allowed_provisioned_bandwidth_downgrade_time)
+      d.t("NextAllowedProvisionedIopsDowngradeTime", x.next_allowed_provisioned_iops_downgrade_time)
+      d.t("NextAllowedQuotaDowngradeTime", x.next_allowed_quota_downgrade_time)
+      d.i("ProvisionedBandwidthMibps", x.provisioned_bandwidth_mibps)
+      d.i("ProvisionedIops", x.provisioned_iops)
+      d.i("Quota", x.quota)
+      d.r(x.response)
+      d.show("h3 set properties")
+    }
+    Err(e) => err_lines("h3 set properties", e)
+  })
+  out = out + add(match sh.create_snapshot(Some({"tag": "nightly"})) {
+    Ok(x) => {
+      var d = Dump{}
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.t("LastModified", x.last_modified)
+      d.s("Snapshot", x.snapshot)
+      d.r(x.response)
+      d.show("h4 snapshot")
+    }
+    Err(e) => err_lines("h4 snapshot", e)
+  })
+  out = out + add(match sh.get_access_policy() {
+    Ok(x) => {
+      var d = Dump{}
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.t("LastModified", x.last_modified)
+      d.lines.push("SignedIdentifiers.len=${x.signed_identifiers.len()}")
+      for (i, s) in x.signed_identifiers.indexed() {
+        if let Some(a) = s.access_policy {
+          d.t("SignedIdentifiers[${i}].AccessPolicy.Expiry", a.expiry)
+          d.s("SignedIdentifiers[${i}].AccessPolicy.Permission", a.permission)
+          d.t("SignedIdentifiers[${i}].AccessPolicy.Start", a.start)
+        }
+        d.s("SignedIdentifiers[${i}].ID", s.id)
+      }
+      d.r(x.response)
+      d.show("h5 access policy")
+    }
+    Err(e) => err_lines("h5 access policy", e)
+  })
+  // 01:02:03.456 at UTC+1.
+  let start = Time.from_unix(1793836923) + Duration.from_millis(456)
+  let ids = [SignedIdentifier{id: Some("pol1"), access_policy: Some(AccessPolicy{start: Some(start), expiry: Some(start + Duration.from_millis(86400000)), permission: Some("rw")})}, SignedIdentifier{id: Some("pol2")}]
+  out = out + add(match sh.set_access_policy(Some(ids)) {
+    Ok(w) => write_dump(w).show("h6 set access policy")
+    Err(e) => err_lines("h6 set access policy", e)
+  })
+  out = out + add(match sh.set_access_policy() {
+    Ok(w) => write_dump(w).show("h7 set access policy, none")
+    Err(e) => err_lines("h7 set access policy, none", e)
+  })
+  out = out + add(match sh.create_permission(SDDL) {
+    Ok(x) => {
+      var d = Dump{}
+      d.t("Date", x.date)
+      d.s("FilePermissionKey", x.file_permission_key)
+      d.r(x.response)
+      d.show("h8 create permission")
+    }
+    Err(e) => err_lines("h8 create permission", e)
+  })
+  for (name, f) in [("h9 get permission", Some(FILE_PERMISSION_FORMAT_SDDL)), ("h10 get permission, no options", None)] {
+    out = out + add(match sh.get_permission("12345*67890", f) {
+      Ok(x) => {
+        var d = Dump{}
+        d.t("Date", x.date)
+        d.s("Format", x.format)
+        d.s("Permission", x.permission)
+        d.r(x.response)
+        d.show(name)
+      }
+      Err(e) => err_lines(name, e)
+    })
+  }
+  out = out + add(match sh.set_metadata(Some({"a": "1", "B": "2"})) {
+    Ok(w) => write_dump(w).show("h11 set metadata")
+    Err(e) => err_lines("h11 set metadata", e)
+  })
+  out = out + add(match sh.get_statistics() {
+    Ok(x) => {
+      var d = Dump{}
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.t("LastModified", x.last_modified)
+      d.i("ShareUsageBytes", x.share_usage_bytes)
+      d.r(x.response)
+      d.show("h12 statistics")
+    }
+    Err(e) => err_lines("h12 statistics", e)
+  })
+  let snap = sh.with_snapshot("2026-11-05T03:00:00.0000000Z")?
+  out = out + ["== h13 urls", "  ${snap.url}", "  ${sh.directory_url("a b/c%d/")}", "  ${sh.root_directory_url()}"]
+  out = out + add(match snap.delete() {
+    Ok(x) => delete_dump(x).show("h14 delete a snapshot client")
+    Err(e) => err_lines("h14 delete a snapshot client", e)
+  })
+  let sh2 = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s3", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP), allow_trailing_dot: Some(true)})
+  out = out + add(match sh2.get_properties() {
+    Ok(g) => ["== h15 a share client with a file request intent", "  =${goq(g.etag ?? "")}"]
+    Err(e) => err_lines("h15 a share client with a file request intent", e)
+  })
+  let sh3 = new_share_client_from_connection_string(os.net, os.clock, os.rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s4", opts)?
+  out = out + add(match sh3.get_properties() {
+    Ok(g) => ["== h16 a share client from a connection string", "  =${goq(g.etag ?? "")}"]
+    Err(e) => err_lines("h16 a share client from a connection string", e)
+  })
+  expect(out) == SHARE_OUTPUT
+}
+
+test "connection strings and URL parts parse as Go parses them" {
+  let a = parse_connection_string("AccountName=acct1;AccountKey=a2V5;EndpointSuffix=example.test;DefaultEndpointsProtocol=http")?
+  expect(a.service_url) == "http://acct1.file.example.test"
+  let b = parse_connection_string("AccountName=acct1;SharedAccessSignature=sv=1&sig=x")?
+  expect(b.service_url) == "https://acct1.file.core.windows.net/?sv=1&sig=x"
+  let c = parse_connection_string("FileEndpoint=http://h.example.test;SharedAccessSignature=sig=x")?
+  expect(c.service_url) == "http://h.example.test/?sig=x"
+  expect(parse_connection_string("AccountKey=a2V5").is_err()) == true
+  expect(parse_connection_string("nope").is_err()) == true
+  let p = parse_url("http://127.0.0.1:10000/devstoreaccount1/s1/d1/f1?ShareSnapshot=2026&sv=1")?
+  expect(p.ip_account_name) == "devstoreaccount1"
+  expect(p.share_name) == "s1"
+  expect(p.directory_or_file_path) == "d1/f1"
+  expect(p.share_snapshot) == "2026"
+  expect(p.unparsed_params) == "sv=1"
+  expect(p.to_url()) == "http://127.0.0.1:10000/devstoreaccount1/s1/d1/f1?sv=1&sharesnapshot=2026"
+  expect(audience(ClientOptions{})) == TOKEN_SCOPE
+  expect(audience(ClientOptions{audience: "https://x.example.test/"})) == "https://x.example.test/.default"
+}

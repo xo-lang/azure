@@ -1,0 +1,132 @@
+// The service client, as azfile's service/client.go and service/models.go
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md), with the requests
+// of its generated ServiceClient.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// A client of one storage account's File service.
+pub struct ServiceClient {
+  /// The service URL (`https://<account>.file.core.windows.net/`), with a
+  /// SAS query when the client has no credential.
+  pub url: Str
+  core: Core
+}
+
+fn service(c: Core) -> ServiceClient {
+  ServiceClient{url: c.url, core: c}
+}
+
+/// A service client with Entra ID tokens (service.NewClient).
+pub fn new_service_client(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service(core_with_token(net, clock, rand, service_url, cred, options))
+}
+
+pub fn new_service_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service(core_with_shared_key(net, clock, rand, service_url, cred, options))
+}
+
+/// A service client with no credential: a SAS in `service_url`.
+pub fn new_service_client_with_no_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service(core_with_no_credential(net, clock, rand, service_url, options))
+}
+
+pub fn new_service_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_service_client_with_shared_key_credential(net, clock, rand, p.service_url, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_service_client_with_no_credential(net, clock, rand, p.service_url, options))
+}
+
+fn service_call(method: Str, comp: Str, ok: List[Int]) -> Call {
+  Call{method: method, query: [("comp", comp), ("restype", "service")], ok: ok, intent: false}
+}
+
+pub struct GetServicePropertiesResponse {
+  pub response: Response
+  pub properties: StorageServiceProperties
+}
+
+pub fn (s: ServiceClient) get_properties() -> GetServicePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(service_call("GET", "properties", [200]))?
+  Ok(GetServicePropertiesResponse{response: response_of(resp), properties: decoded(resp, parse_properties)?})
+}
+
+/// Sets the service's properties; each metrics version is "1.0", as Go's
+/// format() sets it. The body is always sent (empty for no options).
+pub fn (s: ServiceClient) set_properties(options: StorageServiceProperties = StorageServiceProperties{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let ver = fn(m: Metrics) -> Metrics { m with {version: Some("1.0")} }
+  let p = options with {hour_metrics: options.hour_metrics.map(ver), minute_metrics: options.minute_metrics.map(ver)}
+  let resp = s.core.send(service_call("PUT", "properties", [202]) with {body: Some(properties_xml(p).bytes())})?
+  Ok(response_of(resp))
+}
+
+pub struct ListSharesOptions {
+  pub include_metadata: Bool = false
+  pub include_deleted: Bool = false
+  pub include_snapshots: Bool = false
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+}
+
+fn list_url(base: Str, o: ListSharesOptions, marker: Str?) -> Str {
+  var q = [("comp", "list")]
+  var inc: List[Str] = []
+  if o.include_deleted { inc.push("deleted") }
+  if o.include_metadata { inc.push("metadata") }
+  if o.include_snapshots { inc.push("snapshots") }
+  if !inc.is_empty() { q.push(("include", inc.join(","))) }
+  if let Some(m) = marker { q.push(("marker", m)) }
+  if let Some(n) = o.max_results { q.push(("maxresults", "${n}")) }
+  if let Some(p) = o.prefix { q.push(("prefix", p)) }
+  with_query(base, q)
+}
+
+/// The account's shares, a page a call (Go's NewListSharesPager): the
+/// next page asks from the last one's NextMarker until it is empty.
+pub fn (s: ServiceClient) new_list_shares_pager(options: ListSharesOptions = ListSharesOptions{}) -> runtime.Pager[ListSharesSegmentResponse] {
+  let base = s.url
+  let first = policy.Request{method: "GET", url: list_url(base, options, options.marker), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
+  runtime.new_pager_with(s.core.pipeline, first, fn(r: http.Response) -> ListSharesSegmentResponse ! Str {
+    let page = parse_shares(r.body.to_str_lossy())?
+    Ok(page with {response: response_of(r)})
+  }, fn(prev: policy.Request, page: ListSharesSegmentResponse) -> policy.Request? {
+    let m = page.next_marker ?? return None
+    if m == "" {
+      return None
+    }
+    Some(prev with {url: list_url(base, options, Some(m))})
+  })
+}
+
+/// A client of the share `share_name` on the same pipeline.
+pub fn (s: ServiceClient) new_share_client(share_name: Str) -> ShareClient {
+  share(s.core with {url: join_paths(s.url, share_name)})
+}
+
+pub fn (s: ServiceClient) create_share(share_name: Str, options: CreateShareOptions = CreateShareOptions{}) -> CreateShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  s.new_share_client(share_name).create(options)
+}
+
+pub fn (s: ServiceClient) delete_share(share_name: Str, options: DeleteShareOptions = DeleteShareOptions{}) -> DeleteShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  s.new_share_client(share_name).delete(options)
+}
+
+pub fn (s: ServiceClient) restore_share(deleted_share_name: Str, deleted_share_version: Str) -> RestoreShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  s.new_share_client(deleted_share_name).restore(deleted_share_version)
+}
+
+/// A user delegation credential for the account (Go's
+/// GetUserDelegationCredential): the account name is the URL's first
+/// host label after `https://`, as Go takes it.
+pub fn (s: ServiceClient) get_user_delegation_credential(info: KeyInfo) -> exported.UserDelegationCredential ! azcore.CallErr uses (net.dial, clock, rand) {
+  let account = (if s.url.starts_with("https://") { s.url[8..s.url.len()] } else { s.url }).split(".")[0]
+  let resp = s.core.send(Call{method: "POST", query: [("comp", "userdelegationkey"), ("restype", "service")], ok: [200], body: Some(key_info_xml(info).bytes()), intent: false})?
+  let key = decoded(resp, parse_user_delegation_key)?
+  Ok(exported.new_user_delegation_credential(account, key))
+}

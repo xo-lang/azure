@@ -1,0 +1,410 @@
+// The share client, as azfile's share/client.go and share/models.go
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md), with the requests
+// of its generated ShareClient: the query in Go's sorted order, and each
+// response's headers as Go's handlers read them.
+
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+
+pub const ACCESS_TIER_COOL: Str = "Cool"
+pub const ACCESS_TIER_HOT: Str = "Hot"
+pub const ACCESS_TIER_PREMIUM: Str = "Premium"
+pub const ACCESS_TIER_TRANSACTION_OPTIMIZED: Str = "TransactionOptimized"
+
+pub const ROOT_SQUASH_NO_ROOT_SQUASH: Str = "NoRootSquash"
+pub const ROOT_SQUASH_ROOT_SQUASH: Str = "RootSquash"
+pub const ROOT_SQUASH_ALL_SQUASH: Str = "AllSquash"
+
+pub const DELETE_SNAPSHOTS_INCLUDE: Str = "include"
+pub const DELETE_SNAPSHOTS_INCLUDE_LEASED: Str = "include-leased"
+
+pub const FILE_PERMISSION_FORMAT_SDDL: Str = "Sddl"
+pub const FILE_PERMISSION_FORMAT_BINARY: Str = "Binary"
+
+/// A client of one share.
+pub struct ShareClient {
+  /// The share's URL (with `sharesnapshot` for a snapshot).
+  pub url: Str
+  core: Core
+}
+
+fn share(c: Core) -> ShareClient {
+  ShareClient{url: c.url, core: c}
+}
+
+/// A share client with Entra ID tokens (share.NewClient).
+pub fn new_share_client(net: Net, clock: Clock, rand: Rand, share_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> ShareClient {
+  share(core_with_token(net, clock, rand, share_url, cred, options))
+}
+
+pub fn new_share_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, share_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> ShareClient {
+  share(core_with_shared_key(net, clock, rand, share_url, cred, options))
+}
+
+/// A share client with no credential: a SAS in `share_url`.
+pub fn new_share_client_with_no_credential(net: Net, clock: Clock, rand: Rand, share_url: Str, options: ClientOptions = ClientOptions{}) -> ShareClient {
+  share(core_with_no_credential(net, clock, rand, share_url, options))
+}
+
+pub fn new_share_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, share_name: Str, options: ClientOptions = ClientOptions{}) -> ShareClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(p.service_url, share_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_share_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_share_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The same share at `share_snapshot` (Go's WithSnapshot).
+pub fn (s: ShareClient) with_snapshot(share_snapshot: Str) -> ShareClient ! Str {
+  let p = parse_url(s.url)?
+  Ok(share(s.core with {url: (p with {share_snapshot: share_snapshot}).to_url()}))
+}
+
+/// The URL of the directory `directory_name` in the share, the name
+/// escaped as one path segment (its slashes too, as Go's url.PathEscape
+/// escapes them) after trailing slashes are trimmed.
+fn (s: ShareClient) directory_url(directory_name: Str) -> Str {
+  join_paths(s.url, url.path_escape(directory_name.trim_end_chars("/")))
+}
+
+/// The share's root directory URL: the share URL itself.
+fn (s: ShareClient) root_directory_url() -> Str {
+  s.url
+}
+
+fn share_call(method: Str, comp: Str?, ok: List[Int]) -> Call {
+  var q = [("restype", "share")]
+  if let Some(c) = comp { q.push(("comp", c)) }
+  Call{method: method, query: q, ok: ok}
+}
+
+fn lease_header(lease_id: Str?) -> List[(Str, Str)] {
+  match lease_id {
+    Some(l) => [("x-ms-lease-id", l)]
+    None => []
+  }
+}
+
+fn snapshot_query(snapshot: Str?) -> List[(Str, Str)] {
+  match snapshot {
+    Some(s) => [("sharesnapshot", s)]
+    None => []
+  }
+}
+
+fn bool_header(name: Str, v: Bool?) -> List[(Str, Str)] {
+  match v {
+    Some(b) => [(name, "${b}")]
+    None => []
+  }
+}
+
+fn int_header(name: Str, v: Int?) -> List[(Str, Str)] {
+  match v {
+    Some(n) => [(name, "${n}")]
+    None => []
+  }
+}
+
+fn str_header(name: Str, v: Str?) -> List[(Str, Str)] {
+  match v {
+    Some(x) => [(name, x)]
+    None => []
+  }
+}
+
+// Create.
+
+pub struct CreateShareOptions {
+  pub access_tier: Str? = None
+  /// `SMB` or `NFS`.
+  pub enabled_protocols: Str? = None
+  pub metadata: Map[Str, Str]? = None
+  /// GiB.
+  pub quota: Int? = None
+  pub root_squash: Str? = None
+  pub enable_snapshot_virtual_directory_access: Bool? = None
+  pub enable_smb_directory_lease: Bool? = None
+  pub paid_bursting_enabled: Bool? = None
+  pub paid_bursting_max_bandwidth_mibps: Int? = None
+  pub paid_bursting_max_iops: Int? = None
+  pub share_provisioned_bandwidth_mibps: Int? = None
+  pub share_provisioned_iops: Int? = None
+}
+
+pub struct CreateShareResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub max_burst_credits_for_iops: Int? = None
+  pub quota: Int? = None
+  pub share_included_burst_iops: Int? = None
+  pub share_provisioned_bandwidth_mibps: Int? = None
+  pub share_provisioned_iops: Int? = None
+}
+
+pub fn (s: ShareClient) create(options: CreateShareOptions = CreateShareOptions{}) -> CreateShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = str_header("x-ms-access-tier", o.access_tier) + bool_header("x-ms-enable-smb-directory-lease", o.enable_smb_directory_lease) + bool_header("x-ms-enable-snapshot-virtual-directory-access", o.enable_snapshot_virtual_directory_access) + str_header("x-ms-enabled-protocols", o.enabled_protocols) + meta_headers(o.metadata ?? {}) + str_header("x-ms-root-squash", o.root_squash) + bool_header("x-ms-share-paid-bursting-enabled", o.paid_bursting_enabled) + int_header("x-ms-share-paid-bursting-max-bandwidth-mibps", o.paid_bursting_max_bandwidth_mibps) + int_header("x-ms-share-paid-bursting-max-iops", o.paid_bursting_max_iops) + int_header("x-ms-share-provisioned-bandwidth-mibps", o.share_provisioned_bandwidth_mibps) + int_header("x-ms-share-provisioned-iops", o.share_provisioned_iops) + int_header("x-ms-share-quota", o.quota)
+  let resp = s.core.send(share_call("PUT", None, [201]) with {headers: hs})?
+  Ok(CreateShareResponse{response: response_of(resp), date: header_time(resp, "Date"), etag: header(resp, "ETag"), last_modified: header_time(resp, "Last-Modified"), max_burst_credits_for_iops: header_int(resp, "x-ms-share-max-burst-credits-for-iops"), quota: header_int(resp, "x-ms-share-quota"), share_included_burst_iops: header_int(resp, "x-ms-share-included-burst-iops"), share_provisioned_bandwidth_mibps: header_int(resp, "x-ms-share-provisioned-bandwidth-mibps"), share_provisioned_iops: header_int(resp, "x-ms-share-provisioned-iops")})
+}
+
+// Delete and restore.
+
+pub struct DeleteShareOptions {
+  /// `DELETE_SNAPSHOTS_INCLUDE` or `DELETE_SNAPSHOTS_INCLUDE_LEASED`.
+  pub delete_snapshots: Str? = None
+  pub share_snapshot: Str? = None
+  pub lease_id: Str? = None
+}
+
+pub struct DeleteShareResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub file_share_snapshot_usage_bytes: Int? = None
+  pub file_share_usage_bytes: Int? = None
+}
+
+pub fn (s: ShareClient) delete(options: DeleteShareOptions = DeleteShareOptions{}) -> DeleteShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = str_header("x-ms-delete-snapshots", options.delete_snapshots) + lease_header(options.lease_id)
+  let resp = s.core.send(share_call("DELETE", None, [202]) with {query: [("restype", "share")] + snapshot_query(options.share_snapshot), headers: hs})?
+  Ok(DeleteShareResponse{response: response_of(resp), date: header_time(resp, "Date"), file_share_snapshot_usage_bytes: header_int(resp, "x-ms-file-share-snapshot-usage-bytes"), file_share_usage_bytes: header_int(resp, "x-ms-file-share-usage-bytes")})
+}
+
+pub struct RestoreShareResponse {
+  pub response: Response
+  pub client_request_id: Str? = None
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub included_burst_iops: Int? = None
+  pub last_modified: Time? = None
+  pub max_burst_credits_for_iops: Int? = None
+  pub provisioned_bandwidth_mibps: Int? = None
+  pub provisioned_iops: Int? = None
+  pub quota: Int? = None
+}
+
+/// Restores the deleted share of this client's name at
+/// `deleted_share_version` (Go's Restore).
+pub fn (s: ShareClient) restore(deleted_share_version: Str) -> RestoreShareResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let p = parse_url(s.url) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let hs = [("x-ms-deleted-share-name", p.share_name), ("x-ms-deleted-share-version", deleted_share_version)]
+  let resp = s.core.send(share_call("PUT", Some("undelete"), [201]) with {headers: hs})?
+  Ok(RestoreShareResponse{response: response_of(resp), client_request_id: header(resp, "x-ms-client-request-id"), date: header_time(resp, "Date"), etag: header(resp, "ETag"), included_burst_iops: header_int(resp, "x-ms-share-included-burst-iops"), last_modified: header_time(resp, "Last-Modified"), max_burst_credits_for_iops: header_int(resp, "x-ms-share-max-burst-credits-for-iops"), provisioned_bandwidth_mibps: header_int(resp, "x-ms-share-provisioned-bandwidth-mibps"), provisioned_iops: header_int(resp, "x-ms-share-provisioned-iops"), quota: header_int(resp, "x-ms-share-quota")})
+}
+
+// Properties.
+
+pub struct GetSharePropertiesOptions {
+  pub share_snapshot: Str? = None
+  pub lease_id: Str? = None
+}
+
+pub struct GetSharePropertiesResponse {
+  pub response: Response
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_transition_state: Str? = None
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub enable_smb_directory_lease: Bool? = None
+  pub enable_snapshot_virtual_directory_access: Bool? = None
+  pub enabled_protocols: Str? = None
+  pub included_burst_iops: Int? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub max_burst_credits_for_iops: Int? = None
+  pub metadata: Map[Str, Str] = {}
+  pub next_allowed_provisioned_bandwidth_downgrade_time: Time? = None
+  pub next_allowed_provisioned_iops_downgrade_time: Time? = None
+  pub next_allowed_quota_downgrade_time: Time? = None
+  pub paid_bursting_enabled: Bool? = None
+  pub paid_bursting_max_bandwidth_mibps: Int? = None
+  pub paid_bursting_max_iops: Int? = None
+  pub provisioned_bandwidth_mibps: Int? = None
+  pub provisioned_egress_mbps: Int? = None
+  pub provisioned_ingress_mbps: Int? = None
+  pub provisioned_iops: Int? = None
+  pub quota: Int? = None
+  pub root_squash: Str? = None
+}
+
+pub fn (s: ShareClient) get_properties(options: GetSharePropertiesOptions = GetSharePropertiesOptions{}) -> GetSharePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("GET", None, [200]) with {query: [("restype", "share")] + snapshot_query(options.share_snapshot), headers: lease_header(options.lease_id)})?
+  Ok(GetSharePropertiesResponse{
+    response: response_of(resp),
+    access_tier: header(resp, "x-ms-access-tier"), access_tier_change_time: header_time(resp, "x-ms-access-tier-change-time"), access_tier_transition_state: header(resp, "x-ms-access-tier-transition-state"),
+    date: header_time(resp, "Date"), etag: header(resp, "ETag"),
+    enable_smb_directory_lease: header_bool(resp, "x-ms-enable-smb-directory-lease"), enable_snapshot_virtual_directory_access: header_bool(resp, "x-ms-enable-snapshot-virtual-directory-access"),
+    enabled_protocols: header(resp, "x-ms-enabled-protocols"), included_burst_iops: header_int(resp, "x-ms-share-included-burst-iops"),
+    last_modified: header_time(resp, "Last-Modified"),
+    lease_duration: header(resp, "x-ms-lease-duration"), lease_state: header(resp, "x-ms-lease-state"), lease_status: header(resp, "x-ms-lease-status"),
+    max_burst_credits_for_iops: header_int(resp, "x-ms-share-max-burst-credits-for-iops"),
+    metadata: metadata_of(resp),
+    next_allowed_provisioned_bandwidth_downgrade_time: header_time(resp, "x-ms-share-next-allowed-provisioned-bandwidth-downgrade-time"),
+    next_allowed_provisioned_iops_downgrade_time: header_time(resp, "x-ms-share-next-allowed-provisioned-iops-downgrade-time"),
+    next_allowed_quota_downgrade_time: header_time(resp, "x-ms-share-next-allowed-quota-downgrade-time"),
+    paid_bursting_enabled: header_bool(resp, "x-ms-share-paid-bursting-enabled"), paid_bursting_max_bandwidth_mibps: header_int(resp, "x-ms-share-paid-bursting-max-bandwidth-mibps"), paid_bursting_max_iops: header_int(resp, "x-ms-share-paid-bursting-max-iops"),
+    provisioned_bandwidth_mibps: header_int(resp, "x-ms-share-provisioned-bandwidth-mibps"), provisioned_egress_mbps: header_int(resp, "x-ms-share-provisioned-egress-mbps"), provisioned_ingress_mbps: header_int(resp, "x-ms-share-provisioned-ingress-mbps"), provisioned_iops: header_int(resp, "x-ms-share-provisioned-iops"),
+    quota: header_int(resp, "x-ms-share-quota"), root_squash: header(resp, "x-ms-root-squash"),
+  })
+}
+
+pub struct SetSharePropertiesOptions {
+  pub access_tier: Str? = None
+  pub quota: Int? = None
+  pub root_squash: Str? = None
+  pub lease_id: Str? = None
+  pub enable_snapshot_virtual_directory_access: Bool? = None
+  pub enable_smb_directory_lease: Bool? = None
+  pub paid_bursting_enabled: Bool? = None
+  pub paid_bursting_max_bandwidth_mibps: Int? = None
+  pub paid_bursting_max_iops: Int? = None
+  pub share_provisioned_bandwidth_mibps: Int? = None
+  pub share_provisioned_iops: Int? = None
+}
+
+pub struct SetSharePropertiesResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub included_burst_iops: Int? = None
+  pub last_modified: Time? = None
+  pub max_burst_credits_for_iops: Int? = None
+  pub next_allowed_provisioned_bandwidth_downgrade_time: Time? = None
+  pub next_allowed_provisioned_iops_downgrade_time: Time? = None
+  pub next_allowed_quota_downgrade_time: Time? = None
+  pub provisioned_bandwidth_mibps: Int? = None
+  pub provisioned_iops: Int? = None
+  pub quota: Int? = None
+}
+
+pub fn (s: ShareClient) set_properties(options: SetSharePropertiesOptions = SetSharePropertiesOptions{}) -> SetSharePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = str_header("x-ms-access-tier", o.access_tier) + bool_header("x-ms-enable-smb-directory-lease", o.enable_smb_directory_lease) + bool_header("x-ms-enable-snapshot-virtual-directory-access", o.enable_snapshot_virtual_directory_access) + lease_header(o.lease_id) + str_header("x-ms-root-squash", o.root_squash) + bool_header("x-ms-share-paid-bursting-enabled", o.paid_bursting_enabled) + int_header("x-ms-share-paid-bursting-max-bandwidth-mibps", o.paid_bursting_max_bandwidth_mibps) + int_header("x-ms-share-paid-bursting-max-iops", o.paid_bursting_max_iops) + int_header("x-ms-share-provisioned-bandwidth-mibps", o.share_provisioned_bandwidth_mibps) + int_header("x-ms-share-provisioned-iops", o.share_provisioned_iops) + int_header("x-ms-share-quota", o.quota)
+  let resp = s.core.send(share_call("PUT", Some("properties"), [200]) with {headers: hs})?
+  Ok(SetSharePropertiesResponse{
+    response: response_of(resp), date: header_time(resp, "Date"), etag: header(resp, "ETag"), included_burst_iops: header_int(resp, "x-ms-share-included-burst-iops"), last_modified: header_time(resp, "Last-Modified"), max_burst_credits_for_iops: header_int(resp, "x-ms-share-max-burst-credits-for-iops"),
+    next_allowed_provisioned_bandwidth_downgrade_time: header_time(resp, "x-ms-share-next-allowed-provisioned-bandwidth-downgrade-time"),
+    next_allowed_provisioned_iops_downgrade_time: header_time(resp, "x-ms-share-next-allowed-provisioned-iops-downgrade-time"),
+    next_allowed_quota_downgrade_time: header_time(resp, "x-ms-share-next-allowed-quota-downgrade-time"),
+    provisioned_bandwidth_mibps: header_int(resp, "x-ms-share-provisioned-bandwidth-mibps"), provisioned_iops: header_int(resp, "x-ms-share-provisioned-iops"), quota: header_int(resp, "x-ms-share-quota"),
+  })
+}
+
+// Snapshots, metadata and statistics.
+
+/// The ETag and last modified time a write returns.
+pub struct ShareWriteResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+fn write_response(resp: http.Response) -> ShareWriteResponse {
+  ShareWriteResponse{response: response_of(resp), date: header_time(resp, "Date"), etag: header(resp, "ETag"), last_modified: header_time(resp, "Last-Modified")}
+}
+
+pub struct CreateSnapshotResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub snapshot: Str? = None
+}
+
+pub fn (s: ShareClient) create_snapshot(metadata: Map[Str, Str]? = None) -> CreateSnapshotResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("PUT", Some("snapshot"), [201]) with {headers: meta_headers(metadata ?? {})})?
+  Ok(CreateSnapshotResponse{response: response_of(resp), date: header_time(resp, "Date"), etag: header(resp, "ETag"), last_modified: header_time(resp, "Last-Modified"), snapshot: header(resp, "x-ms-snapshot")})
+}
+
+pub fn (s: ShareClient) set_metadata(metadata: Map[Str, Str]? = None, lease_id: Str? = None) -> ShareWriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("PUT", Some("metadata"), [200]) with {headers: lease_header(lease_id) + meta_headers(metadata ?? {})})?
+  Ok(write_response(resp))
+}
+
+pub struct GetStatisticsResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub share_usage_bytes: Int? = None
+}
+
+pub fn (s: ShareClient) get_statistics(lease_id: Str? = None) -> GetStatisticsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("GET", Some("stats"), [200]) with {headers: lease_header(lease_id)})?
+  let w = write_response(resp)
+  Ok(GetStatisticsResponse{response: w.response, date: w.date, etag: w.etag, last_modified: w.last_modified, share_usage_bytes: decoded(resp, parse_share_stats)?})
+}
+
+// Access policies.
+
+pub struct GetAccessPolicyResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub signed_identifiers: List[SignedIdentifier] = []
+}
+
+pub fn (s: ShareClient) get_access_policy(lease_id: Str? = None) -> GetAccessPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("GET", Some("acl"), [200]) with {headers: lease_header(lease_id)})?
+  let w = write_response(resp)
+  Ok(GetAccessPolicyResponse{response: w.response, date: w.date, etag: w.etag, last_modified: w.last_modified, signed_identifiers: decoded(resp, parse_signed_identifiers)?})
+}
+
+/// Replaces the share's stored access policies; `None` sends no body, as
+/// Go does for nil options.
+pub fn (s: ShareClient) set_access_policy(share_acl: List[SignedIdentifier]? = None, lease_id: Str? = None) -> ShareWriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let body = share_acl.map(fn(ids: List[SignedIdentifier]) -> Bytes { signed_identifiers_xml(ids).bytes() })
+  let resp = s.core.send(share_call("PUT", Some("acl"), [200]) with {headers: lease_header(lease_id), body: body})?
+  Ok(write_response(resp))
+}
+
+// Permissions.
+
+pub struct CreatePermissionResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub file_permission_key: Str? = None
+}
+
+/// Stores a security descriptor (SDDL) at the share level; the key it
+/// returns names it in file and directory calls.
+pub fn (s: ShareClient) create_permission(share_permission: Str) -> CreatePermissionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(share_call("PUT", Some("filepermission"), [201]) with {body: Some(permission_json(share_permission, None).bytes()), content_type: "application/json"})?
+  Ok(CreatePermissionResponse{response: response_of(resp), date: header_time(resp, "Date"), file_permission_key: header(resp, "x-ms-file-permission-key")})
+}
+
+pub struct GetPermissionResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub format: Str? = None
+  pub permission: Str? = None
+}
+
+fn parse_permission(text: Str) -> (Str?, Str?) ! Str {
+  let v = json.parse_value(text) ?? e => return Err("the share permission is not JSON: ${e.display()}")
+  let s = fn(k: Str) -> Str? {
+    match v.get(k) {
+      Some(json.Value.Str(x)) => Some(x)
+      _ => None
+    }
+  }
+  Ok((s("format"), s("permission")))
+}
+
+pub fn (s: ShareClient) get_permission(file_permission_key: Str, file_permission_format: Str? = None) -> GetPermissionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = str_header("x-ms-file-permission-format", file_permission_format) + [("x-ms-file-permission-key", file_permission_key)]
+  let resp = s.core.send(share_call("GET", Some("filepermission"), [200]) with {headers: hs, accept: "application/json"})?
+  let (format, permission) = decoded(resp, parse_permission)?
+  Ok(GetPermissionResponse{response: response_of(resp), date: header_time(resp, "Date"), format: format, permission: permission})
+}

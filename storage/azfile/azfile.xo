@@ -1,0 +1,349 @@
+// Azure Files, as azfile v1.7.1 (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): the clients' shared core over the REST API
+// version 2026-06-06, their options, connection strings and URL parts.
+// The Shared Key credential and policy are azblob's (`exported`): azfile's
+// signer is the same code.
+
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+pub const VERSION: Str = "v0.1.0"
+
+/// The REST API version the calls are written for (azfile v1.7.1's).
+pub const SERVICE_VERSION: Str = "2026-06-06"
+
+/// The scope of a token for Storage.
+pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
+
+/// The only file request intent (`x-ms-file-request-intent`), needed with
+/// Entra ID tokens on calls that check share permissions.
+pub const TOKEN_INTENT_BACKUP: Str = "backup"
+
+pub type SharedKeyCredential = exported.SharedKeyCredential
+
+/// The credential of `account_name` with `account_key` (base64).
+pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedKeyCredential ! Str {
+  exported.new_shared_key_credential(account_name, account_key)
+}
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Keep a trailing dot in directory and file names
+  /// (`x-ms-allow-trailing-dot`).
+  pub allow_trailing_dot: Bool? = None
+  /// `TOKEN_INTENT_BACKUP` for calls with Entra ID tokens.
+  pub file_request_intent: Str? = None
+  /// Keep a trailing dot in a copy or rename source
+  /// (`x-ms-source-allow-trailing-dot`).
+  pub allow_source_trailing_dot: Bool? = None
+  /// The token audience (`<audience>/.default`) when it is not Storage's.
+  pub audience: Str = ""
+}
+
+/// What every client shares: the pipeline, the key for SAS URLs and the
+/// options its requests carry.
+struct Core {
+  url: Str
+  pipeline: runtime.Pipeline
+  cred: SharedKeyCredential?
+  options: ClientOptions
+}
+
+fn pipeline(net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy], opts: ClientOptions) -> runtime.Pipeline {
+  runtime.new_pipeline("azfile", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: auth}, opts.client)
+}
+
+/// The token scope (base.GetAudience).
+fn audience(opts: ClientOptions) -> Str {
+  if opts.audience.trim() == "" { TOKEN_SCOPE } else { "${opts.audience.trim_end_chars("/")}/.default" }
+}
+
+fn core_with_shared_key(net: Net, clock: Clock, rand: Rand, u: Str, cred: SharedKeyCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [exported.SharedKeyPolicy{credential: cred, clock: clock}], opts), cred: Some(cred), options: opts}
+}
+
+fn core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [runtime.bearer_token_policy(cred, [audience(opts)], clock)], opts), cred: None, options: opts}
+}
+
+fn core_with_no_credential(net: Net, clock: Clock, rand: Rand, u: Str, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [], opts), cred: None, options: opts}
+}
+
+/// `base` with `segment` joined to its path, its query kept
+/// (runtime.JoinPaths).
+fn join_paths(base: Str, segment: Str) -> Str {
+  let (path, query) = match base.find("?") {
+    Some(i) => (base[0..i], base[i..base.len()])
+    None => (base, "")
+  }
+  if segment == "" {
+    return base
+  }
+  "${path.trim_end_chars("/")}/${segment}${query}"
+}
+
+/// `u` with `query` merged into the query it has, the keys sorted as Go's
+/// url.Values.Encode sorts them.
+fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
+  let (base, raw) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var v = url.parse_query(raw).ok() ?? url.values()
+  for (k, x) in query {
+    v.set(k, x)
+  }
+  let q = v.encode()
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+/// One request: its URL query and headers (Accept and x-ms-version are
+/// added), the body and its content type, and the statuses that succeed.
+struct Call {
+  method: Str
+  query: List[(Str, Str)] = []
+  headers: List[(Str, Str)] = []
+  ok: List[Int]
+  body: Bytes? = None
+  content_type: Str = "application/xml"
+  accept: Str = "application/xml"
+  /// The share clients and below send the file request intent; the
+  /// service client has none (Go's generated ServiceClient).
+  intent: Bool = true
+}
+
+fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let u = with_query(c.url, call.query)
+  var hs = call.headers + [("Accept", call.accept), ("x-ms-version", SERVICE_VERSION)]
+  if call.intent {
+    if let Some(i) = c.options.file_request_intent { hs.push(("x-ms-file-request-intent", i)) }
+  }
+  var b = b""
+  if let Some(x) = call.body {
+    hs.push(("Content-Type", call.content_type))
+    b = x
+  }
+  let req = policy.Request{method: call.method, url: u, headers: hs, body: b}
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !call.ok.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(call.method, u, resp)))
+  }
+  Ok(resp)
+}
+
+fn decoded[T](resp: http.Response, parse: fn(Str) -> T ! Str) -> T ! azcore.CallErr {
+  parse(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+fn meta_headers(metadata: Map[Str, Str]) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  for k in metadata.keys().sort() {
+    hs.push(("x-ms-meta-${k}", metadata.get(k) ?? ""))
+  }
+  hs
+}
+
+/// `x-ms-meta-*` response headers, prefix removed, names as Go's
+/// http.Header canonicalizes them (`Color`, `Content-Type`).
+fn metadata_of(resp: http.Response) -> Map[Str, Str] {
+  var m: Map[Str, Str] = {}
+  for (k, v) in resp.headers {
+    if k.to_lower().starts_with("x-ms-meta-") {
+      m[canonical_header_word(k[10..k.len()])] = v
+    }
+  }
+  m
+}
+
+/// Go's textproto.CanonicalMIMEHeaderKey on a name of letters, digits
+/// and dashes: each dash-separated word capitalized, the rest lowercased.
+fn canonical_header_word(s: Str) -> Str {
+  s.split("-").map(fn(w: Str) -> Str {
+    if w == "" { "" } else { w[0..1].to_upper() + w[1..w.len()].to_lower() }
+  }).join("-")
+}
+
+/// An HTTP date (`Thu, 05 Nov 2026 03:04:05 GMT`) as a Time.
+fn rfc1123(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
+}
+
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time.
+fn rfc3339(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.to_upper(), time.RFC3339, time.utc()).ok()
+}
+
+fn header(resp: http.Response, name: Str) -> Str? {
+  resp.header(name)
+}
+
+fn header_int(resp: http.Response, name: Str) -> Int? {
+  resp.header(name).and_then(fn(v: Str) -> Int? { Int.parse(v) })
+}
+
+fn header_bool(resp: http.Response, name: Str) -> Bool? {
+  resp.header(name).and_then(fn(v: Str) -> Bool? { parse_bool(v) })
+}
+
+fn header_time(resp: http.Response, name: Str) -> Time? {
+  resp.header(name).and_then(fn(v: Str) -> Time? { rfc1123(v) })
+}
+
+/// Go's strconv.ParseBool.
+fn parse_bool(s: Str) -> Bool? {
+  if ["1", "t", "T", "TRUE", "true", "True"].contains(s) {
+    return Some(true)
+  }
+  if ["0", "f", "F", "FALSE", "false", "False"].contains(s) {
+    return Some(false)
+  }
+  None
+}
+
+/// What every call returns: the service's request ID and version.
+pub struct Response {
+  pub request_id: Str? = None
+  pub version: Str? = None
+}
+
+fn response_of(resp: http.Response) -> Response {
+  Response{request_id: header(resp, "x-ms-request-id"), version: header(resp, "x-ms-version")}
+}
+
+/// A parsed connection string: the service URL (with the SAS when it
+/// has one) and the account key.
+pub struct ParsedConnectionString {
+  pub service_url: Str
+  pub account_name: Str = ""
+  pub account_key: Str = ""
+}
+
+/// Parses a storage connection string as azfile does: `AccountName`,
+/// `AccountKey` or `SharedAccessSignature`, and `FileEndpoint` or
+/// `DefaultEndpointsProtocol` and `EndpointSuffix`.
+pub fn parse_connection_string(connection_string: Str) -> ParsedConnectionString ! Str {
+  let malformed = "connection string is either blank or malformed. The expected connection string should contain key value pairs separated by semicolons. For example 'DefaultEndpointsProtocol=https;AccountName=<accountName>;AccountKey=<accountKey>;EndpointSuffix=core.windows.net'"
+  var m: Map[Str, Str] = {}
+  for part in connection_string.trim_end_chars(";").split(";") {
+    let i = part.find("=") ?? return Err(malformed)
+    m[part[0..i]] = part[i + 1..part.len()]
+  }
+  let account = m.get("AccountName") ?? ""
+  let key = match m.get("AccountKey") {
+    Some(k) => k
+    None => {
+      let sig = m.get("SharedAccessSignature") ?? return Err("connection string missing AccountKey and SharedAccessSignature")
+      if let Some(e) = m.get("FileEndpoint") {
+        return Ok(ParsedConnectionString{service_url: "${if e.ends_with("/") { e } else { e + "/" }}?${sig}"})
+      }
+      if account == "" {
+        return Err("connection string missing AccountName")
+      }
+      return Ok(ParsedConnectionString{service_url: "https://${account}.file.core.windows.net/?${sig}"})
+    }
+  }
+  if account == "" {
+    return Err("connection string missing AccountName")
+  }
+  let protocol = m.get("DefaultEndpointsProtocol") ?? "https"
+  let suffix = m.get("EndpointSuffix") ?? "core.windows.net"
+  let service_url = m.get("FileEndpoint") ?? "${protocol}://${account}.file.${suffix}"
+  Ok(ParsedConnectionString{service_url: service_url, account_name: account, account_key: key})
+}
+
+/// A file service URL's parts (sas.URLParts): with an IP host (Azurite's
+/// `127.0.0.1:10000/devstoreaccount1/share`) the first path segment is
+/// the account.
+pub struct URLParts {
+  pub scheme: Str
+  pub host: Str
+  pub ip_account_name: Str = ""
+  pub share_name: Str = ""
+  pub directory_or_file_path: Str = ""
+  pub share_snapshot: Str = ""
+  /// The rest of the query (a SAS included), encoded as Go's
+  /// url.Values.Encode writes it.
+  pub unparsed_params: Str = ""
+}
+
+pub fn parse_url(u: Str) -> URLParts ! Str {
+  let p = http.parse_url(u) ?? e => return Err(e.display())
+  let host = match p.port {
+    Some(n) => "${p.host}:${n}"
+    None => p.host
+  }
+  let raw = match u.find("?") {
+    Some(i) => u[i + 1..u.len()]
+    None => ""
+  }
+  var path = (url.path_unescape(p.path).ok() ?? p.path).trim_start_chars("/")
+  var account = ""
+  if is_ip(p.host) {
+    match path.find("/") {
+      Some(i) => {
+        account = path[0..i]
+        path = path[i + 1..path.len()]
+      }
+      None => {
+        account = path
+        path = ""
+      }
+    }
+  }
+  let (share, rest) = match path.find("/") {
+    Some(i) => (path[0..i], path[i + 1..path.len()])
+    None => (path, "")
+  }
+  var q = url.parse_query(raw).ok() ?? url.values()
+  var snapshot = ""
+  for k in q.keys() {
+    if k.to_lower() == "sharesnapshot" && snapshot == "" {
+      snapshot = q.get(k) ?? ""
+      q.remove(k)
+    }
+  }
+  Ok(URLParts{scheme: p.scheme, host: host, ip_account_name: account, share_name: share, directory_or_file_path: rest, share_snapshot: snapshot, unparsed_params: q.encode()})
+}
+
+/// The URL again (URLParts.String): the snapshot after the other
+/// parameters.
+pub fn (up: URLParts) to_url() -> Str {
+  var path = ""
+  if is_ip(up.host.split(":")[0]) && up.ip_account_name != "" {
+    path = "/${up.ip_account_name}"
+  }
+  if up.share_name != "" {
+    path = "${path}/${up.share_name}"
+    if up.directory_or_file_path != "" {
+      path = "${path}/${up.directory_or_file_path}"
+    }
+  }
+  var query = up.unparsed_params
+  if up.share_snapshot != "" {
+    query = "${if query == "" { "" } else { query + "&" }}sharesnapshot=${up.share_snapshot}"
+  }
+  let base = "${up.scheme}://${up.host}${escape_path(path)}"
+  if query == "" { base } else { "${base}?${query}" }
+}
+
+/// A path escaped segment by segment, its slashes kept.
+fn escape_path(path: Str) -> Str {
+  path.split("/").map(fn(s: Str) -> Str { url.path_escape(s) }).join("/")
+}
+
+fn is_ip(host: Str) -> Bool {
+  let h = host.trim_start_chars("[").trim_end_chars("]")
+  h.contains(":") || (h.split(".").len() == 4 && h.split(".").all(fn(x: Str) -> Bool { Int.parse(x).is_some() }))
+}
