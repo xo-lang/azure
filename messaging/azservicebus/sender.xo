@@ -69,10 +69,10 @@ fn (s: Sender) recover(k: RecoveryKind) uses (net.dial, clock) {
 }
 
 /// Sends `m` on the link with retries.
-fn (s: Sender) send_amqp(m: amqp.Message) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+fn (s: Sender) send_amqp(m: amqp.Message, message_format: Int = 0) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
   s.client.retry(s.client.opts.retry_options, fn(_: Int) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
     let x = s.get()?
-    let st = x.l.send(m) ?? e => return Err(from_amqp(e))
+    let st = x.l.send(m, message_format: message_format) ?? e => return Err(from_amqp(e))
     match outcome(st) {
       Some(e) => Err(e)
       None => Ok(())
@@ -98,36 +98,91 @@ pub fn (s: Sender) send_message(message: Message, options: SendMessageOptions = 
 }
 
 pub struct MessageBatchOptions {
-  /// The batch's size limit in bytes; 0 for the link's (Go reads it from
-  /// the attach; here 256 KiB, the Standard tier's).
+  /// The batch's size limit in bytes; 0 for the link's: its
+  /// `com.microsoft:max-message-batch-size` property, else its max
+  /// message size, as Go's NewMessageBatch.
   pub max_bytes: Int = 0
 }
 
-/// Messages sent as one transfer (message format 0x80013700, each data
-/// section one encoded message).
+/// Messages sent as one transfer of message format 0x80013700: the first
+/// message without its body is the envelope, and each message is one data
+/// section of the body, as Go's MessageBatch.
 pub struct MessageBatch {
   max_bytes: Int
+  rand: Rand
   size: Int = 0
+  envelope: amqp.Message? = None
   encoded: List[Bytes] = []
 }
 
 pub const ERR_MESSAGE_TOO_LARGE: Str = "the message is too large"
 
-/// An empty batch.
-pub fn (s: Sender) new_message_batch(options: MessageBatchOptions = MessageBatchOptions{}) -> MessageBatch ! ServiceBusErr {
-  Ok(MessageBatch{max_bytes: if options.max_bytes > 0 { options.max_bytes } else { 262144 }})
+/// The message format of a batch transfer.
+const BATCH_MESSAGE_FORMAT: Int = 0x80013700
+
+fn int_value(v: amqp.Value) -> Int? {
+  match v {
+    amqp.Value.ULong(x) => Some(Int(x))
+    amqp.Value.UInt(x) => Some(Int(x))
+    amqp.Value.Long(x) => if x > 0 { Some(Int(x)) } else { None }
+    amqp.Value.Int(x) => if x > 0 { Some(Int(x)) } else { None }
+    _ => None
+  }
+}
+
+/// An empty batch, sized for the link (which attaches here, as Go's). A
+/// link that names no size (0, AMQP's no limit) takes no limit.
+pub fn (s: Sender) new_message_batch(options: MessageBatchOptions = MessageBatchOptions{}) -> MessageBatch ! ServiceBusErr uses (net.dial, clock, rand) {
+  let max = s.client.retry(s.client.opts.retry_options, fn(_: Int) -> Int ! ServiceBusErr uses (net.dial, clock, rand) {
+    let x = s.get()?
+    let a = x.l.remote_attach() ?? return Ok(0)
+    var m = a.max_message_size
+    for (k, v) in a.properties {
+      if k == "com.microsoft:max-message-batch-size" {
+        if let Some(n) = int_value(v) {
+          m = n
+        }
+      }
+    }
+    Ok(m)
+  }, fn(k: RecoveryKind) uses (net.dial, clock) { s.recover(k) })?
+  Ok(MessageBatch{max_bytes: if options.max_bytes != 0 { options.max_bytes } else { max }, rand: s.client.rand})
 }
 
 pub struct AddMessageOptions {}
 
-/// Adds a message; ERR_MESSAGE_TOO_LARGE when it would pass the limit.
-pub fn (var b: MessageBatch) add_message(m: Message, options: AddMessageOptions = AddMessageOptions{}) -> () ! ServiceBusErr {
-  let bs = amqp.encode_message(m.to_amqp()) ?? e => return Err(from_amqp(e))
-  // Each data section costs its bytes plus a 5 byte vbin32 header.
-  let grown = b.size + bs.len() + 5
-  if grown > b.max_bytes {
+/// A data section's encoded size: its bytes with a vbin8 or vbin32
+/// header (Go's calcActualSizeForPayload).
+fn payload_size(n: Int) -> Int {
+  if n < 256 { 5 + n } else { 8 + n }
+}
+
+/// Adds a message (given a message id when it has none, as Go's);
+/// ERR_MESSAGE_TOO_LARGE when it would pass the limit.
+pub fn (var b: MessageBatch) add_message(m: Message, options: AddMessageOptions = AddMessageOptions{}) -> () ! ServiceBusErr uses rand {
+  var msg = m
+  if (msg.message_id ?? "") == "" {
+    msg.message_id = Some(uuid.v4(b.rand).display())
+  }
+  let am = msg.to_amqp()
+  let bs = amqp.encode_message(am) ?? e => return Err(from_amqp(e))
+  var size = b.size
+  var envelope = b.envelope
+  if b.encoded.is_empty() {
+    let env = am with {body: amqp.Body.Data(sections: [])}
+    let eb = amqp.encode_message(env) ?? e => return Err(from_amqp(e))
+    size = eb.len()
+    envelope = Some(env)
+  }
+  let grown = size + payload_size(bs.len())
+  if b.max_bytes > 0 && grown > b.max_bytes {
+    if b.encoded.is_empty() {
+      b.size = 0
+      b.envelope = None
+    }
     return Err(ServiceBusErr{msg: ERR_MESSAGE_TOO_LARGE})
   }
+  b.envelope = envelope
   b.encoded.push(bs)
   b.size = grown
   Ok(())
@@ -143,15 +198,10 @@ pub fn (b: MessageBatch) num_messages() -> Int {
 
 pub struct SendMessageBatchOptions {}
 
-/// Sends the batch's messages. Go sends them in one transfer of message
-/// format 0x80013700; std/amqp's send has no message format yet, so each
-/// goes in its own transfer, in order, and the first refusal stops it.
+/// Sends the batch in one transfer (message format 0x80013700).
 pub fn (s: Sender) send_message_batch(batch: MessageBatch, options: SendMessageBatchOptions = SendMessageBatchOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
-  for bs in batch.encoded {
-    let m = amqp.decode_message(bs) ?? e => return Err(from_amqp(e))
-    s.send_amqp(m)?
-  }
-  Ok(())
+  let env = batch.envelope ?? return Ok(())
+  s.send_amqp(env with {body: amqp.Body.Data(sections: batch.encoded)}, BATCH_MESSAGE_FORMAT)
 }
 
 pub struct ScheduleMessagesOptions {}

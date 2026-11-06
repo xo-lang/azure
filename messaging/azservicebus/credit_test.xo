@@ -1,0 +1,81 @@
+// Manual credit and drain, the attach reply's session, and
+// properties_to_modify (std/amqp at 8d3b41d15 and later).
+
+use std/amqp
+use std/amqptest
+
+test "a receive locks only what it returns: the rest is drained, and another receiver gets it" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    for t in ["m1", "m2", "m3"] {
+      snd.send_message(Message{body: t.bytes()})?
+    }
+    let r1 = c.new_receiver_for_queue("q1")?
+    expect(r1.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["m1"]
+    expect(b.locked("q1")) == 1
+    let r2 = c.new_receiver_for_queue("q1")?
+    let rest = r2.receive_messages(5, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(rest.map(text)) == ["m2", "m3"]
+    // An empty queue: the wait ends at the timeout with nothing.
+    expect(r2.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 200})?.len()) == 0
+    expect(r1.receive_messages(0).is_err()) == true
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "accept_next_session_for_queue takes the session the service names, with the lock from the attach" {
+  let b = amqptest.new(os.clock)
+  b.queue("sq", amqptest.QueueOptions{sessions: true, lock_ms: 30000})
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("sq")?
+    snd.send_message(Message{body: b"x1", session_id: Some("s-x")})?
+    snd.send_message(Message{body: b"x2", session_id: Some("s-x")})?
+    let r = c.accept_next_session_for_queue("sq")?
+    expect(r.session_id()) == "s-x"
+    expect(r.locked_until().unix_millis() > os.clock.now().unix_millis()) == true
+    let got = r.receive_messages(2, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(got.map(text)) == ["x1", "x2"]
+    for m in got {
+      r.complete_message(m)?
+    }
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "abandon and defer take properties_to_modify, and a batch goes as one transfer" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("q1")?
+    var batch = snd.new_message_batch()?
+    batch.add_message(Message{body: b"b1"})?
+    batch.add_message(Message{body: b"b2", message_id: Some("given")})?
+    snd.send_message_batch(batch)?
+    let r = c.new_receiver_for_queue("q1")?
+    let got = r.receive_messages(2, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(got.map(text)) == ["b1", "b2"]
+    // The batch gave the first message an id, as Go's AddMessage does.
+    expect(got[0].message_id.len()) == 36
+    expect(got[1].message_id) == "given"
+    r.abandon_message(got[0], AbandonMessageOptions{properties_to_modify: {"tries": amqp.Value.Long(v: 1)}})?
+    r.defer_message(got[1], DeferMessageOptions{properties_to_modify: {"why": amqp.Value.Str(v: "later")}})?
+    until(os.clock, fn() -> Bool { b.deferred("q1").len() == 1 })
+    expect(b.deferred("q1").len()) == 1
+    expect(r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["b1"]
+    c.close()?
+    s.cancel()
+  }
+}

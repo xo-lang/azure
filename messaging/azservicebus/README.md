@@ -21,8 +21,14 @@ What it does:
   messages); receiving deferred messages by sequence number; peeking;
   renewing a message's lock.
 - Session receivers for a named session (`accept_session_for_queue`,
-  `accept_session_for_subscription`) with their session state and lock
-  renewal.
+  `accept_session_for_subscription`) or the next free one
+  (`accept_next_session_for_queue`, `_for_subscription`, the session
+  read from the attach reply), with the lock's expiry from the attach,
+  session state and lock renewal.
+- Batches in one transfer of message format 0x80013700, sized from the
+  link's attach as Go's; settlements in receive settle mode second that
+  wait for the service's answer (a lost lock shows in the call);
+  `properties_to_modify` on abandon and defer.
 - Retries and recovery as Go's: `ClientOptions.retry_options`
   (`RetryOptions`: 3 retries, 4 s doubling with jitter, 120 s cap by
   default). Each error carries its `RecoveryKind`: a busy server or a
@@ -45,25 +51,18 @@ What it does:
   and correlation filters with typed parameters, SQL actions, and keep
   unknown filter and action types as XML.
 
-Not yet, with what each needs:
+Not yet:
 
-- `accept_next_session_for_queue` and `_for_subscription`: the broker
-  names the session it picked in its attach reply, which std/amqp does
-  not show yet (asked of Xo). For the same reason a session
-  receiver's first `locked_until` comes from a renew-session-lock.
 - `new_list_sessions_for_queue_pager`.
-- A batch is one transfer in Go (message format 0x80013700); here each
-  message is its own transfer, since std/amqp's `send` takes no message
-  format.
-- `receive_messages` grants one credit at a time and does not drain;
-  after it returns, the link may hold one locked message that the next
-  call returns (Go drains its credit). Needs manual credit and drain in
-  std/amqp.
-- Settling on the link does not wait for the service's answer (Go's
-  receiver settle mode second does), so a lost lock shows on the next
-  operation rather than in `complete_message`.
-- `properties_to_modify` on abandon and defer (needs annotations on
-  std/amqp's `modify`).
+
+Where the AMQP side differs from Go v1.11.0:
+
+- `receive_messages` issues manual credit for what it asks, as Go's, and
+  then drains what is left, so no message stays locked to the link
+  between calls. Go keeps the credit and releases late messages from a
+  background loop; the outcome is the same without a background task.
+- A link that names no max message size (AMQP's 0, no limit) gives a
+  batch with no limit; Go would refuse every message.
 
 Where admin differs from Go v1.11.0, each a Go bug:
 

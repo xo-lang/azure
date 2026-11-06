@@ -64,8 +64,8 @@ fn (c: Client) receiver(entity: Str, options: ReceiverOptions, filters: List[(St
   }
   let name = c.link_name("receiver", entity)
   let opts = match options.receive_mode {
-    ReceiveMode.PeekLock => amqp.ReceiverOptions{name: name, credit: 1, filters: filters, settle_mode: Some(amqp.ReceiverSettleMode.Second), sender_settle_mode: Some(amqp.SenderSettleMode.Unsettled)}
-    ReceiveMode.ReceiveAndDelete => amqp.ReceiverOptions{name: name, credit: 1, filters: filters, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled)}
+    ReceiveMode.PeekLock => amqp.ReceiverOptions{name: name, credit: 0, filters: filters, settle_mode: Some(amqp.ReceiverSettleMode.Second), sender_settle_mode: Some(amqp.SenderSettleMode.Unsettled)}
+    ReceiveMode.ReceiveAndDelete => amqp.ReceiverOptions{name: name, credit: 0, filters: filters, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled)}
   }
   Ok(Receiver{client: c, entity: entity, mode: options.receive_mode, link: Mutex[RecvLink?].new(None), opts: opts, name: name, last_peeked: Atomic[Int].new(0), settled: Mutex[Set[Str]].new(#{}), closed: Atomic[Bool].new(false)})
 }
@@ -129,9 +129,10 @@ pub struct ReceiveMessagesOptions {
   /// How long to wait for the first message; 0 waits for the client's
   /// timeout. Go waits until its context ends.
   pub timeout_ms: Int = 0
-  /// After the first message, how long to wait for each further one (Go's
-  /// 20 ms, "TimeAfterFirstMessage").
-  pub time_after_first_message_ms: Int = 20
+  /// After the first message, how long to keep collecting (Go's
+  /// TimeAfterFirstMessage); 0 for Go's defaults, 20 ms in peek-lock mode
+  /// and 1 s in receive-and-delete mode.
+  pub time_after_first_message_ms: Int = 0
 }
 
 /// Up to `max_messages` messages: it waits for the first, then takes
@@ -140,24 +141,61 @@ pub struct ReceiveMessagesOptions {
 /// message is retried on a new link or connection; one after it returns
 /// the messages so far and recovers for the next call.
 pub fn (r: Receiver) receive_messages(max_messages: Int, options: ReceiveMessagesOptions = ReceiveMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  if max_messages <= 0 {
+    return Err(fatal("maxMessages should be greater than 0"))
+  }
   let first = if options.timeout_ms > 0 { options.timeout_ms } else { r.client.opts.timeout_ms }
+  let window = if options.time_after_first_message_ms > 0 { options.time_after_first_message_ms } else {
+    match r.mode {
+      ReceiveMode.PeekLock => 20
+      ReceiveMode.ReceiveAndDelete => 1000
+    }
+  }
+  let clock = r.client.clock
+  let drain_ms = r.client.opts.timeout_ms
   r.client.retry(r.client.opts.retry_options, fn(_: Int) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
     let x = r.attached()?
+    // Manual credit, as Go's: as much as asked for, then the rest of it
+    // drained once the window closes, so no message stays locked to the
+    // link between calls (Go releases those from a background loop).
+    x.l.issue_credit(max_messages) ?? e => return Err(from_amqp(e))
     var out: List[ReceivedMessage] = []
+    var failed: ServiceBusErr? = None
+    var deadline = 0
     while out.len() < max_messages {
-      let wait = if out.is_empty() { first } else { options.time_after_first_message_ms }
+      let wait = if out.is_empty() { first } else { deadline - clock.now().unix_millis() }
+      if wait <= 0 && !out.is_empty() {
+        break
+      }
       match x.l.receive(wait) {
-        Ok(d) => out.push(received(d.message, Some(d), x.key))
+        Ok(d) => {
+          if out.is_empty() {
+            deadline = clock.now().unix_millis() + window
+          }
+          out.push(received(d.message, Some(d), x.key))
+        }
         Err(amqp.AmqpErr.Net(m)) if m.contains("i/o timeout") => break
         Err(e) => {
-          let se = from_amqp(e)
-          if out.is_empty() {
-            return Err(se)
-          }
-          r.recover(se.recovery)
+          failed = Some(from_amqp(e))
           break
         }
       }
+    }
+    if failed.is_none() && out.len() < max_messages {
+      match x.l.drain(drain_ms) {
+        Ok(ds) => {
+          for d in ds {
+            out.push(received(d.message, Some(d), x.key))
+          }
+        }
+        Err(e) => failed = Some(from_amqp(e))
+      }
+    }
+    if let Some(se) = failed {
+      if out.is_empty() {
+        return Err(se)
+      }
+      r.recover(se.recovery)
     }
     Ok(out)
   }, fn(k: RecoveryKind) uses (net.dial, clock) { r.recover(k) })
@@ -220,20 +258,42 @@ pub fn (r: Receiver) complete_message(message: ReceivedMessage, options: Complet
   r.settle(message, fn(l: amqp.Receiver, d: amqp.Delivery) -> () ! amqp.AmqpErr uses (net.dial, clock) { l.accept(d) }, "completed", [])
 }
 
-pub struct AbandonMessageOptions {}
+pub struct AbandonMessageOptions {
+  /// Application properties to set on the message as it goes back.
+  pub properties_to_modify: Map[Str, amqp.Value] = {}
+}
+
+/// Go's PropertiesToModify on the link: the Modified outcome's
+/// annotations, keys in order.
+fn modify_annotations(ps: Map[Str, amqp.Value]) -> List[(Str, amqp.Value)] {
+  ps.keys().sort().map(fn(k: Str) -> (Str, amqp.Value) { (k, ps.get(k) ?? amqp.Value.Null) })
+}
+
+/// And on `$management`: a `properties-to-modify` map.
+fn modify_extra(ps: Map[Str, amqp.Value]) -> List[(Str, amqp.Value)] {
+  if ps.is_empty() {
+    return []
+  }
+  [("properties-to-modify", amqp.Value.Map(pairs: modify_annotations(ps).map(fn(kv: (Str, amqp.Value)) -> (amqp.Value, amqp.Value) { (amqp.Value.Str(v: kv.0), kv.1) })))]
+}
 
 /// Gives the message back: it can be received again, its delivery count
 /// up by one.
 pub fn (r: Receiver) abandon_message(message: ReceivedMessage, options: AbandonMessageOptions = AbandonMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
-  r.settle(message, fn(l: amqp.Receiver, d: amqp.Delivery) -> () ! amqp.AmqpErr uses (net.dial, clock) { l.modify(d, false, false) }, "abandoned", [])
+  let ann = modify_annotations(options.properties_to_modify)
+  r.settle(message, fn(l: amqp.Receiver, d: amqp.Delivery) -> () ! amqp.AmqpErr uses (net.dial, clock) { l.modify(d, false, false, ann) }, "abandoned", modify_extra(options.properties_to_modify))
 }
 
-pub struct DeferMessageOptions {}
+pub struct DeferMessageOptions {
+  /// Application properties to set on the message as it is deferred.
+  pub properties_to_modify: Map[Str, amqp.Value] = {}
+}
 
 /// Defers the message: it is only received again by its sequence number
 /// (receive_deferred_messages).
 pub fn (r: Receiver) defer_message(message: ReceivedMessage, options: DeferMessageOptions = DeferMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
-  r.settle(message, fn(l: amqp.Receiver, d: amqp.Delivery) -> () ! amqp.AmqpErr uses (net.dial, clock) { l.modify(d, false, true) }, "defered", [])
+  let ann = modify_annotations(options.properties_to_modify)
+  r.settle(message, fn(l: amqp.Receiver, d: amqp.Delivery) -> () ! amqp.AmqpErr uses (net.dial, clock) { l.modify(d, false, true, ann) }, "defered", modify_extra(options.properties_to_modify))
 }
 
 pub struct DeadLetterOptions {

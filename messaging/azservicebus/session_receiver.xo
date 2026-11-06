@@ -19,27 +19,82 @@ pub struct SessionReceiver {
 const SESSION_FILTER: Str = "com.microsoft:session-filter"
 const SESSION_FILTER_CODE: Int = 0x137000000C
 
-fn (c: Client) accept_session(entity: Str, session_id: Str, options: SessionReceiverOptions) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
-  let filter = amqp.Value.Described(descriptor: amqp.Value.ULong(v: UInt64(SESSION_FILTER_CODE)), value: amqp.Value.Str(v: session_id))
-  let r = c.receiver(entity, ReceiverOptions{receive_mode: options.receive_mode}, [(SESSION_FILTER, filter)])?
-  // Go attaches now and fails when the session is locked elsewhere.
-  r.attached()?
-  var sr = SessionReceiver{inner: r, session: session_id, lock_expiry: Atomic[Int].new(0)}
-  // Go reads the lock's expiry from the attach reply's
-  // com.microsoft:locked-until-utc; std/amqp does not show the reply
-  // yet, so it comes from a renew-session-lock.
-  sr.renew_session_lock()?
+fn session_filter(session_id: Str?) -> (Str, amqp.Value) {
+  let v = match session_id {
+    Some(id) => amqp.Value.Str(v: id)
+    None => amqp.Value.Null
+  }
+  (SESSION_FILTER, amqp.Value.Described(descriptor: amqp.Value.ULong(v: UInt64(SESSION_FILTER_CODE)), value: v))
+}
+
+/// The session the service locked, from the attach reply's source filter
+/// (Go's receivedSessionID), and its lock's expiry from the reply's
+/// `com.microsoft:locked-until-utc`.
+fn attach_session(a: amqp.Attach?) -> (Str?, Int?) {
+  let at = a ?? return (None, None)
+  var id: Str? = None
+  if let Some(src) = at.source {
+    for (k, v) in src.filter {
+      if k == SESSION_FILTER {
+        id = match v {
+          amqp.Value.Described(_, amqp.Value.Str(s)) => Some(s)
+          amqp.Value.Str(s) => Some(s)
+          _ => None
+        }
+      }
+    }
+  }
+  var until: Int? = None
+  for (k, v) in at.properties {
+    if k == "com.microsoft:locked-until-utc" {
+      if let amqp.Value.Timestamp(ms) = v {
+        until = Some(ms)
+      }
+    }
+  }
+  (id, until)
+}
+
+/// Attaches with the session filter (None: the service picks a session)
+/// and reads the session and its lock from the attach reply. Go attaches
+/// now and fails when the session is locked elsewhere or none is free.
+fn (c: Client) accept_session(entity: Str, session_id: Str?, options: SessionReceiverOptions) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  let r = c.receiver(entity, ReceiverOptions{receive_mode: options.receive_mode}, [session_filter(session_id)])?
+  let x = r.attached()?
+  let (got, until) = attach_session(x.l.remote_attach())
+  let id = got ?? session_id ?? return Err(fatal("the service named no session in its attach reply"))
+  // Links made after a recovery ask for the same session, as Go's.
+  let inner = if session_id.is_some() { r } else {
+    let r2 = c.receiver(entity, ReceiverOptions{receive_mode: options.receive_mode}, [session_filter(Some(id))])?
+    r2.link.with(fn(var slot: RecvLink?) { slot = Some(x) })
+    r2
+  }
+  var sr = SessionReceiver{inner: inner, session: id, lock_expiry: Atomic[Int].new(until ?? 0)}
+  if until.is_none() {
+    sr.renew_session_lock()?
+  }
   Ok(sr)
+}
+
+/// Locks the next session of a queue that has messages and no lock
+/// (the service picks it).
+pub fn (c: Client) accept_next_session_for_queue(queue_name: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  c.accept_session(queue_name, None, options)
+}
+
+/// Locks the next free session of a topic's subscription.
+pub fn (c: Client) accept_next_session_for_subscription(topic_name: Str, subscription_name: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  c.accept_session("${topic_name}/Subscriptions/${subscription_name}", None, options)
 }
 
 /// Locks session `session_id` of a queue.
 pub fn (c: Client) accept_session_for_queue(queue_name: Str, session_id: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
-  c.accept_session(queue_name, session_id, options)
+  c.accept_session(queue_name, Some(session_id), options)
 }
 
 /// Locks session `session_id` of a topic's subscription.
 pub fn (c: Client) accept_session_for_subscription(topic_name: Str, subscription_name: Str, session_id: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
-  c.accept_session("${topic_name}/Subscriptions/${subscription_name}", session_id, options)
+  c.accept_session("${topic_name}/Subscriptions/${subscription_name}", Some(session_id), options)
 }
 
 pub fn (r: SessionReceiver) session_id() -> Str {
