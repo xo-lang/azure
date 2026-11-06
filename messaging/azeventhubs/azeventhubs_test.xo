@@ -221,7 +221,7 @@ test "a partition that does not exist is refused at once, without retries" {
 
 test "the hub's and a partition's properties come from $management" {
   let b = amqptest.new(os.clock)
-  b.event_hub("eh1", 1)
+  b.event_hub("eh1", 2)
   b.require_token(true)
   let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
   scope s {
@@ -229,24 +229,30 @@ test "the hub's and a partition's properties come from $management" {
     let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
     let hp = pc.get_event_hub_properties()?
     expect(hp.name) == "eh1"
-    expect(hp.partition_ids) == ["0"]
+    expect(hp.partition_ids) == ["0", "1"]
     expect(hp.created_on.is_some()) == true
-    let empty = pc.get_partition_properties("0")?
+    let empty = pc.get_partition_properties("1")?
     expect(empty.is_empty) == true
-    // A hub-level send: std/amqptest checks a partition link's claim against the hub (asked of Xo).
-    var batch = pc.new_event_data_batch()?
+    // A partition link is authorized by a claim on its own path, as Go puts it.
+    var batch = pc.new_event_data_batch(EventDataBatchOptions{partition_id: Some("1")})?
     batch.add_event_data(EventData{body: b"a"})?
     batch.add_event_data(EventData{body: b"b"})?
     pc.send_event_data_batch(batch)?
     let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP)?
-    let pp = cc.get_partition_properties("0")?
+    let pp = cc.get_partition_properties("1")?
     expect(pp.event_hub_name) == "eh1"
-    expect(pp.partition_id) == "0"
+    expect(pp.partition_id) == "1"
     expect(pp.is_empty) == false
     expect(pp.beginning_sequence_number) == 0
     expect(pp.last_enqueued_sequence_number) == 1
     expect(pp.last_enqueued_offset) == 192
     expect(pp.last_enqueued_on.is_some()) == true
+    let part = cc.new_partition_client("1", PartitionClientOptions{start_position: StartPosition{earliest: true}})?
+    expect(part.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["a", "b"]
+    let auds = b.tokens().map(fn(t: (Str, Str)) -> Str { t.0 })
+    expect(auds.contains("amqp://${l.addr()}/eh1/Partitions/1")) == true
+    expect(auds.contains("amqp://${l.addr()}/eh1/ConsumerGroups/$Default/Partitions/1")) == true
+    expect(auds.contains("amqp://${l.addr()}/eh1/$management")) == true
     cc.close()?
     pc.close()?
     s.cancel()
