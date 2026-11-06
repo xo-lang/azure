@@ -23,6 +23,10 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   against its own), `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,
   SAS, connection strings, XML models and error codes, hand written;
+  requests checked against its own), `sdk/data/azcosmos` v1.5.0 (the Client,
+  DatabaseClient and ContainerClient, master key and Entra ID
+  authorization, partition keys, patch operations, query pagers,
+  database and container properties and throughput, hand written;
   requests checked against its own), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
   its tests, ParseID), `sdk/security/keyvault/azsecrets`, `azkeys` and `azcertificates`
   (their hand written clients, options and ID types, and

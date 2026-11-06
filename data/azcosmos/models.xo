@@ -1,0 +1,254 @@
+// Database and container properties, as azcosmos's
+// cosmos_database_properties.go, cosmos_container_properties.go,
+// partition_key_definition.go, indexing_policy.go, unique_key_policy.go,
+// conflict_resolution_policy.go and throughput_properties.go (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md). Bodies are written in
+// Go's field order; unlike Go, which writes an id with `%s`, an id is a
+// JSON string, escaped (Go fails to marshal one with a quote).
+
+use std/json
+
+pub struct DatabaseProperties {
+  pub id: Str
+  pub etag: Str? = None
+  pub self_link: Str = ""
+  pub resource_id: Str = ""
+  /// `_ts`, Unix seconds.
+  pub last_modified: Int? = None
+}
+
+fn system_fields(rid: Str, etag: Str?, self_link: Str, ts: Int?) -> Str {
+  var out = ""
+  if rid != "" { out = out + ",\"_rid\":${jstr(rid)}" }
+  if let Some(e) = etag { out = out + ",\"_etag\":${jstr(e)}" }
+  if self_link != "" { out = out + ",\"_self\":${jstr(self_link)}" }
+  if let Some(t) = ts { out = out + ",\"_ts\":${t}" }
+  out
+}
+
+pub fn (p: DatabaseProperties) to_json() -> Str {
+  "{\"id\":${jstr(p.id)}${system_fields(p.resource_id, p.etag, p.self_link, p.last_modified)}}"
+}
+
+fn opt_str(v: json.Value, key: Str) -> Str? {
+  match v.get(key) {
+    Some(json.Value.Str(s)) => Some(s)
+    _ => None
+  }
+}
+
+fn database_of(v: json.Value) -> DatabaseProperties {
+  DatabaseProperties{id: str_of(v, "id"), etag: opt_str(v, "_etag"), self_link: str_of(v, "_self"), resource_id: str_of(v, "_rid"), last_modified: int_of(v, "_ts")}
+}
+
+pub const PARTITION_KEY_KIND_HASH: Str = "Hash"
+pub const PARTITION_KEY_KIND_MULTI_HASH: Str = "MultiHash"
+
+pub struct PartitionKeyDefinition {
+  /// `Hash` for one path and `MultiHash` for more when left "".
+  pub kind: Str = ""
+  pub paths: List[Str] = []
+  /// 2 for large partition keys; 0 is left out.
+  pub version: Int = 0
+}
+
+fn strs_json(xs: List[Str]) -> Str {
+  "[${xs.map(jstr).join(",")}]"
+}
+
+pub fn (d: PartitionKeyDefinition) to_json() -> Str {
+  let kind = if d.kind != "" { d.kind } else if d.paths.len() > 1 { PARTITION_KEY_KIND_MULTI_HASH } else if d.paths.len() == 1 { PARTITION_KEY_KIND_HASH } else { "" }
+  let ver = if d.version != 0 { ",\"version\":${d.version}" } else { "" }
+  // Go marshals a nil Paths as null.
+  let paths = if d.paths.is_empty() { "null" } else { strs_json(d.paths) }
+  "{\"kind\":${jstr(kind)},\"paths\":${paths}${ver}}"
+}
+
+pub const INDEXING_MODE_CONSISTENT: Str = "Consistent"
+pub const INDEXING_MODE_NONE: Str = "None"
+
+pub struct IncludedPath {
+  pub path: Str
+}
+
+pub struct ExcludedPath {
+  pub path: Str
+}
+
+pub struct SpatialIndex {
+  pub path: Str
+  /// `Point`, `Polygon`, `LineString`, `MultiPolygon`.
+  pub types: List[Str] = []
+}
+
+pub struct CompositeIndex {
+  pub path: Str
+  /// `ascending` or `descending`.
+  pub order: Str
+}
+
+pub struct IndexingPolicy {
+  pub automatic: Bool = false
+  pub indexing_mode: Str = ""
+  pub included_paths: List[IncludedPath] = []
+  pub excluded_paths: List[ExcludedPath] = []
+  pub spatial_indexes: List[SpatialIndex] = []
+  pub composite_indexes: List[List[CompositeIndex]] = []
+}
+
+fn path_json(p: Str) -> Str {
+  "{\"path\":${jstr(p)}}"
+}
+
+pub fn (p: IndexingPolicy) to_json() -> Str {
+  var out = "{\"automatic\":${p.automatic}"
+  if p.indexing_mode != "" { out = out + ",\"indexingMode\":${jstr(p.indexing_mode)}" }
+  if !p.included_paths.is_empty() { out = out + ",\"includedPaths\":[${p.included_paths.map(fn(x: IncludedPath) -> Str { path_json(x.path) }).join(",")}]" }
+  if !p.excluded_paths.is_empty() { out = out + ",\"excludedPaths\":[${p.excluded_paths.map(fn(x: ExcludedPath) -> Str { path_json(x.path) }).join(",")}]" }
+  if !p.spatial_indexes.is_empty() {
+    out = out + ",\"spatialIndexes\":[${p.spatial_indexes.map(fn(x: SpatialIndex) -> Str { "{\"path\":${jstr(x.path)},\"types\":${strs_json(x.types)}}" }).join(",")}]"
+  }
+  if !p.composite_indexes.is_empty() {
+    let one = fn(xs: List[CompositeIndex]) -> Str { "[${xs.map(fn(x: CompositeIndex) -> Str { "{\"path\":${jstr(x.path)},\"order\":${jstr(x.order)}}" }).join(",")}]" }
+    out = out + ",\"compositeIndexes\":[${p.composite_indexes.map(one).join(",")}]"
+  }
+  out + "}"
+}
+
+pub struct UniqueKey {
+  pub paths: List[Str] = []
+}
+
+pub struct UniqueKeyPolicy {
+  pub unique_keys: List[UniqueKey] = []
+}
+
+pub struct ConflictResolutionPolicy {
+  /// `LastWriterWins` or `Custom`.
+  pub mode: Str
+  pub resolution_path: Str = ""
+  pub resolution_procedure: Str = ""
+}
+
+pub struct ContainerProperties {
+  pub id: Str
+  pub resource_id: Str = ""
+  pub etag: Str? = None
+  pub self_link: Str = ""
+  pub last_modified: Int? = None
+  pub partition_key_definition: PartitionKeyDefinition = PartitionKeyDefinition{}
+  /// Seconds; -1 for items that never expire unless they say so.
+  pub default_time_to_live: Int? = None
+  pub analytical_store_time_to_live_in_seconds: Int? = None
+  pub indexing_policy: IndexingPolicy? = None
+  pub unique_key_policy: UniqueKeyPolicy? = None
+  pub conflict_resolution_policy: ConflictResolutionPolicy? = None
+}
+
+pub fn (p: ContainerProperties) to_json() -> Str {
+  var out = "{\"id\":${jstr(p.id)}${system_fields(p.resource_id, p.etag, p.self_link, p.last_modified)},\"partitionKey\":${p.partition_key_definition.to_json()}"
+  if let Some(t) = p.default_time_to_live { out = out + ",\"defaultTtl\":${t}" }
+  if let Some(t) = p.analytical_store_time_to_live_in_seconds { out = out + ",\"analyticalStorageTtl\":${t}" }
+  if let Some(ip) = p.indexing_policy { out = out + ",\"indexingPolicy\":${ip.to_json()}" }
+  if let Some(u) = p.unique_key_policy {
+    out = out + ",\"uniqueKeyPolicy\":{\"uniqueKeys\":[${u.unique_keys.map(fn(k: UniqueKey) -> Str { "{\"paths\":${strs_json(k.paths)}}" }).join(",")}]}"
+  }
+  if let Some(c) = p.conflict_resolution_policy {
+    var cr = "{\"mode\":${jstr(c.mode)}"
+    if c.resolution_path != "" { cr = cr + ",\"conflictResolutionPath\":${jstr(c.resolution_path)}" }
+    if c.resolution_procedure != "" { cr = cr + ",\"conflictResolutionProcedure\":${jstr(c.resolution_procedure)}" }
+    out = out + ",\"conflictResolutionPolicy\":${cr}}"
+  }
+  out + "}"
+}
+
+fn list_of(v: json.Value, key: Str) -> List[json.Value] {
+  match v.get(key) {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+}
+
+fn strs_of(v: json.Value, key: Str) -> List[Str] {
+  var out: List[Str] = []
+  for x in list_of(v, key) {
+    if let json.Value.Str(s) = x {
+      out.push(s)
+    }
+  }
+  out
+}
+
+fn bool_of(v: json.Value, key: Str) -> Bool {
+  match v.get(key) {
+    Some(json.Value.Bool(b)) => b
+    _ => false
+  }
+}
+
+fn indexing_of(v: json.Value) -> IndexingPolicy {
+  IndexingPolicy{
+    automatic: bool_of(v, "automatic"),
+    indexing_mode: str_of(v, "indexingMode"),
+    included_paths: list_of(v, "includedPaths").map(fn(x: json.Value) -> IncludedPath { IncludedPath{path: str_of(x, "path")} }),
+    excluded_paths: list_of(v, "excludedPaths").map(fn(x: json.Value) -> ExcludedPath { ExcludedPath{path: str_of(x, "path")} }),
+    spatial_indexes: list_of(v, "spatialIndexes").map(fn(x: json.Value) -> SpatialIndex { SpatialIndex{path: str_of(x, "path"), types: strs_of(x, "types")} }),
+    composite_indexes: list_of(v, "compositeIndexes").map(fn(xs: json.Value) -> List[CompositeIndex] {
+      match xs {
+        List(items) => items.map(fn(x: json.Value) -> CompositeIndex { CompositeIndex{path: str_of(x, "path"), order: str_of(x, "order")} })
+        _ => []
+      }
+    }),
+  }
+}
+
+fn container_of(v: json.Value) -> ContainerProperties {
+  let pk = v.get("partitionKey") ?? json.Value.Null
+  ContainerProperties{
+    id: str_of(v, "id"), resource_id: str_of(v, "_rid"), etag: opt_str(v, "_etag"), self_link: str_of(v, "_self"), last_modified: int_of(v, "_ts"),
+    partition_key_definition: PartitionKeyDefinition{kind: str_of(pk, "kind"), paths: strs_of(pk, "paths"), version: int_of(pk, "version") ?? 0},
+    default_time_to_live: int_of(v, "defaultTtl"),
+    analytical_store_time_to_live_in_seconds: int_of(v, "analyticalStorageTtl"),
+    indexing_policy: v.get("indexingPolicy").map(indexing_of),
+    unique_key_policy: v.get("uniqueKeyPolicy").map(fn(u: json.Value) -> UniqueKeyPolicy { UniqueKeyPolicy{unique_keys: list_of(u, "uniqueKeys").map(fn(k: json.Value) -> UniqueKey { UniqueKey{paths: strs_of(k, "paths")} })} }),
+    conflict_resolution_policy: v.get("conflictResolutionPolicy").map(fn(c: json.Value) -> ConflictResolutionPolicy { ConflictResolutionPolicy{mode: str_of(c, "mode"), resolution_path: str_of(c, "conflictResolutionPath"), resolution_procedure: str_of(c, "conflictResolutionProcedure")} }),
+  }
+}
+
+/// Provisioned throughput: manual request units a second, or autoscale
+/// up to a maximum (with an optional increment percent).
+pub struct ThroughputProperties {
+  pub manual: Int? = None
+  pub autoscale_max: Int? = None
+  pub autoscale_increment_percent: Int? = None
+}
+
+pub fn new_manual_throughput_properties(throughput: Int) -> ThroughputProperties {
+  ThroughputProperties{manual: Some(throughput)}
+}
+
+pub fn new_autoscale_throughput_properties(starting_max_throughput: Int) -> ThroughputProperties {
+  ThroughputProperties{autoscale_max: Some(starting_max_throughput)}
+}
+
+pub fn new_autoscale_throughput_properties_with_increment(starting_max_throughput: Int, increment_percentage: Int) -> ThroughputProperties {
+  ThroughputProperties{autoscale_max: Some(starting_max_throughput), autoscale_increment_percent: Some(increment_percentage)}
+}
+
+/// The `x-ms-offer-throughput` or `x-ms-cosmos-offer-autopilot-settings`
+/// header of a create.
+fn (t: ThroughputProperties) header() -> (Str, Str) {
+  if let Some(n) = t.manual {
+    return ("x-ms-offer-throughput", "${n}")
+  }
+  var s = "{"
+  if let Some(m) = t.autoscale_max {
+    if m != 0 { s = s + "\"maxThroughput\":${m}" }
+  }
+  if let Some(i) = t.autoscale_increment_percent {
+    let sep = if s == "{" { "" } else { "," }
+    let inc = if i != 0 { "{\"incrementPercent\":${i}}" } else { "{}" }
+    s = s + "${sep}\"autoUpgradePolicy\":{\"throughputPolicy\":${inc}}"
+  }
+  ("x-ms-cosmos-offer-autopilot-settings", s + "}")
+}

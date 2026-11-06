@@ -1,0 +1,428 @@
+// Databases, containers and items, as azcosmos's cosmos_client.go,
+// cosmos_database.go, cosmos_container.go, cosmos_patch_operations.go and
+// their request options and responses (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), with the headers Go sends for each call.
+
+use std/http
+use std/json
+use std/url
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+fn link(parent: Str, segment: Str, id: Str) -> Str {
+  let p = if parent == "" { "" } else { "${parent}/" }
+  "${p}${segment}/${url.path_escape(id)}"
+}
+
+fn decoded[T](resp: http.Response, parse: fn(json.Value) -> T) -> T ! azcore.CallErr {
+  let v = parse_json(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(parse(v))
+}
+
+fn require_id(id: Str) -> () ! azcore.CallErr {
+  if id == "" {
+    return Err(azcore.CallErr.InvalidInput("id is required"))
+  }
+  Ok(())
+}
+
+// Queries.
+
+/// A named query parameter (`@id`) and its JSON value.
+pub struct QueryParameter {
+  pub name: Str
+  pub value: json.Value
+}
+
+fn query_body(query: Str, parameters: List[QueryParameter]) -> Str {
+  var out = "{\"query\":${jstr(query)}"
+  if !parameters.is_empty() {
+    out = out + ",\"parameters\":[${parameters.map(fn(p: QueryParameter) -> Str { "{\"name\":${jstr(p.name)},\"value\":${js(p.value)}}" }).join(",")}]"
+  }
+  out + "}"
+}
+
+/// The raw JSON text of each element of the array under `key`, as the
+/// service wrote it (Go keeps them as json.RawMessage).
+fn raw_elements(text: Str, key: Str) -> List[Str] ! Str {
+  var r = json.tokens(text.bytes())
+  var depth = 0
+  while {
+    let t = (r.next() ?? e => return Err(e.display())) ?? return Ok([])
+    match t {
+      ObjectStart => depth = depth + 1
+      ArrayStart => depth = depth + 1
+      ObjectEnd => depth = depth - 1
+      ArrayEnd => depth = depth - 1
+      Key(k) => {
+        if depth == 1 && k == key {
+          let open = (r.next() ?? e => return Err(e.display())) ?? return Ok([])
+          if let json.Token.ArrayStart = open {
+            var out: List[Str] = []
+            while r.more() {
+              let start = r.offset()
+              r.skip() ?? e => return Err(e.display())
+              out.push(text[start..r.offset()].trim_start_chars(", \t\r\n"))
+            }
+            return Ok(out)
+          }
+          return Ok([])
+        }
+      }
+      _ => ()
+    }
+  }
+  Ok([])
+}
+
+/// A query's pages: the first request, then the same with each page's
+/// continuation token until a page has none.
+pub struct QueryPager[T] {
+  core: Core
+  call: Call
+  decode: fn(http.Response) -> T ! Str
+  continuation_of: fn(T) -> Str?
+  started: Bool = false
+  next_token: Str? = None
+}
+
+pub fn (p: QueryPager[T]) more() -> Bool {
+  !p.started || p.next_token.is_some()
+}
+
+pub fn (var p: QueryPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  var call = p.call
+  if p.started {
+    let tok = p.next_token ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
+    call = call with {headers: call.headers.filter(fn(h: (Str, Str)) -> Bool { h.0 != "x-ms-continuation" }) + [("x-ms-continuation", tok)]}
+  }
+  let resp = p.core.send(call)?
+  let page = (p.decode)(resp) ?? e => return Err(azcore.CallErr.Decode(e))
+  p.started = true
+  p.next_token = (p.continuation_of)(page)
+  Ok(page)
+}
+
+fn query_call(path: Str, query: Str, parameters: List[QueryParameter], headers: List[(Str, Str)]) -> Call {
+  Call{method: "POST", path: path, headers: headers + [("x-ms-documentdb-query", "True")], body: query_body(query, parameters).bytes(), content_type: "application/query+json"}
+}
+
+fn continuation(resp: http.Response) -> Str? {
+  match resp.header("x-ms-continuation") {
+    Some(c) => if c == "" { None } else { Some(c) }
+    None => None
+  }
+}
+
+// Databases.
+
+pub struct DatabaseResponse {
+  pub response: Response
+  pub database_properties: DatabaseProperties? = None
+}
+
+fn database_response(resp: http.Response) -> DatabaseResponse ! azcore.CallErr {
+  if resp.body.len() == 0 {
+    return Ok(DatabaseResponse{response: response_of(resp)})
+  }
+  Ok(DatabaseResponse{response: response_of(resp), database_properties: Some(decoded(resp, database_of)?)})
+}
+
+pub struct CreateDatabaseOptions {
+  pub throughput_properties: ThroughputProperties? = None
+}
+
+pub fn (c: Client) create_database(properties: DatabaseProperties, options: CreateDatabaseOptions = CreateDatabaseOptions{}) -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = match options.throughput_properties {
+    Some(t) => [t.header()]
+    None => []
+  }
+  let resp = c.core.send(Call{method: "POST", path: "dbs", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?
+  database_response(resp)
+}
+
+/// A client of the database `id`.
+pub fn (c: Client) new_database(id: Str) -> DatabaseClient ! azcore.CallErr {
+  require_id(id)?
+  Ok(DatabaseClient{id: id, link: link("", "dbs", id), core: c.core})
+}
+
+/// A client of the container `container_id` in `database_id`.
+pub fn (c: Client) new_container(database_id: Str, container_id: Str) -> ContainerClient ! azcore.CallErr {
+  c.new_database(database_id)?.new_container(container_id)
+}
+
+pub struct QueryDatabasesOptions {
+  pub continuation_token: Str? = None
+  pub query_parameters: List[QueryParameter] = []
+}
+
+pub struct QueryDatabasesResponse {
+  pub response: Response
+  pub continuation_token: Str? = None
+  pub databases: List[DatabaseProperties] = []
+}
+
+pub fn (c: Client) new_query_databases_pager(query: Str, options: QueryDatabasesOptions = QueryDatabasesOptions{}) -> QueryPager[QueryDatabasesResponse] {
+  let hs = match options.continuation_token {
+    Some(t) => [("x-ms-continuation", t)]
+    None => []
+  }
+  QueryPager{core: c.core, call: query_call("dbs", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryDatabasesResponse ! Str {
+    let v = parse_json(resp.body.to_str_lossy())?
+    Ok(QueryDatabasesResponse{response: response_of(resp), continuation_token: continuation(resp), databases: list_of(v, "Databases").map(database_of)})
+  }, continuation_of: fn(r: QueryDatabasesResponse) -> Str? { r.continuation_token }}
+}
+
+pub struct DatabaseClient {
+  pub id: Str
+  link: Str
+  core: Core
+}
+
+pub fn (db: DatabaseClient) read() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  database_response(db.core.send(Call{method: "GET", path: db.link})?)
+}
+
+pub fn (db: DatabaseClient) delete() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  database_response(db.core.send(Call{method: "DELETE", path: db.link, write: true})?)
+}
+
+pub fn (db: DatabaseClient) new_container(id: Str) -> ContainerClient ! azcore.CallErr {
+  require_id(id)?
+  Ok(ContainerClient{id: id, link: link(db.link, "colls", id), core: db.core})
+}
+
+pub struct ContainerResponse {
+  pub response: Response
+  pub container_properties: ContainerProperties? = None
+}
+
+fn container_response(resp: http.Response) -> ContainerResponse ! azcore.CallErr {
+  if resp.body.len() == 0 {
+    return Ok(ContainerResponse{response: response_of(resp)})
+  }
+  Ok(ContainerResponse{response: response_of(resp), container_properties: Some(decoded(resp, container_of)?)})
+}
+
+pub struct CreateContainerOptions {
+  pub throughput_properties: ThroughputProperties? = None
+}
+
+pub fn (db: DatabaseClient) create_container(properties: ContainerProperties, options: CreateContainerOptions = CreateContainerOptions{}) -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = match options.throughput_properties {
+    Some(t) => [t.header()]
+    None => []
+  }
+  container_response(db.core.send(Call{method: "POST", path: "${db.link}/colls", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?)
+}
+
+pub struct QueryContainersOptions {
+  pub continuation_token: Str? = None
+  pub query_parameters: List[QueryParameter] = []
+}
+
+pub struct QueryContainersResponse {
+  pub response: Response
+  pub continuation_token: Str? = None
+  pub containers: List[ContainerProperties] = []
+}
+
+pub fn (db: DatabaseClient) new_query_containers_pager(query: Str, options: QueryContainersOptions = QueryContainersOptions{}) -> QueryPager[QueryContainersResponse] {
+  let hs = match options.continuation_token {
+    Some(t) => [("x-ms-continuation", t)]
+    None => []
+  }
+  QueryPager{core: db.core, call: query_call("${db.link}/colls", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryContainersResponse ! Str {
+    let v = parse_json(resp.body.to_str_lossy())?
+    Ok(QueryContainersResponse{response: response_of(resp), continuation_token: continuation(resp), containers: list_of(v, "DocumentCollections").map(container_of)})
+  }, continuation_of: fn(r: QueryContainersResponse) -> Str? { r.continuation_token }}
+}
+
+// Containers.
+
+pub struct ContainerClient {
+  pub id: Str
+  link: Str
+  core: Core
+}
+
+pub fn (c: ContainerClient) read() -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  container_response(c.core.send(Call{method: "GET", path: c.link})?)
+}
+
+pub fn (c: ContainerClient) replace(properties: ContainerProperties) -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  container_response(c.core.send(Call{method: "PUT", path: c.link, write: true, body: properties.to_json().bytes(), content_type: "application/json"})?)
+}
+
+pub fn (c: ContainerClient) delete() -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  container_response(c.core.send(Call{method: "DELETE", path: c.link, write: true})?)
+}
+
+// Items.
+
+/// `Exclude` or `Include` (x-ms-indexing-directive).
+pub const INDEXING_DIRECTIVE_INCLUDE: Str = "Include"
+pub const INDEXING_DIRECTIVE_EXCLUDE: Str = "Exclude"
+
+pub const CONSISTENCY_LEVEL_STRONG: Str = "Strong"
+pub const CONSISTENCY_LEVEL_BOUNDED_STALENESS: Str = "BoundedStaleness"
+pub const CONSISTENCY_LEVEL_SESSION: Str = "Session"
+pub const CONSISTENCY_LEVEL_EVENTUAL: Str = "Eventual"
+pub const CONSISTENCY_LEVEL_CONSISTENT_PREFIX: Str = "ConsistentPrefix"
+
+pub struct ItemOptions {
+  pub pre_triggers: List[Str] = []
+  pub post_triggers: List[Str] = []
+  pub session_token: Str? = None
+  pub consistency_level: Str? = None
+  pub indexing_directive: Str? = None
+  /// The ETag the item must have.
+  pub if_match_etag: Str? = None
+  /// Whether a write returns the item; the client's option when None.
+  pub enable_content_response_on_write: Bool? = None
+}
+
+pub struct ItemResponse {
+  pub response: Response
+  /// The item as the service sent it ("" for a write without content).
+  pub value: Str = ""
+  pub session_token: Str? = None
+}
+
+fn item_response(resp: http.Response) -> ItemResponse {
+  ItemResponse{response: response_of(resp), value: resp.body.to_str_lossy(), session_token: resp.header("x-ms-session-token")}
+}
+
+fn (c: ContainerClient) item_headers(pk: PartitionKey, o: ItemOptions, write: Bool) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  if !o.pre_triggers.is_empty() { hs.push(("x-ms-documentdb-pre-trigger-include", o.pre_triggers.join(","))) }
+  if !o.post_triggers.is_empty() { hs.push(("x-ms-documentdb-post-trigger-include", o.post_triggers.join(","))) }
+  if let Some(x) = o.consistency_level { hs.push(("x-ms-consistency-level", x)) }
+  if let Some(x) = o.indexing_directive { hs.push(("x-ms-indexing-directive", x)) }
+  if let Some(x) = o.session_token { hs.push(("x-ms-session-token", x)) }
+  if let Some(x) = o.if_match_etag { hs.push(("If-Match", x)) }
+  if !pk.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", pk.to_json_string())) }
+  if write && !(o.enable_content_response_on_write ?? c.core.content_on_write) {
+    hs.push(("Prefer", "return=minimal"))
+  }
+  hs
+}
+
+pub fn (c: ContainerClient) create_item(partition_key: PartitionKey, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(item_response(c.core.send(Call{method: "POST", path: "${c.link}/docs", write: true, headers: c.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+}
+
+pub fn (c: ContainerClient) upsert_item(partition_key: PartitionKey, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = c.item_headers(partition_key, options, true) + [("x-ms-documentdb-is-upsert", "true")]
+  Ok(item_response(c.core.send(Call{method: "POST", path: "${c.link}/docs", write: true, headers: hs, body: item.bytes(), content_type: "application/json"})?))
+}
+
+pub fn (c: ContainerClient) replace_item(partition_key: PartitionKey, item_id: Str, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(item_response(c.core.send(Call{method: "PUT", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+}
+
+pub fn (c: ContainerClient) read_item(partition_key: PartitionKey, item_id: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(item_response(c.core.send(Call{method: "GET", path: link(c.link, "docs", item_id), headers: c.item_headers(partition_key, options, false)})?))
+}
+
+pub fn (c: ContainerClient) delete_item(partition_key: PartitionKey, item_id: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(item_response(c.core.send(Call{method: "DELETE", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true)})?))
+}
+
+/// Patch operations on one item, applied in order, with an optional
+/// condition (`from c where c.n > 1`).
+pub struct PatchOperations {
+  pub condition: Str? = None
+  pub operations: List[(Str, Str, json.Value?)] = []
+}
+
+pub fn (p: PatchOperations) set_condition(condition: Str) -> PatchOperations {
+  p with {condition: Some(condition)}
+}
+
+pub fn (p: PatchOperations) append_add(path: Str, value: json.Value) -> PatchOperations {
+  p with {operations: p.operations + [("add", path, Some(value))]}
+}
+
+pub fn (p: PatchOperations) append_replace(path: Str, value: json.Value) -> PatchOperations {
+  p with {operations: p.operations + [("replace", path, Some(value))]}
+}
+
+pub fn (p: PatchOperations) append_set(path: Str, value: json.Value) -> PatchOperations {
+  p with {operations: p.operations + [("set", path, Some(value))]}
+}
+
+pub fn (p: PatchOperations) append_remove(path: Str) -> PatchOperations {
+  p with {operations: p.operations + [("remove", path, None)]}
+}
+
+pub fn (p: PatchOperations) append_increment(path: Str, value: Int) -> PatchOperations {
+  p with {operations: p.operations + [("incr", path, Some(json.Value.Int(value)))]}
+}
+
+/// The body, as Go's MarshalJSON writes it (then HTML escaped by
+/// json.Marshal). A value of JSON null is left out, as Go's omitempty
+/// leaves out a nil value.
+pub fn (p: PatchOperations) to_json() -> Str {
+  let cond = match p.condition {
+    Some(c) => "\"condition\":${jstr(c)},"
+    None => ""
+  }
+  let ops = p.operations.map(fn(o: (Str, Str, json.Value?)) -> Str {
+    let v = match o.2 {
+      Some(json.Value.Null) => ""
+      Some(x) => ",\"value\":${js(x)}"
+      None => ""
+    }
+    "{\"op\":${jstr(o.0)},\"path\":${jstr(o.1)}${v}}"
+  })
+  "{${cond}\"operations\":[${ops.join(",")}]}"
+}
+
+pub fn (c: ContainerClient) patch_item(partition_key: PartitionKey, item_id: Str, operations: PatchOperations, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(item_response(c.core.send(Call{method: "PATCH", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true), body: operations.to_json().bytes(), content_type: "application/json"})?))
+}
+
+pub struct QueryOptions {
+  pub session_token: Str? = None
+  pub consistency_level: Str? = None
+  pub response_continuation_token_limit_in_kb: Int = 0
+  /// The most items a page (x-ms-max-item-count).
+  pub page_size_hint: Int = 0
+  pub enable_scan_in_query: Bool = false
+  pub populate_index_metrics: Bool = false
+  pub continuation_token: Str? = None
+  pub query_parameters: List[QueryParameter] = []
+  /// Sent as true unless false (Go's nil is true).
+  pub enable_cross_partition_query: Bool = true
+}
+
+pub struct QueryItemsResponse {
+  pub response: Response
+  pub continuation_token: Str? = None
+  /// Each item's JSON text as the service sent it.
+  pub items: List[Str] = []
+  pub query_metrics: Str? = None
+  pub index_metrics: Str? = None
+}
+
+/// Items matching `query` in `partition_key` (all partitions for a key
+/// with no values). The pager's pages share one correlated activity id.
+pub fn (c: ContainerClient) new_query_items_pager(query: Str, partition_key: PartitionKey, options: QueryOptions = QueryOptions{}) -> QueryPager[QueryItemsResponse] uses rand {
+  var hs: List[(Str, Str)] = []
+  if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
+  if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }
+  if options.response_continuation_token_limit_in_kb > 0 { hs.push(("x-ms-documentdb-responsecontinuationtokenlimitinkb", "${options.response_continuation_token_limit_in_kb}")) }
+  if options.page_size_hint != 0 { hs.push(("x-ms-max-item-count", "${options.page_size_hint}")) }
+  if options.enable_scan_in_query { hs.push(("x-ms-documentdb-force-query-scan", "true")) }
+  if options.populate_index_metrics { hs.push(("x-ms-cosmos-populateindexmetrics", "true")) }
+  if let Some(x) = options.continuation_token { hs.push(("x-ms-continuation", x)) }
+  hs.push(("x-ms-documentdb-populatequerymetrics", "true"))
+  if options.enable_cross_partition_query { hs.push(("x-ms-documentdb-query-enablecrosspartition", "true")) }
+  if !partition_key.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", partition_key.to_json_string())) }
+  hs.push(("x-ms-cosmos-correlated-activityid", uuid.v4(c.core.rand).display()))
+  QueryPager{core: c.core, call: query_call("${c.link}/docs", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryItemsResponse ! Str {
+    Ok(QueryItemsResponse{response: response_of(resp), continuation_token: continuation(resp), items: raw_elements(resp.body.to_str_lossy(), "Documents")?, query_metrics: resp.header("x-ms-documentdb-query-metrics"), index_metrics: resp.header("x-ms-cosmos-index-utilization")})
+  }, continuation_of: fn(r: QueryItemsResponse) -> Str? { r.continuation_token }}
+}

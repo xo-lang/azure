@@ -1,0 +1,283 @@
+// The Client, DatabaseClient and ContainerClient against a fake Cosmos
+// DB account that answers as the Go program's fake does: every request
+// must be Go's, byte for byte (host, path and query as sent, headers
+// with the master key signature, body), and what is read back must
+// print as Go printed it. The random activity ids are normalized as the
+// Go fake normalizes them. Where this port differs from Go on purpose,
+// the test says so and checks both forms.
+
+use std/crypto
+use std/http
+use std/json
+use github.com/xo-lang/azure/policy
+
+const EP: Str = "https://acct1.documents.example.test:443"
+const WEST: Str = "https://acct1-westus.documents.example.test:443"
+const KEY: Str = "aW52ZW50ZWQta2V5"
+const DATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+struct Fixed {}
+
+fn (p: Fixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", DATE))
+}
+
+const ACCOUNT: Str = "{\"_self\":\"\",\"id\":\"acct1\",\"_rid\":\"acct1.documents.example.test\",\"media\":\"//media/\",\"addresses\":\"//addresses/\",\"_dbs\":\"//dbs/\",\"writableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://acct1-westus.documents.example.test:443/\"}],\"readableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://acct1-westus.documents.example.test:443/\"}],\"enableMultipleWriteLocations\":false,\"userConsistencyPolicy\":{\"defaultConsistencyLevel\":\"Session\"}}"
+
+const COLL: Str = "{\"id\":\"c1\",\"indexingPolicy\":{\"indexingMode\":\"consistent\",\"automatic\":true,\"includedPaths\":[{\"path\":\"/*\"}],\"excludedPaths\":[{\"path\":\"/\\\"_etag\\\"/?\"}]},\"partitionKey\":{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2},\"defaultTtl\":3600,\"_rid\":\"cr1=\",\"_ts\":1762311845,\"_self\":\"dbs/dr1=/colls/cr1=/\",\"_etag\":\"\\\"c-e1\\\"\"}"
+
+const DB1: Str = "{\"id\":\"db1\",\"_rid\":\"dr1=\",\"_self\":\"dbs/dr1=/\",\"_etag\":\"\\\"d-e1\\\"\",\"_colls\":\"colls/\",\"_users\":\"users/\",\"_ts\":1762311845}"
+
+fn js_resp(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/json")
+}
+
+/// The Go program's fake, answer for answer; each request logged in its
+/// format, the random activity ids as `ACTIVITY`.
+fn answer(req: http.Request, log: Mutex[List[Str]]) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // The pipeline's x-ms-client-request-id (decision 0003: on by
+    // default) is not in Go's Cosmos pipeline, which has no request ID
+    // policy.
+    if lk == "user-agent" || lk == "accept-encoding" || lk == "x-ms-client-request-id" {
+      continue
+    }
+    let val = if lk == "x-ms-activity-id" || lk == "x-ms-cosmos-correlated-activityid" { "ACTIVITY" } else { v }
+    hs.push("${lk}=${val}")
+  }
+  let qs = req.raw_query()
+  let host = match req.url.port {
+    Some(n) => "${req.url.host}:${n}"
+    None => req.url.host
+  }
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} ${host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  log.with(fn(var l: List[Str]) { l.push(line) })
+  answer_for(req).with_header("x-ms-activity-id", "a1").with_header("x-ms-request-charge", "1.5").with_header("x-ms-session-token", "0:-1#7").with_header("Date", DATE)
+}
+
+fn answer_for(req: http.Request) -> http.Response {
+  let p = req.path
+  let m = req.method
+  let is_query = (req.header("x-ms-documentdb-query") ?? "") == "True"
+  let cont = req.header("x-ms-continuation") ?? ""
+  if p.contains("missing") {
+    return js_resp(404, "{\"code\":\"NotFound\",\"message\":\"Entity with the specified id does not exist in the system.\"}")
+  }
+  if p == "/" && m == "GET" {
+    return js_resp(200, ACCOUNT)
+  }
+  if p == "/dbs" && is_query {
+    if cont == "" {
+      return js_resp(200, "{\"_rid\":\"\",\"Databases\":[${DB1}],\"_count\":1}").with_header("x-ms-continuation", "dbs-next")
+    }
+    return js_resp(200, "{\"_rid\":\"\",\"Databases\":[{\"id\":\"db2\",\"_rid\":\"dr2=\",\"_self\":\"dbs/dr2=/\",\"_etag\":\"\\\"d-e2\\\"\",\"_ts\":1762311846}],\"_count\":1}")
+  }
+  if p == "/dbs" && m == "POST" {
+    return js_resp(201, DB1).with_header("etag", "\"d-e1\"")
+  }
+  if p == "/dbs/db1" && m == "GET" {
+    return js_resp(200, DB1).with_header("etag", "\"d-e1\"")
+  }
+  if p.starts_with("/dbs/") && p.split("/").len() == 3 && m == "DELETE" {
+    return http.text(204, "")
+  }
+  if p == "/dbs/db1/colls" && is_query {
+    return js_resp(200, "{\"_rid\":\"dr1=\",\"DocumentCollections\":[${COLL}],\"_count\":1}")
+  }
+  if p == "/dbs/db1/colls" && m == "POST" {
+    return js_resp(201, COLL).with_header("etag", "\"c-e1\"")
+  }
+  if p == "/dbs/db1/colls/c1" && (m == "GET" || m == "PUT") {
+    return js_resp(200, COLL).with_header("etag", "\"c-e1\"")
+  }
+  if p == "/dbs/db1/colls/c1" && m == "DELETE" {
+    return http.text(204, "")
+  }
+  if p.ends_with("/docs") && is_query {
+    if cont == "" {
+      return js_resp(200, "{\"_rid\":\"cr1=\",\"Documents\":[{\"id\":\"i1\",\"pk\":\"a\",\"n\":1}],\"_count\":1}").with_header("x-ms-continuation", "{\"token\":\"+RID:~a#RT:1\",\"range\":{\"min\":\"\",\"max\":\"FF\"}}")
+    }
+    return js_resp(200, "{\"_rid\":\"cr1=\",\"Documents\":[{\"id\":\"i2\",\"pk\":\"a\",\"n\":2.5}],\"_count\":1}")
+  }
+  if p.ends_with("/docs") && m == "POST" {
+    let status = if (req.header("x-ms-documentdb-is-upsert") ?? "") == "True" { 200 } else { 201 }
+    return js_resp(status, "{\"id\":\"i1\",\"pk\":\"a\",\"n\":1,\"_rid\":\"ir1=\",\"_self\":\"x\",\"_etag\":\"\\\"i-e1\\\"\",\"_ts\":1762311845}").with_header("etag", "\"i-e1\"")
+  }
+  if p.contains("/docs/") && m == "DELETE" {
+    return http.text(204, "")
+  }
+  if p.contains("/docs/") {
+    return js_resp(200, "{\"id\":\"i1\",\"pk\":\"a\",\"n\":2,\"_rid\":\"ir1=\",\"_self\":\"x\",\"_etag\":\"\\\"i-e2\\\"\",\"_ts\":1762311846}").with_header("etag", "\"i-e2\"")
+  }
+  http.text(400, "")
+}
+
+fn serve(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response { answer(req, log) }
+  for base in [EP, WEST] {
+    for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+      for path in ["/", "/{a}", "/{a}/{b}", "/{a}/{b}/{c}", "/{a}/{b}/{c}/{d}", "/{a}/{b}/{c}/{d}/{e}", "/{a}/{b}/{c}/{d}/{e}/{f}"] {
+        net.handle("${m} ${base}${path}", h)
+      }
+    }
+  }
+  log
+}
+
+fn short_hash(v: Str) -> Str {
+  "sha256:${crypto.sha256(v.bytes()).to_hex()[0..16]}"
+}
+
+/// Each master key signature (`sig%3D` to the end of the line) replaced
+/// by a short hash of it, as the vectors keep them.
+fn hide(t: Str) -> Str {
+  let mark = "sig%3D"
+  var out = ""
+  var rest = t
+  while {
+    let i = rest.find(mark) ?? break
+    out = out + rest[0..i + mark.len()]
+    rest = rest[i + mark.len()..rest.len()]
+    let end = rest.find_any(" \n") ?? rest.len()
+    out = out + short_hash(rest[0..end])
+    rest = rest[end..rest.len()]
+  }
+  out + rest
+}
+
+fn str_list(xs: List[Str]) -> Str {
+  "[${xs.join(" ")}]"
+}
+
+test "every call sends Go's request, byte for byte, and reads back what Go reads" {
+  let log = serve(os.net)
+  var out: List[Str] = []
+  let cred = new_key_credential(KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+
+  out.push("== databases")
+  let cd = c.create_database(DatabaseProperties{id: "db1"}, CreateDatabaseOptions{throughput_properties: Some(new_manual_throughput_properties(400))})?
+  let cdp = cd.database_properties ?? return Err("no properties")
+  out.push("created ${cdp.id} etag=${cd.response.etag} charge=${cd.response.request_charge} rid=${cdp.resource_id}")
+  let db = c.new_database("db1")?
+  let rd = db.read()?
+  out.push("read ${rd.database_properties.map(fn(d: DatabaseProperties) -> Str { d.id }) ?? ""} self=${rd.database_properties.map(fn(d: DatabaseProperties) -> Str { d.self_link }) ?? ""} activity=${rd.response.activity_id}")
+  var qp = c.new_query_databases_pager("SELECT * FROM dbs d WHERE d.id = @id", QueryDatabasesOptions{query_parameters: [QueryParameter{name: "@id", value: json.Value.Str("db1")}]})
+  while qp.more() {
+    let pg = qp.next_page()?
+    out.push("dbs ${str_list(pg.databases.map(fn(d: DatabaseProperties) -> Str { d.id }))}")
+  }
+
+  out.push("== containers")
+  let props = ContainerProperties{
+    id: "c1",
+    partition_key_definition: PartitionKeyDefinition{paths: ["/pk"]},
+    default_time_to_live: Some(3600),
+    indexing_policy: Some(IndexingPolicy{indexing_mode: INDEXING_MODE_CONSISTENT, automatic: true, included_paths: [IncludedPath{path: "/*"}], excluded_paths: [ExcludedPath{path: "/\"_etag\"/?"}]}),
+  }
+  let cc = db.create_container(props)?.container_properties ?? return Err("no properties")
+  out.push("created ${cc.id} pk=${str_list(cc.partition_key_definition.paths)} kind=${cc.partition_key_definition.kind} version=${cc.partition_key_definition.version} ttl=${cc.default_time_to_live ?? 0}")
+  let ct = db.new_container("c1")?
+  let rc = ct.read()?.container_properties ?? return Err("no properties")
+  out.push("read ${rc.id} mode=${rc.indexing_policy.map(fn(i: IndexingPolicy) -> Str { i.indexing_mode }) ?? ""}")
+  ct.replace(rc with {default_time_to_live: Some(60)})?
+  var cp = db.new_query_containers_pager("SELECT * FROM c")
+  while cp.more() {
+    let pg = cp.next_page()?
+    out.push("containers ${pg.containers.len()} ${pg.containers[0].id}")
+  }
+
+  out.push("== items")
+  let pk = new_partition_key_string("a")
+  let ci = ct.create_item(pk, "{\"id\":\"i1\",\"pk\":\"a\",\"n\":1}")?
+  out.push("created etag=${ci.response.etag} charge=${ci.response.request_charge} session=${ci.session_token ?? ""} value=${ci.value}")
+  ct.create_item(pk, "{\"id\":\"i1\",\"pk\":\"a\",\"n\":1}", ItemOptions{enable_content_response_on_write: Some(false), pre_triggers: ["t1"], indexing_directive: Some(INDEXING_DIRECTIVE_EXCLUDE)})?
+  let ri = ct.read_item(pk, "i1")?
+  out.push("read etag=${ri.response.etag} value=${ri.value}")
+  let etag = "\"i-e1\""
+  ct.replace_item(pk, "i1", "{\"id\":\"i1\",\"pk\":\"a\",\"n\":2}", ItemOptions{if_match_etag: Some(etag), session_token: Some("0:-1#7"), consistency_level: Some(CONSISTENCY_LEVEL_SESSION)})?
+  ct.upsert_item(pk, "{\"id\":\"i1\",\"pk\":\"a\",\"n\":3}", ItemOptions{enable_content_response_on_write: Some(true)})?
+  let ops = PatchOperations{}.append_set("/n", json.Value.Int(5)).append_increment("/count", 2).append_remove("/old").append_add("/tags/-", json.Value.Str("x")).append_replace("/name", json.Value.Str("<b>")).set_condition("from c where c.n > 1")
+  ct.patch_item(pk, "i1", ops)?
+  ct.read_item(new_partition_key_string("a").append_number(1.5).append_bool(true).append_null(), "i 1/x")?
+  ct.read_item(new_partition_key_number(42.0), "i1")?
+  ct.read_item(new_partition_key_string("\u{e9}\u{1F600}\u{1}\t\"<"), "i1")?
+  ct.delete_item(pk, "i1", ItemOptions{if_match_etag: Some(etag)})?
+  var ip = ct.new_query_items_pager("SELECT * FROM c WHERE c.n > @n", pk, QueryOptions{query_parameters: [QueryParameter{name: "@n", value: json.Value.Int(0)}], page_size_hint: 1, populate_index_metrics: true})
+  while ip.more() {
+    let pg = ip.next_page()?
+    out.push("items ${str_list(pg.items)} charge=${pg.response.request_charge} cont=${pg.continuation_token ?? "nil"}")
+  }
+
+  out.push("== errors")
+  let err = ct.read_item(pk, "missing").err() ?? return Err("no error")
+  let (is_resp, code, status) = match err {
+    Response(r) => (true, r.error_code, r.status_code)
+    _ => (false, "", 0)
+  }
+  out.push("err ${is_resp} ${code} ${status}")
+
+  out.push("== delete")
+  ct.delete()?
+  db.delete()?
+
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  expect(got.len()) == GO_REQUESTS.len()
+  // Go's transport adds Content-Length on the wire; FakeNet hands the
+  // request over in process, so there is none to compare (the master
+  // key signature does not cover it). Go writes a partition key string
+  // with strconv.QuoteToASCII, whose `\U0001f600` and `\x01` are not
+  // JSON; this port writes the surrogate pair and `\u0001`.
+  for (i, want) in GO_REQUESTS.indexed() {
+    let w = want.split("\n").filter(fn(l: Str) -> Bool { !l.starts_with("  content-length=") }).join("\n").replace("\\U0001f600\\x01", "\\ud83d\\ude00\\u0001")
+    expect(hide(got.get(i) ?? "")) == w
+  }
+  // Go's error code is the status text ("404 Not Found"); this port's
+  // is the service's code. Go cannot marshal an id with a quote; see the
+  // test below.
+  let want_out = GO_OUTPUT.filter(fn(l: Str) -> Bool { l != "quote id: true" }).map(fn(l: Str) -> Str { l.replace("err true 404 Not Found 404", "err true NotFound 404") })
+  expect(out.map(hide)) == want_out
+}
+
+test "an id with a quote is a JSON string (Go writes it with %s and fails to marshal)" {
+  expect(DatabaseProperties{id: "q\"1"}.to_json()) == "{\"id\":\"q\\\"1\"}"
+  expect(ContainerProperties{id: "<c>", partition_key_definition: PartitionKeyDefinition{paths: ["/a", "/b"]}}.to_json()) == "{\"id\":\"\\u003cc\\u003e\",\"partitionKey\":{\"kind\":\"MultiHash\",\"paths\":[\"/a\",\"/b\"]}}"
+}
+
+test "resources are named from the path as Go's operations name them" {
+  expect(resource_of("/")) == ("", "")
+  expect(resource_of("/dbs")) == ("dbs", "")
+  expect(resource_of("/dbs/db1")) == ("dbs", "dbs/db1")
+  expect(resource_of("/dbs/db1/colls")) == ("colls", "dbs/db1")
+  expect(resource_of("/dbs/db1/colls/c1/docs/i%201%2Fx")) == ("docs", "dbs/db1/colls/c1/docs/i 1/x")
+}
+
+test "throughput, patch values and partition keys are written as Go writes them" {
+  expect(new_manual_throughput_properties(400).header()) == ("x-ms-offer-throughput", "400")
+  expect(new_autoscale_throughput_properties(4000).header()) == ("x-ms-cosmos-offer-autopilot-settings", "{\"maxThroughput\":4000}")
+  expect(new_autoscale_throughput_properties_with_increment(4000, 10).header()) == ("x-ms-cosmos-offer-autopilot-settings", "{\"maxThroughput\":4000,\"autoUpgradePolicy\":{\"throughputPolicy\":{\"incrementPercent\":10}}}")
+  expect(PatchOperations{}.append_set("/a", json.Value.Num(1.5)).to_json()) == "{\"operations\":[{\"op\":\"set\",\"path\":\"/a\",\"value\":1.5}]}"
+  expect(new_partition_key_number(1e21).append_string("\\\n").to_json_string()) == "[1e+21,\"\\\\\\n\"]"
+}
+
+test "a connection string needs an endpoint and a key; preferred regions pick the read endpoint" {
+  expect(new_client_from_connection_string(os.net, os.clock, os.rand, "AccountEndpoint=${EP}/").err()) == Some("failed parsing connection string due to it not consist of two parts separated by ';'")
+  let c = new_client_from_connection_string(os.net, os.clock, os.rand, "accountendpoint=${EP}/;AccountKey=${KEY};")?
+  expect(c.endpoint()) == "${EP}/"
+  let locs = [("West US", "https://w.example.test/"), ("East US", "https://e.example.test/")]
+  expect(region_endpoint(locs, ["East US"])) == Some("https://e.example.test/")
+  expect(region_endpoint(locs, ["North"])) == Some("https://w.example.test/")
+  expect(region_endpoint([], [])) == None
+}
+
+test "query items are kept as the service wrote them, each one, spacing inside kept" {
+  let text = "{\"_rid\":\"r\",\"Nested\":{\"Documents\":[0]},\"Documents\": [ {\"a\": 1.50} ,\n {\"b\":[2,{\"c\":null}]}],\"_count\":2}"
+  expect(raw_elements(text, "Documents").ok()) == Some(["{\"a\": 1.50}", "{\"b\":[2,{\"c\":null}]}"])
+  expect(raw_elements("{\"Documents\":[]}", "Documents").ok()) == Some([])
+  expect(raw_elements("{\"x\":1}", "Documents").ok()) == Some([])
+}

@@ -1,0 +1,432 @@
+// Azure Cosmos DB for NoSQL, as azcosmos v1.5.0 (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): the Client over the REST API
+// version 2020-11-05, the master key and Entra ID authorization, the
+// account's regional endpoints, responses and partition keys.
+
+use std/base64
+use std/crypto
+use std/http
+use std/json
+use std/time
+use std/url
+use std/uuid
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const VERSION: Str = "v0.1.0"
+
+/// The REST API version the calls are written for (azcosmos v1.5.0's).
+pub const API_VERSION: Str = "2020-11-05"
+
+/// The master key of an account (base64, as the portal shows it).
+pub struct KeyCredential {
+  key: Secret[Bytes]
+}
+
+pub fn new_key_credential(account_key: Str) -> KeyCredential ! Str {
+  let k = base64.decode(account_key) ?? e => return Err("the account key is not base64: ${e.display()}")
+  Ok(KeyCredential{key: Secret.new(k)})
+}
+
+/// The key credential with another key (key rotation).
+pub fn (c: KeyCredential) update(account_key: Str) -> KeyCredential ! Str {
+  new_key_credential(account_key)
+}
+
+/// The resource type and the resource address a request's
+/// authorization covers, from its path as Go's operations name them:
+/// a path with an odd number of segments is a feed (`dbs`,
+/// `dbs/db1/colls`), its last segment the type and the rest the owner;
+/// an even one is a resource (`dbs/db1/colls/c1`), its next to last
+/// segment the type and the whole path the address. The address is
+/// unescaped (an item id `a/b` is sent as `a%2Fb`).
+pub fn resource_of(escaped_path: Str) -> (Str, Str) {
+  let p = escaped_path.trim_start_chars("/").trim_end_chars("/")
+  if p == "" {
+    return ("", "")
+  }
+  let segs = p.split("/")
+  let n = segs.len()
+  let unescape = fn(s: Str) -> Str { url.path_unescape(s).ok() ?? s }
+  if n % 2 == 1 {
+    return (segs[n - 1], unescape(segs[0..n - 1].join("/")))
+  }
+  (segs[n - 2], unescape(p))
+}
+
+/// The master key signature of a request: Go's
+/// buildCanonicalizedAuthHeader, query escaped.
+pub fn (c: KeyCredential) authorization(method: Str, resource_type: Str, resource_address: Str, date: Str) -> Str {
+  let sts = "${method.to_lower()}\n${resource_type.to_lower()}\n${resource_address}\n${date.to_lower()}\n\n"
+  let sig = base64.encode(crypto.hmac_sha256(c.key.reveal(), sts.bytes()))
+  url.query_escape("type=master&ver=1.0&sig=${sig}")
+}
+
+fn escaped_path_of(u: Str) -> Str {
+  let head = match u.find("?") {
+    Some(i) => u[0..i]
+    None => u
+  }
+  let rest = match head.find("://") {
+    Some(i) => head[i + 3..head.len()]
+    None => head
+  }
+  match rest.find("/") {
+    Some(i) => rest[i..rest.len()]
+    None => ""
+  }
+}
+
+/// Signs each request with the master key, setting x-ms-date when the
+/// request has none.
+pub struct KeyCredentialPolicy {
+  pub credential: KeyCredential
+  pub clock: Clock
+}
+
+fn http_date(t: Time) -> Str {
+  time.format(t, time.utc(), time.RFC1123).replace(" UTC", " GMT")
+}
+
+fn (p: KeyCredentialPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", http_date(p.clock.now())) } else { req }
+  let (rt, addr) = resource_of(escaped_path_of(dated.url))
+  next.send(dated.with_header("Authorization", p.credential.authorization(dated.method, rt, addr, dated.header("x-ms-date") ?? "")))
+}
+
+/// Entra ID authorization: `type=aad&ver=1.0&sig=<token>`, the token
+/// cached until it needs a refresh.
+pub struct AadTokenPolicy {
+  pub credential: azcore.TokenCredential
+  pub scopes: List[Str]
+  pub clock: Clock
+  token: Mutex[azcore.AccessToken?]
+}
+
+fn (p: AadTokenPolicy) current() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    if let Some(have) = t {
+      if !azcore.needs_refresh(have, p.clock.now()) {
+        return Ok(have)
+      }
+    }
+    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+fn (p: AadTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let tok = p.current() ?? e => return Err(policy.SendErr.Auth(e.display()))
+  next.send(req.with_header("Authorization", "type=aad&ver=1.0&sig=${tok.token.reveal()}"))
+}
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Regions in the order requests should go to them (`West US`); the
+  /// account's first region when none matches.
+  pub preferred_regions: List[Str] = []
+  /// Whether item writes return the item (no `Prefer: return=minimal`).
+  pub enable_content_response_on_write: Bool = false
+}
+
+/// The account's regional endpoints, read once from the account
+/// (Go's global endpoint manager, without its failover).
+struct Endpoints {
+  write: Str
+  read: Str
+}
+
+/// What every client shares: the account endpoint, the pipeline and the
+/// regional endpoints once known.
+struct Core {
+  endpoint: Str
+  pipeline: runtime.Pipeline
+  rand: Rand
+  preferred_regions: List[Str]
+  content_on_write: Bool
+  endpoints: Mutex[Endpoints?]
+}
+
+fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy, opts: ClientOptions) -> Core {
+  let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  Core{endpoint: endpoint, pipeline: pl, rand: rand, preferred_regions: opts.preferred_regions, content_on_write: opts.enable_content_response_on_write, endpoints: Mutex[Endpoints?].new(None)}
+}
+
+/// A client with the account's master key.
+pub fn new_client_with_key(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: KeyCredential, options: ClientOptions = ClientOptions{}) -> Client {
+  Client{core: new_core(net, clock, rand, endpoint, KeyCredentialPolicy{credential: cred, clock: clock}, options)}
+}
+
+/// A client with Entra ID tokens for the account's scope
+/// (`https://<account host>/.default`).
+pub fn new_client(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let u = http.parse_url(endpoint) ?? e => return Err(e.display())
+  let scope = "${u.scheme}://${u.host}/.default"
+  Ok(Client{core: new_core(net, clock, rand, endpoint, AadTokenPolicy{credential: cred, scopes: [scope], clock: clock, token: Mutex[azcore.AccessToken?].new(None)}, options)})
+}
+
+/// A client from `AccountEndpoint=...;AccountKey=...` (keys compared
+/// without case).
+pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  var endpoint = ""
+  var key: KeyCredential? = None
+  let parts = connection_string.trim_end_chars(";").split(";")
+  if parts.len() < 2 {
+    return Err("failed parsing connection string due to it not consist of two parts separated by ';'")
+  }
+  for part in parts {
+    let i = part.find("=") ?? return Err("failed parsing connection string due to unmatched key value separated by '='")
+    let k = part[0..i].to_lower()
+    let v = part[i + 1..part.len()]
+    if k == "accountendpoint" {
+      endpoint = v
+    } else if k == "accountkey" {
+      key = Some(new_key_credential(v)?)
+    }
+  }
+  let cred = key ?? return Err("the connection string has no AccountKey")
+  Ok(new_client_with_key(net, clock, rand, endpoint, cred, options))
+}
+
+/// A client of one Cosmos DB account.
+pub struct Client {
+  core: Core
+}
+
+pub fn (c: Client) endpoint() -> Str {
+  c.core.endpoint
+}
+
+// Sending.
+
+/// What a request needs besides its method and path.
+struct Call {
+  method: Str
+  /// The path from the account root, escaped (`dbs/db1/colls/c1`).
+  path: Str
+  write: Bool = false
+  headers: List[(Str, Str)] = []
+  body: Bytes = b""
+  content_type: Str = ""
+}
+
+fn join_url(base: Str, path: Str) -> Str {
+  let b = base.trim_end_chars("/")
+  if path == "" { "${b}/" } else { "${b}/${path}" }
+}
+
+fn (c: Core) request(call: Call, base: Str) -> policy.Request uses rand {
+  var hs = call.headers + [
+    ("x-ms-version", API_VERSION),
+    ("x-ms-cosmos-sdk-supportedcapabilities", "1"),
+    ("x-ms-activity-id", uuid.v4(c.rand).display()),
+  ]
+  if call.content_type != "" {
+    hs.push(("Content-Type", call.content_type))
+  }
+  policy.Request{method: call.method, url: join_url(base, call.path), headers: hs, body: call.body}
+}
+
+fn region_endpoint(locs: List[(Str, Str)], preferred: List[Str]) -> Str? {
+  for p in preferred {
+    for (name, ep) in locs {
+      if name == p {
+        return Some(ep)
+      }
+    }
+  }
+  locs.first().map(fn(l: (Str, Str)) -> Str { l.1 })
+}
+
+fn locations_of(v: json.Value, key: Str) -> List[(Str, Str)] {
+  let xs = match v.get(key) {
+    Some(json.Value.List(items)) => items
+    _ => []
+  }
+  var out: List[(Str, Str)] = []
+  for x in xs {
+    match (x.get("name"), x.get("databaseAccountEndpoint")) {
+      (Some(json.Value.Str(n)), Some(json.Value.Str(e))) => out.push((n, e))
+      _ => ()
+    }
+  }
+  out
+}
+
+/// The regional endpoints, read from the account on first use.
+fn (c: Core) resolved() -> Endpoints ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(e) = c.endpoints.with_read(fn(e: Endpoints?) -> Endpoints? { e }) {
+    return Ok(e)
+  }
+  let req = c.request(Call{method: "GET", path: ""}, c.endpoint)
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status < 200 || resp.status >= 300 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  let v = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e.display()))
+  let w = region_endpoint(locations_of(v, "writableLocations"), []) ?? c.endpoint
+  let r = region_endpoint(locations_of(v, "readableLocations"), c.preferred_regions) ?? w
+  let eps = Endpoints{write: w, read: r}
+  c.endpoints.with(fn(var e: Endpoints?) { e = Some(eps) })
+  Ok(eps)
+}
+
+fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let eps = c.resolved()?
+  let req = c.request(call, if call.write { eps.write } else { eps.read })
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if (resp.status >= 200 && resp.status < 300) || resp.status == 304 {
+    return Ok(resp)
+  }
+  Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+}
+
+// Responses.
+
+/// What every response carries.
+pub struct Response {
+  /// The x-ms-request-charge header: the request units used.
+  pub request_charge: Float = 0.0
+  pub activity_id: Str = ""
+  pub etag: Str = ""
+  pub status: Int = 0
+}
+
+fn response_of(resp: http.Response) -> Response {
+  let charge = Float.parse(resp.header("x-ms-request-charge") ?? "") ?? 0.0
+  Response{request_charge: charge, activity_id: resp.header("x-ms-activity-id") ?? "", etag: resp.header("etag") ?? "", status: resp.status}
+}
+
+// JSON.
+
+/// `v` as Go's json.Marshal writes it (HTML escaped, Go's float form).
+fn js(v: json.Value) -> Str {
+  var w = json.json_writer(escape_html: true)
+  match w.value(v) {
+    Ok(_) => w.finish().to_str_lossy().trim_end_chars("\n")
+    Err(_) => "null"
+  }
+}
+
+fn jstr(s: Str) -> Str {
+  js(json.Value.Str(s))
+}
+
+fn str_of(v: json.Value, key: Str) -> Str {
+  match v.get(key) {
+    Some(json.Value.Str(s)) => s
+    _ => ""
+  }
+}
+
+fn int_of(v: json.Value, key: Str) -> Int? {
+  match v.get(key) {
+    Some(json.Value.Int(n)) => Some(n)
+    Some(json.Value.Num(f)) => Some(Int(f.trunc()))
+    _ => None
+  }
+}
+
+fn parse_json(text: Str) -> json.Value ! Str {
+  json.parse_value(text) ?? e => Err(e.display())
+}
+
+// Partition keys.
+
+/// A partition key value: one value, or several for a hierarchical key.
+/// A key with no values is the whole container (cross partition).
+pub struct PartitionKey {
+  pub values: List[json.Value] = []
+}
+
+pub fn new_partition_key() -> PartitionKey {
+  PartitionKey{}
+}
+
+pub fn new_partition_key_string(value: Str) -> PartitionKey {
+  PartitionKey{values: [json.Value.Str(value)]}
+}
+
+pub fn new_partition_key_bool(value: Bool) -> PartitionKey {
+  PartitionKey{values: [json.Value.Bool(value)]}
+}
+
+pub fn new_partition_key_number(value: Float) -> PartitionKey {
+  PartitionKey{values: [json.Value.Num(value)]}
+}
+
+pub fn (pk: PartitionKey) append_string(value: Str) -> PartitionKey {
+  PartitionKey{values: pk.values + [json.Value.Str(value)]}
+}
+
+pub fn (pk: PartitionKey) append_bool(value: Bool) -> PartitionKey {
+  PartitionKey{values: pk.values + [json.Value.Bool(value)]}
+}
+
+pub fn (pk: PartitionKey) append_number(value: Float) -> PartitionKey {
+  PartitionKey{values: pk.values + [json.Value.Num(value)]}
+}
+
+pub fn (pk: PartitionKey) append_null() -> PartitionKey {
+  PartitionKey{values: pk.values + [json.Value.Null]}
+}
+
+/// The `x-ms-documentdb-partitionkey` header: a JSON array with every
+/// string ASCII only. Go writes strings with strconv.QuoteToASCII, whose
+/// `\U0001f600` and `\x01` are not JSON; here a character outside the
+/// BMP is a surrogate pair (`😀`) and a control character
+/// `\u0001`, which is what the service's JSON reader takes.
+pub fn (pk: PartitionKey) to_json_string() -> Str {
+  let parts = pk.values.map(fn(v: json.Value) -> Str {
+    match v {
+      Str(s) => ascii_json(s)
+      other => js(other)
+    }
+  })
+  "[${parts.join(",")}]"
+}
+
+fn hex4(n: Int) -> Str {
+  let h = "0123456789abcdef"
+  var out = ""
+  for shift in [12, 8, 4, 0] {
+    let d = (n >> shift) & 15
+    out = out + h[d..d + 1]
+  }
+  out
+}
+
+/// A JSON string of `s` with only ASCII in it, as QuoteToASCII writes the
+/// printable ASCII and the escapes JSON shares with Go (`\"`, `\\`, `\n`,
+/// `\r`, `\t`, `\b`, `\f`, and `\u` for the BMP).
+fn ascii_json(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    let n = Int(c)
+    if c == '"' {
+      out = out + "\\\""
+    } else if c == '\\' {
+      out = out + "\\\\"
+    } else if n == 10 {
+      out = out + "\\n"
+    } else if n == 13 {
+      out = out + "\\r"
+    } else if n == 9 {
+      out = out + "\\t"
+    } else if n == 8 {
+      out = out + "\\b"
+    } else if n == 12 {
+      out = out + "\\f"
+    } else if n >= 32 && n < 127 {
+      out = out + "${c}"
+    } else if n < 65536 {
+      out = out + "\\u${hex4(n)}"
+    } else {
+      let v = n - 65536
+      out = out + "\\u${hex4(55296 + (v >> 10))}\\u${hex4(56320 + (v & 1023))}"
+    }
+  }
+  out + "\""
+}
