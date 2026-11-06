@@ -31,10 +31,10 @@ test "start positions are Go's selector expressions" {
   expect(start_expression(StartPosition{})) == Ok("amqp.annotation.x-opt-offset > '@latest'")
   expect(start_expression(StartPosition{earliest: true})) == Ok("amqp.annotation.x-opt-offset > '-1'")
   expect(start_expression(StartPosition{latest: true, inclusive: true})) == Ok("amqp.annotation.x-opt-offset >= '@latest'")
-  expect(start_expression(StartPosition{offset: Some(192)})) == Ok("amqp.annotation.x-opt-offset > '192'")
+  expect(start_expression(StartPosition{offset: Some("192")})) == Ok("amqp.annotation.x-opt-offset > '192'")
   expect(start_expression(StartPosition{sequence_number: Some(4), inclusive: true})) == Ok("amqp.annotation.x-opt-sequence-number >= '4'")
   expect(start_expression(StartPosition{enqueued_time: Some(Time.from_unix_millis(1793847845123))})) == Ok("amqp.annotation.x-opt-enqueued-time > '1793847845123'")
-  expect(start_expression(StartPosition{offset: Some(1), sequence_number: Some(2)}).err()) == Some("only a single start point can be set: Earliest, EnqueuedTime, Latest, Offset, or SequenceNumber")
+  expect(start_expression(StartPosition{offset: Some("1"), sequence_number: Some(2)}).err()) == Some("only a single start point can be set: Earliest, EnqueuedTime, Latest, Offset, or SequenceNumber")
 }
 
 test "a received event reads Go's four annotations and keeps the rest as system properties" {
@@ -52,7 +52,7 @@ test "a received event reads Go's four annotations and keeps the rest as system 
   }
   let e = received(m)?
   expect(e.sequence_number) == 7
-  expect(e.offset) == 960
+  expect(e.offset) == "960"
   expect(e.enqueued_time) == Some(Time.from_unix_millis(1793847845000))
   expect(e.partition_key) == Some("k")
   expect(e.message_id) == Some("id1")
@@ -136,7 +136,7 @@ test "a partition client reads from the earliest event, then after the last one 
     let got = part.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?
     expect(got.map(body_text)) == ["a", "b"]
     expect(got.map(fn(e: ReceivedEventData) -> Int { e.sequence_number })) == [0, 1]
-    expect(got.map(fn(e: ReceivedEventData) -> Int { e.offset })) == [64, 192]
+    expect(got.map(fn(e: ReceivedEventData) -> Str { e.offset })) == ["64", "192"]
     expect(got[0].enqueued_time.is_some()) == true
     expect(part.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["c"]
     var more = pc.new_event_data_batch()?
@@ -231,6 +231,9 @@ test "the hub's and a partition's properties come from $management" {
     expect(hp.name) == "eh1"
     expect(hp.partition_ids) == ["0", "1"]
     expect(hp.created_on.is_some()) == true
+    expect(hp.geo_replication_enabled) == false
+    b.event_hub_geo_factor("eh1", 2)
+    expect(pc.get_event_hub_properties()?.geo_replication_enabled) == true
     let empty = pc.get_partition_properties("1")?
     expect(empty.is_empty) == true
     // A partition link is authorized by a claim on its own path, as Go puts it.
@@ -245,7 +248,7 @@ test "the hub's and a partition's properties come from $management" {
     expect(pp.is_empty) == false
     expect(pp.beginning_sequence_number) == 0
     expect(pp.last_enqueued_sequence_number) == 1
-    expect(pp.last_enqueued_offset) == 192
+    expect(pp.last_enqueued_offset) == "192"
     expect(pp.last_enqueued_on.is_some()) == true
     let part = cc.new_partition_client("1", PartitionClientOptions{start_position: StartPosition{earliest: true}})?
     expect(part.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["a", "b"]
@@ -253,6 +256,13 @@ test "the hub's and a partition's properties come from $management" {
     expect(auds.contains("amqp://${l.addr()}/eh1/Partitions/1")) == true
     expect(auds.contains("amqp://${l.addr()}/eh1/ConsumerGroups/$Default/Partitions/1")) == true
     expect(auds.contains("amqp://${l.addr()}/eh1/$management")) == true
+    // v2: every link but the CBS one asks for geo-replication, as Go's.
+    let links = b.attaches().map(fn(x: (Str, Str, List[Str])) -> Str { "${x.1} ${x.0} ${x.2.join(",")}" })
+    expect(links.filter(fn(x: Str) -> Bool { !x.contains("$cbs") && !x.ends_with(" com.microsoft:georeplication") })) == []
+    expect(links.filter(fn(x: Str) -> Bool { x.contains("$cbs") && x.contains("georeplication") })) == []
+    for want in ["sender $management", "receiver $management", "sender eh1/Partitions/1", "receiver eh1/ConsumerGroups/$Default/Partitions/1"] {
+      expect(links.any(fn(x: Str) -> Bool { x.starts_with(want + " ") })) == true
+    }
     cc.close()?
     pc.close()?
     s.cancel()

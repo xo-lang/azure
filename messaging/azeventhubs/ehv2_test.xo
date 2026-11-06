@@ -1,0 +1,134 @@
+// azeventhubs v2.0.2's changes from v1.4.0 replayed against the lines of
+// Go's own functions (ehv2vectors_test.xo): string offsets, the hub's
+// georeplication_factor and the geo-replication offset error.
+
+use std/amqp
+
+fn go_lines(prefix: Str) -> List[Str] {
+  EHV2_GO.filter(fn(l: Str) -> Bool { l.starts_with(prefix) })
+}
+
+fn s(v: Str) -> amqp.Value {
+  amqp.Value.Str(v: v)
+}
+
+fn hub_base() -> List[(amqp.Value, amqp.Value)] {
+  [(s("name"), s("eh1")), (s("created_at"), amqp.Value.Timestamp(ms: 1793952000000)), (s("partition_ids"), amqp.Value.Array(items: [s("0"), s("1")]))]
+}
+
+fn without(pairs: List[(amqp.Value, amqp.Value)], k: Str) -> List[(amqp.Value, amqp.Value)] {
+  pairs.filter(fn(p: (amqp.Value, amqp.Value)) -> Bool { p.0 != s(k) })
+}
+
+fn with_field(pairs: List[(amqp.Value, amqp.Value)], k: Str, v: amqp.Value) -> List[(amqp.Value, amqp.Value)] {
+  without(pairs, k) + [(s(k), v)]
+}
+
+test "event hub properties read georeplication_factor as Go v2's newEventHubProperties" {
+  let factor = fn(v: amqp.Value) -> List[(amqp.Value, amqp.Value)] { with_field(hub_base(), "georeplication_factor", v) }
+  let geo2 = factor(amqp.Value.Long(v: 2))
+  let cases = [
+    ("not a map", s("x")),
+    ("no factor", amqp.Value.Map(pairs: hub_base())),
+    ("factor long 1", amqp.Value.Map(pairs: factor(amqp.Value.Long(v: 1)))),
+    ("factor long 2", amqp.Value.Map(pairs: geo2)),
+    ("factor int 3", amqp.Value.Map(pairs: factor(amqp.Value.Int(v: 3)))),
+    ("factor short 2", amqp.Value.Map(pairs: factor(amqp.Value.Short(v: 2)))),
+    ("factor byte 2", amqp.Value.Map(pairs: factor(amqp.Value.Byte(v: 2)))),
+    ("factor ulong 2", amqp.Value.Map(pairs: factor(amqp.Value.ULong(v: 2)))),
+    ("factor uint 2", amqp.Value.Map(pairs: factor(amqp.Value.UInt(v: 2)))),
+    ("factor ubyte 2", amqp.Value.Map(pairs: factor(amqp.Value.UByte(v: 2)))),
+    ("factor string 2", amqp.Value.Map(pairs: factor(s("2")))),
+    ("factor long 0", amqp.Value.Map(pairs: factor(amqp.Value.Long(v: 0)))),
+    ("no partition_ids", amqp.Value.Map(pairs: without(geo2, "partition_ids"))),
+    ("bad name", amqp.Value.Map(pairs: with_field(geo2, "name", amqp.Value.Long(v: 1)))),
+    ("no created_at", amqp.Value.Map(pairs: without(geo2, "created_at"))),
+  ]
+  let got = cases.map(fn(c: (Str, amqp.Value)) -> Str {
+    match event_hub_properties_of(c.1) {
+      Ok(p) => "HUB ${c.0} => name=${p.name} ids=[${p.partition_ids.join(" ")}] geo=${p.geo_replication_enabled}"
+      Err(e) => "HUB ${c.0} => error ${e.msg}"
+    }
+  })
+  expect(got) == go_lines("HUB ")
+}
+
+test "partition properties keep the last offset as a string, as Go v2's newPartitionProperties" {
+  let base = [
+    (s("name"), s("eh1")), (s("partition"), s("1")), (s("begin_sequence_number"), amqp.Value.Long(v: 0)),
+    (s("last_enqueued_sequence_number"), amqp.Value.Long(v: 5)), (s("last_enqueued_offset"), s("192")),
+    (s("last_enqueued_time_utc"), amqp.Value.Timestamp(ms: 1793952000000)), (s("is_partition_empty"), amqp.Value.Bool(v: false)),
+  ]
+  let cases = [
+    ("plain", base),
+    ("geo offset", with_field(base, "last_enqueued_offset", s("1:192:7"))),
+    ("numeric offset", with_field(base, "last_enqueued_offset", amqp.Value.Long(v: 192))),
+    ("ulong seq", with_field(base, "last_enqueued_sequence_number", amqp.Value.ULong(v: 5))),
+    ("int seq", with_field(base, "last_enqueued_sequence_number", amqp.Value.Int(v: 5))),
+  ]
+  let got = cases.map(fn(c: (Str, List[(amqp.Value, amqp.Value)])) -> Str {
+    match partition_properties_of(amqp.Value.Map(pairs: c.1)) {
+      Ok(p) => "PART ${c.0} => seq=${p.beginning_sequence_number}..${p.last_enqueued_sequence_number} offset=\"${p.last_enqueued_offset}\""
+      Err(e) => "PART ${c.0} => error ${e.msg}"
+    }
+  })
+  expect(got) == go_lines("PART ")
+}
+
+test "a received event's offset is its string annotation, as Go v2's newReceivedEventData" {
+  let cases = [("numeric", s("960")), ("geo", s("2:960:1")), ("empty", s("")), ("long", amqp.Value.Long(v: 960))]
+  let got = cases.map(fn(c: (Str, amqp.Value)) -> Str {
+    let m = amqp.Message{
+      annotations: Some([(amqp.Value.Symbol(v: "x-opt-offset"), c.1), (amqp.Value.Symbol(v: "x-opt-sequence-number"), amqp.Value.Long(v: 3))]),
+      body: amqp.Body.Data(sections: [b"x"]),
+    }
+    match received(m) {
+      Ok(e) => "EVENT ${c.0} => offset=\"${e.offset}\" seq=${e.sequence_number}"
+      Err(e) => "EVENT ${c.0} => error ${e}"
+    }
+  })
+  expect(got) == go_lines("EVENT ")
+}
+
+test "a string offset is the start filter's value, as Go v2's getStartExpression" {
+  let cases = [
+    ("offset", StartPosition{offset: Some("192")}),
+    ("geo offset inclusive", StartPosition{offset: Some("1:192:7"), inclusive: true}),
+    ("empty offset", StartPosition{offset: Some("")}),
+    ("offset and earliest", StartPosition{offset: Some("1"), earliest: true}),
+  ]
+  let got = cases.map(fn(c: (Str, StartPosition)) -> Str {
+    match start_expression(c.1) {
+      Ok(x) => "START ${c.0} => \"${x}\" <nil>"
+      Err(e) => "START ${c.0} => \"\" ${e}"
+    }
+  })
+  expect(got) == go_lines("START ")
+}
+
+test "the geo-replication offset error is fatal, as Go v2's GetRecoveryKind" {
+  let e = from_wire(amqp.WireError{condition: ERROR_COND_GEO_REPLICATION_OFFSET, description: ""})
+  let kind = match e.recovery {
+    RecoveryKind.Fatal => "fatal"
+    RecoveryKind.Conn => "connection"
+    RecoveryKind.Link => "link"
+    RecoveryKind.None => ""
+  }
+  expect(["RECOVERY ${ERROR_COND_GEO_REPLICATION_OFFSET} => ${kind} geo=${is_geo_replication_offset_error(e)}"]) == go_lines("RECOVERY ")
+}
+
+test "a partition whose numeric offset a geo-replicated hub refuses starts again from the earliest event, inclusive" {
+  let tried = Mutex[List[StartPosition]].new([])
+  let open = fn(sp: StartPosition) -> Str ! EventHubsErr uses (net.dial, clock, rand) {
+    let n = tried.with(fn(var xs: List[StartPosition]) -> Int {
+      xs.push(sp)
+      xs.len()
+    })
+    if n == 1 { Err(from_wire(amqp.WireError{condition: ERROR_COND_GEO_REPLICATION_OFFSET, description: "bad offset"})) } else { Ok("opened") }
+  }
+  expect(open_with_geo_fallback(StartPosition{offset: Some("192")}, open)?) == "opened"
+  expect(tried.with_read(fn(xs: List[StartPosition]) -> List[StartPosition] { xs })) == [StartPosition{offset: Some("192")}, StartPosition{earliest: true, inclusive: true}]
+  // Any other error is returned as it is, with no second try.
+  let other = fn(sp: StartPosition) -> Str ! EventHubsErr uses (net.dial, clock, rand) { Err(from_wire(amqp.WireError{condition: "amqp:link:stolen", description: ""})) }
+  expect(open_with_geo_fallback(StartPosition{offset: Some("192")}, other).err().map(fn(e: EventHubsErr) -> Str { e.code })) == Some(ERROR_CODE_OWNERSHIP_LOST)
+}

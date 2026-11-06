@@ -325,12 +325,7 @@ fn (p: Processor) start_position(id: Str, checkpoints: Map[Str, Checkpoint]) -> 
 
 fn (p: Processor) add_partition_client(id: Str, checkpoints: Map[Str, Checkpoint]) -> () ! EventHubsErr uses (net.dial, clock, rand) {
   let start = p.start_position(id, checkpoints)?
-  // Owner level 0, as Go's processorOwnerLevel.
-  let part = p.cc.new_partition_client(id, PartitionClientOptions{start_position: start, owner_level: Some(0), prefetch: p.prefetch})?
-  part.init() ?? e => {
-    part.close() ?? _ => {}
-    return Err(e)
-  }
+  let part = open_with_geo_fallback(start, fn(sp: StartPosition) -> PartitionClient ! EventHubsErr uses (net.dial, clock, rand) { p.open_partition_client(id, sp) })?
   let client = ProcessorPartitionClient{pid: id, inner: part, store: p.store, details: p.details, consumers: p.consumers}
   let ch = p.next.with_read(fn(c: Chan[ProcessorPartitionClient]?) -> Chan[ProcessorPartitionClient]? { c }) ?? return Err(fatal("the Processor is not running"))
   if !ch.try_send(client) {
@@ -339,6 +334,29 @@ fn (p: Processor) add_partition_client(id: Str, checkpoints: Map[Str, Checkpoint
   }
   p.clients.with(fn(var cs: List[ProcessorPartitionClient]) { cs.push(client) })
   Ok(())
+}
+
+/// `open(start)`, and when a geo-replicated hub refuses the start's
+/// numeric offset, `open` again from the earliest event, inclusive (Go
+/// v2's addPartitionClient).
+fn open_with_geo_fallback[T](start: StartPosition, open: fn(StartPosition) -> T ! EventHubsErr uses (net.dial, clock, rand)) -> T ! EventHubsErr uses (net.dial, clock, rand) {
+  match open(start) {
+    Ok(v) => Ok(v)
+    Err(e) if is_geo_replication_offset_error(e) => open(StartPosition{earliest: true, inclusive: true})
+    Err(e) => Err(e)
+  }
+}
+
+/// A partition client with its link open now (Go's
+/// openPartitionClientImpl), so a stolen partition is claimed at once.
+fn (p: Processor) open_partition_client(id: Str, start: StartPosition) -> PartitionClient ! EventHubsErr uses (net.dial, clock, rand) {
+  // Owner level 0, as Go's processorOwnerLevel.
+  let part = p.cc.new_partition_client(id, PartitionClientOptions{start_position: start, owner_level: Some(0), prefetch: p.prefetch})?
+  part.init() ?? e => {
+    part.close() ?? _ => {}
+    return Err(e)
+  }
+  Ok(part)
 }
 
 /// Go's Processor.close: the clients closed, the ownerships given up,

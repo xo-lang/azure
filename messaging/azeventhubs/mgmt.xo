@@ -10,6 +10,9 @@ pub struct EventHubProperties {
   pub created_on: Time? = None
   pub name: Str = ""
   pub partition_ids: List[Str] = []
+  /// Whether the hub is geo-replicated (its georeplication_factor is
+  /// above 1; v2).
+  pub geo_replication_enabled: Bool = false
 }
 
 pub struct GetEventHubPropertiesOptions {}
@@ -18,7 +21,7 @@ pub struct PartitionProperties {
   pub beginning_sequence_number: Int = 0
   pub event_hub_name: Str = ""
   pub is_empty: Bool = false
-  pub last_enqueued_offset: Int = 0
+  pub last_enqueued_offset: Str = ""
   pub last_enqueued_on: Time? = None
   pub last_enqueued_sequence_number: Int = 0
   pub partition_id: Str = ""
@@ -53,8 +56,8 @@ fn (ns: Namespace) read(event_hub: Str, props: List[(Str, amqp.Value)]) -> Reply
   // address around the `$` (its arguments are swapped), so the reply
   // address is `$management$$management-reply-to-<id>`; kept as Go's.
   let reply_to = "$management$$management-reply-to-${id}"
-  let snd = conn.c.new_sender(conn.s, "$management", amqp.SenderOptions{name: ns.link_name("mgmt-s", event_hub)}) ?? e => return Err(from_amqp(e))
-  let rcv = conn.c.new_receiver(conn.s, "$management", amqp.ReceiverOptions{name: ns.link_name("mgmt-r", event_hub), target: reply_to, credit: 1000, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled)}) ?? e => {
+  let snd = conn.c.new_sender(conn.s, "$management", amqp.SenderOptions{name: ns.link_name("mgmt-s", event_hub), desired_capabilities: [CAPABILITY_GEO_DR_REPLICATION]}) ?? e => return Err(from_amqp(e))
+  let rcv = conn.c.new_receiver(conn.s, "$management", amqp.ReceiverOptions{name: ns.link_name("mgmt-r", event_hub), target: reply_to, credit: 1000, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled), desired_capabilities: [CAPABILITY_GEO_DR_REPLICATION]}) ?? e => {
     snd.close() ?? _ => {}
     return Err(from_amqp(e))
   }
@@ -124,31 +127,51 @@ fn get_event_hub_properties(ns: Namespace, o: RetryOptions, event_hub: Str) -> E
     ("operation", amqp.Value.Str(v: "READ")), ("name", amqp.Value.Str(v: event_hub)),
     ("type", amqp.Value.Str(v: "com.microsoft:eventhub")), ("security_token", amqp.Value.Str(v: token.token)),
   ])?
-  // Go: a body that is not a map is empty properties, not an error.
-  if !(r.body is amqp.Value.Map(..)) {
+  event_hub_properties_of(r.body)
+}
+
+/// A READ reply's event hub properties, as Go v2's
+/// newEventHubProperties: a body that is not a map is empty properties,
+/// not an error; each missing or mistyped field is named.
+fn event_hub_properties_of(body: amqp.Value) -> EventHubProperties ! EventHubsErr {
+  if !(body is amqp.Value.Map(..)) {
     return Ok(EventHubProperties{})
   }
+  let bad = fn(k: Str) -> EventHubsErr { fatal("invalid value for ${k}") }
   var ids: List[Str] = []
-  match field(r.body, "partition_ids") {
+  match field(body, "partition_ids") {
     Some(amqp.Value.Array(xs)) => {
       for x in xs {
         ids.push(match x {
           amqp.Value.Str(s) => s
-          _ => return Err(invalid())
+          _ => return Err(bad("partition_ids"))
         })
       }
     }
-    _ => return Err(invalid())
+    _ => return Err(bad("partition_ids"))
   }
-  let name = match field(r.body, "name") {
+  let name = match field(body, "name") {
     Some(amqp.Value.Str(s)) => s
-    _ => return Err(invalid())
+    _ => return Err(bad("name"))
   }
-  let created = match field(r.body, "created_at") {
+  let created = match field(body, "created_at") {
     Some(amqp.Value.Timestamp(ms)) => Time.from_unix_millis(ms)
-    _ => return Err(invalid())
+    _ => return Err(bad("created_at"))
   }
-  Ok(EventHubProperties{name: name, created_on: Some(created), partition_ids: ids})
+  let geo = field(body, "georeplication_factor").and_then(signed_int) ?? return Err(bad("georeplication_factor"))
+  Ok(EventHubProperties{name: name, created_on: Some(created), partition_ids: ids, geo_replication_enabled: geo > 1})
+}
+
+/// Go's eh.ConvertToInt64: a signed integer of any width; an unsigned
+/// one is not converted.
+fn signed_int(v: amqp.Value) -> Int? {
+  match v {
+    amqp.Value.Long(x) => Some(Int(x))
+    amqp.Value.Int(x) => Some(Int(x))
+    amqp.Value.Short(x) => Some(Int(x))
+    amqp.Value.Byte(x) => Some(Int(x))
+    _ => None
+  }
 }
 
 fn get_partition_properties(ns: Namespace, o: RetryOptions, event_hub: Str, partition_id: Str) -> PartitionProperties ! EventHubsErr uses (net.dial, clock, rand) {
@@ -158,19 +181,26 @@ fn get_partition_properties(ns: Namespace, o: RetryOptions, event_hub: Str, part
     ("type", amqp.Value.Str(v: "com.microsoft:partition")), ("partition", amqp.Value.Str(v: partition_id)),
     ("security_token", amqp.Value.Str(v: token.token)),
   ])?
+  partition_properties_of(r.body)
+}
+
+/// A READ reply's partition properties, as Go v2's
+/// newPartitionProperties: the last offset a string, every missing or
+/// mistyped field "invalid message format".
+fn partition_properties_of(body: amqp.Value) -> PartitionProperties ! EventHubsErr {
   let s = fn(k: Str) -> Str ! EventHubsErr {
-    match field(r.body, k) {
+    match field(body, k) {
       Some(amqp.Value.Str(v)) => Ok(v)
       _ => Err(invalid())
     }
   }
-  let n = fn(k: Str) -> Int ! EventHubsErr { Ok(field(r.body, k).and_then(val_int) ?? return Err(invalid())) }
-  let offset = Int.parse(s("last_enqueued_offset")?) ?? return Err(fatal("invalid message format: strconv.ParseInt: parsing: invalid syntax"))
-  let last_on = match field(r.body, "last_enqueued_time_utc") {
+  let n = fn(k: Str) -> Int ! EventHubsErr { Ok(field(body, k).and_then(signed_int) ?? return Err(invalid())) }
+  let offset = s("last_enqueued_offset")?
+  let last_on = match field(body, "last_enqueued_time_utc") {
     Some(amqp.Value.Timestamp(ms)) => Time.from_unix_millis(ms)
     _ => return Err(invalid())
   }
-  let empty = match field(r.body, "is_partition_empty") {
+  let empty = match field(body, "is_partition_empty") {
     Some(amqp.Value.Bool(b)) => b
     _ => return Err(invalid())
   }

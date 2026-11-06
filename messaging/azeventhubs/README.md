@@ -1,7 +1,7 @@
 # azeventhubs
 
-Azure Event Hubs for Xo, a port of Go's `sdk/messaging/azeventhubs`
-v1.4.0 over std/amqp. Names and shapes follow Go's:
+Azure Event Hubs for Xo, a port of Go's `sdk/messaging/azeventhubs/v2`
+v2.0.2 over std/amqp. Names and shapes follow Go's:
 `new_producer_client`, `new_producer_client_from_connection_string`,
 `new_event_data_batch`, `add_event_data`, `send_event_data_batch`,
 `new_consumer_client`, `new_partition_client`, `receive_events`,
@@ -36,7 +36,21 @@ What it does:
   partition key annotations, the rest as system properties, and the raw
   AMQP message; an annotation of the wrong type is an error, as Go's.
 - The hub's and a partition's properties from the namespace's
-  `$management` node (a READ with the entity's token).
+  `$management` node (a READ with the entity's token), with v2's
+  `geo_replication_enabled` (the hub's `georeplication_factor` above 1;
+  a reply without one is an error, as Go v2's).
+- v2's string offsets: `ReceivedEventData.offset`,
+  `Checkpoint.offset`, `StartPosition.offset` and
+  `PartitionProperties.last_enqueued_offset` are `Str`, as a
+  geo-replicated hub's offsets are not numbers. Stored checkpoints are
+  read and written as before.
+- Geo-replication's offset error (`com.microsoft:georeplication:invalid-offset`,
+  `is_geo_replication_offset_error`) is fatal; the Processor then starts
+  that partition over from the earliest event, inclusive, as Go v2's.
+- v2's `com.microsoft:georeplication` desired capability on the
+  producer's sender, each partition receiver and the `$management` pair
+  (not the CBS link), as Go v2's; the tests check each link's Attach on
+  std/amqptest's attach log.
 - The Processor (`new_processor`, `run`, `next_partition_client`):
   partitions claimed in a `CheckpointStore` and balanced among the
   consumer group's Processors (balanced, one partition per round, or
@@ -71,7 +85,7 @@ What it does:
   AMQP Open's hostname, the TLS server name (needs xo 4bd90321b or
   later) and the token audiences name the namespace.
 
-Where it differs from Go v1.4.0:
+Where it differs from Go v2.0.2:
 
 - `receive_events` takes its wait as `ReceiveEventsOptions.timeout_ms`
   (Go: the context). When it ends with no events the result is an empty
@@ -93,6 +107,13 @@ Where it differs from Go v1.4.0:
   account).
 
 Not yet: web sockets.
+
+Building needs xo 2d8ae0c82 or later (std/amqp's link desired
+capabilities); the tests need xo fad59ead6 or later (std/amqptest's
+`georeplication_factor` and attach log).
+
+Moving from the v1.4.0 port: offsets are `Str` (`Some("192")` where it
+was `Some(192)`); nothing else in the API changed.
 
 Go names that are Xo keywords: none (Go's `Error.As` method is not
 ported; match on the error's code instead).
