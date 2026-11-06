@@ -37,6 +37,10 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   words (`FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE`), as Go's int32.
 - An object definition with no properties, parent or map values is
   `json.Value` (Go's `any`).
+- A pageable long-running operation (x-ms-pageable and
+  x-ms-long-running-operation, armnetwork's `GetActiveSessions`) returns
+  `runtime.Poller[runtime.Pager[T]]`, as Go's `Poller[*Pager[T]]`: the
+  final response is the first page, then the pager GETs each nextLink.
 - A model that only PATCH bodies reach (no response, no other body:
   `VirtualMachineUpdate`, `TagsObject`) has `json.Patch[T]` fields, so
   `json.Patch.Null` sends an explicit `null`, Go's `azcore.NullValue`;

@@ -145,3 +145,22 @@ test "update_tags with json.Patch.Null sends an explicit null, Go's azcore.NullV
   let bodies = all(seen).map(fn(r: http.Request) -> Str { r.body.to_str_lossy() })
   expect(bodies) == ["{\"tags\":null}", "{}", "{\"tags\":{\"env\":\"test\"}}"]
 }
+
+test "begin_get_active_sessions is a poller of a pager: the final response is page one, then nextLink" {
+  let loc = "${EP}/subscriptions/${SUB}/providers/Microsoft.Network/locations/westus/operationResults/op1"
+  let post = capture(os.net, "POST ${RG}/bastionHosts/b1/getActiveSessions", 202, "", [("Location", loc), ("Retry-After", "0")])
+  capture(os.net, "GET ${loc}", 200, "{\"value\":[{\"sessionId\":\"s1\"}],\"nextLink\":\"${EP}/sessionspage2\"}")
+  let page2 = capture(os.net, "GET ${EP}/sessionspage2", 200, "{\"value\":[{\"sessionId\":\"s2\"}]}")
+  let c = new_management_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  var p = c.begin_get_active_sessions("rg1", "b1")?
+  var pager = p.poll_until_done(os.clock, frequency: 1s)?
+  var ids: List[Str] = []
+  while pager.more() {
+    for x in pager.next_page()?.bastion_active_session_list_result.value ?? [] {
+      ids.push(x.session_id ?? "")
+    }
+  }
+  expect(ids) == ["s1", "s2"]
+  expect(all(post).len()) == 1
+  expect(all(page2)[0].method) == "GET"
+}
