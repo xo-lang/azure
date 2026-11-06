@@ -1,0 +1,179 @@
+// The file client's path calls, as azdatalake v1.7.1's file/client.go
+// and file/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): the path calls of path.xo, an expiry, and an ACL change
+// on the one file. Its data calls (append, flush, upload, download) come
+// later.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+
+/// A client of one file.
+pub struct FileClient {
+  /// The file's dfs URL.
+  pub dfs_url: Str
+  /// The file's blob URL.
+  pub blob_url: Str
+  core: PathCore
+}
+
+fn file_of(c: PathCore) -> FileClient {
+  FileClient{dfs_url: c.dfs_url, blob_url: c.blob_url, core: c}
+}
+
+/// A file client with Entra ID tokens (file.NewClient); `file_url` may be
+/// the dfs or the blob URL.
+pub fn new_file_client(net: Net, clock: Clock, rand: Rand, file_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file_of(path_core(file_url, token_blob_at(net, clock, rand, cred, options), dfs_pipeline(net, clock, rand, token_auth(clock, cred, options), options)))
+}
+
+pub fn new_file_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, file_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file_of(path_core(file_url, shared_key_blob_at(net, clock, rand, cred, options), dfs_pipeline(net, clock, rand, shared_key_auth(clock, cred), options)))
+}
+
+/// A file client with no credential: a SAS in `file_url`, or public
+/// access.
+pub fn new_file_client_with_no_credential(net: Net, clock: Clock, rand: Rand, file_url: Str, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file_of(path_core(file_url, no_credential_blob_at(net, clock, rand, options), dfs_pipeline(net, clock, rand, [], options)))
+}
+
+/// A file client from a connection string, the file's path and its file
+/// system's name, joined unescaped as Go joins them.
+pub fn new_file_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, file_path: Str, file_system_name: Str, options: ClientOptions = ClientOptions{}) -> FileClient ! Str {
+  let p = azblob.parse_connection_string(connection_string)?
+  let u = connection_string_url(p.service_url, file_system_name, file_path)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_file_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_file_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The file `file_path` in this file system (`\` read as `/`).
+pub fn (fs: FileSystemClient) new_file_client(file_path: Str) -> FileClient {
+  file_of(fs.path_core_of(file_path))
+}
+
+/// How a create's expiry time is read (Go's CreateExpiryType).
+pub const CREATE_EXPIRY_ABSOLUTE: Str = "Absolute"
+pub const CREATE_EXPIRY_NEVER_EXPIRE: Str = "NeverExpire"
+pub const CREATE_EXPIRY_RELATIVE_TO_NOW: Str = "RelativeToNow"
+
+/// When a new file expires (Go's CreateExpiryValues): both "" is none.
+/// `expires_on` is an RFC 1123 time or milliseconds, and is not sent for
+/// `CREATE_EXPIRY_NEVER_EXPIRE`. Go sends the type even when it is "".
+pub struct CreateExpiryValues {
+  pub expiry_type: Str = ""
+  pub expires_on: Str = ""
+}
+
+pub struct CreateFileOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  /// Its Content-MD5 is not sent.
+  pub http_headers: HTTPHeaders? = None
+  pub expiry: CreateExpiryValues = CreateExpiryValues{}
+  /// Seconds, or -1 for a lease that never expires.
+  pub lease_duration: Int? = None
+  pub proposed_lease_id: Str? = None
+  pub permissions: Str? = None
+  pub umask: Str? = None
+  pub owner: Str? = None
+  pub group: Str? = None
+  pub acl: Str? = None
+  pub encryption_context: Str? = None
+}
+
+/// The expiry headers: none for the zero value, the type alone for
+/// never, else the type and the time.
+fn expiry_hs(expiry_type: Str, expires_on: Str, never: Str) -> List[(Str, Str)] {
+  if expiry_type == "" && expires_on == "" {
+    return []
+  }
+  [("x-ms-expiry-option", expiry_type)] + (if expiry_type == never { [] } else { [("x-ms-expiry-time", expires_on)] })
+}
+
+pub fn (f: FileClient) create(options: CreateFileOptions = CreateFileOptions{}) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = path_create_hs(o.conditions, o.cpk_info, o.http_headers, o.lease_duration, o.proposed_lease_id, o.permissions, o.umask, o.owner, o.group, o.acl) +
+    h_str("x-ms-encryption-context", o.encryption_context) + expiry_hs(o.expiry.expiry_type, o.expiry.expires_on, CREATE_EXPIRY_NEVER_EXPIRE)
+  f.core.create("file", hs)
+}
+
+/// Deletes the file (one request: a continuation is returned, not
+/// followed).
+pub fn (f: FileClient) delete(options: DeletePathOptions = DeletePathOptions{}) -> DeletePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.delete_once(false, options, None)
+}
+
+/// The file's properties, from the blob endpoint.
+pub fn (f: FileClient) get_properties(options: GetPathPropertiesOptions = GetPathPropertiesOptions{}) -> PathPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.get_properties(options)
+}
+
+/// Renames the file to `destination_path` (in its file system; a query
+/// on it, such as a SAS, is sent in place of this URL's).
+pub fn (f: FileClient) rename(destination_path: Str, options: RenamePathOptions = RenamePathOptions{}) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.rename(destination_path, options)
+}
+
+/// How a set_expiry time is read (Go's SetExpiryType).
+pub const SET_EXPIRY_ABSOLUTE: Str = "Absolute"
+pub const SET_EXPIRY_NEVER_EXPIRE: Str = "NeverExpire"
+pub const SET_EXPIRY_RELATIVE_TO_CREATION: Str = "RelativeToCreation"
+pub const SET_EXPIRY_RELATIVE_TO_NOW: Str = "RelativeToNow"
+
+/// When the file expires (Go's SetExpiryValues): the zero value is
+/// never; `expires_on` is not sent for `SET_EXPIRY_NEVER_EXPIRE`.
+pub struct SetExpiryValues {
+  pub expiry_type: Str = ""
+  pub expires_on: Str = ""
+}
+
+/// Sets when the file expires, on the blob endpoint through
+/// azdatalake's pipeline (Go's generated_blob SetExpiry).
+pub fn (f: FileClient) set_expiry(expiry_values: SetExpiryValues = SetExpiryValues{}) -> PathETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let v = expiry_values
+  let hs = if v.expiry_type == "" && v.expires_on == "" { [("x-ms-expiry-option", SET_EXPIRY_NEVER_EXPIRE)] } else { expiry_hs(v.expiry_type, v.expires_on, SET_EXPIRY_NEVER_EXPIRE) }
+  etag_of(dfs_send(f.core.pipeline, dfs_request("PUT", f.core.blob_url, [("comp", "expiry")], hs), [200])?)
+}
+
+pub fn (f: FileClient) set_access_control(options: SetAccessControlOptions = SetAccessControlOptions{}) -> PathETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.set_access_control(options)
+}
+
+/// Adds or changes the entries of `acl` on the file (one
+/// setAccessControlRecursive request, `mode=modify`).
+pub fn (f: FileClient) update_access_control(acl: Str) -> UpdateAccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.acl_recursive("modify", acl, None, None, None)
+}
+
+/// Removes the entries of `acl` from the file (`mode=remove`).
+pub fn (f: FileClient) remove_access_control(acl: Str) -> RemoveAccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.acl_recursive("remove", acl, None, None, None)
+}
+
+pub fn (f: FileClient) get_access_control(options: GetAccessControlOptions = GetAccessControlOptions{}) -> AccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.head("getAccessControl", options)
+}
+
+/// The file's system properties (`action=getStatus`).
+pub fn (f: FileClient) get_system_properties(options: GetSystemPropertiesOptions = GetSystemPropertiesOptions{}) -> SystemPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.head("getStatus", options)
+}
+
+/// Replaces the file's metadata.
+pub fn (f: FileClient) set_metadata(metadata: Map[Str, Str], options: SetPathMetadataOptions = SetPathMetadataOptions{}) -> SetMetadataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.set_metadata(metadata, options)
+}
+
+/// Replaces the file's HTTP headers; each unset one is cleared.
+pub fn (f: FileClient) set_http_headers(http_headers: HTTPHeaders, conditions: AccessConditions = AccessConditions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.set_http_headers(http_headers, conditions)
+}
+
+pub fn (f: FileClient) get_tags(options: GetPathTagsOptions = GetPathTagsOptions{}) -> GetTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.get_tags(options)
+}
+
+pub fn (f: FileClient) set_tags(tags: Map[Str, Str], options: SetPathTagsOptions = SetPathTagsOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  f.core.set_tags(tags, options)
+}

@@ -1,0 +1,478 @@
+// The directory and file clients against a fake that answers as the Go
+// program's fake does (pathvectors_test.xo).
+
+use std/http
+use std/testing
+
+const PATH_GO_DATE: Str = "Fri, 06 Nov 2026 15:05:22 GMT"
+
+const REC_PAGE0: Str = "{\"directoriesSuccessful\":2,\"filesSuccessful\":3,\"failureCount\":0,\"failedEntries\":[]}"
+const REC_PAGE1: Str = "{\"directoriesSuccessful\":1,\"filesSuccessful\":4,\"failureCount\":2,\"failedEntries\":[{\"errorMessage\":\"denied\",\"name\":\"rec/a\",\"type\":\"FILE\"},{\"errorMessage\":\"busy\",\"name\":\"rec/b\",\"type\":\"DIRECTORY\"}]}"
+const REC_PAGE2: Str = "{\"directoriesSuccessful\":5,\"filesSuccessful\":6,\"failureCount\":0}"
+const RECERR_PAGE0: Str = "{\"directoriesSuccessful\":1,\"filesSuccessful\":1,\"failureCount\":1,\"failedEntries\":[{\"errorMessage\":\"x\",\"name\":\"recerr/z\",\"type\":\"FILE\"}]}"
+const REC2_PAGE0: Str = "{\"directoriesSuccessful\":1,\"filesSuccessful\":0,\"failureCount\":1,\"failedEntries\":[{\"errorMessage\":\"m1\",\"name\":\"rec2/a\",\"type\":\"FILE\"}]}"
+const REC2_PAGE1: Str = "{\"directoriesSuccessful\":0,\"filesSuccessful\":2,\"failureCount\":1,\"failedEntries\":[{\"errorMessage\":\"m2\",\"name\":\"rec2/b\",\"type\":\"FILE\"}]}"
+const NOFAIL_PAGE: Str = "{\"directoriesSuccessful\":0,\"filesSuccessful\":1,\"failureCount\":0}"
+const ONE_FILE_PAGE: Str = "{\"directoriesSuccessful\":0,\"filesSuccessful\":1,\"failureCount\":0,\"failedEntries\":[]}"
+const TAGS_XML: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Tags><TagSet><Tag><Key>a</Key><Value>1</Value></Tag><Tag><Key>b</Key><Value>2</Value></Tag></TagSet></Tags>"
+
+fn path_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let p = req.url.path
+  let last = match p.rfind("/") {
+    Some(i) => p[i + 1..p.len()]
+    None => p
+  }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-06-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let stamp = [("ETag", "\"0x8D9\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  if p.contains("missing") {
+    return empty(404, [("x-ms-error-code", "BlobNotFound")])
+  }
+  let m = req.method
+  if q("action") == "setAccessControlRecursive" {
+    let c = q("continuation")
+    if last == "recerr" && c == "e1" {
+      return empty(409, [("x-ms-error-code", "ContainerBeingDeleted")])
+    }
+    let next = if last == "rec" && c == "" { "k1" } else if last == "rec" && c == "k1" { "k2" } else if last == "recerr" && c == "" { "e1" } else if last == "rec2" && c == "" { "j1" } else { "" }
+    let page = if last == "rec" && c == "" { REC_PAGE0 } else if last == "rec" && c == "k1" { REC_PAGE1 } else if last == "rec" && c == "k2" { REC_PAGE2 } else if last == "recerr" && c == "" { RECERR_PAGE0 } else if last == "rec2" && c == "" { REC2_PAGE0 } else if last == "rec2" && c == "j1" { REC2_PAGE1 } else if last == "nofail.txt" { NOFAIL_PAGE } else { ONE_FILE_PAGE }
+    let hs = [("Content-Type", "application/json;charset=utf-8")] + (if next == "" { [] } else { [("x-ms-continuation", next)] })
+    return with_hs(http.text(200, page), common + hs)
+  }
+  if q("action") == "setAccessControl" {
+    return empty(200, stamp)
+  }
+  if m == "HEAD" && q("action") != "" {
+    return empty(200, stamp + [
+      ("x-ms-owner", "o1"), ("x-ms-group", "g1"), ("x-ms-permissions", "rwxr-x---+"), ("x-ms-acl", "user::rwx,group::r-x,other::---"),
+      ("x-ms-resource-type", "directory"), ("x-ms-properties", "k=dg=="), ("Content-Length", "0"), ("Content-MD5", "AQID"),
+      ("x-ms-server-encrypted", "true"), ("x-ms-creation-time", "Mon, 02 Nov 2026 01:02:03 GMT"), ("x-ms-expiry-time", "Sun, 08 Nov 2026 01:02:03 GMT"),
+      ("x-ms-lease-state", "available"), ("x-ms-encryption-context", "ctx"),
+    ])
+  }
+  if m == "HEAD" {
+    return empty(200, stamp + [
+      ("x-ms-owner", "o2"), ("x-ms-group", "g2"), ("x-ms-permissions", "rw-r-----"), ("x-ms-acl", "user::rw-"), ("x-ms-resource-type", "file"),
+      ("x-ms-encryption-context", "ctx2"), ("Content-Length", "12"), ("Content-Type", "text/plain"), ("Content-MD5", "AQID"),
+      ("x-ms-blob-type", "BlockBlob"), ("x-ms-meta-color", "blue"), ("x-ms-lease-status", "unlocked"), ("x-ms-access-tier", "Hot"),
+      ("x-ms-access-tier-inferred", "true"), ("x-ms-server-encrypted", "true"), ("x-ms-creation-time", "Mon, 02 Nov 2026 01:02:03 GMT"),
+      ("x-ms-expiry-time", "Sun, 08 Nov 2026 01:02:03 GMT"), ("x-ms-tag-count", "2"),
+    ])
+  }
+  if m == "PUT" && q("comp") == "expiry" {
+    return empty(200, stamp)
+  }
+  if m == "PUT" && q("comp") == "metadata" {
+    return empty(200, stamp + [("x-ms-request-server-encrypted", "true"), ("x-ms-version-id", "v9")])
+  }
+  if m == "PUT" && q("comp") == "properties" {
+    return empty(200, stamp + [("x-ms-blob-sequence-number", "4")])
+  }
+  if m == "PUT" && q("comp") == "tags" {
+    return empty(204, [])
+  }
+  if m == "GET" && q("comp") == "tags" {
+    return with_hs(http.text(200, TAGS_XML), common + [("Content-Type", "application/xml")])
+  }
+  if m == "PUT" && last == "ok200" {
+    return empty(200, [])
+  }
+  if m == "PUT" {
+    let enc = if last == "badbool" { "yes" } else { "true" }
+    let rn = if q("mode") == "legacy" { [("x-ms-continuation", "rn1")] } else { [] }
+    return empty(201, stamp + [("Content-Length", "0"), ("x-ms-request-server-encrypted", enc), ("x-ms-encryption-key-sha256", "k256")] + rn)
+  }
+  if m == "DELETE" {
+    let c = if last == "d1" && q("continuation") == "" { [("x-ms-continuation", "del 1+")] } else if last == "f.txt" { [("x-ms-continuation", "fc")] } else { [] }
+    return empty(200, c + [("x-ms-deletion-id", "132")])
+  }
+  empty(400, [])
+}
+
+fn path_urls(name: Str, dfs: Str, blob: Str) -> List[Str] {
+  ["== ${name}", "  DFSURL=${dfs}", "  BlobURL=${blob}"]
+}
+
+fn create_dump(x: CreatePathResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("ContentLength", x.content_length)
+  d.s("Continuation", x.continuation)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+/// Go's RenameResponse: a create's, without the client request ID.
+fn rename_dump(x: CreatePathResponse) -> Dump {
+  create_dump(x with {response: x.response with {client_request_id: None}})
+}
+
+fn delete_dump(x: DeletePathResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("Continuation", x.continuation)
+  d.s("DeletionID", x.deletion_id)
+  d.s("XMSContinuation", x.continuation)
+  d.s("XMSRequestID", x.response.request_id)
+  d.s("XMSVersion", x.response.version)
+  d
+}
+
+fn properties_dump(x: PathPropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("AccessControlList", x.access_control_list)
+  d.s("AccessTier", x.access_tier)
+  d.t("AccessTierChangeTime", x.access_tier_change_time)
+  d.b("AccessTierInferred", x.access_tier_inferred)
+  d.s("ArchiveStatus", x.archive_status)
+  d.s("CacheControl", x.cache_control)
+  d.s("ContentDisposition", x.content_disposition)
+  d.s("ContentEncoding", x.content_encoding)
+  d.s("ContentLanguage", x.content_language)
+  d.i("ContentLength", x.content_length)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ContentType", x.content_type)
+  d.t("CopyCompletionTime", x.copy_completion_time)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyProgress", x.copy_progress)
+  d.s("CopySource", x.copy_source)
+  d.s("CopyStatus", x.copy_status)
+  d.s("CopyStatusDescription", x.copy_status_description)
+  d.t("CreationTime", x.creation_time)
+  d.s("DestinationSnapshot", x.destination_snapshot)
+  d.s("ETag", x.etag)
+  d.s("EncryptionContext", x.encryption_context)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.t("ExpiresOn", x.expires_on)
+  d.s("Group", x.group)
+  d.t("ImmutabilityPolicyExpiresOn", x.immutability_policy_expires_on)
+  d.s("ImmutabilityPolicyMode", x.immutability_policy_mode)
+  d.b("IsCurrentVersion", x.is_current_version)
+  d.b("IsIncrementalCopy", x.is_incremental_copy)
+  d.b("IsSealed", x.is_sealed)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastAccessed", x.last_accessed)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.b("LegalHold", x.legal_hold)
+  d.m("Metadata", x.metadata)
+  d.s("ObjectReplicationPolicyID", x.object_replication_policy_id)
+  d.m("ObjectReplicationRules", x.object_replication_rules)
+  d.s("Owner", x.owner)
+  d.s("Permissions", x.permissions)
+  d.s("RehydratePriority", x.rehydrate_priority)
+  d.s("ResourceType", x.resource_type)
+  d.i("TagCount", x.tag_count)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn access_dump(x: AccessControlResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ACL", x.acl)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("CacheControl", x.cache_control)
+  d.s("ContentDisposition", x.content_disposition)
+  d.s("ContentEncoding", x.content_encoding)
+  d.s("ContentLanguage", x.content_language)
+  d.i("ContentLength", x.content_length)
+  d.s("ContentMD5", x.content_md5)
+  d.s("ContentRange", x.content_range)
+  d.s("ContentType", x.content_type)
+  d.t("CreationTime", x.creation_time)
+  d.s("ETag", x.etag)
+  d.s("EncryptionContext", x.encryption_context)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.t("ExpiresOn", x.expires_on)
+  d.s("Group", x.group)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.s("Owner", x.owner)
+  d.s("Permissions", x.permissions)
+  d.s("Properties", x.properties)
+  d.s("ResourceType", x.resource_type)
+  d
+}
+
+fn path_etag_dump(x: PathETagResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+fn (var d: Dump) entries(xs: List[ACLFailedEntry]) {
+  d.lines.push("FailedEntries.len=${xs.len()}")
+  var i = 0
+  for e in xs {
+    d.s("FailedEntries[${i}].ErrorMessage", e.error_message)
+    d.s("FailedEntries[${i}].Name", e.name)
+    d.s("FailedEntries[${i}].Type", e.entry_type)
+    i += 1
+  }
+}
+
+fn totals_dump(x: SetAccessControlRecursiveResponse) -> Dump {
+  var d = Dump{}
+  d.lines.push("DirectoriesSuccessful=${x.directories_successful}")
+  d.entries(x.failed_entries)
+  d.lines.push("FailureCount=${x.failure_count}")
+  d.lines.push("FilesSuccessful=${x.files_successful}")
+  d
+}
+
+/// The totals, and then the error, as the Go program prints both.
+fn recursive_lines(name: Str, r: Result[SetAccessControlRecursiveResponse, AccessControlRecursiveErr]) -> List[Str] {
+  match r {
+    Ok(x) => totals_dump(x).show(name)
+    Err(e) => totals_dump(e.partial).show(name) + [err_lines(name, e.err)[1]]
+  }
+}
+
+fn update_dump(x: UpdateAccessControlResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.s("Continuation", x.continuation)
+  d.i("DirectoriesSuccessful", x.directories_successful)
+  if let Some(xs) = x.failed_entries { d.entries(xs) }
+  d.i("FailureCount", x.failure_count)
+  d.i("FilesSuccessful", x.files_successful)
+  d
+}
+
+fn metadata_dump(x: SetMetadataResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn tags_dump(x: GetTagsResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.lines.push("BlobTagSet.len=${x.blob_tag_set.len()}")
+  var i = 0
+  for t in x.blob_tag_set {
+    d.s("BlobTagSet[${i}].Key", t.key)
+    d.s("BlobTagSet[${i}].Value", t.value)
+    i += 1
+  }
+  d
+}
+
+fn response_dump(x: Response) -> Dump {
+  var d = Dump{}
+  d.r(x)
+  d
+}
+
+/// Also serves the IP-style host the Go program renames on.
+fn serve_ip(net: testing.FakeNet, log: Mutex[List[Str]]) {
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    path_answer(req)
+  }
+  for p in ["/{a}/{b}/{c}", "/{a}/{b}/{c}/{d}"] {
+    net.handle("PUT http://127.0.0.1:10000${p}", h)
+  }
+}
+
+test "the directory and file clients send what Go sends and read what Go reads" {
+  let log = serve(os.net, path_answer)
+  serve_ip(os.net, log)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(PATH_GO_DATE)
+  let nokey = go_options("")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let t1 = at("2026-11-01T02:03:04Z")
+  let t2 = at("2026-11-02T02:03:04Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("e1"), if_none_match: Some("e2"), if_modified_since: Some(t1), if_unmodified_since: Some(t2)}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+
+  // URLs.
+  let fsc = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1", cred, opts)
+  let d0 = fsc.new_directory_client("a b\\c/d%")
+  out = out + path_urls("fs NewDirectoryClient", d0.dfs_url, d0.blob_url)
+  let f0 = fsc.new_file_client("x/y z.txt")
+  out = out + path_urls("fs NewFileClient", f0.dfs_url, f0.blob_url)
+  let dir = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1", cred, opts)
+  out = out + path_urls("directory NewClientWithSharedKeyCredential", dir.dfs_url, dir.blob_url)
+  let nf = dir.new_file_client("n/m q")
+  out = out + path_urls("dir NewFileClient", nf.dfs_url, nf.blob_url)
+  let ns = dir.new_subdirectory_client("sub x//")
+  out = out + path_urls("dir NewSubdirectoryClient", ns.dfs_url, ns.blob_url)
+  let bl = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/fs1/b1?sig=s", nokey)
+  out = out + path_urls("directory from blob URL", bl.dfs_url, bl.blob_url)
+
+  // Create.
+  out = out + add(shown("dir Create nil", dir.create(), create_dump))
+  let full = CreateDirectoryOptions{
+    conditions: ac, cpk_info: Some(cpk),
+    http_headers: Some(HTTPHeaders{cache_control: Some("no-cache"), content_disposition: Some("inline"), content_encoding: Some("gzip"), content_language: Some("en"), content_md5: Some(b"\x01\x02\x03"), content_type: Some("text/plain")}),
+    lease_duration: Some(15), proposed_lease_id: Some("pl1"), permissions: Some("0750"), umask: Some("0027"), owner: Some("o1"), group: Some("g1"), acl: Some("user::rwx"),
+  }
+  out = out + add(shown("dir Create full", dir.create(full), create_dump))
+  let bb = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/badbool", cred, opts)
+  out = out + add(shown("dir Create bad bool", bb.create(), create_dump))
+  let miss = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing", cred, opts)
+  out = out + add(shown("dir Create missing", miss.create(), create_dump))
+
+  // Delete.
+  out = out + add(shown("dir Delete nil (continuation loop)", dir.delete(), delete_dump))
+  out = out + add(shown("dir Delete full", dir.delete(DeletePathOptions{conditions: ac, paginated: Some(true)}), delete_dump))
+  out = out + add(shown("dir Delete missing", miss.delete(), delete_dump))
+
+  // Properties and access control.
+  out = out + add(shown("dir GetProperties nil", dir.get_properties(), properties_dump))
+  out = out + add(shown("dir GetProperties full", dir.get_properties(GetPathPropertiesOptions{conditions: ac, cpk_info: Some(cpk)}), properties_dump))
+  out = out + add(shown("dir GetProperties missing", miss.get_properties(), properties_dump))
+  out = out + add(shown("fs dir GetProperties", d0.get_properties(), properties_dump))
+  out = out + add(shown("dir GetAccessControl nil", dir.get_access_control(), access_dump))
+  out = out + add(shown("dir GetAccessControl full", dir.get_access_control(GetAccessControlOptions{upn: Some(true), conditions: ac}), access_dump))
+  out = out + add(shown("dir GetSystemProperties nil", dir.get_system_properties(), access_dump))
+  out = out + add(shown("dir GetSystemProperties full", dir.get_system_properties(GetSystemPropertiesOptions{upn: Some(false), conditions: ac}), access_dump))
+  out = out + add(shown("dir SetAccessControl nil", dir.set_access_control(), path_etag_dump))
+  out = out + add(shown("dir SetAccessControl empty", dir.set_access_control(SetAccessControlOptions{conditions: ac}), path_etag_dump))
+  out = out + add(shown("dir SetAccessControl full", dir.set_access_control(SetAccessControlOptions{owner: Some("o1"), group: Some("g1"), acl: Some("user::rwx"), permissions: Some("0777"), conditions: ac}), path_etag_dump))
+
+  // Rename.
+  out = out + add(shown("dir Rename", dir.rename(" /new dir/x;y,z/ "), rename_dump))
+  out = out + add(shown("dir Rename empty", dir.rename("  / "), rename_dump))
+  let src = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/src%20dir?foo=1&sv=2026-06-06&sp=rw&sig=c2ln", nokey)
+  let src_conditions = SourceAccessConditions{source_lease_id: Some("sl1"), source_if_match: Some("se1"), source_if_none_match: Some("se2"), source_if_modified_since: Some(t1), source_if_unmodified_since: Some(t2)}
+  out = out + add(shown("dir Rename SAS source", src.rename("dst", RenamePathOptions{conditions: ac, cpk_info: Some(cpk), source_conditions: src_conditions}), rename_dump))
+  out = out + add(shown("dir Rename dest query", src.rename("dst/q?sv=2&sig=z z", RenamePathOptions{source_conditions: SourceAccessConditions{source_lease_id: Some("sl2")}}), rename_dump))
+  out = out + add(shown("dir Rename missing", miss.rename("x"), rename_dump))
+  let sas = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/s%7Ex(1)?b=2&SV=2026-06-06&st=2026-11-01&se=bad&sip=192.0.2.4-::ffff:198.51.100.8&skoid=o1&skt=2026-11-01T00:00:00Z&ske=x&a=1&a=0&sr=d&sig=x%20y&sdd=1&zz=&sp=r&sp=w", nokey)
+  out = out + add(shown("dir Rename SAS rebuilt", sas.rename("a b/c\\d"), rename_dump))
+  let sas2 = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/s2?se=2026-11-09T01:02Z&st=2026-11-01T00:00:00.1234567Z&sip=203.0.113.1&spr=https&sp=r&sv=1", nokey)
+  out = out + add(shown("dir Rename SAS times", sas2.rename("t"), rename_dump))
+  let twoq = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/q?a=1?b=2", cred, opts)
+  out = out + add(shown("dir Rename two question marks", twoq.rename("r?x=1?y=2"), rename_dump))
+  let ipd = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://127.0.0.1:10000/acct1/fs1/ip%20dir", cred, opts)
+  out = out + path_urls("ip directory", ipd.dfs_url, ipd.blob_url)
+  out = out + add(shown("dir Rename IP endpoint", ipd.rename("ip2"), rename_dump))
+  let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
+  let csd = new_directory_client_from_connection_string(os.net, os.clock, os.rand, cs, "x y\\z", "fs1", opts)?
+  out = out + path_urls("directory from a connection string", csd.dfs_url, csd.blob_url)
+  let csf = new_file_client_from_connection_string(os.net, os.clock, os.rand, cs, "f.txt", "fs1", opts)?
+  out = out + path_urls("file from a connection string", csf.dfs_url, csf.blob_url)
+  out = out + add(shown("connection string file Create", csf.create(), create_dump))
+
+  // Recursive ACLs.
+  let rec = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec", cred, opts)
+  out = out + add(recursive_lines("Set recursive nil (stops on failure)", rec.set_access_control_recursive("user::rwx")))
+  out = out + add(recursive_lines("Update recursive continue on failure", rec.update_access_control_recursive("user::r-x", AccessControlRecursiveOptions{continue_on_failure: Some(true), batch_size: Some(2)})))
+  out = out + add(recursive_lines("Remove recursive max batches 1", rec.remove_access_control_recursive("user:x", AccessControlRecursiveOptions{max_batches: Some(1)})))
+  out = out + add(recursive_lines("Set recursive marker", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{marker: Some("k1"), continue_on_failure: Some(true)})))
+  out = out + add(recursive_lines("Set recursive max batches 2 continue", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{max_batches: Some(2), continue_on_failure: Some(true)})))
+  out = out + add(recursive_lines("Set recursive max batches 0", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{max_batches: Some(0)})))
+  let recerr = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/recerr", cred, opts)
+  out = out + add(recursive_lines("Set recursive error on page 2", recerr.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{continue_on_failure: Some(true)})))
+  let rec2 = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec2", cred, opts)
+  out = out + add(recursive_lines("Set recursive failures on two pages", rec2.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{continue_on_failure: Some(true)})))
+  out = out + add(recursive_lines("Set recursive missing", miss.set_access_control_recursive("user::rwx")))
+
+  // Blob calls on a directory.
+  out = out + add(shown("dir SetMetadata nil", dir.set_metadata({"k": "v", "Color": "red"}), metadata_dump))
+  out = out + add(shown("dir SetMetadata full", dir.set_metadata({"k": "v"}, SetPathMetadataOptions{conditions: ac, cpk_info: Some(cpk), encryption_scope: Some("scope1")}), metadata_dump))
+  out = out + add(shown("dir SetHTTPHeaders nil", dir.set_http_headers(HTTPHeaders{cache_control: Some("no-cache"), content_type: Some("text/plain"), content_md5: Some(b"\x01\x02\x03")}), etag_dump))
+  out = out + add(shown("dir SetHTTPHeaders full", dir.set_http_headers(HTTPHeaders{content_language: Some("en")}, ac), etag_dump))
+  out = out + add(shown("dir SetHTTPHeaders missing", miss.set_http_headers(HTTPHeaders{}), etag_dump))
+  out = out + add(shown("dir SetMetadata missing", miss.set_metadata({"k": "v"}), metadata_dump))
+  out = out + add(shown("dir GetTags missing", miss.get_tags(), tags_dump))
+  out = out + add(shown("dir SetTags missing", miss.set_tags({"a": "1"}), response_dump))
+  out = out + add(shown("dir GetTags nil", dir.get_tags(), tags_dump))
+  out = out + add(shown("dir GetTags full", dir.get_tags(GetPathTagsOptions{snapshot: Some("s1"), version_id: Some("v1"), conditions: ac}), tags_dump))
+  out = out + add(shown("dir SetTags nil", dir.set_tags({"a": "1"}), response_dump))
+  out = out + add(shown("dir SetTags full", dir.set_tags({"a": "1"}, SetPathTagsOptions{version_id: Some("v1"), transactional_content_crc64: Some(b"\x09"), transactional_content_md5: Some(b"\x08"), conditions: ac}), response_dump))
+
+  // File.
+  let fc = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1/f.txt", cred, opts)
+  out = out + add(shown("file Create nil", fc.create(), create_dump))
+  let ffull = CreateFileOptions{
+    conditions: ac, cpk_info: Some(cpk), http_headers: Some(HTTPHeaders{cache_control: Some("no-cache"), content_type: Some("text/plain"), content_md5: Some(b"\x01")}),
+    expiry: CreateExpiryValues{expiry_type: CREATE_EXPIRY_RELATIVE_TO_NOW, expires_on: "5000"},
+    lease_duration: Some(-1), proposed_lease_id: Some("pl1"), permissions: Some("0640"), umask: Some("0027"), owner: Some("o1"), group: Some("g1"), acl: Some("user::rw-"), encryption_context: Some("ctx"),
+  }
+  out = out + add(shown("file Create full", fc.create(ffull), create_dump))
+  out = out + add(shown("file Create never expire", fc.create(CreateFileOptions{expiry: CreateExpiryValues{expiry_type: CREATE_EXPIRY_NEVER_EXPIRE, expires_on: "ignored"}}), create_dump))
+  out = out + add(shown("file Create expiry time only", fc.create(CreateFileOptions{expiry: CreateExpiryValues{expires_on: "only time"}}), create_dump))
+  out = out + add(shown("file Delete nil", fc.delete(), delete_dump))
+  out = out + add(shown("file Delete full", fc.delete(DeletePathOptions{conditions: ac}), delete_dump))
+  out = out + add(shown("file UpdateAccessControl", fc.update_access_control("user::rw-"), update_dump))
+  out = out + add(shown("file RemoveAccessControl", fc.remove_access_control("user:x"), update_dump))
+  let frec = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec", cred, opts)
+  out = out + add(shown("file UpdateAccessControl with failures", frec.update_access_control("user::rw-"), update_dump))
+  let fnf = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/nofail.txt", cred, opts)
+  out = out + add(shown("file UpdateAccessControl without failedEntries", fnf.update_access_control("user::rw-"), update_dump))
+  let fok = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/ok200", cred, opts)
+  out = out + add(shown("file Create answered 200", fok.create(), create_dump))
+  let fmiss = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing.txt", cred, opts)
+  out = out + add(shown("file UpdateAccessControl missing", fmiss.update_access_control("user::rw-"), update_dump))
+  out = out + add(shown("file SetExpiry zero", fc.set_expiry(), path_etag_dump))
+  out = out + add(shown("file SetExpiry absolute", fc.set_expiry(SetExpiryValues{expiry_type: SET_EXPIRY_ABSOLUTE, expires_on: "Sun, 08 Nov 2026 01:02:03 GMT"}), path_etag_dump))
+  out = out + add(shown("file SetExpiry never", fc.set_expiry(SetExpiryValues{expiry_type: SET_EXPIRY_NEVER_EXPIRE, expires_on: "ignored"}), path_etag_dump))
+  out = out + add(shown("file SetExpiry time only", fc.set_expiry(SetExpiryValues{expires_on: "5000"}), path_etag_dump))
+  out = out + add(shown("file SetExpiry missing", fmiss.set_expiry(SetExpiryValues{expiry_type: SET_EXPIRY_RELATIVE_TO_CREATION, expires_on: "10"}), path_etag_dump))
+  out = out + add(shown("file GetProperties", fc.get_properties(), properties_dump))
+  out = out + add(shown("file GetAccessControl", fc.get_access_control(), access_dump))
+  out = out + add(shown("file Rename", fc.rename("d2/g.txt"), rename_dump))
+  out = out + add(shown("file SetAccessControl", fc.set_access_control(SetAccessControlOptions{permissions: Some("0600")}), path_etag_dump))
+
+  // Tokens: the dfs pipeline asks for the audience's scope, the blob
+  // client for the default one.
+  let tok = ScopeLog{log: log}
+  let tdir = new_directory_client(os.net, os.clock, os.rand, "${DEP}/fs1/t1", tok, go_options("") with {audience: "https://aud.example.test/", insecure_allow_credential_with_http: true})
+  out = out + add(shown("token dir Create", tdir.create(), create_dump))
+  out = out + add(shown("token dir GetProperties", tdir.get_properties(), properties_dump))
+  let tf = tdir.new_file_client("t.txt")
+  out = out + add(shown("token dir file GetProperties", tf.get_properties(), properties_dump))
+
+  // A file from a service client's file system.
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  let sf = svc.new_file_system_client("fs2").new_file_client("dir/s.txt")
+  out = out + add(shown("service fs file GetProperties", sf.get_properties(), properties_dump))
+  out = out + add(shown("service fs file Create", sf.create(), create_dump))
+  out = out + drain(log)
+  expect(out) == PATH_OUTPUT
+}
+
+test "a recursive ACL page without its counts is an error with the totals so far" {
+  let page = fn(req: http.Request) -> http.Response {
+    let first = (req.url.query.get("continuation") ?? "") == ""
+    with_hs(http.text(200, if first { REC_PAGE0 } else { "{\"failedEntries\":[]}" }), if first { [("x-ms-continuation", "k1")] } else { [] })
+  }
+  let _ = serve(os.net, page)
+  let d = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/recnil", go_options(""))
+  let r = d.set_access_control_recursive("user::rwx")
+  expect(r.is_err()) == true
+  if let Err(e) = r {
+    expect(e.partial.directories_successful) == 2
+    expect(e.partial.files_successful) == 3
+    expect(e.display()) == "decoding the response: setAccessControlRecursive: the response has no directoriesSuccessful, filesSuccessful or failureCount"
+  }
+}

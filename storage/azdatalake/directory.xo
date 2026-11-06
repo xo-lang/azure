@@ -1,0 +1,231 @@
+// The directory client, as azdatalake v1.7.1's directory/client.go and
+// directory/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): the path calls of path.xo, a delete that follows the
+// service's continuation until the directory is gone, and the recursive
+// ACL changes, a page at a time.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+use std/url
+
+/// A client of one directory.
+pub struct DirectoryClient {
+  /// The directory's dfs URL.
+  pub dfs_url: Str
+  /// The directory's blob URL.
+  pub blob_url: Str
+  core: PathCore
+}
+
+fn directory_of(c: PathCore) -> DirectoryClient {
+  DirectoryClient{dfs_url: c.dfs_url, blob_url: c.blob_url, core: c}
+}
+
+/// A directory client with Entra ID tokens (directory.NewClient);
+/// `directory_url` may be the dfs or the blob URL.
+pub fn new_directory_client(net: Net, clock: Clock, rand: Rand, directory_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory_of(path_core(directory_url, token_blob_at(net, clock, rand, cred, options), dfs_pipeline(net, clock, rand, token_auth(clock, cred, options), options)))
+}
+
+pub fn new_directory_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, directory_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory_of(path_core(directory_url, shared_key_blob_at(net, clock, rand, cred, options), dfs_pipeline(net, clock, rand, shared_key_auth(clock, cred), options)))
+}
+
+/// A directory client with no credential: a SAS in `directory_url`, or
+/// public access.
+pub fn new_directory_client_with_no_credential(net: Net, clock: Clock, rand: Rand, directory_url: Str, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory_of(path_core(directory_url, no_credential_blob_at(net, clock, rand, options), dfs_pipeline(net, clock, rand, [], options)))
+}
+
+/// A directory client from a connection string, the directory's path and
+/// its file system's name, joined unescaped as Go joins them.
+pub fn new_directory_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, directory_path: Str, file_system_name: Str, options: ClientOptions = ClientOptions{}) -> DirectoryClient ! Str {
+  let p = azblob.parse_connection_string(connection_string)?
+  let u = connection_string_url(p.service_url, file_system_name, directory_path)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_directory_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_directory_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The directory `directory_path` in this file system (`\` read as `/`).
+pub fn (fs: FileSystemClient) new_directory_client(directory_path: Str) -> DirectoryClient {
+  directory_of(fs.path_core_of(directory_path))
+}
+
+/// The file `file_name` in this directory, its name escaped as one
+/// segment (a `/` too), with a new blob client.
+pub fn (d: DirectoryClient) new_file_client(file_name: Str) -> FileClient {
+  file_of(d.core.child(url.path_escape(file_name)))
+}
+
+/// The directory `subdirectory_name` in this one, its trailing `/`s
+/// removed and the rest escaped as one segment.
+pub fn (d: DirectoryClient) new_subdirectory_client(subdirectory_name: Str) -> DirectoryClient {
+  directory_of(d.core.child(url.path_escape(subdirectory_name.trim_end_chars("/"))))
+}
+
+pub struct CreateDirectoryOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  /// Its Content-MD5 is not sent.
+  pub http_headers: HTTPHeaders? = None
+  /// Seconds, or -1 for a lease that never expires.
+  pub lease_duration: Int? = None
+  pub proposed_lease_id: Str? = None
+  pub permissions: Str? = None
+  pub umask: Str? = None
+  pub owner: Str? = None
+  pub group: Str? = None
+  pub acl: Str? = None
+}
+
+fn path_create_hs(conditions: AccessConditions, cpk: CPKInfo?, h: HTTPHeaders?, lease_duration: Int?, proposed_lease_id: Str?, permissions: Str?, umask: Str?, owner: Str?, group: Str?, acl: Str?) -> List[(Str, Str)] {
+  conditions_hs(conditions) + cpk_hs(cpk) + create_http_hs(h) + h_str("x-ms-acl", acl) + h_str("x-ms-group", group) +
+    h_str("x-ms-lease-duration", lease_duration.map(fn(n: Int) -> Str { "${n}" })) + h_str("x-ms-owner", owner) +
+    h_str("x-ms-permissions", permissions) + h_str("x-ms-proposed-lease-id", proposed_lease_id) + h_str("x-ms-umask", umask)
+}
+
+pub fn (d: DirectoryClient) create(options: CreateDirectoryOptions = CreateDirectoryOptions{}) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  d.core.create("directory", path_create_hs(o.conditions, o.cpk_info, o.http_headers, o.lease_duration, o.proposed_lease_id, o.permissions, o.umask, o.owner, o.group, o.acl))
+}
+
+/// Deletes the directory and everything in it, sending the request again
+/// with each continuation the service returns; the last response is
+/// returned.
+pub fn (d: DirectoryClient) delete(options: DeletePathOptions = DeletePathOptions{}) -> DeletePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var continuation: Str? = None
+  while {
+    let r = d.core.delete_once(true, options, continuation)?
+    if r.continuation.is_none() {
+      return Ok(r)
+    }
+    continuation = r.continuation
+  }
+}
+
+/// The directory's properties, from the blob endpoint.
+pub fn (d: DirectoryClient) get_properties(options: GetPathPropertiesOptions = GetPathPropertiesOptions{}) -> PathPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.get_properties(options)
+}
+
+/// Renames the directory to `destination_path` (in its file system; a
+/// query on it, such as a SAS, is sent in place of this URL's).
+pub fn (d: DirectoryClient) rename(destination_path: Str, options: RenamePathOptions = RenamePathOptions{}) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.rename(destination_path, options)
+}
+
+pub fn (d: DirectoryClient) set_access_control(options: SetAccessControlOptions = SetAccessControlOptions{}) -> PathETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.set_access_control(options)
+}
+
+pub fn (d: DirectoryClient) get_access_control(options: GetAccessControlOptions = GetAccessControlOptions{}) -> AccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.head("getAccessControl", options)
+}
+
+/// The directory's system properties (`action=getStatus`).
+pub fn (d: DirectoryClient) get_system_properties(options: GetSystemPropertiesOptions = GetSystemPropertiesOptions{}) -> SystemPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.head("getStatus", options)
+}
+
+/// Replaces the directory's metadata.
+pub fn (d: DirectoryClient) set_metadata(metadata: Map[Str, Str], options: SetPathMetadataOptions = SetPathMetadataOptions{}) -> SetMetadataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.set_metadata(metadata, options)
+}
+
+/// Replaces the directory's HTTP headers; each unset one is cleared.
+pub fn (d: DirectoryClient) set_http_headers(http_headers: HTTPHeaders, conditions: AccessConditions = AccessConditions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.set_http_headers(http_headers, conditions)
+}
+
+pub fn (d: DirectoryClient) get_tags(options: GetPathTagsOptions = GetPathTagsOptions{}) -> GetTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.get_tags(options)
+}
+
+pub fn (d: DirectoryClient) set_tags(tags: Map[Str, Str], options: SetPathTagsOptions = SetPathTagsOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  d.core.set_tags(tags, options)
+}
+
+// Recursive ACLs.
+
+/// The options of a recursive ACL change.
+pub struct AccessControlRecursiveOptions {
+  /// The most paths one request changes (`maxRecords`).
+  pub batch_size: Int? = None
+  /// The most requests to send; None is no limit.
+  pub max_batches: Int? = None
+  /// Go on past a page with failures (`forceFlag`); without it the change
+  /// stops after the first such page.
+  pub continue_on_failure: Bool? = None
+  /// A continuation to start from.
+  pub marker: Str? = None
+}
+
+/// A recursive ACL change's totals over the pages it sent, and every
+/// entry that failed, in order.
+pub struct SetAccessControlRecursiveResponse {
+  pub directories_successful: Int = 0
+  pub files_successful: Int = 0
+  pub failure_count: Int = 0
+  pub failed_entries: List[ACLFailedEntry] = []
+}
+
+/// A recursive ACL change whose request failed: the totals of the pages
+/// before it, and the error.
+pub struct AccessControlRecursiveErr {
+  pub partial: SetAccessControlRecursiveResponse
+  pub err: azcore.CallErr
+}
+
+pub fn (e: AccessControlRecursiveErr) display() -> Str {
+  e.err.display()
+}
+
+/// Go's setAccessControlRecursiveHelper: pages while the service returns
+/// a continuation and `max_batches` allows, adding up each page; without
+/// `continue_on_failure` it stops, with no error, after a page with
+/// failures. As in Go, the totals do not say where it stopped.
+fn (d: DirectoryClient) acl_recursive(mode: Str, acl: Str, o: AccessControlRecursiveOptions) -> SetAccessControlRecursiveResponse ! AccessControlRecursiveErr uses (net.dial, clock, rand) {
+  let force = o.continue_on_failure ?? false
+  var counter = o.max_batches ?? -1
+  var total = SetAccessControlRecursiveResponse{}
+  var continuation = o.marker
+  var more = true
+  while more && counter != 0 {
+    let page = d.core.acl_recursive(mode, acl, Some(force), o.batch_size, continuation) ?? e => return Err(AccessControlRecursiveErr{partial: total, err: e})
+    let (dirs, files, failures) = match (page.directories_successful, page.files_successful, page.failure_count) {
+      (Some(a), Some(b), Some(c)) => (a, b, c)
+      _ => return Err(AccessControlRecursiveErr{partial: total, err: azcore.CallErr.Decode("setAccessControlRecursive: the response has no directoriesSuccessful, filesSuccessful or failureCount")})
+    }
+    total = SetAccessControlRecursiveResponse{
+      directories_successful: total.directories_successful + dirs, files_successful: total.files_successful + files,
+      failure_count: total.failure_count + failures, failed_entries: total.failed_entries + (page.failed_entries ?? []),
+    }
+    counter -= 1
+    if !force && failures > 0 {
+      return Ok(total)
+    }
+    continuation = page.continuation
+    more = match page.continuation {
+      Some(c) => c != ""
+      None => false
+    }
+  }
+  Ok(total)
+}
+
+/// Sets `acl` on the directory and everything in it (`mode=set`).
+pub fn (d: DirectoryClient) set_access_control_recursive(acl: Str, options: AccessControlRecursiveOptions = AccessControlRecursiveOptions{}) -> SetAccessControlRecursiveResponse ! AccessControlRecursiveErr uses (net.dial, clock, rand) {
+  d.acl_recursive("set", acl, options)
+}
+
+/// Adds or changes the entries of `acl` (`mode=modify`).
+pub fn (d: DirectoryClient) update_access_control_recursive(acl: Str, options: AccessControlRecursiveOptions = AccessControlRecursiveOptions{}) -> SetAccessControlRecursiveResponse ! AccessControlRecursiveErr uses (net.dial, clock, rand) {
+  d.acl_recursive("modify", acl, options)
+}
+
+/// Removes the entries of `acl` (`mode=remove`).
+pub fn (d: DirectoryClient) remove_access_control_recursive(acl: Str, options: AccessControlRecursiveOptions = AccessControlRecursiveOptions{}) -> SetAccessControlRecursiveResponse ! AccessControlRecursiveErr uses (net.dial, clock, rand) {
+  d.acl_recursive("remove", acl, options)
+}

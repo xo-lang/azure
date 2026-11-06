@@ -28,9 +28,11 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   strings, URL parts, the `sas` package and GetSASURL, and `fileerror`,
   hand written over azblob's Shared Key; requests checked against its
   own; the storage internal `sasurl` helpers), `sdk/storage/azdatalake`
-  v1.7.1 (the service and file system clients, their options and
-  responses, the dfs and blob URL mapping and the DFS error code
-  rename, over azblob's clients; requests checked against its own),
+  v1.7.1 (the service, file system, directory and file clients, their
+  options and responses, the dfs and blob URL mapping and the DFS error
+  code rename, over azblob's clients; its generated list, path and
+  access control calls and models, and its sas.URLParts rebuild of a
+  rename's URL; requests checked against its own),
   `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,
   SAS, connection strings, XML models and error codes, hand written;

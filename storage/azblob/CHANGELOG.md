@@ -1,5 +1,11 @@
 # azblob changes
 
+## v0.4.0
+
+- `BlobClient.get_properties_with_response`: the properties and the
+  response they were read from, for a client that reads more of its
+  headers (azdatalake's paths read their owner and ACL from it).
+
 ## v0.3.0
 
 Adds Go v1.8.3's service, container, blob and lease clients for what

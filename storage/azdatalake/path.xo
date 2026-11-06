@@ -1,0 +1,501 @@
+// What the directory and file clients share, as azdatalake v1.7.1's
+// internal/path, internal/base and the requests of its generated
+// PathClient (MIT, Copyright (c) Microsoft Corporation; NOTICE.md). A
+// path has two endpoints: its dfs calls (create, delete, rename, access
+// control) go through azdatalake's own pipeline and the rest (properties,
+// metadata, HTTP headers, tags) to an azblob blob client on the blob URL,
+// with Go's options mapping. Each dfs response header is read as Go's
+// generated handlers read it: a bool, number or date that does not parse
+// fails the call.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob
+
+pub type CPKInfo = azblob.CPKInfo
+pub type GetTagsResponse = azblob.GetTagsResponse
+pub type SetMetadataResponse = azblob.SetBlobMetadataResponse
+
+pub const ENCRYPTION_ALGORITHM_AES256: Str = "AES256"
+
+/// The conditions on a rename's source (Go's SourceAccessConditions: its
+/// lease and source modified access conditions, flattened).
+pub struct SourceAccessConditions {
+  pub source_lease_id: Str? = None
+  pub source_if_match: Str? = None
+  pub source_if_none_match: Str? = None
+  pub source_if_modified_since: Time? = None
+  pub source_if_unmodified_since: Time? = None
+}
+
+/// A path's standard HTTP headers (Go's HTTPHeaders).
+pub struct HTTPHeaders {
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+}
+
+/// What a directory or file client holds: its two URLs, the blob client
+/// on the blob URL, azdatalake's pipeline, and how to make a blob client
+/// with the same credential for another path.
+struct PathCore {
+  dfs_url: Str
+  blob_url: Str
+  blob: azblob.BlobClient
+  pipeline: runtime.Pipeline
+  blob_at: fn(Str) -> azblob.BlobClient
+}
+
+/// The core of a client of `u` (dfs or blob URL), a new blob client and
+/// the same pipeline.
+fn path_core(u: Str, blob_at: fn(Str) -> azblob.BlobClient, pipeline: runtime.Pipeline) -> PathCore {
+  let (b, d) = get_urls(u)
+  PathCore{dfs_url: d, blob_url: b, blob: blob_at(b), pipeline: pipeline, blob_at: blob_at}
+}
+
+/// A sub-path's core (Go's NewFileClient and NewSubdirectoryClient):
+/// `segment` joined to the dfs URL, a new blob client on its blob URL.
+fn (c: PathCore) child(segment: Str) -> PathCore {
+  path_core(join_paths(c.dfs_url, segment), c.blob_at, c.pipeline)
+}
+
+/// The URL of the path `p` in a connection string's account (Go's
+/// NewClientFromConnectionString: JoinPaths(service, fs, path)).
+fn connection_string_url(service_url: Str, file_system_name: Str, p: Str) -> Str {
+  let rest = p.replace("\\", "/")
+  join_paths(service_url, if rest == "" { file_system_name } else { "${file_system_name}/${rest}" })
+}
+
+fn conditions_hs(a: AccessConditions) -> List[(Str, Str)] {
+  h_str("If-Match", a.if_match) + h_time("If-Modified-Since", a.if_modified_since) + h_str("If-None-Match", a.if_none_match) + h_time("If-Unmodified-Since", a.if_unmodified_since) + h_str("x-ms-lease-id", a.lease_id)
+}
+
+fn cpk_hs(c: CPKInfo?) -> List[(Str, Str)] {
+  match c {
+    Some(k) => h_str("x-ms-encryption-algorithm", k.encryption_algorithm) + h_str("x-ms-encryption-key", k.encryption_key) + h_str("x-ms-encryption-key-sha256", k.encryption_key_sha256)
+    None => []
+  }
+}
+
+/// The create headers of HTTP headers (`x-ms-cache-control` and so on;
+/// Go sends no Content-MD5 on a create).
+fn create_http_hs(h: HTTPHeaders?) -> List[(Str, Str)] {
+  match h {
+    Some(x) => h_str("x-ms-cache-control", x.cache_control) + h_str("x-ms-content-disposition", x.content_disposition) + h_str("x-ms-content-encoding", x.content_encoding) + h_str("x-ms-content-language", x.content_language) + h_str("x-ms-content-type", x.content_type)
+    None => []
+  }
+}
+
+/// The blob client's conditions (exported.FormatBlobAccessConditions).
+fn blob_conditions(a: AccessConditions) -> azblob.AccessConditions {
+  azblob.AccessConditions{lease_id: a.lease_id, if_match: a.if_match, if_none_match: a.if_none_match, if_modified_since: a.if_modified_since, if_unmodified_since: a.if_unmodified_since}
+}
+
+// Create.
+
+/// A create's or rename's response (Go's CreateResponse).
+pub struct CreatePathResponse {
+  pub response: Response
+  pub content_length: Int? = None
+  pub continuation: Str? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+}
+
+fn create_response_of(resp: http.Response) -> CreatePathResponse ! azcore.CallErr {
+  Ok(CreatePathResponse{
+    response: strict_response(resp)?, content_length: s_int(resp, "Content-Length")?, continuation: r_str(resp, "x-ms-continuation"),
+    etag: r_str(resp, "ETag"), encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    is_server_encrypted: s_bool(resp, "x-ms-request-server-encrypted")?, last_modified: s_time(resp, "Last-Modified")?,
+  })
+}
+
+fn (c: PathCore) create(resource: Str, hs: List[(Str, Str)]) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  create_response_of(dfs_send(c.pipeline, dfs_request("PUT", c.dfs_url, [("resource", resource)], hs), [201])?)
+}
+
+// Delete.
+
+pub struct DeletePathOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  /// Delete a directory's paths a page at a time (`paginated`).
+  pub paginated: Bool? = None
+}
+
+/// A delete's response (Go's DeleteResponse; its XMS fields repeat these).
+pub struct DeletePathResponse {
+  pub response: Response
+  pub continuation: Str? = None
+  pub deletion_id: Str? = None
+}
+
+fn (c: PathCore) delete_once(recursive: Bool, o: DeletePathOptions, continuation: Str?) -> DeletePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var q = [("recursive", "${recursive}")]
+  if let Some(p) = o.paginated { q.push(("paginated", "${p}")) }
+  if let Some(k) = continuation { q.push(("continuation", k)) }
+  let resp = dfs_send(c.pipeline, dfs_request("DELETE", c.dfs_url, q, conditions_hs(o.conditions)), [200, 202])?
+  Ok(DeletePathResponse{response: strict_response(resp)?, continuation: r_str(resp, "x-ms-continuation"), deletion_id: r_str(resp, "x-ms-deletion-id")})
+}
+
+// Rename.
+
+pub struct RenamePathOptions {
+  pub source_conditions: SourceAccessConditions = SourceAccessConditions{}
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// Renames the path to `destination_path` in its file system (Go's
+/// Rename, a create in legacy mode): the destination's own query, if it
+/// has one, replaces the source URL's.
+fn (c: PathCore) rename(destination_path: Str, o: RenamePathOptions) -> CreatePathResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let dest = destination_path.trim().trim_chars("/")
+  if dest == "" {
+    return Err(azcore.CallErr.InvalidInput("destination path must not be empty"))
+  }
+  let (source, target) = rename_urls(c.dfs_url, dest) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let s = o.source_conditions
+  let hs = conditions_hs(o.conditions) + cpk_hs(o.cpk_info) + [("x-ms-rename-source", source)] +
+    h_str("x-ms-source-if-match", s.source_if_match) + h_time("x-ms-source-if-modified-since", s.source_if_modified_since) +
+    h_str("x-ms-source-if-none-match", s.source_if_none_match) + h_time("x-ms-source-if-unmodified-since", s.source_if_unmodified_since) +
+    h_str("x-ms-source-lease-id", s.source_lease_id)
+  create_response_of(dfs_send(c.pipeline, dfs_request("PUT", target, [("mode", "legacy")], hs), [201])?)
+}
+
+// Properties.
+
+pub struct GetPathPropertiesOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// A path's properties (Go's GetPropertiesResponse): the blob's, with
+/// its owner, group, permissions, ACL, resource type and encryption
+/// context read from the same response.
+pub struct PathPropertiesResponse {
+  pub response: Response
+  pub accept_ranges: Str? = None
+  pub access_control_list: Str? = None
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_inferred: Bool? = None
+  pub archive_status: Str? = None
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  pub creation_time: Time? = None
+  pub destination_snapshot: Str? = None
+  pub etag: Str? = None
+  pub encryption_context: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub expires_on: Time? = None
+  pub group: Str? = None
+  pub immutability_policy_expires_on: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub is_current_version: Bool? = None
+  pub is_incremental_copy: Bool? = None
+  pub is_sealed: Bool? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_accessed: Time? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub legal_hold: Bool? = None
+  /// Names as Go's http.Header canonicalizes them (`Color`).
+  pub metadata: Map[Str, Str]? = None
+  pub object_replication_policy_id: Str? = None
+  pub object_replication_rules: Map[Str, Str]? = None
+  pub owner: Str? = None
+  pub permissions: Str? = None
+  pub rehydrate_priority: Str? = None
+  pub resource_type: Str? = None
+  pub tag_count: Int? = None
+  pub version_id: Str? = None
+}
+
+fn (c: PathCore) get_properties(o: GetPathPropertiesOptions) -> PathPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let (r, resp) = c.blob.get_properties_with_response(azblob.GetBlobPropertiesOptions{conditions: blob_conditions(o.conditions), cpk_info: o.cpk_info}).map_err(to_dfs_error)?
+  Ok(PathPropertiesResponse{
+    response: r.response, accept_ranges: r.accept_ranges, access_control_list: r_str(resp, "x-ms-acl"), access_tier: r.access_tier,
+    access_tier_change_time: r.access_tier_change_time, access_tier_inferred: r.access_tier_inferred, archive_status: r.archive_status,
+    cache_control: r.cache_control, content_disposition: r.content_disposition, content_encoding: r.content_encoding,
+    content_language: r.content_language, content_length: r.content_length, content_md5: r.content_md5, content_type: r.content_type,
+    copy_completion_time: r.copy_completion_time, copy_id: r.copy_id, copy_progress: r.copy_progress, copy_source: r.copy_source,
+    copy_status: r.copy_status, copy_status_description: r.copy_status_description, creation_time: r.creation_time,
+    destination_snapshot: r.destination_snapshot, etag: r.etag, encryption_context: r_str(resp, "x-ms-encryption-context"),
+    encryption_key_sha256: r.encryption_key_sha256, encryption_scope: r.encryption_scope, expires_on: r.expires_on,
+    group: r_str(resp, "x-ms-group"), immutability_policy_expires_on: r.immutability_policy_expires_on,
+    immutability_policy_mode: r.immutability_policy_mode, is_current_version: r.is_current_version,
+    is_incremental_copy: r.is_incremental_copy, is_sealed: r.is_sealed, is_server_encrypted: r.is_server_encrypted,
+    last_accessed: r.last_accessed, last_modified: r.last_modified, lease_duration: r.lease_duration, lease_state: r.lease_state,
+    lease_status: r.lease_status, legal_hold: r.legal_hold, metadata: r.metadata,
+    object_replication_policy_id: r.object_replication_policy_id, object_replication_rules: r.object_replication_rules,
+    owner: r_str(resp, "x-ms-owner"), permissions: r_str(resp, "x-ms-permissions"), rehydrate_priority: r.rehydrate_priority,
+    resource_type: r_str(resp, "x-ms-resource-type"), tag_count: r.tag_count, version_id: r.version_id,
+  })
+}
+
+// Access control.
+
+pub struct GetAccessControlOptions {
+  /// Owner and group as user principal names, not object IDs (`upn`).
+  pub upn: Bool? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// The options of get_system_properties: the same as get_access_control's.
+pub type GetSystemPropertiesOptions = GetAccessControlOptions
+
+/// A dfs HEAD of the path (Go's GetAccessControlResponse, which
+/// GetSystemProperties returns too).
+pub struct AccessControlResponse {
+  pub response: Response
+  pub acl: Str? = None
+  pub accept_ranges: Str? = None
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  /// As the header has it (base64), not decoded.
+  pub content_md5: Str? = None
+  pub content_range: Str? = None
+  pub content_type: Str? = None
+  pub creation_time: Time? = None
+  pub etag: Str? = None
+  pub encryption_context: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub expires_on: Time? = None
+  pub group: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub owner: Str? = None
+  pub permissions: Str? = None
+  /// `x-ms-properties`: the path's properties as Go returns them, one
+  /// string of `name=base64 value` pairs.
+  pub properties: Str? = None
+  pub resource_type: Str? = None
+}
+
+pub type SystemPropertiesResponse = AccessControlResponse
+
+fn (c: PathCore) head(action: Str, o: GetAccessControlOptions) -> AccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var q = [("action", action)]
+  if let Some(u) = o.upn { q.push(("upn", "${u}")) }
+  let resp = dfs_send(c.pipeline, dfs_request("HEAD", c.dfs_url, q, conditions_hs(o.conditions)), [200])?
+  let s = fn(n: Str) -> Str? { r_str(resp, n) }
+  Ok(AccessControlResponse{
+    response: strict_response(resp)?, acl: s("x-ms-acl"), accept_ranges: s("Accept-Ranges"), cache_control: s("Cache-Control"),
+    content_disposition: s("Content-Disposition"), content_encoding: s("Content-Encoding"), content_language: s("Content-Language"),
+    content_length: s_int(resp, "Content-Length")?, content_md5: s("Content-MD5"), content_range: s("Content-Range"), content_type: s("Content-Type"),
+    creation_time: s_time(resp, "x-ms-creation-time")?, etag: s("ETag"), encryption_context: s("x-ms-encryption-context"),
+    encryption_key_sha256: s("x-ms-encryption-key-sha256"), encryption_scope: s("x-ms-encryption-scope"), expires_on: s_time(resp, "x-ms-expiry-time")?,
+    group: s("x-ms-group"), is_server_encrypted: s_bool(resp, "x-ms-server-encrypted")?, last_modified: s_time(resp, "Last-Modified")?,
+    lease_duration: s("x-ms-lease-duration"), lease_state: s("x-ms-lease-state"), lease_status: s("x-ms-lease-status"),
+    owner: s("x-ms-owner"), permissions: s("x-ms-permissions"), properties: s("x-ms-properties"), resource_type: s("x-ms-resource-type"),
+  })
+}
+
+/// The options of set_access_control: at least one of owner, group, ACL
+/// and permissions.
+pub struct SetAccessControlOptions {
+  pub owner: Str? = None
+  pub group: Str? = None
+  pub acl: Str? = None
+  pub permissions: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// What a dfs call that changes a path returns (Go's
+/// SetAccessControlResponse and file SetExpiryResponse).
+pub struct PathETagResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+fn etag_of(resp: http.Response) -> PathETagResponse ! azcore.CallErr {
+  Ok(PathETagResponse{response: strict_response(resp)?, etag: r_str(resp, "ETag"), last_modified: s_time(resp, "Last-Modified")?})
+}
+
+fn (c: PathCore) set_access_control(o: SetAccessControlOptions) -> PathETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if o.owner.is_none() && o.group.is_none() && o.acl.is_none() && o.permissions.is_none() {
+    return Err(azcore.CallErr.InvalidInput("at least one parameter should be set for SetAccessControl API"))
+  }
+  let hs = conditions_hs(o.conditions) + h_str("x-ms-acl", o.acl) + h_str("x-ms-group", o.group) + h_str("x-ms-owner", o.owner) + h_str("x-ms-permissions", o.permissions)
+  etag_of(dfs_send(c.pipeline, dfs_request("PATCH", c.dfs_url, [("action", "setAccessControl")], hs), [200])?)
+}
+
+/// One entry a recursive ACL change failed on.
+pub struct ACLFailedEntry {
+  pub error_message: Str? = None
+  pub name: Str? = None
+  /// Go's `Type` (`type` is a keyword): `FILE` or `DIRECTORY`.
+  pub entry_type: Str? = None
+}
+
+/// One request's answer to a recursive ACL change (Go's generated
+/// PathClientSetAccessControlRecursiveResponse): the counts are None when
+/// the body leaves them out. A file's update_access_control and
+/// remove_access_control return it.
+pub struct UpdateAccessControlResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub continuation: Str? = None
+  pub directories_successful: Int? = None
+  pub files_successful: Int? = None
+  pub failure_count: Int? = None
+  pub failed_entries: List[ACLFailedEntry]? = None
+}
+
+pub type RemoveAccessControlResponse = UpdateAccessControlResponse
+
+fn j_int(v: json.Value, key: Str) -> Int? ! Str {
+  match v.get(key) {
+    Some(Int(n)) => Ok(Some(n))
+    Some(Null) => Ok(None)
+    None => Ok(None)
+    Some(_) => Err("${key}: not a number")
+  }
+}
+
+fn j_opt_str(v: json.Value, key: Str) -> Str? ! Str {
+  match v.get(key) {
+    Some(Str(s)) => Ok(Some(s))
+    Some(Null) => Ok(None)
+    None => Ok(None)
+    Some(_) => Err("${key}: not a string")
+  }
+}
+
+fn failed_entry_of(v: json.Value) -> ACLFailedEntry ! Str {
+  Ok(ACLFailedEntry{error_message: j_opt_str(v, "errorMessage")?, name: j_opt_str(v, "name")?, entry_type: j_opt_str(v, "type")?})
+}
+
+fn recursive_page_of(resp: http.Response) -> UpdateAccessControlResponse ! azcore.CallErr {
+  let base = UpdateAccessControlResponse{response: strict_response(resp)?, content_type: r_str(resp, "Content-Type"), continuation: r_str(resp, "x-ms-continuation")}
+  let body = resp.body.to_str_lossy()
+  if body.trim() == "" {
+    return Ok(base)
+  }
+  let parse = fn() -> UpdateAccessControlResponse ! Str {
+    let v = json.parse_value(body) ?? e => return Err(e.display())
+    let entries = match v.get("failedEntries") {
+      Some(List(xs)) => {
+        var out: List[ACLFailedEntry] = []
+        for x in xs {
+          out.push(failed_entry_of(x)?)
+        }
+        Some(out)
+      }
+      Some(Null) => None
+      None => None
+      Some(_) => return Err("failedEntries: not a list")
+    }
+    Ok(base with {directories_successful: j_int(v, "directoriesSuccessful")?, files_successful: j_int(v, "filesSuccessful")?, failure_count: j_int(v, "failureCount")?, failed_entries: entries})
+  }
+  parse() ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// One setAccessControlRecursive request.
+fn (c: PathCore) acl_recursive(mode: Str, acl: Str, force_flag: Bool?, max_records: Int?, continuation: Str?) -> UpdateAccessControlResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var q = [("action", "setAccessControlRecursive"), ("mode", mode)]
+  if let Some(k) = continuation { q.push(("continuation", k)) }
+  if let Some(f) = force_flag { q.push(("forceFlag", "${f}")) }
+  if let Some(m) = max_records { q.push(("maxRecords", "${m}")) }
+  let req = dfs_request("PATCH", c.dfs_url, q, [("Accept", "application/json"), ("x-ms-acl", acl)])
+  recursive_page_of(dfs_send(c.pipeline, req, [200])?)
+}
+
+// Blob calls.
+
+pub struct SetPathMetadataOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  /// An encryption scope (Go's CPKScopeInfo).
+  pub encryption_scope: Str? = None
+}
+
+fn (c: PathCore) set_metadata(metadata: Map[Str, Str], o: SetPathMetadataOptions) -> SetMetadataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.blob.set_metadata(Some(metadata), azblob.SetBlobMetadataOptions{conditions: blob_conditions(o.conditions), cpk_info: o.cpk_info, encryption_scope: o.encryption_scope}).map_err(to_dfs_error)
+}
+
+fn (c: PathCore) set_http_headers(h: HTTPHeaders, conditions: AccessConditions) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let bh = azblob.HTTPHeaders{blob_cache_control: h.cache_control, blob_content_disposition: h.content_disposition, blob_content_encoding: h.content_encoding, blob_content_language: h.content_language, blob_content_md5: h.content_md5, blob_content_type: h.content_type}
+  let r = c.blob.set_http_headers(bh, blob_conditions(conditions)).map_err(to_dfs_error)?
+  Ok(ETagResponse{response: r.response, etag: r.etag, last_modified: r.last_modified})
+}
+
+pub struct GetPathTagsOptions {
+  pub snapshot: Str? = None
+  pub version_id: Str? = None
+  /// Sent as `x-ms-lease-id` and the `x-ms-blob-if-*` conditions.
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+fn (c: PathCore) get_tags(o: GetPathTagsOptions) -> GetTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.blob.get_tags(azblob.GetTagsOptions{snapshot: o.snapshot, version_id: o.version_id, conditions: blob_conditions(o.conditions)}).map_err(to_dfs_error)
+}
+
+pub struct SetPathTagsOptions {
+  pub version_id: Str? = None
+  pub transactional_content_crc64: Bytes? = None
+  pub transactional_content_md5: Bytes? = None
+  /// Sent as `x-ms-lease-id` and the `x-ms-blob-if-*` conditions.
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+fn (c: PathCore) set_tags(tags: Map[Str, Str], o: SetPathTagsOptions) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let a = o.conditions
+  c.blob.set_tags(tags, azblob.SetTagsOptions{
+    version_id: o.version_id, transactional_content_crc64: o.transactional_content_crc64, transactional_content_md5: o.transactional_content_md5,
+    lease_id: a.lease_id, blob_conditions: azblob.BlobModifiedConditions{if_match: a.if_match, if_none_match: a.if_none_match, if_modified_since: a.if_modified_since, if_unmodified_since: a.if_unmodified_since},
+  }).map_err(to_dfs_error)
+}
+
+// The blob clients a path's clients make (Go builds each with the
+// pipeline options only, so a token is asked for the default scope).
+
+fn token_blob_at(net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential, options: ClientOptions) -> fn(Str) -> azblob.BlobClient {
+  fn(u: Str) -> azblob.BlobClient { azblob.new_blob_client(net, clock, rand, u, cred, blob_options(options)) }
+}
+
+fn shared_key_blob_at(net: Net, clock: Clock, rand: Rand, cred: SharedKeyCredential, options: ClientOptions) -> fn(Str) -> azblob.BlobClient {
+  fn(u: Str) -> azblob.BlobClient { azblob.new_blob_client_with_shared_key_credential(net, clock, rand, u, cred, blob_options(options)) }
+}
+
+fn no_credential_blob_at(net: Net, clock: Clock, rand: Rand, options: ClientOptions) -> fn(Str) -> azblob.BlobClient {
+  fn(u: Str) -> azblob.BlobClient { azblob.new_blob_client_with_no_credential(net, clock, rand, u, blob_options(options)) }
+}
+
+/// The core of a path in a file system client (Go's NewDirectoryClient
+/// and NewFileClient): the dfs URL with each name escaped, the blob
+/// client the container's, its name escaped whole (a `/` too).
+fn (fs: FileSystemClient) path_core_of(p: Str) -> PathCore {
+  let name = p.replace("\\", "/")
+  let (b, d) = get_urls(join_paths(fs.dfs_url, escape_split_paths(name)))
+  PathCore{dfs_url: d, blob_url: b, blob: fs.container.new_blob_client(name), pipeline: fs.pipeline, blob_at: fs.blob_at}
+}

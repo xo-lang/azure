@@ -7,6 +7,7 @@
 // and the response error azcore's.
 
 use std/http
+use std/netip
 use std/time
 use std/url
 use github.com/xo-lang/azure/azcore
@@ -121,4 +122,307 @@ fn go_parse_bool(s: Str) -> Bool? {
     return Some(false)
   }
   None
+}
+
+// Requests.
+
+fn h_str(name: Str, v: Str?) -> List[(Str, Str)] {
+  match v {
+    Some(x) => [(name, x)]
+    None => []
+  }
+}
+
+/// An HTTP date header (Go's datetime.RFC7231: the time in UTC).
+fn h_time(name: Str, v: Time?) -> List[(Str, Str)] {
+  match v {
+    Some(t) => [(name, exported.http_date(t))]
+    None => []
+  }
+}
+
+/// A request as Go's generated code builds it: the query merged and
+/// sorted, x-ms-version set.
+fn dfs_request(method: Str, u: Str, query: List[(Str, Str)], headers: List[(Str, Str)]) -> policy.Request {
+  policy.Request{method: method, url: with_query(u, query), headers: headers + [("x-ms-version", SERVICE_VERSION)]}
+}
+
+/// Sends `req`; a status not in `ok` is a response error, as a DFS one.
+fn dfs_send(pipeline: runtime.Pipeline, req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !ok.contains(resp.status) {
+    return Err(to_dfs_error(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
+  }
+  Ok(resp)
+}
+
+// Response headers read strictly, as Go's generated handlers read them:
+// a value that does not parse fails the call with Go's error text.
+
+/// Go's strconv.Quote of ASCII text.
+fn go_quote(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else if c == '\n' { "\\n" } else if c == '\t' { "\\t" } else if c == '\r' { "\\r" } else { "${c}" })
+  }
+  out + "\""
+}
+
+fn s_bool(resp: http.Response, name: Str) -> Bool? ! azcore.CallErr {
+  let v = r_str(resp, name) ?? return Ok(None)
+  match go_parse_bool(v) {
+    Some(b) => Ok(Some(b))
+    None => Err(azcore.CallErr.Decode("strconv.ParseBool: parsing ${go_quote(v)}: invalid syntax"))
+  }
+}
+
+/// Go's strconv.ParseInt(v, 10, 64): an optional sign and digits.
+fn s_int(resp: http.Response, name: Str) -> Int? ! azcore.CallErr {
+  let v = r_str(resp, name) ?? return Ok(None)
+  let digits = if v.starts_with("+") || v.starts_with("-") { v[1..v.len()] } else { v }
+  if digits == "" || !all_bytes(digits, fn(b: UInt8) -> Bool { b >= 0x30 && b <= 0x39 }) {
+    return Err(azcore.CallErr.Decode("strconv.ParseInt: parsing ${go_quote(v)}: invalid syntax"))
+  }
+  match Int.parse(v) {
+    Some(n) => Ok(Some(n))
+    None => Err(azcore.CallErr.Decode("strconv.ParseInt: parsing ${go_quote(v)}: value out of range"))
+  }
+}
+
+/// An RFC 1123 date. (Go's error text goes on to say which part did not
+/// parse; this one stops at the layout.)
+fn s_time(resp: http.Response, name: Str) -> Time? ! azcore.CallErr {
+  let v = r_str(resp, name) ?? return Ok(None)
+  match rfc1123(v) {
+    Some(t) => Ok(Some(t))
+    None => Err(azcore.CallErr.Decode("parsing time ${go_quote(v)} as \"Mon, 02 Jan 2006 15:04:05 MST\""))
+  }
+}
+
+fn strict_response(resp: http.Response) -> Response ! azcore.CallErr {
+  Ok(Response{client_request_id: r_str(resp, "x-ms-client-request-id"), date: s_time(resp, "Date")?, request_id: r_str(resp, "x-ms-request-id"), version: r_str(resp, "x-ms-version")})
+}
+
+// Go's URL escaping.
+
+fn all_bytes(s: Str, f: fn(UInt8) -> Bool) -> Bool {
+  let bs = s.bytes()
+  for i in 0..bs.len() {
+    if !f(bs[i]) {
+      return false
+    }
+  }
+  true
+}
+
+fn has_byte(set: Str, b: UInt8) -> Bool {
+  !all_bytes(set, fn(c: UInt8) -> Bool { c != b })
+}
+
+fn is_unreserved(b: UInt8) -> Bool {
+  (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39) || b == 0x2d || b == 0x5f || b == 0x2e || b == 0x7e
+}
+
+/// A path escaped as Go's url.URL writes one (escape with encodePath):
+/// `$&+,/:;=@` and the unreserved bytes kept, the rest `%XX`.
+fn go_escape_path(s: Str) -> Str {
+  var out = ""
+  let bs = s.bytes()
+  for i in 0..bs.len() {
+    let b = bs[i]
+    if is_unreserved(b) || has_byte("$&+,/:;=@", b) {
+      out = out + bs[i..i + 1].to_str_lossy()
+    } else {
+      out = out + "%" + Int(b).to_str_width(2, base: 16, zero: true).to_upper()
+    }
+  }
+  out
+}
+
+/// Go's validEncoded(s, encodePath): whether a raw path can be sent as it
+/// is.
+fn valid_encoded_path(s: Str) -> Bool {
+  all_bytes(s, fn(b: UInt8) -> Bool { is_unreserved(b) || has_byte("!$&'()*+,;=:@[]%/", b) })
+}
+
+/// Go's URL.EscapedPath of the raw path `raw`.
+fn go_escaped_path(raw: Str) -> Str ! Str {
+  if valid_encoded_path(raw) {
+    return Ok(raw)
+  }
+  Ok(go_escape_path(url.path_unescape(raw) ?? e => return Err(e.display())))
+}
+
+/// Each `/`-separated name path escaped (shared.EscapeSplitPaths).
+fn escape_split_paths(p: Str) -> Str {
+  p.split("/").map(fn(n: Str) -> Str { url.path_escape(n) }).join("/")
+}
+
+/// The parts of an absolute URL: scheme, host, raw path and raw query
+/// (None without a `?`).
+struct RawUrl {
+  scheme: Str
+  host: Str
+  path: Str
+  query: Str?
+}
+
+fn split_url(u: Str) -> RawUrl ! Str {
+  let i = u.find("://") ?? return Err("parse ${go_quote(u)}: missing scheme")
+  let rest = u[i + 3..u.len()]
+  let (hp, q) = match rest.find("?") {
+    Some(j) => (rest[0..j], Some(rest[j + 1..rest.len()]))
+    None => (rest, None)
+  }
+  let (host, p) = match hp.find("/") {
+    Some(j) => (hp[0..j], hp[j..hp.len()])
+    None => (hp, "")
+  }
+  Ok(RawUrl{scheme: u[0..i].to_lower(), host: host, path: p, query: q})
+}
+
+/// shared.IsIPEndpointStyle: the host, its port removed, is an IP address
+/// (Go's net.ParseIP, which takes no zone).
+fn is_ip_endpoint(host: Str) -> Bool {
+  var h = host
+  if h.starts_with("[") {
+    if let Some(j) = h.find("]") { h = h[1..j] }
+  } else if let Some(j) = h.rfind(":") {
+    if !h[0..j].contains(":") { h = h[0..j] }
+  }
+  match netip.parse_addr(h) {
+    Ok(a) => a.zone == ""
+    Err(_) => false
+  }
+}
+
+/// An IP address as Go's net.ParseIP and IP.String give it back, None
+/// when it does not parse.
+fn go_ip(s: Str) -> Str? {
+  let a = netip.parse_addr(s).ok() ?? return None
+  if a.zone != "" {
+    return None
+  }
+  Some(if a.is_4in6() { a.unmap().display() } else { a.display() })
+}
+
+/// Whether `v` parses as one of Go's SAS time formats; each gives back
+/// the text it parsed, so the text is kept as it is.
+fn sas_time_ok(v: Str) -> Bool {
+  let digits = fn(x: Str) -> Bool { all_bytes(x, fn(b: UInt8) -> Bool { b >= 0x30 && b <= 0x39 }) }
+  // Each format as the RFC 3339 time it names.
+  let base = if v.len() == 28 && v[19..20] == "." && digits(v[20..27]) && v.ends_with("Z") {
+    "${v[0..19]}Z"
+  } else if v.len() == 20 && v.ends_with("Z") {
+    v
+  } else if v.len() == 17 && v.ends_with("Z") {
+    "${v[0..16]}:00Z"
+  } else if v.len() == 10 {
+    "${v}T00:00:00Z"
+  } else {
+    return false
+  }
+  base[4..5] == "-" && base[7..8] == "-" && base[10..11] == "T" && base[13..14] == ":" && base[16..17] == ":" && time.parse(base, time.RFC3339, time.utc()).is_ok()
+}
+
+/// The SAS keys Go's datalake sas.newQueryParameters takes out of a URL.
+const SAS_KEYS: List[Str] = ["sv", "ss", "srt", "spr", "st", "se", "sip", "si", "sr", "sp", "sig", "rscc", "rscd", "rsce", "rscl", "rsct", "skoid", "sktid", "skt", "ske", "sks", "skv", "sdd", "saoid", "suoid", "scid", "ses", "sduoid", "skdutid", "srh", "srq"]
+
+/// A URL's query as Go's datalake sas.URLParts.String writes it back: the
+/// other parameters encoded, then the SAS ones (each key's first value)
+/// as QueryParameters.Encode keeps them.
+fn sas_query_rebuilt(raw: Str) -> Str {
+  let all = url.parse_query(raw).ok() ?? url.values()
+  var rest = all
+  var sas: Map[Str, Str] = {}
+  for k in all.keys() {
+    let lk = k.to_lower()
+    if SAS_KEYS.contains(lk) {
+      sas[lk] = all.get(k) ?? ""
+      rest.remove(k)
+    }
+  }
+  let g = fn(k: Str) -> Str { sas.get(k) ?? "" }
+  var v = url.values()
+  for k in ["sv", "ss", "srt", "spr"] {
+    if g(k) != "" { v.add(k, g(k)) }
+  }
+  for k in ["st", "se"] {
+    if sas_time_ok(g(k)) { v.add(k, g(k)) }
+  }
+  let sip = g("sip")
+  let (ip_start, ip_end) = match sip.find("-") {
+    Some(j) => (go_ip(sip[0..j]), go_ip(sip[j + 1..sip.len()]))
+    None => (go_ip(sip), None)
+  }
+  if let Some(s) = ip_start {
+    v.add("sip", match ip_end {
+      Some(e) => "${s}-${e}"
+      None => s
+    })
+  }
+  for k in ["si", "sr", "sp"] {
+    if g(k) != "" { v.add(k, g(k)) }
+  }
+  if g("skoid") != "" {
+    let sk_time = fn(k: Str) -> Str { if g(k).len() == 20 && sas_time_ok(g(k)) { g(k) } else { "0001-01-01T00:00:00Z" } }
+    v.add("skoid", g("skoid"))
+    v.add("sktid", g("sktid"))
+    v.add("skt", sk_time("skt"))
+    v.add("ske", sk_time("ske"))
+    v.add("sks", g("sks"))
+    v.add("skv", g("skv"))
+  }
+  for k in ["sig", "rscc", "rscd", "rsce", "rscl", "rsct", "sdd", "saoid", "suoid", "scid", "ses", "sduoid", "skdutid", "srh", "srq"] {
+    if g(k) != "" { v.add(k, g(k)) }
+  }
+  let a = rest.encode()
+  let b = v.encode()
+  if a != "" && b != "" { "${a}&${b}" } else { a + b }
+}
+
+/// The rename source (`x-ms-rename-source`) and the destination URL of a
+/// path at `dfs_url` renamed to `dest` (Go's Rename): the source is the
+/// escaped path with the URL's query; the destination is the URL with
+/// `dest` as the path in the same file system, rebuilt as Go's
+/// sas.URLParts writes it, and `dest`'s own query in place of its query
+/// when `dest` has one.
+fn rename_urls(dfs_url: Str, dest: Str) -> (Str, Str) ! Str {
+  let u = split_url(dfs_url)?
+  let src_parts = dfs_url.split("?")
+  let escaped = go_escaped_path(u.path)?
+  let source = if src_parts.len() == 2 && src_parts[1] != "" { "${escaped}?${src_parts[1]}" } else { escaped }
+  var p = url.path_unescape(u.path) ?? e => return Err("parse ${go_quote(dfs_url)}: ${e.display()}")
+  if p.starts_with("/") {
+    p = p[1..p.len()]
+  }
+  var account = ""
+  if is_ip_endpoint(u.host) {
+    match p.find("/") {
+      Some(j) => {
+        account = p[0..j]
+        p = p[j + 1..p.len()]
+      }
+      None => {
+        account = p
+        p = ""
+      }
+    }
+  }
+  let fs_name = match p.find("/") {
+    Some(j) => p[0..j]
+    None => p
+  }
+  let dest_parts = dest.split("?")
+  var new_path = if account != "" { "/${account}" } else { "" }
+  if fs_name != "" {
+    new_path = "${new_path}/${fs_name}"
+    if dest_parts[0] != "" {
+      new_path = "${new_path}/${dest_parts[0]}"
+    }
+  }
+  let q = sas_query_rebuilt(u.query ?? "")
+  let base = "${u.scheme}://${u.host}${go_escape_path(new_path)}"
+  let target = if dest_parts.len() == 2 && dest_parts[1] != "" { "${base}?${dest_parts[1]}" } else if q != "" { "${base}?${q}" } else { base }
+  Ok((source, target))
 }
