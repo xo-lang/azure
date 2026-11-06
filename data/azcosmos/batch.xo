@@ -1,0 +1,241 @@
+// Transactional batches, as azcosmos's cosmos_transactional_batch.go,
+// cosmos_transactional_batch_options.go and
+// cosmos_transactional_batch_response.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): up to 100 operations on one logical
+// partition, committed together or not at all.
+
+use std/json
+use github.com/xo-lang/azure/azcore
+
+/// An operation's ETag condition.
+pub struct TransactionalBatchItemOptions {
+  /// The ETag the item must have.
+  pub if_match_etag: Str? = None
+}
+
+enum BatchOp {
+  Create(item: Str)
+  Upsert(item: Str, etag: Str?)
+  Replace(id: Str, item: Str, etag: Str?)
+  Delete(id: Str, etag: Str?)
+  Patch(id: Str, ops: PatchOperations, etag: Str?)
+  Read(id: Str)
+}
+
+/// Operations on the items of one partition key, sent in order by
+/// `ContainerClient.execute_transactional_batch`. Each method returns
+/// the batch with the operation appended. Unlike Go, `create_item` and
+/// `read_item` take no options: Go accepts them and ignores them.
+pub struct TransactionalBatch {
+  pub partition_key: PartitionKey
+  ops: List[BatchOp] = []
+}
+
+/// The number of operations so far.
+pub fn (b: TransactionalBatch) len() -> Int {
+  b.ops.len()
+}
+
+pub fn (b: TransactionalBatch) create_item(item: Str) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Create(item)]}
+}
+
+pub fn (b: TransactionalBatch) upsert_item(item: Str, options: TransactionalBatchItemOptions = TransactionalBatchItemOptions{}) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Upsert(item: item, etag: options.if_match_etag)]}
+}
+
+pub fn (b: TransactionalBatch) replace_item(item_id: Str, item: Str, options: TransactionalBatchItemOptions = TransactionalBatchItemOptions{}) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Replace(id: item_id, item: item, etag: options.if_match_etag)]}
+}
+
+pub fn (b: TransactionalBatch) delete_item(item_id: Str, options: TransactionalBatchItemOptions = TransactionalBatchItemOptions{}) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Delete(id: item_id, etag: options.if_match_etag)]}
+}
+
+pub fn (b: TransactionalBatch) patch_item(item_id: Str, operations: PatchOperations, options: TransactionalBatchItemOptions = TransactionalBatchItemOptions{}) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Patch(id: item_id, ops: operations, etag: options.if_match_etag)]}
+}
+
+pub fn (b: TransactionalBatch) read_item(item_id: Str) -> TransactionalBatch {
+  b with {ops: b.ops + [BatchOp.Read(item_id)]}
+}
+
+fn if_match(etag: Str?) -> Str {
+  match etag {
+    Some(e) => ",\"ifMatch\":${jstr(e)}"
+    None => ""
+  }
+}
+
+/// One operation as Go's MarshalJSON writes it, field for field.
+fn (op: BatchOp) to_json() -> Str ! Str {
+  match op {
+    Create(item) => Ok("{\"operationType\":\"Create\",\"resourceBody\":${compact(item)?}}")
+    Upsert(item, e) => Ok("{\"operationType\":\"Upsert\"${if_match(e)},\"resourceBody\":${compact(item)?}}")
+    Replace(id, item, e) => Ok("{\"operationType\":\"Replace\"${if_match(e)},\"id\":${jstr(id)},\"resourceBody\":${compact(item)?}}")
+    Delete(id, e) => Ok("{\"operationType\":\"Delete\",\"id\":${jstr(id)}${if_match(e)}}")
+    Patch(id, p, e) => Ok("{\"operationType\":\"Patch\"${if_match(e)},\"id\":${jstr(id)},\"resourceBody\":${p.to_json()}}")
+    Read(id) => Ok("{\"operationType\":\"Read\",\"id\":${jstr(id)}}")
+  }
+}
+
+/// `text` as encoding/json's compact with HTML escaping writes a
+/// Marshaler's output: white space outside strings dropped, `<`, `>`, `&`,
+/// U+2028 and U+2029 as `\u` escapes. Invalid JSON is an error, as Go's
+/// json.Marshal reports it.
+fn compact(text: Str) -> Str ! Str {
+  json.parse_value(text) ?? e => return Err(e.display())
+  var out = ""
+  var in_str = false
+  var esc = false
+  for c in text.runes() {
+    let r = "${c}"
+    if in_str {
+      if esc {
+        esc = false
+        out = out + r
+      } else if r == "\\" {
+        esc = true
+        out = out + r
+      } else if r == "\"" {
+        in_str = false
+        out = out + r
+      } else if r == "<" {
+        out = out + "\\u003c"
+      } else if r == ">" {
+        out = out + "\\u003e"
+      } else if r == "&" {
+        out = out + "\\u0026"
+      } else if r == "\u{2028}" {
+        out = out + "\\u2028"
+      } else if r == "\u{2029}" {
+        out = out + "\\u2029"
+      } else {
+        out = out + r
+      }
+    } else if r == "\"" {
+      in_str = true
+      out = out + r
+    } else if r != " " && r != "\t" && r != "\n" && r != "\r" {
+      out = out + r
+    }
+  }
+  Ok(out)
+}
+
+/// Options for a whole batch.
+pub struct TransactionalBatchOptions {
+  pub session_token: Str? = None
+  pub consistency_level: Str? = None
+  /// Whether write results carry the item. None is the client's option
+  /// (Go: no options); Go's options struct always overrides it, false
+  /// when unset. A batch with a read always asks for content.
+  pub enable_content_response_on_write: Bool? = None
+  pub priority_level: Str? = None
+  pub throughput_bucket: Int? = None
+}
+
+/// One operation's outcome.
+pub struct TransactionalBatchResult {
+  pub status_code: Int = 0
+  pub request_charge: Float = 0.0
+  /// The item as the service wrote it ("" when none).
+  pub resource_body: Str = ""
+  pub etag: Str = ""
+}
+
+pub struct TransactionalBatchResponse {
+  pub response: Response
+  pub session_token: Str = ""
+  /// In the order of the batch's operations.
+  pub operation_results: List[TransactionalBatchResult] = []
+  /// False when the service answered 207 Multi-Status: nothing was
+  /// committed, and each result says which operation failed (the rest
+  /// are 424 Failed Dependency).
+  pub success: Bool = false
+}
+
+fn float_of(v: json.Value) -> Float {
+  match v {
+    Int(n) => Float(n)
+    Num(f) => f
+    _ => 0.0
+  }
+}
+
+/// The results array, each result's resourceBody kept as written.
+fn batch_results(text: Str) -> List[TransactionalBatchResult] ! Str {
+  if text.trim() == "" {
+    return Ok([])
+  }
+  var r = json.tokens(text.bytes())
+  let open = (r.next() ?? e => return Err(e.display())) ?? return Ok([])
+  if !(open is json.Token.ArrayStart) {
+    return Err("batch response is not an array")
+  }
+  var out: List[TransactionalBatchResult] = []
+  while r.more() {
+    let start = (r.next() ?? e => return Err(e.display())) ?? break
+    if !(start is json.Token.ObjectStart) {
+      return Err("batch result is not an object")
+    }
+    var res = TransactionalBatchResult{}
+    while r.more() {
+      let k = match (r.next() ?? e => return Err(e.display())) {
+        Some(json.Token.Key(k)) => k
+        _ => return Err("batch result: expected a key")
+      }
+      if k == "resourceBody" {
+        let at = r.offset()
+        r.skip() ?? e => return Err(e.display())
+        res = res with {resource_body: text[at..r.offset()].trim_start_chars(": \t\r\n")}
+      } else {
+        let v = r.value() ?? e => return Err(e.display())
+        if k == "statusCode" {
+          res = res with {status_code: match v {
+            Int(n) => n
+            _ => 0
+          }}
+        } else if k == "requestCharge" {
+          res = res with {request_charge: float_of(v)}
+        } else if k == "eTag" {
+          res = res with {etag: match v {
+            Str(x) => x
+            _ => ""
+          }}
+        }
+      }
+    }
+    r.next() ?? e => return Err(e.display())
+    out.push(res)
+  }
+  Ok(out)
+}
+
+/// A batch on `partition_key`; add operations, then execute it.
+pub fn (c: ContainerClient) new_transactional_batch(partition_key: PartitionKey) -> TransactionalBatch {
+  TransactionalBatch{partition_key: partition_key}
+}
+
+/// Executes the batch as one transaction; check `success` for whether it
+/// was committed. An empty batch is an error before anything is sent.
+pub fn (c: ContainerClient) execute_transactional_batch(batch: TransactionalBatch, options: TransactionalBatchOptions = TransactionalBatchOptions{}) -> TransactionalBatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if batch.ops.is_empty() {
+    return Err(azcore.CallErr.InvalidInput("no operations in batch"))
+  }
+  var parts: List[Str] = []
+  for op in batch.ops {
+    parts.push(op.to_json() ?? e => return Err(azcore.CallErr.InvalidInput(e)))
+  }
+  let has_read = batch.ops.any(fn(o: BatchOp) -> Bool { o is BatchOp.Read(..) })
+  let content = has_read || (options.enable_content_response_on_write ?? c.core.content_on_write)
+  var hs: List[(Str, Str)] = []
+  if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
+  if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }
+  hs = hs + [("x-ms-cosmos-is-batch-request", "True"), ("x-ms-cosmos-batch-atomic", "True"), ("x-ms-cosmos-batch-ordered", "True")]
+  if !batch.partition_key.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", batch.partition_key.to_json_string())) }
+  if !content { hs.push(("Prefer", "return=minimal")) }
+  let resp = c.core.send(Call{method: "POST", path: "${c.link}/docs", write: true, headers: hs, body: "[${parts.join(",")}]".bytes(), content_type: "application/json", priority_level: options.priority_level, throughput_bucket: options.throughput_bucket})?
+  let results = batch_results(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(TransactionalBatchResponse{response: response_of(resp), session_token: resp.header("x-ms-session-token") ?? "", operation_results: results, success: resp.status != 207})
+}

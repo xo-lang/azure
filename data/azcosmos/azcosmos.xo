@@ -129,7 +129,17 @@ pub struct ClientOptions {
   pub preferred_regions: List[Str] = []
   /// Whether item writes return the item (no `Prefer: return=minimal`).
   pub enable_content_response_on_write: Bool = false
+  /// The priority of every request (`PRIORITY_LEVEL_HIGH` or `_LOW`);
+  /// an operation's option overrides it.
+  pub priority_level: Str? = None
+  /// The throughput bucket of every request (preview); an operation's
+  /// option overrides it.
+  pub throughput_bucket: Int? = None
 }
+
+/// Priority-based execution levels (x-ms-cosmos-priority-level).
+pub const PRIORITY_LEVEL_HIGH: Str = "High"
+pub const PRIORITY_LEVEL_LOW: Str = "Low"
 
 /// The account's regional endpoints, read once from the account
 /// (Go's global endpoint manager, without its failover).
@@ -146,12 +156,14 @@ struct Core {
   rand: Rand
   preferred_regions: List[Str]
   content_on_write: Bool
+  priority_level: Str?
+  throughput_bucket: Int?
   endpoints: Mutex[Endpoints?]
 }
 
 fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy, opts: ClientOptions) -> Core {
   let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
-  Core{endpoint: endpoint, pipeline: pl, rand: rand, preferred_regions: opts.preferred_regions, content_on_write: opts.enable_content_response_on_write, endpoints: Mutex[Endpoints?].new(None)}
+  Core{endpoint: endpoint, pipeline: pl, rand: rand, preferred_regions: opts.preferred_regions, content_on_write: opts.enable_content_response_on_write, priority_level: opts.priority_level, throughput_bucket: opts.throughput_bucket, endpoints: Mutex[Endpoints?].new(None)}
 }
 
 /// A client with the account's master key.
@@ -210,6 +222,9 @@ struct Call {
   headers: List[(Str, Str)] = []
   body: Bytes = b""
   content_type: Str = ""
+  /// The operation's priority and throughput bucket, over the client's.
+  priority_level: Str? = None
+  throughput_bucket: Int? = None
 }
 
 fn join_url(base: Str, path: Str) -> Str {
@@ -275,7 +290,11 @@ fn (c: Core) resolved() -> Endpoints ! azcore.CallErr uses (net.dial, clock, ran
 
 fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
   let eps = c.resolved()?
-  let req = c.request(call, if call.write { eps.write } else { eps.read })
+  // Go's header policy adds these to operations, not to the account read.
+  var hs = call.headers
+  if let Some(p) = call.priority_level ?? c.priority_level { hs.push(("x-ms-cosmos-priority-level", p)) }
+  if let Some(b) = call.throughput_bucket ?? c.throughput_bucket { hs.push(("x-ms-cosmos-throughput-bucket", "${b}")) }
+  let req = c.request(call with {headers: hs}, if call.write { eps.write } else { eps.read })
   let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if (resp.status >= 200 && resp.status < 300) || resp.status == 304 {
     return Ok(resp)
@@ -324,7 +343,8 @@ fn str_of(v: json.Value, key: Str) -> Str {
 fn int_of(v: json.Value, key: Str) -> Int? {
   match v.get(key) {
     Some(json.Value.Int(n)) => Some(n)
-    Some(json.Value.Num(f)) => Some(Int(f.trunc()))
+    // Int(f) truncates and faults out of range, so a huge service number is None.
+    Some(json.Value.Num(f)) if f > -9.0e18 && f < 9.0e18 => Some(Int(f))
     _ => None
   }
 }

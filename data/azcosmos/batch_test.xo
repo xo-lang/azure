@@ -1,0 +1,109 @@
+// Transactional batches and the priority and throughput bucket headers
+// against the same fake, compared with what Go's azcosmos v1.5.0 sent
+// and read back (batchvectors_test.xo).
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// The Go fake's batch answers: a 207 for the session token `0:-1#5`, no
+/// body when Prefer asks for minimal, otherwise three results with the
+/// service's spacing in one resource body.
+fn batch_answer(req: http.Request) -> http.Response {
+  if (req.header("x-ms-session-token") ?? "") == "0:-1#5" {
+    return js_resp(207, "[{\"statusCode\":409,\"requestCharge\":1.25},{\"statusCode\":424,\"requestCharge\":0}]")
+  }
+  if (req.header("Prefer") ?? "") == "return=minimal" {
+    return http.text(200, "")
+  }
+  js_resp(200, "[{\"statusCode\":201,\"requestCharge\":5.71,\"eTag\":\"\\\"b-e1\\\"\",\"resourceBody\":{\"id\":\"b1\",\"pk\":\"a\"}},{\"statusCode\":200,\"requestCharge\":1,\"resourceBody\":{ \"id\" : \"b2\", \"n\": [1, 2] }},{\"statusCode\":204,\"requestCharge\":2.29}]")
+}
+
+/// A Float as Go's %v prints it (`1`, not `1.0`).
+fn go_float(f: Float) -> Str {
+  let t = "${f}"
+  if t.ends_with(".0") { t[0..t.len() - 2] } else { t }
+}
+
+fn print_batch(r: TransactionalBatchResponse) -> List[Str] {
+  var out = ["success ${r.success} session ${r.session_token} charge ${r.response.request_charge}"]
+  for (i, o) in r.operation_results.indexed() {
+    out.push("  op ${i} status ${o.status_code} charge ${go_float(o.request_charge)} etag ${o.etag} body ${o.resource_body}")
+  }
+  out
+}
+
+test "a batch sends Go's request, byte for byte, and reads its results as Go does" {
+  let log = serve(os.net)
+  var out: List[Str] = []
+  let cred = new_key_credential(KEY)?
+  let base = policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: base})
+  let ct = c.new_container("db1", "c1")?
+  let pk = new_partition_key_string("a")
+
+  out.push("== batch with a read")
+  let e1 = TransactionalBatchItemOptions{if_match_etag: Some("\"e-1\"")}
+  let po = PatchOperations{}.set_condition("from c where c.n > 1").append_increment("/n", 1).append_set("/t", json.Value.Str("<x>"))
+  let b = ct.new_transactional_batch(pk)
+    .create_item("{ \"id\": \"b1\",\n \"pk\": \"a\", \"t\": \"<b>&\u{2028}\" }")
+    .upsert_item("{\"id\":\"b2\",\"pk\":\"a\"}", e1)
+    .replace_item("b3", "{\"id\":\"b3\",\"pk\":\"a\"}", e1)
+    .delete_item("b4")
+    .delete_item("b5", e1)
+    .patch_item("b6", po, e1)
+    .read_item("b7")
+  out = out + print_batch(ct.execute_transactional_batch(b)?)
+
+  out.push("== batch with options, partial failure")
+  let b2 = ct.new_transactional_batch(pk).create_item("{\"id\":\"b1\",\"pk\":\"a\"}").create_item("{\"id\":\"b2\",\"pk\":\"a\"}")
+  out = out + print_batch(ct.execute_transactional_batch(b2, TransactionalBatchOptions{session_token: Some("0:-1#5"), consistency_level: Some(CONSISTENCY_LEVEL_SESSION)})?)
+
+  out.push("== batch, minimal response")
+  out = out + print_batch(ct.execute_transactional_batch(ct.new_transactional_batch(pk).delete_item("b1"))?)
+
+  out.push("== batch, content, priority and bucket")
+  let b4 = ct.new_transactional_batch(pk).upsert_item("{\"id\":\"b1\",\"pk\":\"a\"}")
+  out = out + print_batch(ct.execute_transactional_batch(b4, TransactionalBatchOptions{enable_content_response_on_write: Some(true), priority_level: Some(PRIORITY_LEVEL_HIGH), throughput_bucket: Some(3)})?)
+
+  out.push("== batch errors")
+  let empty = match ct.execute_transactional_batch(ct.new_transactional_batch(pk)) {
+    Err(azcore.CallErr.InvalidInput(m)) => m
+    _ => "no error"
+  }
+  out.push("empty: ${empty}")
+  out.push("invalid item: ${ct.execute_transactional_batch(ct.new_transactional_batch(pk).create_item("{\"id\":")).is_err()}")
+
+  out.push("== client priority and bucket")
+  let c2 = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: base, priority_level: Some(PRIORITY_LEVEL_LOW), throughput_bucket: Some(2)})
+  let ct2 = c2.new_container("db1", "c1")?
+  ct2.read_item(pk, "i1")?
+  ct2.read_item(pk, "i1", ItemOptions{priority_level: Some(PRIORITY_LEVEL_HIGH), throughput_bucket: Some(5)})?
+  ct2.create_item(pk, "{\"id\":\"i1\",\"pk\":\"a\"}")?
+
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  expect(got.len()) == BATCH_REQUESTS.len()
+  // No Content-Length over FakeNet, as in the main test.
+  for (i, want) in BATCH_REQUESTS.indexed() {
+    let w = want.split("\n").filter(fn(l: Str) -> Bool { !l.starts_with("  content-length=") }).join("\n")
+    expect(hide(got.get(i) ?? "")) == w
+  }
+  expect(out) == BATCH_OUTPUT
+}
+
+test "compact drops white space outside strings and escapes as encoding/json does" {
+  expect(compact(" { \"a\" : [1, 2],\n\"b\":\"x y<>&\\\"\u{2029}\" } ")?) == "{\"a\":[1,2],\"b\":\"x y\\u003c\\u003e\\u0026\\\"\\u2029\"}"
+  expect(compact("{\"a\":").is_err()) == true
+}
+
+test "batch results tolerate an empty body and reject a non-array" {
+  expect(batch_results("")?.len()) == 0
+  expect(batch_results("{}").is_err()) == true
+  let rs = batch_results("[{\"eTag\":\"e\",\"other\":{\"x\":[1]},\"statusCode\":201,\"resourceBody\": [1, {\"a\":2}] }, {}]")?
+  expect(rs.len()) == 2
+  expect(rs[0].resource_body) == "[1, {\"a\":2}]"
+  expect(rs[0].status_code) == 201
+  expect(rs[0].etag) == "e"
+  expect(rs[1].status_code) == 0
+}
