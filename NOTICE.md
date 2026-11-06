@@ -16,7 +16,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   credential, and the `sas` package:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and
-  `storage/azblob/sas/testdata`), and later the other data plane packages. Each ported file names its source in a header comment.
+  `storage/azblob/sas/testdata`), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
+  its tests), and later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:
   initialisms, the package name dropped from type names, `Client` for

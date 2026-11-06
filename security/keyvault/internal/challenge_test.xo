@@ -1,0 +1,168 @@
+// Ported from keyvault/internal v1.1.1 challenge_policy_test.go, with
+// invented hosts (vault.example.test stands for vault.azure.net).
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+const VAULT: Str = "https://kv1.vault.example.test"
+const RESOURCE: Str = "https://vault.example.test"
+const SCOPE: Str = "https://vault.example.test/.default"
+const KV1: Str = "Bearer authorization=\"https://login.example.test/tenant\", resource=\"https://vault.example.test\""
+const CAE1: Str = "Bearer realm=\"\", authorization_uri=\"https://login.example.test/common/oauth2/authorize\", error=\"insufficient_claims\", claims=\"dGVzdGluZzE=\""
+const CAE2: Str = "Bearer realm=\"\", authorization_uri=\"https://login.example.test/common/oauth2/authorize\", error=\"insufficient_claims\", claims=\"dGVzdGluZzI=\""
+
+/// A credential that records its requests and gives `tok-<n>`.
+struct Recording {
+  seen: Mutex[List[azcore.TokenRequestOptions]]
+}
+
+fn (c: Recording) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.seen.with(fn(var xs: List[azcore.TokenRequestOptions]) -> Int {
+    xs.push(opts)
+    xs.len()
+  })
+  Ok(azcore.AccessToken{token: Secret.new("tok-${n}"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn recording() -> Recording {
+  Recording{seen: Mutex.new([])}
+}
+
+fn (c: Recording) requests() -> List[azcore.TokenRequestOptions] {
+  c.seen.with_read(fn(xs: List[azcore.TokenRequestOptions]) -> List[azcore.TokenRequestOptions] { xs })
+}
+
+/// A fake vault answering with `script` in order (status, WWW-Authenticate),
+/// then 200; it records each request.
+fn vault(net: testing.FakeNet, method: Str, script: List[(Int, Str)]) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle("${method} ${VAULT}/secrets/s1", fn(req: http.Request) -> http.Response {
+    let n = seen.with(fn(var xs: List[http.Request]) -> Int {
+      xs.push(req)
+      xs.len()
+    })
+    if n <= script.len() {
+      let (status, challenge) = script[n - 1]
+      return http.text(status, "").with_header("WWW-Authenticate", challenge)
+    }
+    http.text(200, "{}")
+  })
+  seen
+}
+
+fn requests(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+fn pipeline(net: testing.FakeNet, clock: Clock, rand: Rand, cred: Recording, opts: ChallengePolicyOptions = ChallengePolicyOptions{}) -> runtime.Pipeline {
+  runtime.new_pipeline("kvtest", "v0.1.0", net, clock, rand, runtime.PipelineOptions{per_retry: [new_challenge_policy(cred, clock, opts)]}, policy.ClientOptions{})
+}
+
+fn put(body: Str) -> policy.Request {
+  policy.Request{method: "PUT", url: "${VAULT}/secrets/s1", headers: [("Content-Type", "application/json")], body: body.bytes()}
+}
+
+test "the first request goes bare, the challenge's scope and tenant authorize the resend with its body" {
+  let seen = vault(os.net, "PUT", [(401, KV1)])
+  let cred = recording()
+  let pl = pipeline(os.net, os.clock, os.rand, cred)
+  expect(pl.send(put("{\"value\":\"v\"}"))?.status) == 200
+  let rs = requests(seen)
+  expect(rs.len()) == 2
+  expect(rs[0].header("Authorization")) == None
+  expect(rs[0].body) == b""
+  expect(rs[0].header("Content-Type")) == None
+  expect(rs[1].header("Authorization")) == Some("Bearer tok-1")
+  expect(rs[1].body) == b"{\"value\":\"v\"}"
+  let tro = cred.requests()[0]
+  expect(tro.scopes) == [SCOPE]
+  expect(tro.tenant_id) == "tenant"
+  expect(tro.enable_cae) == true
+  // The scope is known now: the next request is authorized at once.
+  expect(pl.send(put("{}"))?.status) == 200
+  expect(requests(seen)[2].header("Authorization")) == Some("Bearer tok-1")
+  expect(cred.requests().len()) == 1
+}
+
+test "scope is preferred to resource, and .default is added only when missing" {
+  for (challenge, want) in [
+    ("Bearer authorization=\"https://login.example.test/t\", resource=\"${RESOURCE}\"", SCOPE),
+    ("Bearer authorization=\"https://login.example.test/t\", scope=\"${SCOPE}\"", SCOPE),
+    ("Bearer authorization=\"https://login.example.test/t\", resource=\"${RESOURCE}\" scope=\"${SCOPE}\"", SCOPE),
+    ("Bearer authorization=\"https://login.example.test/t\", scope=\"${SCOPE}\" resource=\"ignore me\"", SCOPE),
+  ] {
+    let l = learn(challenge, VAULT, true)?
+    expect(l.scopes) == [want]
+    expect(l.tenant_id) == "t"
+  }
+}
+
+test "a challenge resource that is not a parent of the vault's host is refused unless verification is off" {
+  for (resource, want) in [
+    ("https://vault.example.other", "https://vault.example.other/.default"),
+    ("https://kv1.example.test", "https://kv1.example.test/.default"),
+    ("https://vault.example.other/.default", "https://vault.example.other/.default"),
+  ] {
+    let challenge = "Bearer authorization=\"https://login.example.test/t\", scope=\"${resource}\""
+    match learn(challenge, VAULT, true) {
+      Err(e) => expect(e.starts_with("challenge resource \"${resource}\" doesn't match the requested domain")) == true
+      other => expect("${other:?}") == "an error"
+    }
+    expect(learn(challenge, VAULT, false)?.scopes) == [want]
+  }
+}
+
+test "a refused challenge resource fails the request without a token" {
+  vault(os.net, "PUT", [(401, "Bearer authorization=\"https://login.example.test/t\", resource=\"https://vault.example.other\"")])
+  let cred = recording()
+  match pipeline(os.net, os.clock, os.rand, cred).send(put("{}")) {
+    Err(policy.SendErr.Auth(m)) => expect(m.contains("doesn't match the requested domain")) == true
+    other => expect("${other:?}") == "an Auth error"
+  }
+  expect(cred.requests().len()) == 0
+}
+
+test "a CAE challenge after the Key Vault challenge gets one token with its claims" {
+  let seen = vault(os.net, "PUT", [(401, KV1), (401, CAE1)])
+  let cred = recording()
+  let pl = pipeline(os.net, os.clock, os.rand, cred)
+  expect(pl.send(put("{\"value\":\"v\"}"))?.status) == 200
+  let rs = requests(seen)
+  expect(rs.len()) == 3
+  expect(rs[2].header("Authorization")) == Some("Bearer tok-2")
+  expect(rs[2].body) == b"{\"value\":\"v\"}"
+  let tros = cred.requests()
+  expect(tros.len()) == 2
+  expect(tros[0].claims) == ""
+  expect(tros[1].claims) == "testing1"
+}
+
+test "a second CAE challenge in a row is returned to the caller" {
+  vault(os.net, "PUT", [(401, KV1), (401, CAE1), (401, CAE2)])
+  let cred = recording()
+  let resp = pipeline(os.net, os.clock, os.rand, cred).send(put("{}"))?
+  expect(resp.status) == 401
+  expect(resp.header("WWW-Authenticate")) == Some(CAE2)
+  expect(cred.requests().len()) == 2
+}
+
+test "a new tenant in a later challenge is learned" {
+  let seen = vault(os.net, "GET", [(401, KV1), (200, ""), (401, KV1.replace("/tenant\"", "/tenant2\""))])
+  let cred = recording()
+  let pl = pipeline(os.net, os.clock, os.rand, cred)
+  let get = policy.Request{method: "GET", url: "${VAULT}/secrets/s1"}
+  expect(pl.send(get)?.status) == 200
+  expect(pl.send(get)?.status) == 200
+  expect(requests(seen).len()) == 4
+  let tros = cred.requests()
+  expect(tros.map(fn(t: azcore.TokenRequestOptions) -> Str { t.tenant_id })) == ["tenant", "tenant2"]
+}
+
+test "parse_tenant takes the authority's first path segment" {
+  expect(parse_tenant("")) == ""
+  expect(parse_tenant("https://login.example.test/tenant-a")) == "tenant-a"
+  expect(parse_tenant("https://login.example.test/tenant-a,")) == "tenant-a"
+}

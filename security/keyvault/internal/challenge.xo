@@ -1,0 +1,164 @@
+// Key Vault's challenge authentication, as azure-sdk-for-go's
+// sdk/security/keyvault/internal v1.1.1 (challenge_policy.go) inside
+// azcore v1.18.0's BearerTokenPolicy (handleChallenge); MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md.
+//
+// The token's scope and tenant are not known ahead: the first request
+// goes without a token and without its body, Key Vault answers 401
+// with `WWW-Authenticate: Bearer authorization="<authority>/<tenant>"
+// resource="https://vault.azure.net"` (or `scope=`), and the request is
+// sent again, body and all, with a token for that scope and tenant.
+// Later requests use the learned scope at once. A CAE claims challenge
+// is answered as the bearer policy answers it.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub struct ChallengePolicyOptions {
+  /// Accept a challenge resource whose host is not a parent of the
+  /// vault's host (Go's DisableChallengeResourceVerification).
+  pub disable_challenge_resource_verification: Bool = false
+  /// Send tokens over plain HTTP too (tests against a local fake only).
+  pub insecure_allow_http: Bool = false
+}
+
+/// What a challenge taught: the token's scope and tenant.
+struct Learned {
+  scopes: List[Str]
+  tenant_id: Str
+}
+
+pub struct ChallengePolicy {
+  credential: azcore.TokenCredential
+  clock: Clock
+  verify: Bool
+  insecure_allow_http: Bool
+  learned: Mutex[Learned?]
+  token: Mutex[azcore.AccessToken?]
+}
+
+pub fn new_challenge_policy(credential: azcore.TokenCredential, clock: Clock, opts: ChallengePolicyOptions = ChallengePolicyOptions{}) -> ChallengePolicy {
+  ChallengePolicy{credential: credential, clock: clock, verify: !opts.disable_challenge_resource_verification, insecure_allow_http: opts.insecure_allow_http, learned: Mutex.new(None), token: Mutex.new(None)}
+}
+
+const MATCH_ERROR: Str = "doesn't match the requested domain. Set disable_challenge_resource_verification to true in your client options to disable. See https://aka.ms/azsdk/blog/vault-uri for more information"
+
+fn (p: ChallengePolicy) known() -> Learned? {
+  p.learned.with_read(fn(l: Learned?) -> Learned? { l })
+}
+
+/// The cached token, or a new one for `l` (with `claims` for a CAE
+/// challenge, which always fetches).
+fn (p: ChallengePolicy) token_for(l: Learned, claims: Str = "") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    if claims == "" {
+      if let Some(have) = t {
+        if !azcore.needs_refresh(have, p.clock.now()) {
+          return Ok(have)
+        }
+      }
+    }
+    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: l.scopes, tenant_id: l.tenant_id, claims: claims, enable_cae: true})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+fn (p: ChallengePolicy) authorized(req: policy.Request, l: Learned, claims: Str = "") -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+  let t = p.token_for(l, claims) ?? e => return Err(policy.SendErr.Auth(e.display()))
+  Ok(req.with_header("Authorization", "Bearer ${t.token.reveal()}"))
+}
+
+/// `req` without its body, to elicit a challenge cheaply.
+fn bare(req: policy.Request) -> policy.Request {
+  req with {body: b"", headers: req.headers.filter(fn(h: (Str, Str)) -> Bool { h.0.to_lower() != "content-type" })}
+}
+
+fn (p: ChallengePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if !req.url.starts_with("https://") && !p.insecure_allow_http {
+    return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
+  }
+  let first = match p.known() {
+    Some(l) => p.authorized(req, l)?
+    None => bare(req)
+  }
+  let resp = next.send(first)?
+  p.handle(req, resp, false, next)
+}
+
+/// azcore's handleChallenge with Key Vault's OnChallenge.
+fn (p: ChallengePolicy) handle(req: policy.Request, resp: http.Response, recursed: Bool, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if resp.status != 401 || resp.header("WWW-Authenticate").is_none() {
+    return Ok(resp)
+  }
+  p.token.reset(None)
+  let claims = runtime.cae_claims(resp) ?? e => return Err(policy.SendErr.Auth(e))
+  if let Some(c) = claims {
+    return match p.known() {
+      Some(l) => next.send(p.authorized(req, l, c)?)
+      None => next.send(bare(req))
+    }
+  }
+  if recursed {
+    return Ok(resp)
+  }
+  let l = learn(resp.header("WWW-Authenticate") ?? "", req.url, p.verify) ?? e => return Err(policy.SendErr.Auth(e))
+  p.learned.reset(Some(l))
+  let again = next.send(p.authorized(req, l)?)?
+  p.handle(req, again, true, next)
+}
+
+/// The scope and tenant of a Key Vault challenge, checked against the
+/// vault's host unless `verify` is off (updateTokenRequestOptions).
+fn learn(header: Str, url: Str, verify: Bool) -> Learned ! Str {
+  if header == "" {
+    return Err("response has no WWW-Authenticate header for challenge authentication")
+  }
+  var vals: Map[Str, Str] = {}
+  for part in header.replace("Bearer ", "").split(" ") {
+    let sub = part.split("=")
+    if sub.len() == 2 {
+      vals[sub[0]] = sub[1].replace("\"", "").trim_suffix(",")
+    }
+  }
+  var scope = vals.get("scope") ?? vals.get("resource") ?? ""
+  if scope == "" {
+    return Err("could not find a valid resource in the WWW-Authenticate header")
+  }
+  if verify {
+    let want = host_of(scope)
+    if want == "" {
+      return Err("invalid challenge resource \"${scope}\"")
+    }
+    if !host_of(url).ends_with(".${want}") {
+      return Err("challenge resource \"${scope}\" ${MATCH_ERROR}")
+    }
+  }
+  if !scope.ends_with("/.default") {
+    scope = "${scope}/.default"
+  }
+  Ok(Learned{scopes: [scope], tenant_id: parse_tenant(vals.get("authorization") ?? "")})
+}
+
+/// The tenant in an authority URL (its first path segment), as Go's
+/// parseTenant.
+pub fn parse_tenant(url: Str) -> Str {
+  if url == "" {
+    return ""
+  }
+  let parts = url.split("/")
+  if parts.len() < 4 {
+    return ""
+  }
+  parts[3].replace(",", "")
+}
+
+/// The host (with any port) of an absolute URL.
+fn host_of(url: Str) -> Str {
+  let i = url.find("://") ?? return ""
+  let rest = url[i + 3..url.len()]
+  let end = rest.find("/") ?? rest.find("?") ?? rest.len()
+  rest[0..end]
+}
