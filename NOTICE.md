@@ -24,7 +24,13 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   settlement, Message and ReceivedMessage and their AMQP mapping, the
   connection string parser and SAS signer, and the `$management`
   requests of `internal/mgmt.go`, hand written over std/amqp; the
-  signing vector checked against its algorithm), and later the other data plane packages. Each ported file names its source in a header comment.
+  signing vector checked against its algorithm), `sdk/messaging/azeventhubs`
+  v1.4.0 (the ProducerClient, EventDataBatch, ConsumerClient,
+  PartitionClient and its start positions, EventData and
+  ReceivedEventData and their AMQP mapping, the connection string
+  parser and SAS signer, and the `$management` READ requests of
+  `mgmt.go`, hand written over std/amqp; the batch encoding checked
+  against its own), and later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:
   initialisms, the package name dropped from type names, `Client` for

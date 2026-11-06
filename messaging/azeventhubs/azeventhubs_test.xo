@@ -1,0 +1,308 @@
+// The Event Hubs clients against std/amqptest's in-process broker in its
+// event hub mode, on the test world's in-memory network (no emulator,
+// no namespace; invented hosts and keys).
+
+use std/amqp
+use std/amqptest
+use std/crypto
+
+fn conn_str(addr: Str) -> Str {
+  "Endpoint=sb://${addr};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=aW52ZW50ZWQta2V5;UseDevelopmentEmulator=true"
+}
+
+fn body_text(e: ReceivedEventData) -> Str {
+  e.body.to_str_lossy()
+}
+
+fn ann(m: amqp.Message, k: Str) -> amqp.Value? {
+  lookup(m.annotations ?? [], k)
+}
+
+test "the event hub comes from the connection string's EntityPath or the argument, exactly one" {
+  let p = parse_connection_string("Endpoint=sb://ns1.servicebus.example.test/;SharedAccessKeyName=k1;SharedAccessKey=s1;EntityPath=eh1")?
+  expect(event_hub_of(p, "")) == Ok("eh1")
+  expect(event_hub_of(p, "eh2").err()) == Some("connection string contains an EntityPath. eventHub must be an empty string")
+  let q = parse_connection_string("Endpoint=sb://ns1.servicebus.example.test/;SharedAccessKeyName=k1;SharedAccessKey=s1")?
+  expect(event_hub_of(q, "eh2")) == Ok("eh2")
+  expect(event_hub_of(q, "").err()) == Some("connection string does not contain an EntityPath. eventHub cannot be an empty string")
+}
+
+test "start positions are Go's selector expressions" {
+  expect(start_expression(StartPosition{})) == Ok("amqp.annotation.x-opt-offset > '@latest'")
+  expect(start_expression(StartPosition{earliest: true})) == Ok("amqp.annotation.x-opt-offset > '-1'")
+  expect(start_expression(StartPosition{latest: true, inclusive: true})) == Ok("amqp.annotation.x-opt-offset >= '@latest'")
+  expect(start_expression(StartPosition{offset: Some(192)})) == Ok("amqp.annotation.x-opt-offset > '192'")
+  expect(start_expression(StartPosition{sequence_number: Some(4), inclusive: true})) == Ok("amqp.annotation.x-opt-sequence-number >= '4'")
+  expect(start_expression(StartPosition{enqueued_time: Some(Time.from_unix_millis(1793847845123))})) == Ok("amqp.annotation.x-opt-enqueued-time > '1793847845123'")
+  expect(start_expression(StartPosition{offset: Some(1), sequence_number: Some(2)}).err()) == Some("only a single start point can be set: Earliest, EnqueuedTime, Latest, Offset, or SequenceNumber")
+}
+
+test "a received event reads Go's four annotations and keeps the rest as system properties" {
+  let m = amqp.Message{
+    annotations: Some([
+      (amqp.Value.Symbol(v: "x-opt-sequence-number"), amqp.Value.Long(v: 7)),
+      (amqp.Value.Symbol(v: "x-opt-offset"), amqp.Value.Str(v: "960")),
+      (amqp.Value.Symbol(v: "x-opt-enqueued-time"), amqp.Value.Timestamp(ms: 1793847845000)),
+      (amqp.Value.Symbol(v: "x-opt-partition-key"), amqp.Value.Str(v: "k")),
+      (amqp.Value.Symbol(v: "x-opt-publisher"), amqp.Value.Str(v: "p1")),
+    ]),
+    properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: "id1"), correlation_id: amqp.Value.ULong(v: 9)}),
+    app_properties: Some([("a", amqp.Value.Long(v: 1))]),
+    body: amqp.Body.Data(sections: [b"hi"]),
+  }
+  let e = received(m)?
+  expect(e.sequence_number) == 7
+  expect(e.offset) == 960
+  expect(e.enqueued_time) == Some(Time.from_unix_millis(1793847845000))
+  expect(e.partition_key) == Some("k")
+  expect(e.message_id) == Some("id1")
+  expect(e.correlation_id) == amqp.Value.ULong(v: 9)
+  expect(e.properties.get("a")) == Some(amqp.Value.Long(v: 1))
+  expect(e.system_properties.get("x-opt-publisher")) == Some(amqp.Value.Str(v: "p1"))
+  expect(body_text(e)) == "hi"
+  let bad = m with {annotations: Some([(amqp.Value.Symbol(v: "x-opt-offset"), amqp.Value.Long(v: 1))])}
+  expect(received(bad).err()) == Some("offset cannot be converted to an int64")
+}
+
+test "a batch with a partition key goes to one partition, with the key on every event and a put-token per entity" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 2)
+  b.require_token(true)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    var batch = pc.new_event_data_batch(EventDataBatchOptions{partition_key: Some("device-7")})?
+    batch.add_event_data(EventData{body: b"e1", properties: {"n": amqp.Value.Long(v: 1)}})?
+    batch.add_event_data(EventData{body: b"e2", message_id: Some("given")})?
+    expect(batch.num_events()) == 2
+    expect(batch.num_bytes() > 0) == true
+    pc.send_event_data_batch(batch)?
+    let all = b.events("eh1", 0) + b.events("eh1", 1)
+    expect(all.len()) == 2
+    for m in all {
+      expect(ann(m, "x-opt-partition-key")) == Some(amqp.Value.Str(v: "device-7"))
+    }
+    // Both went to the same partition.
+    expect(b.events("eh1", 0).len() == 2 || b.events("eh1", 1).len() == 2) == true
+    expect(all[1].properties.map(fn(p: amqp.Properties) -> amqp.Value { p.message_id })) == Some(amqp.Value.Str(v: "given"))
+    // The first event was given a UUID, as Go's AddEventData does.
+    expect(all[0].properties.and_then(fn(p: amqp.Properties) -> Str? { val_str(p.message_id) }).map(fn(id: Str) -> Int { id.len() })) == Some(36)
+    expect(b.tokens().map(fn(t: (Str, Str)) -> Str { t.0 })) == ["amqp://${l.addr()}/eh1"]
+    pc.close()?
+    s.cancel()
+  }
+}
+
+test "a batch for a partition id goes there; both an id and a key, an empty batch and an oversized event are errors" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 3)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    var batch = pc.new_event_data_batch(EventDataBatchOptions{partition_id: Some("2")})?
+    batch.add_event_data(EventData{body: b"p2"})?
+    pc.send_event_data_batch(batch)?
+    expect(b.events("eh1", 2).len()) == 1
+    expect(b.events("eh1", 0).len() + b.events("eh1", 1).len()) == 0
+    expect(pc.new_event_data_batch(EventDataBatchOptions{partition_id: Some("1"), partition_key: Some("k")}).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("either PartitionID or PartitionKey can be set, but not both")
+    let empty = pc.new_event_data_batch()?
+    expect(pc.send_event_data_batch(empty).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("batch is nil or empty")
+    var small = pc.new_event_data_batch(EventDataBatchOptions{max_bytes: 100})?
+    expect(small.add_event_data(EventData{body: b"a".repeat(200)}).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some(ERR_EVENT_DATA_TOO_LARGE)
+    expect(small.num_events()) == 0
+    expect(small.num_bytes()) == 0
+    pc.close()?
+    s.cancel()
+  }
+}
+
+test "a partition client reads from the earliest event, then after the last one it returned, and sees events sent later" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    var batch = pc.new_event_data_batch()?
+    for t in ["a", "b", "c"] {
+      batch.add_event_data(EventData{body: t.bytes()})?
+    }
+    pc.send_event_data_batch(batch)?
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP, ConsumerClientOptions{instance_id: "reader-1"})?
+    expect(cc.instance_id()) == "reader-1"
+    let part = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{earliest: true}})?
+    let got = part.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?
+    expect(got.map(body_text)) == ["a", "b"]
+    expect(got.map(fn(e: ReceivedEventData) -> Int { e.sequence_number })) == [0, 1]
+    expect(got.map(fn(e: ReceivedEventData) -> Int { e.offset })) == [64, 192]
+    expect(got[0].enqueued_time.is_some()) == true
+    expect(part.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["c"]
+    var more = pc.new_event_data_batch()?
+    more.add_event_data(EventData{body: b"d"})?
+    pc.send_event_data_batch(more)?
+    expect(part.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["d"]
+    // Nothing more: the wait ends at the timeout with no events.
+    expect(part.receive_events(1, ReceiveEventsOptions{timeout_ms: 200})?.len()) == 0
+    expect(part.receive_events(0).is_err()) == true
+    part.close()?
+    cc.close()?
+    pc.close()?
+    s.cancel()
+  }
+}
+
+test "a start sequence number is exclusive unless inclusive; with prefetch off each receive asks for what it wants" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    var batch = pc.new_event_data_batch()?
+    for t in ["a", "b", "c", "d"] {
+      batch.add_event_data(EventData{body: t.bytes()})?
+    }
+    pc.send_event_data_batch(batch)?
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP)?
+    let after = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{sequence_number: Some(1)}})?
+    expect(after.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["c"]
+    let from = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{sequence_number: Some(1), inclusive: true}, prefetch: -1})?
+    expect(from.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["b", "c"]
+    expect(from.receive_events(5, ReceiveEventsOptions{timeout_ms: 300})?.map(body_text)) == ["d"]
+    expect(from.receive_events(5001).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("count cannot exceed 5000")
+    expect(cc.new_partition_client("0", PartitionClientOptions{prefetch: 5001}).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("options.Prefetch cannot exceed 5000")
+    cc.close()?
+    pc.close()?
+    s.cancel()
+  }
+}
+
+test "a receiver with a higher owner level takes the partition: the other one's receive is ownershiplost" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    var batch = pc.new_event_data_batch()?
+    batch.add_event_data(EventData{body: b"a"})?
+    pc.send_event_data_batch(batch)?
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP)?
+    let low = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{earliest: true}, owner_level: Some(1)})?
+    expect(low.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["a"]
+    let high = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{earliest: true}, owner_level: Some(2)})?
+    expect(high.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["a"]
+    let lost = low.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})
+    expect(lost.err().map(fn(e: EventHubsErr) -> Str { e.code })) == Some(ERROR_CODE_OWNERSHIP_LOST)
+    cc.close()?
+    pc.close()?
+    s.cancel()
+  }
+}
+
+test "a partition that does not exist is refused at once, without retries" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP)?
+    let part = cc.new_partition_client("9")?
+    let started = os.clock.now().unix_millis()
+    let e = part.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000}).err()
+    expect(e.map(fn(x: EventHubsErr) -> RecoveryKind { x.recovery })) == Some(RecoveryKind.Fatal)
+    expect(os.clock.now().unix_millis() - started < 2000) == true
+    cc.close()?
+    s.cancel()
+  }
+}
+
+test "the hub's and a partition's properties come from $management" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  b.require_token(true)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    let hp = pc.get_event_hub_properties()?
+    expect(hp.name) == "eh1"
+    expect(hp.partition_ids) == ["0"]
+    expect(hp.created_on.is_some()) == true
+    let empty = pc.get_partition_properties("0")?
+    expect(empty.is_empty) == true
+    // A hub-level send: std/amqptest checks a partition link's claim against the hub (asked of Xo).
+    var batch = pc.new_event_data_batch()?
+    batch.add_event_data(EventData{body: b"a"})?
+    batch.add_event_data(EventData{body: b"b"})?
+    pc.send_event_data_batch(batch)?
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP)?
+    let pp = cc.get_partition_properties("0")?
+    expect(pp.event_hub_name) == "eh1"
+    expect(pp.partition_id) == "0"
+    expect(pp.is_empty) == false
+    expect(pp.beginning_sequence_number) == 0
+    expect(pp.last_enqueued_sequence_number) == 1
+    expect(pp.last_enqueued_offset) == 192
+    expect(pp.last_enqueued_on.is_some()) == true
+    cc.close()?
+    pc.close()?
+    s.cancel()
+  }
+}
+
+/// The batch's transfer as send_event_data_batch builds it.
+fn wire(b: EventDataBatch) -> Bytes ! EventHubsErr {
+  let env = b.envelope ?? return Ok(b"")
+  amqp.encode_message(env with {body: amqp.Body.Data(sections: b.encoded)}) ?? e => Err(from_amqp(e))
+}
+
+test "batches size and encode as Go's EventDataBatch, byte for byte" {
+  // Go: newEventDataBatch with a 10000 byte link, AddEventData, then
+  // toAMQPMessage().MarshalBinary() (azeventhubs v1.4.0, run locally).
+  var b1 = EventDataBatch{max_bytes: 10000, rand: os.rand, partition_id: None, partition_key: Some("device-7")}
+  b1.add_event_data(EventData{body: b"e1", properties: {"n": amqp.Value.Long(v: 1)}, message_id: Some("id1")})?
+  b1.add_event_data(EventData{body: b"e2", message_id: Some("given")})?
+  expect(b1.num_bytes()) == 240
+  let w1 = wire(b1)?
+  expect(w1.len()) == 240
+  expect(crypto.sha256(w1).to_hex()) == "46b1dd9f5c725f1ad52b75e70164b22cea385ad54964b2665b6788a4f82c4160"
+  var b2 = EventDataBatch{max_bytes: 10000, rand: os.rand, partition_id: None, partition_key: None}
+  b2.add_event_data(EventData{body: Bytes.zeroed(300), content_type: Some("text/plain"), correlation_id: amqp.Value.Str(v: "c1"), message_id: Some("m1")})?
+  expect(b2.num_bytes()) == 388
+  let w2 = wire(b2)?
+  expect(w2.len()) == 388
+  expect(crypto.sha256(w2).to_hex()) == "36308f3ff5882e02e671aaa6df5aece7afe67d30bb36ea1229b5b98f243d3025"
+}
+
+test "after a forced detach the producer and the partition client attach again; the reader resumes after its last event" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 1)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let quick = ProducerClientOptions{retry_options: RetryOptions{retry_delay: -1s}}
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", quick)?
+    var b1 = pc.new_event_data_batch()?
+    b1.add_event_data(EventData{body: b"a"})?
+    b1.add_event_data(EventData{body: b"b"})?
+    pc.send_event_data_batch(b1)?
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP, ConsumerClientOptions{retry_options: RetryOptions{retry_delay: -1s}})?
+    let part = cc.new_partition_client("0", PartitionClientOptions{start_position: StartPosition{earliest: true}})?
+    expect(part.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["a"]
+    let forced = amqp.WireError{condition: "amqp:link:detach-forced", description: "invented detach"}
+    b.detach_links("eh1", forced)
+    b.detach_links("eh1/ConsumerGroups/$Default/Partitions/0", forced)
+    var b2 = pc.new_event_data_batch()?
+    b2.add_event_data(EventData{body: b"c"})?
+    pc.send_event_data_batch(b2)?
+    expect(b.events("eh1", 0).len()) == 3
+    // The new link's filter starts after sequence number 0.
+    expect(part.receive_events(2, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)) == ["b", "c"]
+    cc.close()?
+    pc.close()?
+    s.cancel()
+  }
+}

@@ -1,0 +1,304 @@
+// The consumer, as azeventhubs's ConsumerClient and PartitionClient
+// (consumer_client.go, partition_client.go) (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md).
+
+use std/amqp
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+/// The consumer group every event hub has.
+pub const DEFAULT_CONSUMER_GROUP: Str = "$Default"
+
+const DEFAULT_PREFETCH_SIZE: Int = 300
+const DEFAULT_MAX_CREDIT_SIZE: Int = 5000
+
+/// The selector filter's name and descriptor (go-amqp's
+/// NewSelectorFilter).
+const SELECTOR_FILTER: Str = "apache.org:selector-filter:string"
+const SELECTOR_FILTER_CODE: Int = 0x0000468C00000004
+
+pub struct ConsumerClientOptions {
+  /// Prefixed to the AMQP connection's user agent property.
+  pub application_id: Str = ""
+  /// The consumer's name to the service; a new UUID when empty.
+  pub instance_id: Str = ""
+  pub retry_options: RetryOptions = RetryOptions{}
+  /// How long a connect, a put-token or a management call may wait.
+  pub timeout_ms: Int = 60000
+}
+
+pub struct ConsumerClient {
+  ns: Namespace
+  event_hub: Str
+  consumer_group: Str
+  id: Str
+  retry_options: RetryOptions
+}
+
+fn consumer(ns: Namespace, event_hub: Str, consumer_group: Str, options: ConsumerClientOptions) -> ConsumerClient uses rand {
+  let id = if options.instance_id != "" { options.instance_id } else { uuid.v4(ns.rand).display() }
+  ConsumerClient{ns: ns, event_hub: event_hub, consumer_group: consumer_group, id: id, retry_options: options.retry_options}
+}
+
+/// A consumer of `event_hub` for `consumer_group` (DEFAULT_CONSUMER_GROUP
+/// for the default) with an Entra ID credential.
+pub fn new_consumer_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, consumer_group: Str, credential: azcore.TokenCredential, options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient ! Str uses rand {
+  Ok(consumer(namespace(net, clock, rand, fully_qualified_namespace, true, Auth.Credential(credential), options.application_id, options.timeout_ms), event_hub, consumer_group, options))
+}
+
+/// A consumer from a connection string. The event hub is the string's
+/// EntityPath, or `event_hub` when it has none (exactly one of them).
+pub fn new_consumer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str, consumer_group: Str, options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient ! Str uses rand {
+  let (ns, hub) = namespace_from_connection_string(net, clock, rand, connection_string, event_hub, options.application_id, options.timeout_ms)?
+  Ok(consumer(ns, hub, consumer_group, options))
+}
+
+/// The consumer's name to the service.
+pub fn (cc: ConsumerClient) instance_id() -> Str {
+  cc.id
+}
+
+/// Closes the connection; partition clients made from the client fail
+/// after it.
+pub fn (cc: ConsumerClient) close() -> () ! EventHubsErr uses (net.dial, clock) {
+  cc.ns.close()
+}
+
+/// Where a partition client starts reading: one of the fields, or the
+/// latest event when none is set.
+pub struct StartPosition {
+  pub offset: Int? = None
+  pub sequence_number: Int? = None
+  pub enqueued_time: Time? = None
+  /// Include the event at the position (`>=`), not only those after it.
+  pub inclusive: Bool = false
+  pub earliest: Bool = false
+  pub latest: Bool = false
+}
+
+/// The selector expression for a start position, as Go's
+/// getStartExpression: one field at most.
+fn start_expression(sp: StartPosition) -> Str ! Str {
+  let gt = if sp.inclusive { ">=" } else { ">" }
+  let multiple = "only a single start point can be set: Earliest, EnqueuedTime, Latest, Offset, or SequenceNumber"
+  var expr = ""
+  if let Some(t) = sp.enqueued_time {
+    expr = "amqp.annotation.x-opt-enqueued-time ${gt} '${t.unix_millis()}'"
+  }
+  if let Some(o) = sp.offset {
+    if expr != "" {
+      return Err(multiple)
+    }
+    expr = "amqp.annotation.x-opt-offset ${gt} '${o}'"
+  }
+  if sp.latest {
+    if expr != "" {
+      return Err(multiple)
+    }
+    expr = "amqp.annotation.x-opt-offset ${gt} '@latest'"
+  }
+  if let Some(n) = sp.sequence_number {
+    if expr != "" {
+      return Err(multiple)
+    }
+    expr = sequence_expression(gt, n)
+  }
+  if sp.earliest {
+    if expr != "" {
+      return Err(multiple)
+    }
+    return Ok("amqp.annotation.x-opt-offset > '-1'")
+  }
+  Ok(if expr != "" { expr } else { "amqp.annotation.x-opt-offset > '@latest'" })
+}
+
+fn sequence_expression(op: Str, n: Int) -> Str {
+  "amqp.annotation.x-opt-sequence-number ${op} '${n}'"
+}
+
+pub struct PartitionClientOptions {
+  pub start_position: StartPosition = StartPosition{}
+  /// The receiver's epoch: a receiver with a higher one takes the
+  /// partition from the others (ERROR_CODE_OWNERSHIP_LOST for them).
+  pub owner_level: Int? = None
+  /// Events the link asks for ahead: 0 for 300, negative to ask for
+  /// only what each receive_events wants; at most 5000.
+  pub prefetch: Int = 0
+}
+
+/// A partition's receiving link and the connection it is on.
+struct ReceiverLink {
+  l: amqp.Receiver
+  gen: Int
+}
+
+pub struct PartitionClient {
+  ns: Namespace
+  event_hub: Str
+  consumer_group: Str
+  partition_id: Str
+  instance_id: Str
+  owner_level: Int?
+  prefetch: Int
+  retry_options: RetryOptions
+  /// Where the next link starts: the start position, then after the last
+  /// event received.
+  expression: Mutex[Str]
+  link: Mutex[ReceiverLink?]
+}
+
+/// A client for one partition. Its link attaches on the first receive.
+pub fn (cc: ConsumerClient) new_partition_client(partition_id: Str, options: PartitionClientOptions = PartitionClientOptions{}) -> PartitionClient ! EventHubsErr {
+  let expr = start_expression(options.start_position) ?? e => return Err(fatal(e))
+  if options.prefetch > DEFAULT_MAX_CREDIT_SIZE {
+    return Err(fatal("options.Prefetch cannot exceed ${DEFAULT_MAX_CREDIT_SIZE}"))
+  }
+  Ok(PartitionClient{ns: cc.ns, event_hub: cc.event_hub, consumer_group: cc.consumer_group, partition_id: partition_id, instance_id: cc.id, owner_level: options.owner_level, prefetch: options.prefetch, retry_options: cc.retry_options, expression: Mutex[Str].new(expr), link: Mutex[ReceiverLink?].new(None)})
+}
+
+/// The link's address: `<hub>/ConsumerGroups/<group>/Partitions/<id>`.
+fn (pc: PartitionClient) entity_path() -> Str {
+  "${pc.event_hub}/ConsumerGroups/${pc.consumer_group}/Partitions/${pc.partition_id}"
+}
+
+/// The link, attached again (from where the last receive ended) when
+/// there is none or it is on a dropped connection.
+fn (pc: PartitionClient) get() -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand) {
+  let ns = pc.ns
+  let path = pc.entity_path()
+  let expr = pc.expression.with_read(fn(e: Str) -> Str { e })
+  var props: List[(Str, amqp.Value)] = [("com.microsoft:receiver-name", amqp.Value.Str(v: pc.instance_id))]
+  if let Some(level) = pc.owner_level {
+    props.push(("com.microsoft:epoch", amqp.Value.Long(v: Int64(level))))
+  }
+  let credit = if pc.prefetch > 0 { pc.prefetch } else if pc.prefetch == 0 { DEFAULT_PREFETCH_SIZE } else { 0 }
+  let opts = amqp.ReceiverOptions{
+    name: ns.link_name("consumer", path), credit: credit, settle_mode: Some(amqp.ReceiverSettleMode.First),
+    target: pc.instance_id, properties: props,
+    filters: [(SELECTOR_FILTER, amqp.Value.Described(descriptor: amqp.Value.ULong(v: UInt64(SELECTOR_FILTER_CODE)), value: amqp.Value.Str(v: expr)))],
+  }
+  pc.link.with(fn(var slot: ReceiverLink?) -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand) {
+    if let Some(x) = slot {
+      if x.gen == ns.current_gen() {
+        return Ok(x)
+      }
+    }
+    let conn = ns.open()?
+    ns.authorize(conn, path)?
+    let l = conn.c.new_receiver(conn.s, path, opts) ?? e => return Err(from_amqp(e))
+    let x = ReceiverLink{l: l, gen: conn.gen}
+    slot = Some(x)
+    Ok(x)
+  })
+}
+
+/// Recovery before a retry: a new link, or a new connection.
+fn (pc: PartitionClient) recover(k: RecoveryKind) uses (net.dial, clock) {
+  let old = pc.link.with(fn(var slot: ReceiverLink?) -> ReceiverLink? {
+    let was = slot
+    if k == RecoveryKind.Link || k == RecoveryKind.Conn {
+      slot = None
+    }
+    was
+  })
+  if let Some(x) = old {
+    if k == RecoveryKind.Link {
+      x.l.close() ?? _ => {}
+    }
+  }
+  if k == RecoveryKind.Conn {
+    pc.ns.reset(old.map(fn(x: ReceiverLink) -> Int { x.gen }) ?? 0)
+  }
+}
+
+pub struct ReceiveEventsOptions {
+  /// How long to wait for `count` events (Go's context deadline).
+  pub timeout_ms: Int = 60000
+}
+
+/// Up to `count` events, waiting until there are `count` or the timeout
+/// ends; the events that came by then, none at all when nothing came
+/// (Go returns its context's error then). A failed try is retried from
+/// scratch, as Go's; when the retries end in an error, the last try's
+/// events are returned if it had any. With prefetch off the link is
+/// given `count` credit and drained at the end.
+pub fn (pc: PartitionClient) receive_events(count: Int, options: ReceiveEventsOptions = ReceiveEventsOptions{}) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand) {
+  if count <= 0 {
+    return Err(fatal("count should be greater than 0"))
+  }
+  let manual = pc.prefetch < 0
+  if manual && count > DEFAULT_MAX_CREDIT_SIZE {
+    return Err(fatal("count cannot exceed ${DEFAULT_MAX_CREDIT_SIZE}"))
+  }
+  let clock = pc.ns.clock
+  let deadline = clock.now().unix_millis() + options.timeout_ms
+  // The events of the try that failed last (Go's `events`).
+  let partial = Mutex[List[ReceivedEventData]].new([])
+  let result = pc.ns.retry(pc.retry_options, fn(_: Int) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand) {
+    partial.with(fn(var p: List[ReceivedEventData]) { p = [] })
+    let x = pc.get()?
+    var out: List[ReceivedEventData] = []
+    if manual {
+      x.l.issue_credit(count) ?? e => return Err(from_amqp(e))
+    }
+    while out.len() < count {
+      let left = deadline - clock.now().unix_millis()
+      if left <= 0 {
+        break
+      }
+      match x.l.receive(left) {
+        Ok(d) => out.push(received(d.message) ?? e => return Err(fatal(e)))
+        Err(e) if is_timeout(e) => break
+        Err(e) => {
+          let err = from_amqp(e)
+          if err.code != ERROR_CODE_OWNERSHIP_LOST {
+            let got = out
+            partial.with(fn(var p: List[ReceivedEventData]) { p = got })
+          }
+          return Err(err)
+        }
+      }
+    }
+    if manual {
+      let rest = x.l.drain(pc.ns.timeout_ms) ?? e => {
+        let got = out
+        partial.with(fn(var p: List[ReceivedEventData]) { p = got })
+        return Err(from_amqp(e))
+      }
+      for d in rest {
+        if out.len() < count {
+          out.push(received(d.message) ?? e => return Err(fatal(e)))
+        }
+      }
+    }
+    Ok(out)
+  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(k) })
+  let events = match result {
+    Ok(v) => v
+    Err(e) => {
+      let got = partial.with_read(fn(p: List[ReceivedEventData]) -> List[ReceivedEventData] { p })
+      if got.is_empty() {
+        return Err(e)
+      }
+      got
+    }
+  }
+  if let Some(last) = events.last() {
+    let n = last.sequence_number
+    pc.expression.with(fn(var e: Str) { e = sequence_expression(">", n) })
+  }
+  Ok(events)
+}
+
+/// Detaches the link.
+pub fn (pc: PartitionClient) close() -> () ! EventHubsErr uses (net.dial, clock) {
+  let old = pc.link.with(fn(var slot: ReceiverLink?) -> ReceiverLink? {
+    let was = slot
+    slot = None
+    was
+  })
+  if let Some(x) = old {
+    x.l.close() ?? e => return Err(from_amqp(e))
+  }
+  Ok(())
+}

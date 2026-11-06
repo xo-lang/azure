@@ -1,0 +1,79 @@
+// Errors, as azeventhubs's Error and its ErrorCodes (internal/exported,
+// internal/errors.go TransformError) (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md).
+
+use std/amqp
+
+/// What kind of failure an Error is; "" for one with no code.
+pub type ErrorCode = Str
+
+/// The credentials were refused (`amqp:unauthorized-access`, or a 401
+/// from `$management`).
+pub const ERROR_CODE_UNAUTHORIZED_ACCESS: ErrorCode = "unauthorized"
+/// The link or connection dropped and the retries did not bring it back.
+pub const ERROR_CODE_CONNECTION_LOST: ErrorCode = "connlost"
+/// Another receiver with a higher owner level (epoch) took the partition
+/// (`amqp:link:stolen`).
+pub const ERROR_CODE_OWNERSHIP_LOST: ErrorCode = "ownershiplost"
+
+pub struct EventHubsErr {
+  pub code: ErrorCode = ""
+  pub msg: Str
+  /// The AMQP error condition, when the service sent one.
+  pub condition: Str = ""
+  /// What a retry would have to recover first; Fatal when retrying
+  /// cannot help.
+  pub recovery: RecoveryKind = RecoveryKind.Fatal
+}
+
+/// `(code): msg` as Go's Error.Error; the message alone without a code
+/// (Go returns such errors untransformed).
+pub fn (e: EventHubsErr) display() -> Str {
+  if e.code == "" { e.msg } else { "(${e.code}): ${e.msg}" }
+}
+
+/// The code of an error, as Go's TransformError: ownership lost and
+/// unauthorized by condition, then connlost for anything a link or
+/// connection recovery would fix.
+fn code_for(condition: Str, recovery: RecoveryKind) -> ErrorCode {
+  match condition {
+    "amqp:link:stolen" => ERROR_CODE_OWNERSHIP_LOST
+    "amqp:unauthorized-access" => ERROR_CODE_UNAUTHORIZED_ACCESS
+    _ => match recovery {
+      RecoveryKind.Link | RecoveryKind.Conn => ERROR_CODE_CONNECTION_LOST
+      RecoveryKind.None | RecoveryKind.Fatal => ""
+    }
+  }
+}
+
+/// An error a peer sent: its condition's recovery, else a link one (Go's
+/// LinkError quick recovery; a dead connection then fails the new link
+/// and escalates).
+fn from_wire(w: amqp.WireError) -> EventHubsErr {
+  let rk = recovery_of_condition(w.condition) ?? RecoveryKind.Link
+  EventHubsErr{code: code_for(w.condition, rk), msg: if w.description == "" { w.condition } else { "${w.condition}: ${w.description}" }, condition: w.condition, recovery: rk}
+}
+
+fn from_amqp(e: amqp.AmqpErr) -> EventHubsErr {
+  match e {
+    amqp.AmqpErr.Peer(w) => from_wire(w)
+    // Go: io.EOF and net errors reset the connection.
+    amqp.AmqpErr.Net(m) => EventHubsErr{code: ERROR_CODE_CONNECTION_LOST, msg: m, recovery: RecoveryKind.Conn}
+    amqp.AmqpErr.Protocol(m) => EventHubsErr{code: ERROR_CODE_CONNECTION_LOST, msg: m, recovery: RecoveryKind.Conn}
+    other => EventHubsErr{msg: "${other:?}"}
+  }
+}
+
+/// A client-side misuse or state that retrying cannot change (Go's
+/// errNonRetriable).
+fn fatal(msg: Str) -> EventHubsErr {
+  EventHubsErr{msg: msg, recovery: RecoveryKind.Fatal}
+}
+
+/// A receive that ended at its deadline (Go's context ending).
+fn is_timeout(e: amqp.AmqpErr) -> Bool {
+  match e {
+    amqp.AmqpErr.Net(m) => m.contains("i/o timeout")
+    _ => false
+  }
+}

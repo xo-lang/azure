@@ -1,0 +1,201 @@
+// Event hub and partition properties from the namespace's `$management`
+// node, as azeventhubs's mgmt.go and internal/rpc.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): a READ request with the entity's
+// token in `security_token`, after a put-token for `<hub>/$management`.
+
+use std/amqp
+use std/uuid
+
+pub struct EventHubProperties {
+  pub created_on: Time? = None
+  pub name: Str = ""
+  pub partition_ids: List[Str] = []
+}
+
+pub struct GetEventHubPropertiesOptions {}
+
+pub struct PartitionProperties {
+  pub beginning_sequence_number: Int = 0
+  pub event_hub_name: Str = ""
+  pub is_empty: Bool = false
+  pub last_enqueued_offset: Int = 0
+  pub last_enqueued_on: Time? = None
+  pub last_enqueued_sequence_number: Int = 0
+  pub partition_id: Str = ""
+}
+
+pub struct GetPartitionPropertiesOptions {}
+
+/// A reply's status and body.
+struct Reply {
+  code: Int
+  description: Str
+  body: amqp.Value
+}
+
+/// The value under key `k` of a map value.
+fn field(v: amqp.Value, k: Str) -> amqp.Value? {
+  match v {
+    amqp.Value.Map(pairs) => lookup(pairs, k)
+    _ => None
+  }
+}
+
+/// One READ with `props` on `$management`, on a link pair opened for it
+/// and closed after. A status other than 2xx is an error, as Go's
+/// RPCError: 404 and 401 are fatal (401 unauthorized), 408, 503 and 500
+/// are retried, anything else gets a new connection.
+fn (ns: Namespace) read(event_hub: Str, props: List[(Str, amqp.Value)]) -> Reply ! EventHubsErr uses (net.dial, clock, rand) {
+  let conn = ns.open()?
+  ns.authorize(conn, "${event_hub}/$management")?
+  let id = uuid.v4(ns.rand).display()
+  // Go's clientAddress: strings.ReplaceAll("$", "", address) puts the
+  // address around the `$` (its arguments are swapped), so the reply
+  // address is `$management$$management-reply-to-<id>`; kept as Go's.
+  let reply_to = "$management$$management-reply-to-${id}"
+  let snd = conn.c.new_sender(conn.s, "$management", amqp.SenderOptions{name: ns.link_name("mgmt-s", event_hub)}) ?? e => return Err(from_amqp(e))
+  let rcv = conn.c.new_receiver(conn.s, "$management", amqp.ReceiverOptions{name: ns.link_name("mgmt-r", event_hub), target: reply_to, credit: 1000, settle_mode: Some(amqp.ReceiverSettleMode.First), sender_settle_mode: Some(amqp.SenderSettleMode.Settled)}) ?? e => {
+    snd.close() ?? _ => {}
+    return Err(from_amqp(e))
+  }
+  let r = exchange(snd, rcv, id, reply_to, props, ns.timeout_ms)
+  snd.close() ?? _ => {}
+  rcv.close() ?? _ => {}
+  r
+}
+
+fn exchange(snd: amqp.Sender, rcv: amqp.Receiver, id: Str, reply_to: Str, props: List[(Str, amqp.Value)], timeout_ms: Int) -> Reply ! EventHubsErr uses (net.dial, clock) {
+  let req = amqp.Message{properties: Some(amqp.Properties{message_id: amqp.Value.Str(v: id), reply_to: Some(reply_to)}), app_properties: Some(props)}
+  snd.send(req) ?? e => return Err(from_amqp(e))
+  while {
+    let d = rcv.receive(timeout_ms) ?? e => return Err(from_amqp(e))
+    if !d.settled {
+      rcv.accept(d) ?? e => return Err(from_amqp(e))
+    }
+    let corr = d.message.properties.map(fn(p: amqp.Properties) -> amqp.Value { p.correlation_id }) ?? amqp.Value.Null
+    if corr != amqp.Value.Str(v: id) {
+      continue
+    }
+    var r = Reply{code: 0, description: "", body: amqp.Value.Null}
+    for (k, v) in d.message.app_properties ?? [] {
+      if k == "status-code" || k == "statusCode" {
+        r.code = match v {
+          amqp.Value.Int(x) => Int(x)
+          _ => return Err(EventHubsErr{msg: "status code was not of expected type int32", recovery: RecoveryKind.Conn})
+        }
+      } else if k == "status-description" || k == "statusDescription" {
+        r.description = val_str(v) ?? return Err(EventHubsErr{msg: "status description was not of expected type string", recovery: RecoveryKind.Conn})
+      }
+    }
+    if r.code == 0 {
+      return Err(EventHubsErr{msg: "status codes was not found on rpc message", recovery: RecoveryKind.Conn})
+    }
+    if let amqp.Body.Value(v) = d.message.body {
+      r.body = v
+    }
+    if r.code < 200 || r.code > 299 {
+      return Err(EventHubsErr{code: if r.code == 401 { ERROR_CODE_UNAUTHORIZED_ACCESS } else { "" }, msg: "rpc: failed, status code ${r.code} and description: ${r.description}", recovery: recovery_of_status(r.code)})
+    }
+    return Ok(r)
+  }
+}
+
+/// A READ with retries; a failed one gets a new connection when its
+/// error asks for one.
+fn (ns: Namespace) read_with_retry(o: RetryOptions, event_hub: Str, props: List[(Str, amqp.Value)]) -> Reply ! EventHubsErr uses (net.dial, clock, rand) {
+  let gen = Atomic[Int].new(0)
+  ns.retry(o, fn(_: Int) -> Reply ! EventHubsErr uses (net.dial, clock, rand) {
+    gen.set(ns.current_gen())
+    ns.read(event_hub, props)
+  }, fn(k: RecoveryKind) uses (net.dial, clock) {
+    if k == RecoveryKind.Conn {
+      ns.reset(gen.get())
+    }
+  })
+}
+
+fn invalid() -> EventHubsErr {
+  fatal("invalid message format")
+}
+
+fn get_event_hub_properties(ns: Namespace, o: RetryOptions, event_hub: Str) -> EventHubProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  let token = ns.token_for(event_hub)?
+  let r = ns.read_with_retry(o, event_hub, [
+    ("operation", amqp.Value.Str(v: "READ")), ("name", amqp.Value.Str(v: event_hub)),
+    ("type", amqp.Value.Str(v: "com.microsoft:eventhub")), ("security_token", amqp.Value.Str(v: token.token)),
+  ])?
+  // Go: a body that is not a map is empty properties, not an error.
+  if !(r.body is amqp.Value.Map(..)) {
+    return Ok(EventHubProperties{})
+  }
+  var ids: List[Str] = []
+  match field(r.body, "partition_ids") {
+    Some(amqp.Value.Array(xs)) => {
+      for x in xs {
+        ids.push(match x {
+          amqp.Value.Str(s) => s
+          _ => return Err(invalid())
+        })
+      }
+    }
+    _ => return Err(invalid())
+  }
+  let name = match field(r.body, "name") {
+    Some(amqp.Value.Str(s)) => s
+    _ => return Err(invalid())
+  }
+  let created = match field(r.body, "created_at") {
+    Some(amqp.Value.Timestamp(ms)) => Time.from_unix_millis(ms)
+    _ => return Err(invalid())
+  }
+  Ok(EventHubProperties{name: name, created_on: Some(created), partition_ids: ids})
+}
+
+fn get_partition_properties(ns: Namespace, o: RetryOptions, event_hub: Str, partition_id: Str) -> PartitionProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  let token = ns.token_for(event_hub)?
+  let r = ns.read_with_retry(o, event_hub, [
+    ("operation", amqp.Value.Str(v: "READ")), ("name", amqp.Value.Str(v: event_hub)),
+    ("type", amqp.Value.Str(v: "com.microsoft:partition")), ("partition", amqp.Value.Str(v: partition_id)),
+    ("security_token", amqp.Value.Str(v: token.token)),
+  ])?
+  let s = fn(k: Str) -> Str ! EventHubsErr {
+    match field(r.body, k) {
+      Some(amqp.Value.Str(v)) => Ok(v)
+      _ => Err(invalid())
+    }
+  }
+  let n = fn(k: Str) -> Int ! EventHubsErr { Ok(field(r.body, k).and_then(val_int) ?? return Err(invalid())) }
+  let offset = Int.parse(s("last_enqueued_offset")?) ?? return Err(fatal("invalid message format: strconv.ParseInt: parsing: invalid syntax"))
+  let last_on = match field(r.body, "last_enqueued_time_utc") {
+    Some(amqp.Value.Timestamp(ms)) => Time.from_unix_millis(ms)
+    _ => return Err(invalid())
+  }
+  let empty = match field(r.body, "is_partition_empty") {
+    Some(amqp.Value.Bool(b)) => b
+    _ => return Err(invalid())
+  }
+  Ok(PartitionProperties{
+    event_hub_name: s("name")?, partition_id: s("partition")?,
+    beginning_sequence_number: n("begin_sequence_number")?, last_enqueued_sequence_number: n("last_enqueued_sequence_number")?,
+    last_enqueued_offset: offset, last_enqueued_on: Some(last_on), is_empty: empty,
+  })
+}
+
+/// The hub's name, creation time and partition ids.
+pub fn (pc: ProducerClient) get_event_hub_properties(options: GetEventHubPropertiesOptions = GetEventHubPropertiesOptions{}) -> EventHubProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  get_event_hub_properties(pc.ns, pc.retry_options, pc.event_hub)
+}
+
+/// A partition's sequence numbers, last offset and time, and whether it
+/// is empty.
+pub fn (pc: ProducerClient) get_partition_properties(partition_id: Str, options: GetPartitionPropertiesOptions = GetPartitionPropertiesOptions{}) -> PartitionProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  get_partition_properties(pc.ns, pc.retry_options, pc.event_hub, partition_id)
+}
+
+pub fn (cc: ConsumerClient) get_event_hub_properties(options: GetEventHubPropertiesOptions = GetEventHubPropertiesOptions{}) -> EventHubProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  get_event_hub_properties(cc.ns, cc.retry_options, cc.event_hub)
+}
+
+pub fn (cc: ConsumerClient) get_partition_properties(partition_id: Str, options: GetPartitionPropertiesOptions = GetPartitionPropertiesOptions{}) -> PartitionProperties ! EventHubsErr uses (net.dial, clock, rand) {
+  get_partition_properties(cc.ns, cc.retry_options, cc.event_hub, partition_id)
+}

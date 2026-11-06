@@ -1,0 +1,140 @@
+// Events, as azeventhubs's EventData, ReceivedEventData and their AMQP
+// mapping (event_data.go) (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/amqp
+
+/// An event to send.
+pub struct EventData {
+  pub properties: Map[Str, amqp.Value] = {}
+  pub body: Bytes = b""
+  pub content_type: Str? = None
+  /// A string, uuid, ulong or binary; Null for none (Go's `any`).
+  pub correlation_id: amqp.Value = amqp.Value.Null
+  pub message_id: Str? = None
+}
+
+/// An event from a partition.
+pub struct ReceivedEventData {
+  pub properties: Map[Str, amqp.Value] = {}
+  pub body: Bytes = b""
+  pub content_type: Str? = None
+  pub correlation_id: amqp.Value = amqp.Value.Null
+  pub message_id: Str? = None
+  pub enqueued_time: Time? = None
+  pub partition_key: Str? = None
+  pub offset: Int = 0
+  pub sequence_number: Int = 0
+  /// The message annotations other than the four above.
+  pub system_properties: Map[Str, amqp.Value] = {}
+  /// The AMQP message as it came.
+  pub raw_amqp_message: amqp.Message = amqp.Message{}
+}
+
+const PARTITION_KEY: Str = "x-opt-partition-key"
+const SEQUENCE_NUMBER: Str = "x-opt-sequence-number"
+const OFFSET: Str = "x-opt-offset"
+const ENQUEUED_TIME: Str = "x-opt-enqueued-time"
+
+/// The AMQP message, as Go's EventData.toAMQPMessage: one data section,
+/// the properties section always, application properties when any.
+fn (e: EventData) to_amqp() -> amqp.Message {
+  var app: List[(Str, amqp.Value)] = []
+  for (k, v) in e.properties {
+    app.push((k, v))
+  }
+  amqp.Message{
+    properties: Some(amqp.Properties{
+      message_id: match e.message_id {
+        Some(id) => amqp.Value.Str(v: id)
+        None => amqp.Value.Null
+      },
+      content_type: e.content_type, correlation_id: e.correlation_id,
+    }),
+    app_properties: if app.is_empty() { None } else { Some(app) },
+    body: amqp.Body.Data(sections: [e.body]),
+  }
+}
+
+fn val_str(v: amqp.Value) -> Str? {
+  match v {
+    amqp.Value.Str(s) => Some(s)
+    amqp.Value.Symbol(s) => Some(s)
+    _ => None
+  }
+}
+
+/// Go's eh.ConvertToInt64: any of the integer types.
+fn val_int(v: amqp.Value) -> Int? {
+  match v {
+    amqp.Value.Long(x) => Some(Int(x))
+    amqp.Value.Int(x) => Some(Int(x))
+    amqp.Value.ULong(x) => Some(Int(x))
+    amqp.Value.UInt(x) => Some(Int(x))
+    amqp.Value.Short(x) => Some(Int(x))
+    amqp.Value.UShort(x) => Some(Int(x))
+    amqp.Value.Byte(x) => Some(Int(x))
+    amqp.Value.UByte(x) => Some(Int(x))
+    _ => None
+  }
+}
+
+/// The value under symbol or string key `k`.
+fn lookup(pairs: List[(amqp.Value, amqp.Value)], k: Str) -> amqp.Value? {
+  for (key, v) in pairs {
+    if val_str(key) == Some(k) {
+      return Some(v)
+    }
+  }
+  None
+}
+
+/// A received event from its AMQP message, as Go's newReceivedEventData:
+/// an annotation of the wrong type is an error, with Go's text.
+fn received(am: amqp.Message) -> ReceivedEventData ! Str {
+  var re = ReceivedEventData{raw_amqp_message: am}
+  if let amqp.Body.Data(sections) = am.body {
+    if sections.len() == 1 {
+      re.body = sections[0]
+    }
+  }
+  if let Some(p) = am.properties {
+    if let amqp.Value.Str(id) = p.message_id {
+      re.message_id = Some(id)
+    }
+    re.content_type = p.content_type
+    re.correlation_id = p.correlation_id
+  }
+  if let Some(app) = am.app_properties {
+    var m: Map[Str, amqp.Value] = {}
+    for (k, v) in app {
+      m[k] = v
+    }
+    re.properties = m
+  }
+  for (kv, v) in am.annotations ?? [] {
+    // Go skips keys that are not strings; a symbol is a string there.
+    let key = val_str(kv) ?? continue
+    if key == SEQUENCE_NUMBER {
+      re.sequence_number = val_int(v) ?? return Err("sequence number cannot be converted to an int64")
+    } else if key == PARTITION_KEY {
+      re.partition_key = Some(match v {
+        amqp.Value.Str(s) => s
+        _ => return Err("partition key cannot be converted to a string")
+      })
+    } else if key == ENQUEUED_TIME {
+      re.enqueued_time = Some(match v {
+        amqp.Value.Timestamp(ms) => Time.from_unix_millis(ms)
+        _ => return Err("enqueued time cannot be converted to a time.Time")
+      })
+    } else if key == OFFSET {
+      re.offset = match v {
+        amqp.Value.Str(s) => Int.parse(s) ?? return Err("offset cannot be converted to an int64")
+        _ => return Err("offset cannot be converted to an int64")
+      }
+    } else {
+      re.system_properties[key] = v
+    }
+  }
+  Ok(re)
+}

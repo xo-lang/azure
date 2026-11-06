@@ -1,0 +1,229 @@
+// The producer, as azeventhubs's ProducerClient and EventDataBatch
+// (producer_client.go, event_data_batch.go) (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md).
+
+use std/amqp
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+pub struct ProducerClientOptions {
+  /// Prefixed to the AMQP connection's user agent property.
+  pub application_id: Str = ""
+  /// How sends and management calls are retried after a recoverable
+  /// failure.
+  pub retry_options: RetryOptions = RetryOptions{}
+  /// How long a connect, a put-token or a management call may wait.
+  pub timeout_ms: Int = 60000
+}
+
+/// A partition's sending link and the connection it is on.
+struct SenderLink {
+  l: amqp.Sender
+  gen: Int
+}
+
+pub struct ProducerClient {
+  ns: Namespace
+  event_hub: Str
+  retry_options: RetryOptions
+  /// The links by partition id, "" for the hub's (any partition).
+  links: Mutex[Map[Str, SenderLink]]
+}
+
+fn producer(ns: Namespace, event_hub: Str, options: ProducerClientOptions) -> ProducerClient {
+  ProducerClient{ns: ns, event_hub: event_hub, retry_options: options.retry_options, links: Mutex[Map[Str, SenderLink]].new({})}
+}
+
+/// A producer for `event_hub` in the namespace
+/// (`<name>.servicebus.windows.net`) with an Entra ID credential.
+pub fn new_producer_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, credential: azcore.TokenCredential, options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient ! Str {
+  Ok(producer(namespace(net, clock, rand, fully_qualified_namespace, true, Auth.Credential(credential), options.application_id, options.timeout_ms), event_hub, options))
+}
+
+/// A producer from a connection string. The event hub is the string's
+/// EntityPath, or `event_hub` when it has none (exactly one of them).
+pub fn new_producer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str = "", options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient ! Str {
+  let (ns, hub) = namespace_from_connection_string(net, clock, rand, connection_string, event_hub, options.application_id, options.timeout_ms)?
+  Ok(producer(ns, hub, options))
+}
+
+/// The link's address: the hub, or `<hub>/Partitions/<id>`.
+fn (pc: ProducerClient) entity_path(partition_id: Str) -> Str {
+  if partition_id == "" { pc.event_hub } else { "${pc.event_hub}/Partitions/${partition_id}" }
+}
+
+/// The partition's link, attached again when there is none or it is on
+/// a dropped connection. Mixed settlement, as Go's.
+fn (pc: ProducerClient) link(partition_id: Str) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand) {
+  let ns = pc.ns
+  let path = pc.entity_path(partition_id)
+  pc.links.with(fn(var m: Map[Str, SenderLink]) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand) {
+    if let Some(x) = m.get(partition_id) {
+      if x.gen == ns.current_gen() {
+        return Ok(x)
+      }
+    }
+    let conn = ns.open()?
+    ns.authorize(conn, path)?
+    let l = conn.c.new_sender(conn.s, path, amqp.SenderOptions{name: ns.link_name("producer", path), settle_mode: Some(amqp.SenderSettleMode.Mixed)}) ?? e => return Err(from_amqp(e))
+    let x = SenderLink{l: l, gen: conn.gen}
+    m[partition_id] = x
+    Ok(x)
+  })
+}
+
+/// Recovery before a retry: a new link, or a new connection.
+fn (pc: ProducerClient) recover(partition_id: Str, k: RecoveryKind) uses (net.dial, clock) {
+  let old = pc.links.with(fn(var m: Map[Str, SenderLink]) -> SenderLink? {
+    let was = m.get(partition_id)
+    if k == RecoveryKind.Link || k == RecoveryKind.Conn {
+      m.remove(partition_id)
+    }
+    was
+  })
+  if k == RecoveryKind.Conn {
+    pc.ns.reset(old.map(fn(x: SenderLink) -> Int { x.gen }) ?? 0)
+  }
+}
+
+pub struct EventDataBatchOptions {
+  /// The batch's size limit in bytes; 0 for the link's max message size.
+  pub max_bytes: Int = 0
+  /// Events with the same key go to the same partition.
+  pub partition_key: Str? = None
+  /// The partition the batch goes to; None lets the service choose.
+  pub partition_id: Str? = None
+}
+
+/// Events sent as one transfer of message format 0x80013700: the first
+/// event without its body is the envelope, and each event is one data
+/// section of the body, as Go's EventDataBatch.
+pub struct EventDataBatch {
+  max_bytes: Int
+  rand: Rand
+  partition_id: Str?
+  partition_key: Str?
+  size: Int = 0
+  envelope: amqp.Message? = None
+  encoded: List[Bytes] = []
+}
+
+/// Go's ErrEventDataTooLarge.
+pub const ERR_EVENT_DATA_TOO_LARGE: Str = "the EventData could not be added because it is too large for the batch"
+
+/// The message format of a batch transfer.
+const BATCH_MESSAGE_FORMAT: Int = 0x80013700
+
+/// An empty batch, sized for the partition's link (which attaches here,
+/// as Go's). A link that names no size (0, AMQP's no limit) takes no
+/// limit.
+pub fn (pc: ProducerClient) new_event_data_batch(options: EventDataBatchOptions = EventDataBatchOptions{}) -> EventDataBatch ! EventHubsErr uses (net.dial, clock, rand) {
+  if options.partition_id.is_some() && options.partition_key.is_some() {
+    return Err(fatal("either PartitionID or PartitionKey can be set, but not both"))
+  }
+  let pid = options.partition_id ?? ""
+  let link_max = pc.ns.retry(pc.retry_options, fn(_: Int) -> Int ! EventHubsErr uses (net.dial, clock, rand) {
+    let x = pc.link(pid)?
+    Ok(x.l.remote_attach().map(fn(a: amqp.Attach) -> Int { a.max_message_size }) ?? 0)
+  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(pid, k) })?
+  if options.max_bytes != 0 && link_max != 0 && options.max_bytes > link_max {
+    return Err(fatal("maximum message size for batch was set to ${options.max_bytes} bytes, which is larger than the maximum size allowed by link (${link_max})"))
+  }
+  Ok(EventDataBatch{max_bytes: if options.max_bytes != 0 { options.max_bytes } else { link_max }, rand: pc.ns.rand, partition_id: options.partition_id, partition_key: options.partition_key})
+}
+
+pub struct AddEventDataOptions {}
+
+/// A data section's encoded size: its bytes with a vbin8 or vbin32
+/// header (Go's calcActualSizeForPayload).
+fn payload_size(n: Int) -> Int {
+  if n < 256 { 5 + n } else { 8 + n }
+}
+
+/// The batch's partition key as a message annotation.
+fn (b: EventDataBatch) keyed(m: amqp.Message) -> amqp.Message {
+  let pk = b.partition_key ?? return m
+  var anns = m.annotations ?? []
+  anns.push((amqp.Value.Symbol(v: PARTITION_KEY), amqp.Value.Str(v: pk)))
+  m with {annotations: Some(anns)}
+}
+
+/// Adds an event (given a message id when it has none, and the batch's
+/// partition key, as Go's); ERR_EVENT_DATA_TOO_LARGE when it would pass
+/// the limit.
+pub fn (var b: EventDataBatch) add_event_data(event: EventData, options: AddEventDataOptions = AddEventDataOptions{}) -> () ! EventHubsErr uses rand {
+  var e = event
+  if (e.message_id ?? "") == "" {
+    e.message_id = Some(uuid.v4(b.rand).display())
+  }
+  let am = b.keyed(e.to_amqp())
+  let bs = amqp.encode_message(am) ?? x => return Err(from_amqp(x))
+  var size = b.size
+  var envelope = b.envelope
+  if b.encoded.is_empty() {
+    let env = am with {body: amqp.Body.Empty}
+    let eb = amqp.encode_message(env) ?? x => return Err(from_amqp(x))
+    size = eb.len()
+    envelope = Some(env)
+  }
+  let grown = size + payload_size(bs.len())
+  if b.max_bytes > 0 && grown > b.max_bytes {
+    if b.encoded.is_empty() {
+      b.size = 0
+      b.envelope = None
+    }
+    return Err(EventHubsErr{msg: ERR_EVENT_DATA_TOO_LARGE})
+  }
+  b.envelope = envelope
+  b.encoded.push(bs)
+  b.size = grown
+  Ok(())
+}
+
+/// The batch's size in bytes, as it would go on the wire.
+pub fn (b: EventDataBatch) num_bytes() -> Int {
+  b.size
+}
+
+pub fn (b: EventDataBatch) num_events() -> Int {
+  b.encoded.len()
+}
+
+pub struct SendEventDataBatchOptions {}
+
+/// Sends the batch in one transfer (message format 0x80013700) to its
+/// partition, or the hub's link, with retries.
+pub fn (pc: ProducerClient) send_event_data_batch(batch: EventDataBatch, options: SendEventDataBatchOptions = SendEventDataBatchOptions{}) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+  let env = batch.envelope ?? return Err(fatal("batch is nil or empty"))
+  if batch.encoded.is_empty() {
+    return Err(fatal("batch is nil or empty"))
+  }
+  // The envelope is the first event, so it carries the partition key.
+  let m = env with {body: amqp.Body.Data(sections: batch.encoded)}
+  let pid = batch.partition_id ?? ""
+  pc.ns.retry(pc.retry_options, fn(_: Int) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+    let x = pc.link(pid)?
+    let st = x.l.send(m, message_format: BATCH_MESSAGE_FORMAT) ?? e => return Err(from_amqp(e))
+    match st {
+      None | Some(amqp.DeliveryState.Accepted) => Ok(())
+      Some(amqp.DeliveryState.Rejected(Some(w))) => Err(from_wire(w))
+      Some(other) => Err(EventHubsErr{msg: "the batch was not accepted: ${other:?}", recovery: RecoveryKind.None})
+    }
+  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(pid, k) })
+}
+
+/// Detaches the links and closes the connection.
+pub fn (pc: ProducerClient) close() -> () ! EventHubsErr uses (net.dial, clock) {
+  let ls = pc.links.with(fn(var m: Map[Str, SenderLink]) -> List[SenderLink] {
+    var out: List[SenderLink] = []
+    for (_, x) in m {
+      out.push(x)
+    }
+    m = {}
+    out
+  })
+  for x in ls {
+    x.l.close() ?? _ => {}
+  }
+  pc.ns.close()
+}
