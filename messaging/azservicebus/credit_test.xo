@@ -74,24 +74,44 @@ test "abandon and defer take properties_to_modify, and a batch goes as one trans
     r.defer_message(got[1], DeferMessageOptions{properties_to_modify: {"why": amqp.Value.Str(v: "later")}})?
     until(os.clock, fn() -> Bool { b.deferred("q1").len() == 1 })
     expect(b.deferred("q1").len()) == 1
-    expect(r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["b1"]
+    let again = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(again.map(text)) == ["b1"]
+    // The modified annotations land in the message's application properties.
+    expect(again[0].application_properties.get("tries")) == Some(amqp.Value.Long(v: 1))
+    expect(b.deferred("q1")[0].app_properties.map(fn(ps: List[(Str, amqp.Value)]) -> Bool { ps.contains(("why", amqp.Value.Str(v: "later"))) })) == Some(true)
     c.close()?
     s.cancel()
   }
 }
 
-test "the list sessions pager asks $management; the broker's 501 comes back as an error" {
+test "the list sessions pagers list the sessions with messages, or those whose state changed after a time" {
   let b = amqptest.new(os.clock)
   b.queue("sq", amqptest.QueueOptions{sessions: true})
+  b.queue("empty", amqptest.QueueOptions{sessions: true})
   let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
   scope s {
     b.serve(s.group(), l)
     let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("sq")?
+    for id in ["s-c", "s-a", "s-b"] {
+      snd.send_message(Message{body: id.bytes(), session_id: Some(id)})?
+    }
     var p = c.new_list_sessions_for_queue_pager("sq")
     expect(p.more()) == true
-    // std/amqptest does not answer get-message-sessions yet (asked of Xo).
-    expect(p.next_page().is_err()) == true
+    expect(p.next_page()?.sessions) == ["s-a", "s-b", "s-c"]
     expect(p.more()) == false
+    let before = os.clock.now()
+    os.clock.sleep(5ms)
+    let r = c.accept_session_for_queue("sq", "s-b")?
+    r.set_session_state(b"seen")?
+    r.close()?
+    var q = c.new_list_sessions_for_queue_pager("sq", ListSessionsOptions{session_state_updated_after: Some(before)})
+    expect(q.next_page()?.sessions) == ["s-b"]
+    expect(q.more()) == false
+    // No sessions: the service's 204 is an empty last page.
+    var e = c.new_list_sessions_for_queue_pager("empty")
+    expect(e.next_page()?.sessions.len()) == 0
+    expect(e.more()) == false
     expect(is_session_not_found("The session was not found: SessionNotFound")) == true
     c.close()?
     s.cancel()

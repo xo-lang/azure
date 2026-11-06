@@ -25,6 +25,10 @@ What it does:
   (`accept_next_session_for_queue`, `_for_subscription`, the session
   read from the attach reply), with the lock's expiry from the attach,
   session state and lock renewal.
+- Listing an entity's sessions (`new_list_sessions_for_queue_pager`,
+  `_for_subscription_pager`): those with messages, or with
+  `session_state_updated_after` those whose state changed after a time,
+  in pages of 100 on `$management`, as Go's.
 - Batches in one transfer of message format 0x80013700, sized from the
   link's attach as Go's; settlements in receive settle mode second that
   wait for the service's answer (a lost lock shows in the call);
@@ -51,12 +55,6 @@ What it does:
   and correlation filters with typed parameters, SQL actions, and keep
   unknown filter and action types as XML.
 
-Not yet checked against the broker:
-
-- `new_list_sessions_for_queue_pager` and `_for_subscription_pager` are
-  written as Go's (pages of 100 on `$management`, 204 or a "session not
-  found" 404 as an empty page), but std/amqptest does not answer
-  `get-message-sessions` yet (asked of Xo).
 
 Where the AMQP side differs from Go v1.11.0:
 
