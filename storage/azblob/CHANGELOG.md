@@ -1,5 +1,13 @@
 # azblob changes
 
+## v0.8.0
+
+- `exported.all_bytes`, `has_byte` and `is_unreserved` are public, for
+  azdatalake's Go path escaping. azfile's sas time and IP helpers and
+  azdatalake's quoting, escaping and IP-host helpers now call azblob's
+  instead of keeping copies (they were the same code; no behavior
+  change).
+
 ## v0.7.0
 
 - `new_shared_key_credential`: a key that is not base64 reads
