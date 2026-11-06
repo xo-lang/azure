@@ -8,6 +8,15 @@ version has been tagged since.
 
 ## Unreleased
 
+**Behavior fix** in every generated module (ARM, Key Vault and
+azappconfig's generated layer; regenerated): an empty 2xx response
+body decodes as Go's UnmarshalAsJSON leaves it, the zero value (a
+model with no fields set, an empty list or map, `""`, a JSON null),
+instead of the decode error `the response has no body`. Only a
+polymorphic result (armnetwork's `AdminRulesClient`
+`BaseAdminRuleClassification`) keeps the error, having no zero value
+here; Go's is a nil interface.
+
 The generator writes Go's response handling more closely, for the
 packages generated with `reachable_only` (the TypeSpec ones: Key
 Vault's azsecrets, azkeys, azcertificates and azadmin, and
@@ -26,9 +35,6 @@ each regenerated module:
   `PrivateEndpointConnectionsClient.put` and
   `MhsmPrivateEndpointConnectionsClient.put` responses gain
   `azure_async_operation` and `retry_after`, as Go's.
-- **Behavior fix:** an empty response body decodes as the zero value,
-  as Go's UnmarshalAsJSON leaves it (it was the decode error `the
-  response has no body`).
 - A list of enum values in the query is comma joined, a
   `collectionFormat: multi` array is one parameter per value, and a
   HEAD operation's response has no `success` field.
