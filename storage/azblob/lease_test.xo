@@ -1,0 +1,76 @@
+// The lease clients against a fake that answers as the Go program's fake
+// does (leasevectors_test.xo): every request Go's, byte for byte.
+
+use std/http
+
+const LEASE_GO_DATE: Str = "Fri, 06 Nov 2026 14:08:47 GMT"
+
+fn lease_answer(req: http.Request) -> http.Response {
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("held") {
+    return with_hs(http.empty(409), common + [("x-ms-error-code", "LeaseAlreadyPresent")])
+  }
+  let status = match req.header("x-ms-lease-action") ?? "" {
+    "acquire" => 201
+    "break" => 202
+    _ => 200
+  }
+  with_hs(http.empty(status), common + [("ETag", "\"0x8D1\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT"), ("x-ms-lease-id", "from-server"), ("x-ms-lease-time", "12")])
+}
+
+fn lease_dump(x: LeaseResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseID", x.lease_id)
+  d.i("LeaseTime", x.lease_time)
+  d
+}
+
+test "the lease clients send what Go sends and read what Go reads" {
+  let log = serve_blob(os.net, [BEP], lease_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(LEASE_GO_DATE))
+  let c = svc.new_container_client("c1")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let mac = ModifiedConditions{if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let dates = ContainerConditions{if_modified_since: Some(when), if_unmodified_since: Some(when)}
+
+  var bl = new_blob_lease_client(os.rand, c.new_blob_client("b.txt"), Some("lease-1"))
+  out = out + add(shown("l1 blob acquire with conditions", bl.acquire_lease(30, mac), lease_dump))
+  out = out + add(shown("l1b blob acquire, infinite", bl.acquire_lease(-1), lease_dump))
+  out = out + add(shown("l2 blob break with a period and conditions", bl.break_lease(Some(5), mac), lease_dump))
+  out = out + add(shown("l2b blob break naturally", bl.break_lease(Some(BREAK_NATURALLY)), lease_dump))
+  out = out + add(shown("l2c blob break now", bl.break_lease(Some(0)), lease_dump))
+  out = out + add(shown("l3 blob change with conditions", bl.change_lease("lease-2", mac), lease_dump))
+  out = out + ["== l3b lease ID after change", "  ${bl.lease_id}"]
+  out = out + add(shown("l4 blob renew with conditions", bl.renew_lease(mac), lease_dump))
+  out = out + add(shown("l5 blob release with conditions", bl.release_lease(mac), lease_dump))
+  out = out + add(shown("l5b blob release", bl.release_lease(), lease_dump))
+  var held = new_blob_lease_client(os.rand, c.new_blob_client("held"), Some("lease-3"))
+  out = out + add(shown("l6 blob acquire, already leased", held.acquire_lease(15), lease_dump))
+  let _ = held.change_lease("lease-4").ignore_err("the 409 is the point: the ID must stay")
+  out = out + add(["== l6b lease ID after a failed change", "  ${held.lease_id}"])
+
+  var cl = new_container_lease_client(os.rand, c, Some("lease-5"))
+  out = out + add(shown("l7 container acquire with conditions", cl.acquire_lease(60, dates), lease_dump))
+  out = out + add(shown("l8 container break with a period and conditions", cl.break_lease(Some(3), dates), lease_dump))
+  out = out + add(shown("l8b container break", cl.break_lease(), lease_dump))
+  out = out + add(shown("l9 container change with conditions", cl.change_lease("lease-6", dates), lease_dump))
+  out = out + add(shown("l10 container renew with conditions", cl.renew_lease(dates), lease_dump))
+  out = out + add(shown("l11 container release with conditions", cl.release_lease(dates), lease_dump))
+  out = out + ["== l12 container lease ID", "  ${cl.lease_id}"]
+  out = out + drain(log)
+  expect(out) == LEASE_OUTPUT
+}
+
+test "a lease client with no ID makes a random UUID" {
+  let svc = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/")
+  let id = new_blob_lease_client(os.rand, svc.new_container_client("c1").new_blob_client("b")).lease_id
+  expect(id.len()) == 36
+  expect(id[14..15]) == "4"
+  expect(new_container_lease_client(os.rand, svc.new_container_client("c1")).lease_id != id) == true
+}

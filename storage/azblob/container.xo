@@ -1,0 +1,174 @@
+// The container client, as azblob v1.8.3's container/client.go and
+// container/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md), with the requests of its generated ContainerClient. Each
+// option's conditions are the ones Go's format() passes on: a delete or
+// an access policy takes the two date conditions, set_metadata only
+// If-Modified-Since.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob/sas
+
+/// A client of one container.
+pub struct ContainerClient {
+  /// The container's URL.
+  pub url: Str
+  core: Core
+}
+
+fn container_of(c: Core) -> ContainerClient {
+  ContainerClient{url: c.url, core: c}
+}
+
+/// A container client with Entra ID tokens (container.NewClient).
+pub fn new_container_client(net: Net, clock: Clock, rand: Rand, container_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> ContainerClient {
+  container_of(core_with_token(net, clock, rand, container_url, cred, options))
+}
+
+pub fn new_container_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, container_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> ContainerClient {
+  container_of(core_with_shared_key(net, clock, rand, container_url, cred, options))
+}
+
+/// A container client with no credential: a SAS in `container_url`, or
+/// public access.
+pub fn new_container_client_with_no_credential(net: Net, clock: Clock, rand: Rand, container_url: Str, options: ClientOptions = ClientOptions{}) -> ContainerClient {
+  container_of(core_with_no_credential(net, clock, rand, container_url, options))
+}
+
+pub fn new_container_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, container_name: Str, options: ClientOptions = ClientOptions{}) -> ContainerClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(p.service_url, container_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_container_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_container_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The date conditions on a container (Go's ModifiedAccessConditions as
+/// a container call reads them; an ETag or tag condition does not apply).
+pub struct ContainerConditions {
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+}
+
+fn container_call(method: Str, comp: Str?, ok: List[Int]) -> Call {
+  var q = [("restype", "container")]
+  if let Some(c) = comp { q.push(("comp", c)) }
+  Call{method: method, query: q, ok: ok}
+}
+
+pub struct CreateContainerOptions {
+  /// `PUBLIC_ACCESS_TYPE_BLOB` or `PUBLIC_ACCESS_TYPE_CONTAINER`.
+  pub access: Str? = None
+  pub metadata: Map[Str, Str]? = None
+  pub default_encryption_scope: Str? = None
+  pub prevent_encryption_scope_override: Bool? = None
+}
+
+pub fn (c: ContainerClient) create(options: CreateContainerOptions = CreateContainerOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_str("x-ms-blob-public-access", o.access) + h_str("x-ms-default-encryption-scope", o.default_encryption_scope) + h_bool("x-ms-deny-encryption-scope-override", o.prevent_encryption_scope_override) + h_meta(o.metadata)
+  Ok(etag_response(c.core.send(container_call("PUT", None, [201]) with {headers: hs})?))
+}
+
+pub struct DeleteContainerOptions {
+  pub lease_id: Str? = None
+  pub conditions: ContainerConditions = ContainerConditions{}
+}
+
+pub fn (c: ContainerClient) delete(options: DeleteContainerOptions = DeleteContainerOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_time("If-Modified-Since", o.conditions.if_modified_since) + h_time("If-Unmodified-Since", o.conditions.if_unmodified_since) + h_str("x-ms-lease-id", o.lease_id)
+  Ok(response_of(c.core.send(container_call("DELETE", None, [202]) with {headers: hs})?))
+}
+
+/// Restores the deleted container of this client's name at
+/// `deleted_container_version` (Go's Restore).
+pub fn (c: ContainerClient) restore(deleted_container_version: Str) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let (name, _) = url_names(c.url) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let hs = [("x-ms-deleted-container-name", name), ("x-ms-deleted-container-version", deleted_container_version)]
+  Ok(response_of(c.core.send(container_call("PUT", Some("undelete"), [201]) with {headers: hs})?))
+}
+
+pub struct ContainerPropertiesResponse {
+  pub response: Response
+  pub blob_public_access: Str? = None
+  pub default_encryption_scope: Str? = None
+  pub deny_encryption_scope_override: Bool? = None
+  pub etag: Str? = None
+  pub has_immutability_policy: Bool? = None
+  pub has_legal_hold: Bool? = None
+  pub is_immutable_storage_with_versioning_enabled: Bool? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  /// Names as Go's http.Header canonicalizes them (`Color`).
+  pub metadata: Map[Str, Str]? = None
+}
+
+pub fn (c: ContainerClient) get_properties(lease_id: Str? = None) -> ContainerPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.core.send(container_call("GET", None, [200]) with {headers: h_str("x-ms-lease-id", lease_id)})?
+  Ok(ContainerPropertiesResponse{
+    response: response_of(resp), blob_public_access: r_str(resp, "x-ms-blob-public-access"),
+    default_encryption_scope: r_str(resp, "x-ms-default-encryption-scope"), deny_encryption_scope_override: r_bool(resp, "x-ms-deny-encryption-scope-override"),
+    etag: r_str(resp, "ETag"), has_immutability_policy: r_bool(resp, "x-ms-has-immutability-policy"), has_legal_hold: r_bool(resp, "x-ms-has-legal-hold"),
+    is_immutable_storage_with_versioning_enabled: r_bool(resp, "x-ms-immutable-storage-with-versioning-enabled"), last_modified: r_time(resp, "Last-Modified"),
+    lease_duration: r_str(resp, "x-ms-lease-duration"), lease_state: r_str(resp, "x-ms-lease-state"), lease_status: r_str(resp, "x-ms-lease-status"),
+    metadata: r_meta(resp),
+  })
+}
+
+pub struct SetContainerMetadataOptions {
+  pub metadata: Map[Str, Str]? = None
+  pub lease_id: Str? = None
+  /// Only If-Modified-Since is sent (Go's format drops the rest).
+  pub conditions: ContainerConditions = ContainerConditions{}
+}
+
+pub fn (c: ContainerClient) set_metadata(options: SetContainerMetadataOptions = SetContainerMetadataOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_time("If-Modified-Since", o.conditions.if_modified_since) + h_str("x-ms-lease-id", o.lease_id) + h_meta(o.metadata)
+  Ok(etag_response(c.core.send(container_call("PUT", Some("metadata"), [200]) with {headers: hs})?))
+}
+
+pub struct ContainerAccessPolicyResponse {
+  pub response: Response
+  pub blob_public_access: Str? = None
+  pub content_type: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub signed_identifiers: List[SignedIdentifier] = []
+}
+
+pub fn (c: ContainerClient) get_access_policy(lease_id: Str? = None) -> ContainerAccessPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.core.send(container_call("GET", Some("acl"), [200]) with {headers: h_str("x-ms-lease-id", lease_id), accept: Some("application/xml")})?
+  Ok(ContainerAccessPolicyResponse{response: response_of(resp), blob_public_access: r_str(resp, "x-ms-blob-public-access"), content_type: r_str(resp, "Content-Type"), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified"), signed_identifiers: decode_body(resp, parse_signed_identifiers)?})
+}
+
+pub struct SetAccessPolicyOptions {
+  /// `PUBLIC_ACCESS_TYPE_BLOB` or `PUBLIC_ACCESS_TYPE_CONTAINER`; unset
+  /// makes the container private.
+  pub access: Str? = None
+  pub lease_id: Str? = None
+  pub conditions: ContainerConditions = ContainerConditions{}
+  pub container_acl: List[SignedIdentifier] = []
+}
+
+pub fn (c: ContainerClient) set_access_policy(options: SetAccessPolicyOptions = SetAccessPolicyOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_time("If-Modified-Since", o.conditions.if_modified_since) + h_time("If-Unmodified-Since", o.conditions.if_unmodified_since) + h_str("x-ms-blob-public-access", o.access) + h_str("x-ms-lease-id", o.lease_id)
+  Ok(etag_response(c.core.send(container_call("PUT", Some("acl"), [200]) with {headers: hs, body: Some(signed_identifiers_xml(o.container_acl).bytes())})?))
+}
+
+pub fn (c: ContainerClient) get_account_info() -> AccountInfoResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(account_info_of(c.core.send(Call{method: "GET", query: [("comp", "properties"), ("restype", "account")], ok: [200]})?))
+}
+
+/// A container SAS URL: `permissions` letters of
+/// `sas.CONTAINER_PERMISSIONS`.
+pub fn (c: ContainerClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = c.core.cred ?? return Err(MISSING_SHARED_KEY_CREDENTIAL)
+  let (name, _) = url_names(c.url)?
+  let qps = sas.BlobSignatureValues{version: sas.VERSION, container_name: name, permissions: permissions, start: start, expiry: Some(expiry)}.sign_with_shared_key(cred)?
+  Ok(append_sas(c.url, qps.encode()))
+}

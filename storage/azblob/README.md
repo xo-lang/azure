@@ -11,6 +11,16 @@ What it does:
   pagers. Hand written ahead of the generator; its calls are a
   convenience shape, not yet Go's container, blob and block blob
   clients.
+- Go's clients, beside `Client` (which keeps its shape):
+  `ServiceClient` (properties, account info, account SAS URL),
+  `ContainerClient` (create, delete, restore, properties, metadata,
+  access policy, account info, SAS URL), `BlobClient` (properties, HTTP
+  headers, metadata, tags, delete, `download_stream`,
+  `download_buffer`), and `BlobLeaseClient` and `ContainerLeaseClient`
+  (acquire, break, change, release, renew). Each is built from a token,
+  a Shared Key, no credential, or a connection string, as Go's are, and
+  every request and response is checked byte for byte against Go
+  v1.8.3 on a fake service.
 - `exported`: Shared Key (`SharedKeyCredential` and its policy, checked
   against Go's signer on captured vectors) and the user delegation
   credential.
@@ -27,9 +37,28 @@ Where it differs from Go v1.8.3:
 - Not ported yet: `ClientOptions.ExpectContinueBehavior` (Go sends
   `Expect: 100-continue` for a minute after a 429, 500 or 503). It comes
   with Go's default once Xo's std can send that header.
-- Not ported yet: Go's container, blob, block blob, append blob, page
-  blob and lease clients, batch, and the parallel and checksummed
-  transfers.
-- Go names that are Xo keywords: none in what is ported.
+- `set_tags` writes the tags in key order; Go writes its map in map
+  order, so with two or more tags its body varies from run to run.
+- `download_buffer` returns the bytes rather than filling a caller's
+  buffer, and asks for its blocks one at a time in order (Go asks five
+  at a time). Its requests are Go's.
+- A download reads its whole body, so there is no retry reader: a
+  failed read is a failed send, which the retry policy repeats.
+- Go's `DownloadStreamResponse.ObjectReplicationRules` list is never
+  filled (its parser looks for `or-` after the prefix is gone);
+  `object_replication_rules` here is the map of `x-ms-or-*` headers,
+  as Go's generated response holds them. A download has no smart
+  access tier, as Go's conversion drops it.
+- Container calls take `ContainerConditions` (the two dates), the ones
+  Go's options pass on; container `set_metadata` sends only
+  If-Modified-Since, as Go's does.
+- Not ported yet: `blob.ParseURL` and `URLParts`, `with_snapshot` and
+  `with_version_id`, a blob SAS URL, `DownloadFile`, structured message
+  (transactional CRC64) downloads, the container and blob pagers on the
+  new clients, the block blob, append blob and page blob clients,
+  batch, and the parallel and checksummed uploads.
+- Go names that are Xo keywords: none in what is ported (the lease
+  calls are Go's `AcquireLease` to `RenewLease`, so `break_lease` is
+  Go's own name).
 
 Changes: [CHANGELOG.md](CHANGELOG.md).

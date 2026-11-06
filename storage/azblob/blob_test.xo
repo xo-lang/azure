@@ -1,0 +1,213 @@
+// The blob client's properties, HTTP headers, metadata, tags and delete
+// against a fake that answers as the Go program's fake does
+// (blobvectors_test.xo): every request Go's, byte for byte, and what is
+// read back printed as Go's dump printed it.
+
+use std/http
+
+const BLOB_GO_DATE: Str = "Fri, 06 Nov 2026 13:59:44 GMT"
+
+const BLOB_TAGS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Tags><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>team</Key><Value>a&amp;b</Value></Tag></TagSet></Tags>"
+
+const BLOB_PROPS: List[(Str, Str)] = [
+  ("Accept-Ranges", "bytes"), ("x-ms-access-tier", "Hot"), ("x-ms-access-tier-change-time", "Wed, 04 Nov 2026 01:02:03 GMT"), ("x-ms-access-tier-inferred", "true"),
+  ("x-ms-archive-status", "rehydrate-pending-to-hot"), ("x-ms-blob-committed-block-count", "3"), ("x-ms-blob-sequence-number", "7"), ("x-ms-blob-type", "BlockBlob"),
+  ("Cache-Control", "no-cache"), ("Content-Disposition", "inline"), ("Content-Encoding", "gzip"), ("Content-Language", "en"), ("Content-Length", "1024"),
+  ("Content-MD5", "AAECAwQFBgcICQoLDA0ODw=="), ("Content-Type", "text/plain"), ("x-ms-copy-completion-time", "Tue, 03 Nov 2026 01:02:03 GMT"), ("x-ms-copy-id", "cp1"),
+  ("x-ms-copy-progress", "10/10"), ("x-ms-copy-source", "https://src.example.test/c/b"), ("x-ms-copy-status", "success"), ("x-ms-copy-status-description", "done"),
+  ("x-ms-creation-time", "Mon, 02 Nov 2026 01:02:03 GMT"), ("x-ms-copy-destination-snapshot", "2026-11-02T01:02:03.0000000Z"), ("ETag", "\"0x8D2\""),
+  ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1"), ("x-ms-expiry-time", "Sat, 07 Nov 2026 01:02:03 GMT"),
+  ("x-ms-immutability-policy-until-date", "Sun, 08 Nov 2026 01:02:03 GMT"), ("x-ms-immutability-policy-mode", "unlocked"), ("x-ms-is-current-version", "true"),
+  ("x-ms-incremental-copy", "false"), ("x-ms-blob-sealed", "false"), ("x-ms-server-encrypted", "true"), ("x-ms-last-access-time", "Thu, 05 Nov 2026 02:02:03 GMT"),
+  ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT"), ("x-ms-lease-duration", "fixed"), ("x-ms-lease-state", "leased"), ("x-ms-lease-status", "locked"),
+  ("x-ms-legal-hold", "true"), ("x-ms-meta-color", "blue"), ("x-ms-meta-Big-Size", "L"), ("x-ms-or-policy-id", "pol1"), ("x-ms-or-pol1_rule1", "complete"),
+  ("x-ms-rehydrate-priority", "High"), ("x-ms-smart-access-tier", "Cool"), ("x-ms-tag-count", "2"), ("x-ms-version-id", "2026-11-05T03:00:00.0000000Z"),
+]
+
+fn blob_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let tag = [("ETag", "\"0x8D1\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  if req.url.path.contains("missing") {
+    return empty(404, [("x-ms-error-code", "BlobNotFound")])
+  }
+  if req.method == "HEAD" {
+    return empty(200, BLOB_PROPS)
+  }
+  if q("comp") == "tags" && req.method == "GET" {
+    return with_hs(http.text(200, BLOB_TAGS), common + [("Content-Type", "application/xml")])
+  }
+  if q("comp") == "tags" {
+    return empty(204, [])
+  }
+  if q("comp") == "properties" {
+    return empty(200, tag + [("x-ms-blob-sequence-number", "7")])
+  }
+  if q("comp") == "metadata" {
+    return empty(200, tag + [("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1"), ("x-ms-request-server-encrypted", "true"), ("x-ms-version-id", "v1")])
+  }
+  if req.method == "DELETE" {
+    return empty(202, [])
+  }
+  empty(400, [])
+}
+
+/// Go's `%q` of bytes: printable ASCII as is, the C escapes, else \xNN.
+fn goq_bytes(b: Bytes) -> Str {
+  var out = "\""
+  for i in 0..b.len() {
+    let c = b[i]
+    out = out + (if c == 0x22 { "\\\"" } else if c == 0x5c { "\\\\" } else if c == 7 { "\\a" } else if c == 8 { "\\b" } else if c == 9 { "\\t" } else if c == 10 { "\\n" } else if c == 11 { "\\v" } else if c == 12 { "\\f" } else if c == 13 { "\\r" } else if c >= 0x20 && c < 0x7f { b[i..i + 1].to_str_lossy() } else { "\\x${Int(c).to_str_width(2, base: 16, zero: true)}" })
+  }
+  out + "\""
+}
+
+fn (var d: Dump) q(name: Str, v: Bytes?) {
+  if let Some(x) = v { d.lines.push("${name}=${goq_bytes(x)}") }
+}
+
+fn blob_props_dump(x: GetBlobPropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("AccessTier", x.access_tier)
+  d.t("AccessTierChangeTime", x.access_tier_change_time)
+  d.b("AccessTierInferred", x.access_tier_inferred)
+  d.s("ArchiveStatus", x.archive_status)
+  d.i("BlobCommittedBlockCount", x.blob_committed_block_count)
+  d.i("BlobSequenceNumber", x.blob_sequence_number)
+  d.s("BlobType", x.blob_type)
+  d.s("CacheControl", x.cache_control)
+  d.s("ContentDisposition", x.content_disposition)
+  d.s("ContentEncoding", x.content_encoding)
+  d.s("ContentLanguage", x.content_language)
+  d.i("ContentLength", x.content_length)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ContentType", x.content_type)
+  d.t("CopyCompletionTime", x.copy_completion_time)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyProgress", x.copy_progress)
+  d.s("CopySource", x.copy_source)
+  d.s("CopyStatus", x.copy_status)
+  d.s("CopyStatusDescription", x.copy_status_description)
+  d.t("CreationTime", x.creation_time)
+  d.s("DestinationSnapshot", x.destination_snapshot)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.t("ExpiresOn", x.expires_on)
+  d.t("ImmutabilityPolicyExpiresOn", x.immutability_policy_expires_on)
+  d.s("ImmutabilityPolicyMode", x.immutability_policy_mode)
+  d.b("IsCurrentVersion", x.is_current_version)
+  d.b("IsIncrementalCopy", x.is_incremental_copy)
+  d.b("IsSealed", x.is_sealed)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastAccessed", x.last_accessed)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.b("LegalHold", x.legal_hold)
+  d.m("Metadata", x.metadata)
+  d.s("ObjectReplicationPolicyID", x.object_replication_policy_id)
+  d.m("ObjectReplicationRules", x.object_replication_rules)
+  d.s("RehydratePriority", x.rehydrate_priority)
+  d.s("SmartAccessTier", x.smart_access_tier)
+  d.i("TagCount", x.tag_count)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn http_headers_dump(x: SetHTTPHeadersResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("BlobSequenceNumber", x.blob_sequence_number)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+fn blob_metadata_dump(x: SetBlobMetadataResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn tags_dump(x: GetTagsResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.lines.push("BlobTagSet.len=${x.blob_tag_set.len()}")
+  var i = 0
+  for t in x.blob_tag_set {
+    d.s("BlobTagSet[${i}].Key", t.key)
+    d.s("BlobTagSet[${i}].Value", t.value)
+    i += 1
+  }
+  d
+}
+
+test "the blob client sends what Go sends and reads what Go reads" {
+  let log = serve_blob(os.net, [BEP], blob_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(BLOB_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, opts)
+  let c = svc.new_container_client("c1")
+  let b = c.new_blob_client("dir/a b+c.txt")
+  var out: List[Str] = ["== b0 blob URL", "  ${b.url}"]
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("\"a\"='b'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+
+  out = out + add(shown("b1 blob get properties", b.get_properties(), blob_props_dump))
+  out = out + add(match b.get_properties(GetBlobPropertiesOptions{conditions: ac, cpk_info: Some(cpk)}) {
+    Ok(x) => one_str("b2 blob get properties with conditions and a key", x.etag)
+    Err(e) => err_lines("b2", e)
+  })
+  let hh = HTTPHeaders{blob_cache_control: Some("max-age=1"), blob_content_disposition: Some("attachment"), blob_content_encoding: Some("gzip"), blob_content_language: Some("fr"), blob_content_md5: Some(b"\x01\x02\x03"), blob_content_type: Some("text/x")}
+  out = out + add(shown("b3 blob set HTTP headers with conditions", b.set_http_headers(hh, ac), http_headers_dump))
+  out = out + add(match b.set_http_headers(HTTPHeaders{}) {
+    Ok(x) => one_str("b3b blob set HTTP headers, none", x.etag)
+    Err(e) => err_lines("b3b", e)
+  })
+  out = out + add(shown("b4 blob set metadata with conditions, a key and a scope", b.set_metadata(Some({"k": "v", "Up": "X"}), SetBlobMetadataOptions{conditions: ac, cpk_info: Some(cpk), encryption_scope: Some("scope1")}), blob_metadata_dump))
+  out = out + add(match b.set_metadata() {
+    Ok(x) => one_str("b4b blob set metadata, none", x.version_id)
+    Err(e) => err_lines("b4b", e)
+  })
+  let when_b = BlobModifiedConditions{if_match: Some("e3"), if_none_match: Some("e4"), if_modified_since: Some(when), if_unmodified_since: Some(when)}
+  out = out + add(shown("b5 blob set tags with every option", b.set_tags({"env": "p<r>od"}, SetTagsOptions{version_id: Some("v1"), transactional_content_crc64: Some(b"\x09\x09"), transactional_content_md5: Some(b"\x08\x08"), lease_id: Some("l1"), if_tags: Some("\"a\"='b'"), blob_conditions: when_b}), resp_dump))
+  out = out + add(match b.set_tags({}) {
+    Ok(x) => one_str("b5b blob set tags, none", x.request_id)
+    Err(e) => err_lines("b5b", e)
+  })
+  out = out + add(shown("b6 blob get tags with every option", b.get_tags(GetTagsOptions{snapshot: Some("2026-11-01T00:00:00.0000000Z"), version_id: Some("v1"), conditions: ac}), tags_dump))
+  out = out + add(match b.get_tags() {
+    Ok(x) => one_str("b6b blob get tags, none", x.response.request_id)
+    Err(e) => err_lines("b6b", e)
+  })
+  out = out + add(shown("b7 blob delete with every option", b.delete(DeleteBlobOptions{delete_snapshots: Some(DELETE_SNAPSHOTS_INCLUDE), conditions: ac, blob_delete_type: Some(DELETE_TYPE_PERMANENT), access_tier_if_modified_since: Some(when), access_tier_if_unmodified_since: Some(when)}), resp_dump))
+  out = out + add(match b.delete() {
+    Ok(x) => one_str("b7b blob delete, none", x.request_id)
+    Err(e) => err_lines("b7b", e)
+  })
+  out = out + add(quiet("b8 blob get properties, not found", c.new_blob_client("missing").get_properties()))
+  let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
+  let fb = new_blob_client_from_connection_string(os.net, os.clock, os.rand, cs, "c2", "x/y z.txt", opts)?
+  out = out + ["== b9 blob from a connection string", "  ${fb.url}"]
+  out = out + add(quiet("b9b delete it", fb.delete()))
+  out = out + drain(log)
+  expect(out) == BLOB_OUTPUT
+}
+
+test "set_tags writes the tags in key order" {
+  expect(blob_tags_xml({"b": "2", "a": "1"})) == "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Tags><TagSet><Tag><Key>a</Key><Value>1</Value></Tag><Tag><Key>b</Key><Value>2</Value></Tag></TagSet></Tags>"
+}

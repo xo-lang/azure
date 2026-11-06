@@ -1,0 +1,195 @@
+// The Blob service's service and container models, as azblob v1.8.3's
+// generated zz_models.go and zz_models_serde.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). Request bodies are written as Go's
+// encoding/xml writes them: a `<?xml ...?>` line, elements in Go's field
+// order (a field the serde overrides goes last), an unset field left out.
+
+use std/time
+use std/xml
+use github.com/xo-lang/azure/storage/azblob/sas
+
+const XML_HEADER: Str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+
+pub const PUBLIC_ACCESS_TYPE_BLOB: Str = "blob"
+pub const PUBLIC_ACCESS_TYPE_CONTAINER: Str = "container"
+
+pub struct RetentionPolicy {
+  pub enabled: Bool? = None
+  pub allow_permanent_delete: Bool? = None
+  pub days: Int? = None
+}
+
+pub struct Metrics {
+  pub enabled: Bool? = None
+  pub include_apis: Bool? = None
+  pub retention_policy: RetentionPolicy? = None
+  pub version: Str? = None
+}
+
+/// Azure Analytics logging settings.
+pub struct Logging {
+  pub delete: Bool? = None
+  pub read: Bool? = None
+  pub retention_policy: RetentionPolicy? = None
+  pub version: Str? = None
+  pub write: Bool? = None
+}
+
+pub struct CorsRule {
+  pub allowed_headers: Str? = None
+  pub allowed_methods: Str? = None
+  pub allowed_origins: Str? = None
+  pub exposed_headers: Str? = None
+  pub max_age_in_seconds: Int? = None
+}
+
+pub struct StaticWebsite {
+  pub enabled: Bool? = None
+  pub default_index_document_path: Str? = None
+  pub error_document_404_path: Str? = None
+  pub index_document: Str? = None
+}
+
+/// The Blob service's properties (StorageServiceProperties).
+pub struct StorageServiceProperties {
+  pub cors: List[CorsRule]? = None
+  pub default_service_version: Str? = None
+  pub delete_retention_policy: RetentionPolicy? = None
+  pub hour_metrics: Metrics? = None
+  pub logging: Logging? = None
+  pub minute_metrics: Metrics? = None
+  pub static_website: StaticWebsite? = None
+}
+
+pub struct AccessPolicy {
+  pub expiry: Time? = None
+  /// Letters of `rwdl` and the others a container SAS takes.
+  pub permission: Str? = None
+  pub start: Time? = None
+}
+
+/// A stored access policy (at most five a container).
+pub struct SignedIdentifier {
+  pub id: Str? = None
+  pub access_policy: AccessPolicy? = None
+}
+
+// Writing.
+
+fn el(name: Str, inner: Str) -> Str {
+  "<${name}>${inner}</${name}>"
+}
+
+fn x_str(name: Str, v: Str?) -> Str {
+  v.map(fn(x: Str) -> Str { el(name, xml.escape(x)) }) ?? ""
+}
+
+fn x_bool(name: Str, v: Bool?) -> Str {
+  v.map(fn(x: Bool) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn x_int(name: Str, v: Int?) -> Str {
+  v.map(fn(x: Int) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn retention_xml(name: Str, r: RetentionPolicy?) -> Str {
+  r.map(fn(x: RetentionPolicy) -> Str { el(name, x_bool("Enabled", x.enabled) + x_bool("AllowPermanentDelete", x.allow_permanent_delete) + x_int("Days", x.days)) }) ?? ""
+}
+
+fn metrics_xml(name: Str, m: Metrics?) -> Str {
+  m.map(fn(x: Metrics) -> Str { el(name, x_bool("Enabled", x.enabled) + x_bool("IncludeAPIs", x.include_apis) + retention_xml("RetentionPolicy", x.retention_policy) + x_str("Version", x.version)) }) ?? ""
+}
+
+fn logging_xml(l: Logging?) -> Str {
+  l.map(fn(x: Logging) -> Str { el("Logging", x_bool("Delete", x.delete) + x_bool("Read", x.read) + retention_xml("RetentionPolicy", x.retention_policy) + x_str("Version", x.version) + x_bool("Write", x.write)) }) ?? ""
+}
+
+fn website_xml(w: StaticWebsite?) -> Str {
+  w.map(fn(x: StaticWebsite) -> Str { el("StaticWebsite", x_bool("Enabled", x.enabled) + x_str("DefaultIndexDocumentPath", x.default_index_document_path) + x_str("ErrorDocument404Path", x.error_document_404_path) + x_str("IndexDocument", x.index_document)) }) ?? ""
+}
+
+fn cors_xml(rules: List[CorsRule]?) -> Str {
+  let rs = rules ?? []
+  if rs.is_empty() {
+    return ""
+  }
+  el("Cors", rs.map(fn(r: CorsRule) -> Str {
+    el("CorsRule", x_str("AllowedHeaders", r.allowed_headers) + x_str("AllowedMethods", r.allowed_methods) + x_str("AllowedOrigins", r.allowed_origins) + x_str("ExposedHeaders", r.exposed_headers) + x_int("MaxAgeInSeconds", r.max_age_in_seconds))
+  }).join(""))
+}
+
+/// The set_properties body (Cors last: its serde override).
+pub fn service_properties_xml(p: StorageServiceProperties) -> Str {
+  XML_HEADER + el("StorageServiceProperties", x_str("DefaultServiceVersion", p.default_service_version) + retention_xml("DeleteRetentionPolicy", p.delete_retention_policy) + metrics_xml("HourMetrics", p.hour_metrics) + logging_xml(p.logging) + metrics_xml("MinuteMetrics", p.minute_metrics) + website_xml(p.static_website) + cors_xml(p.cors))
+}
+
+fn x_time(name: Str, t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { el(name, sas.format_time(x)) }) ?? ""
+}
+
+/// The set_access_policy body (Permission first in a policy: Expiry and
+/// Start are the serde's overrides). Times are written to the second in
+/// UTC, as the container client's formatTime truncates them.
+pub fn signed_identifiers_xml(ids: List[SignedIdentifier]) -> Str {
+  XML_HEADER + el("SignedIdentifiers", ids.map(fn(s: SignedIdentifier) -> Str {
+    let ap = s.access_policy.map(fn(a: AccessPolicy) -> Str { el("AccessPolicy", x_str("Permission", a.permission) + x_time("Expiry", a.expiry) + x_time("Start", a.start)) }) ?? ""
+    el("SignedIdentifier", x_str("Id", s.id) + ap)
+  }).join(""))
+}
+
+// Reading.
+
+fn c_text(e: xml.Element, name: Str) -> Str? {
+  e.child(name).map(fn(x: xml.Element) -> Str { x.text() })
+}
+
+fn c_bool(e: xml.Element, name: Str) -> Bool? {
+  c_text(e, name).and_then(fn(t: Str) -> Bool? { go_parse_bool(t) })
+}
+
+fn c_int(e: xml.Element, name: Str) -> Int? {
+  c_text(e, name).and_then(fn(t: Str) -> Int? { Int.parse(t) })
+}
+
+fn c_3339(e: xml.Element, name: Str) -> Time? {
+  c_text(e, name).and_then(fn(t: Str) -> Time? { rfc3339(t) })
+}
+
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time.
+fn rfc3339(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.to_upper(), time.RFC3339, time.utc()).ok()
+}
+
+fn xml_doc(text: Str, what: Str) -> xml.Element ! Str {
+  xml.parse(text) ?? e => Err("the ${what} is not XML: ${e.display()}")
+}
+
+fn retention_of(e: xml.Element, name: Str) -> RetentionPolicy? {
+  e.child(name).map(fn(r: xml.Element) -> RetentionPolicy { RetentionPolicy{enabled: c_bool(r, "Enabled"), allow_permanent_delete: c_bool(r, "AllowPermanentDelete"), days: c_int(r, "Days")} })
+}
+
+fn metrics_of(e: xml.Element, name: Str) -> Metrics? {
+  e.child(name).map(fn(m: xml.Element) -> Metrics { Metrics{enabled: c_bool(m, "Enabled"), include_apis: c_bool(m, "IncludeAPIs"), retention_policy: retention_of(m, "RetentionPolicy"), version: c_text(m, "Version")} })
+}
+
+pub fn parse_service_properties(text: Str) -> StorageServiceProperties ! Str {
+  let d = xml_doc(text, "service properties")?
+  let cors = d.child("Cors").map(fn(c: xml.Element) -> List[CorsRule] {
+    c.children_named("CorsRule").map(fn(r: xml.Element) -> CorsRule {
+      CorsRule{allowed_headers: c_text(r, "AllowedHeaders"), allowed_methods: c_text(r, "AllowedMethods"), allowed_origins: c_text(r, "AllowedOrigins"), exposed_headers: c_text(r, "ExposedHeaders"), max_age_in_seconds: c_int(r, "MaxAgeInSeconds")}
+    })
+  })
+  let logging = d.child("Logging").map(fn(l: xml.Element) -> Logging { Logging{delete: c_bool(l, "Delete"), read: c_bool(l, "Read"), retention_policy: retention_of(l, "RetentionPolicy"), version: c_text(l, "Version"), write: c_bool(l, "Write")} })
+  let website = d.child("StaticWebsite").map(fn(w: xml.Element) -> StaticWebsite { StaticWebsite{enabled: c_bool(w, "Enabled"), default_index_document_path: c_text(w, "DefaultIndexDocumentPath"), error_document_404_path: c_text(w, "ErrorDocument404Path"), index_document: c_text(w, "IndexDocument")} })
+  Ok(StorageServiceProperties{cors: cors, default_service_version: c_text(d, "DefaultServiceVersion"), delete_retention_policy: retention_of(d, "DeleteRetentionPolicy"), hour_metrics: metrics_of(d, "HourMetrics"), logging: logging, minute_metrics: metrics_of(d, "MinuteMetrics"), static_website: website})
+}
+
+pub fn parse_signed_identifiers(text: Str) -> List[SignedIdentifier] ! Str {
+  let d = xml_doc(text, "access policy")?
+  Ok(d.children_named("SignedIdentifier").map(fn(s: xml.Element) -> SignedIdentifier {
+    SignedIdentifier{id: c_text(s, "Id"), access_policy: s.child("AccessPolicy").map(fn(a: xml.Element) -> AccessPolicy { AccessPolicy{start: c_3339(a, "Start"), expiry: c_3339(a, "Expiry"), permission: c_text(a, "Permission")} })}
+  }))
+}

@@ -1,0 +1,241 @@
+// Blob downloads, as azblob v1.8.3's blob.Client DownloadStream and
+// DownloadBuffer (blob/client.go, MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), with the request of its generated
+// BlobClient.Download. A response body here is read in full by the
+// pipeline, so Go's retry reader (which re-requests the rest of a body
+// whose read fails) has nothing to do: a failed read is a failed send,
+// which the pipeline's retry policy repeats.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+/// The default block of a buffered download (blob.DefaultDownloadBlockSize).
+pub const DEFAULT_DOWNLOAD_BLOCK_SIZE: Int = 4194304
+
+/// A byte range (Go's HTTPRange): `count` 0 is to the end.
+pub struct HTTPRange {
+  pub offset: Int = 0
+  pub count: Int = 0
+}
+
+/// `bytes=<offset>-<end>`, or None for the whole blob
+/// (exported.FormatHTTPRange).
+pub fn format_http_range(r: HTTPRange) -> Str? {
+  if r.offset == 0 && r.count == 0 {
+    return None
+  }
+  let end = if r.count > 0 { "${r.offset + r.count - 1}" } else { "" }
+  Some("bytes=${r.offset}-${end}")
+}
+
+pub struct DownloadStreamOptions {
+  pub range_get_content_md5: Bool? = None
+  pub range: HTTPRange = HTTPRange{}
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// A download (Go's DownloadStreamResponse). A 304 Not Modified is not
+/// an error: it comes back with only `error_code` set, as Go returns it.
+pub struct DownloadStreamResponse {
+  pub response: Response
+  pub body: Bytes = b""
+  pub error_code: Str? = None
+  pub accept_ranges: Str? = None
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub blob_committed_block_count: Int? = None
+  /// The three hashes are empty, never None, when their header is absent
+  /// (Go's generated Download decodes them unconditionally).
+  pub blob_content_md5: Bytes? = None
+  pub blob_sequence_number: Int? = None
+  pub blob_type: Str? = None
+  pub cache_control: Str? = None
+  pub content_crc64: Bytes? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_range: Str? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  pub creation_time: Time? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub immutability_policy_expires_on: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub is_current_version: Bool? = None
+  pub is_sealed: Bool? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_accessed: Time? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub legal_hold: Bool? = None
+  /// Names as Go's http.Header canonicalizes them (`Color`).
+  pub metadata: Map[Str, Str]? = None
+  pub object_replication_policy_id: Str? = None
+  /// Every `x-ms-or-*` header, prefix removed and names canonicalized.
+  /// (Go's parsed ObjectReplicationRules list is left out: Go never fills
+  /// it, as its parser looks for `or-` in these names after the prefix is
+  /// gone.)
+  pub object_replication_rules: Map[Str, Str]? = None
+  // No smart access tier: Go's convertDownloadResponse drops the one its
+  // generated layer reads.
+  pub tag_count: Int? = None
+  pub version_id: Str? = None
+}
+
+fn download_of(resp: http.Response) -> DownloadStreamResponse {
+  let s = fn(n: Str) -> Str? { r_str(resp, n) }
+  let b = fn(n: Str) -> Bool? { r_bool(resp, n) }
+  let t = fn(n: Str) -> Time? { r_time(resp, n) }
+  let i = fn(n: Str) -> Int? { r_int(resp, n) }
+  DownloadStreamResponse{
+    response: response_of(resp), body: resp.body, accept_ranges: s("Accept-Ranges"), access_tier: s("x-ms-access-tier"),
+    access_tier_change_time: t("x-ms-access-tier-change-time"), blob_committed_block_count: i("x-ms-blob-committed-block-count"),
+    blob_content_md5: Some(r_b64(resp, "x-ms-blob-content-md5") ?? b""), blob_sequence_number: i("x-ms-blob-sequence-number"), blob_type: s("x-ms-blob-type"),
+    cache_control: s("Cache-Control"), content_crc64: Some(r_b64(resp, "x-ms-content-crc64") ?? b""), content_disposition: s("Content-Disposition"),
+    content_encoding: s("Content-Encoding"), content_language: s("Content-Language"), content_length: i("Content-Length"),
+    content_md5: Some(r_b64(resp, "Content-MD5") ?? b""), content_range: s("Content-Range"), content_type: s("Content-Type"),
+    copy_completion_time: t("x-ms-copy-completion-time"), copy_id: s("x-ms-copy-id"), copy_progress: s("x-ms-copy-progress"),
+    copy_source: s("x-ms-copy-source"), copy_status: s("x-ms-copy-status"), copy_status_description: s("x-ms-copy-status-description"),
+    creation_time: t("x-ms-creation-time"), etag: s("ETag"), encryption_key_sha256: s("x-ms-encryption-key-sha256"),
+    encryption_scope: s("x-ms-encryption-scope"), immutability_policy_expires_on: t("x-ms-immutability-policy-until-date"),
+    immutability_policy_mode: s("x-ms-immutability-policy-mode"), is_current_version: b("x-ms-is-current-version"), is_sealed: b("x-ms-blob-sealed"),
+    is_server_encrypted: b("x-ms-server-encrypted"), last_accessed: t("x-ms-last-access-time"), last_modified: t("Last-Modified"),
+    lease_duration: s("x-ms-lease-duration"), lease_state: s("x-ms-lease-state"), lease_status: s("x-ms-lease-status"), legal_hold: b("x-ms-legal-hold"),
+    metadata: r_meta(resp), object_replication_policy_id: s("x-ms-or-policy-id"), object_replication_rules: r_prefixed(resp, "x-ms-or-"),
+    tag_count: i("x-ms-tag-count"), version_id: s("x-ms-version-id"),
+  }
+}
+
+/// Downloads the blob, or `options.range` of it.
+pub fn (b: BlobClient) download_stream(options: DownloadStreamOptions = DownloadStreamOptions{}) -> DownloadStreamResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + h_str("Range", format_http_range(o.range)) + cpk_headers(o.cpk_info) + h_bool("x-ms-range-get-content-md5", o.range_get_content_md5)
+  match b.core.send(Call{method: "GET", headers: hs, ok: [200, 206], accept: Some("application/octet-stream")}) {
+    Ok(resp) => Ok(download_of(resp))
+    Err(Response(e)) => if e.status_code == 304 { Ok(DownloadStreamResponse{response: Response{}, error_code: Some(e.error_code), blob_content_md5: Some(b""), content_crc64: Some(b""), content_md5: Some(b"")}) } else { Err(azcore.CallErr.Response(e)) }
+    Err(e) => Err(e)
+  }
+}
+
+pub struct DownloadBufferOptions {
+  /// The range to download; `count` 0 is to the end.
+  pub range: HTTPRange = HTTPRange{}
+  /// The size of each request's range (0 is DEFAULT_DOWNLOAD_BLOCK_SIZE).
+  pub block_size: Int = 0
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// The `<start>` and `<end>` of a `bytes <start>-<end>/...` range.
+fn content_range_bounds(cr: Str) -> (Int, Int)? {
+  if !cr.starts_with("bytes ") {
+    return None
+  }
+  let rest = cr[6..cr.len()]
+  let slash = rest.find("/") ?? return None
+  let dash = rest[0..slash].find("-") ?? return None
+  let start = Int.parse(rest[0..dash]) ?? return None
+  let end = Int.parse(rest[dash + 1..slash]) ?? return None
+  Some((start, end))
+}
+
+/// parseContentRangeLength: end - start + 1, or 0.
+fn content_range_length(cr: Str) -> Int {
+  match content_range_bounds(cr) {
+    Some((s, e)) => e - s + 1
+    None => 0
+  }
+}
+
+/// parseContentRangeTotal: the total after the slash, or 0.
+fn content_range_total(cr: Str) -> Int {
+  if content_range_bounds(cr).is_none() {
+    return 0
+  }
+  let slash = cr.find("/") ?? return 0
+  Int.parse(cr[slash + 1..cr.len()]) ?? 0
+}
+
+fn is_invalid_range(e: azcore.CallErr) -> Bool {
+  match e {
+    Response(r) => r.error_code == "InvalidRange"
+    _ => false
+  }
+}
+
+/// `count` bytes from `start` in chunks of `block`, one request at a time
+/// in order (Go's DoBatchTransfer, which runs them five at a time).
+fn (b: BlobClient) download_chunks(o: DownloadBufferOptions, conditions: AccessConditions, start: Int, count: Int, block: Int) -> Bytes ! azcore.CallErr uses (net.dial, clock, rand) {
+  var out = b""
+  let chunks = (count - 1) / block + 1
+  var n = 0
+  while n < chunks {
+    let size = if n == chunks - 1 { count - n * block } else { block }
+    let r = b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: start + n * block, count: size}, conditions: conditions, cpk_info: o.cpk_info})?
+    out = out + r.body
+    n += 1
+  }
+  Ok(out)
+}
+
+/// Downloads the blob (or `options.range` of it) in blocks, as Go's
+/// DownloadBuffer: with no count it asks for the first block, reads the
+/// size from Content-Range, and asks for the rest with If-Match set to the
+/// first response's ETag, so a blob changed in between fails with 412.
+/// The bytes are returned rather than written into a caller's buffer.
+pub fn (b: BlobClient) download_buffer(options: DownloadBufferOptions = DownloadBufferOptions{}) -> Bytes ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let block = if o.block_size == 0 { DEFAULT_DOWNLOAD_BLOCK_SIZE } else { o.block_size }
+  if o.range.count != 0 {
+    return b.download_chunks(o, o.conditions, o.range.offset, o.range.count, block)
+  }
+  let first = match b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: o.range.offset, count: block}, conditions: o.conditions, cpk_info: o.cpk_info}) {
+    Ok(r) => r
+    Err(e) => return if is_invalid_range(e) { Ok(b"") } else { Err(e) }
+  }
+  if first.content_range.is_none() && first.content_length.is_none() {
+    return Err(azcore.CallErr.InvalidInput("response contained no content headers; this may indicate a 304 Not Modified due to access conditions"))
+  }
+  let total = match first.content_range {
+    Some(cr) => {
+      let t = content_range_total(cr)
+      if t <= 0 {
+        return Err(azcore.CallErr.InvalidInput("unable to parse total size from Content-Range header: ${cr}"))
+      }
+      t
+    }
+    None => (first.content_length ?? 0) + o.range.offset
+  }
+  let count = total - o.range.offset
+  if count <= 0 {
+    return Ok(b"")
+  }
+  let conditions = match first.etag {
+    Some(e) => o.conditions with {if_match: Some(e)}
+    None => o.conditions
+  }
+  let initial = match first.content_range {
+    Some(cr) => content_range_length(cr)
+    None => first.content_length ?? 0
+  }
+  if initial <= 0 {
+    return Ok(b"")
+  }
+  let head = if first.body.len() > initial { first.body[0..initial] } else { first.body }
+  if initial >= count {
+    return Ok(head)
+  }
+  Ok(head + b.download_chunks(o, conditions, o.range.offset + initial, count - initial, block)?)
+}

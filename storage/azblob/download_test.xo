@@ -1,0 +1,165 @@
+// Downloads against a fake that answers as the Go program's fake does
+// (downloadvectors_test.xo): one 10 byte blob served in ranges, a 304
+// for its ETag, a 412 for another ETag (or, at offset 8, for the blob
+// named "changing"), a 416 InvalidRange past its end, and the whole
+// blob, ignoring the range, for the blob named "norange".
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+const DOWNLOAD_GO_DATE: Str = "Fri, 06 Nov 2026 14:10:39 GMT"
+
+const DOWNLOAD_PROPS: List[(Str, Str)] = [
+  ("Accept-Ranges", "bytes"), ("x-ms-access-tier", "Hot"), ("x-ms-access-tier-change-time", "Wed, 04 Nov 2026 01:02:03 GMT"),
+  ("x-ms-blob-committed-block-count", "3"), ("x-ms-blob-content-md5", "AQID"), ("x-ms-blob-sequence-number", "7"), ("x-ms-blob-type", "BlockBlob"),
+  ("Cache-Control", "no-cache"), ("x-ms-content-crc64", "CQk="), ("Content-Disposition", "inline"), ("Content-Encoding", "identity"), ("Content-Language", "en"),
+  ("Content-MD5", "BAU="), ("Content-Type", "text/plain"), ("x-ms-copy-completion-time", "Tue, 03 Nov 2026 01:02:03 GMT"), ("x-ms-copy-id", "cp1"),
+  ("x-ms-copy-progress", "10/10"), ("x-ms-copy-source", "https://src.example.test/c/b"), ("x-ms-copy-status", "success"), ("x-ms-copy-status-description", "done"),
+  ("x-ms-creation-time", "Mon, 02 Nov 2026 01:02:03 GMT"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1"),
+  ("x-ms-immutability-policy-until-date", "Sun, 08 Nov 2026 01:02:03 GMT"), ("x-ms-immutability-policy-mode", "locked"), ("x-ms-is-current-version", "true"),
+  ("x-ms-blob-sealed", "true"), ("x-ms-server-encrypted", "true"), ("x-ms-last-access-time", "Thu, 05 Nov 2026 02:02:03 GMT"), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT"),
+  ("x-ms-lease-duration", "infinite"), ("x-ms-lease-state", "leased"), ("x-ms-lease-status", "locked"), ("x-ms-legal-hold", "false"),
+  ("x-ms-meta-color", "blue"), ("x-ms-or-policy-id", "pol1"), ("x-ms-or-pol1_rule1", "complete"), ("x-ms-smart-access-tier", "Cool"),
+  ("x-ms-tag-count", "2"), ("x-ms-version-id", "v1"),
+]
+
+fn download_answer(req: http.Request) -> http.Response {
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let content = if req.url.path.contains("empty") { "" } else { "0123456789" }
+  let etag = "\"0x8D1\""
+  let rg = req.header("x-ms-range") ?? ""
+  if let Some(im) = req.header("If-Match") {
+    if im != etag || (req.url.path.contains("changing") && rg.starts_with("bytes=8")) {
+      return with_hs(http.empty(412), common + [("x-ms-error-code", "ConditionNotMet")])
+    }
+  }
+  if req.header("If-None-Match") == Some(etag) {
+    return with_hs(http.empty(304), common)
+  }
+  if rg == "" || req.url.path.contains("norange") {
+    return with_hs(http.text(200, content), common + [("ETag", etag)] + DOWNLOAD_PROPS + [("Content-Length", "${content.len()}")])
+  }
+  let spec = rg[6..rg.len()]
+  let dash = spec.find("-") ?? 0
+  let start = Int.parse(spec[0..dash]) ?? 0
+  let tail = spec[dash + 1..spec.len()]
+  var end = content.len() - 1
+  if tail != "" {
+    end = Int.parse(tail) ?? 0
+    if end > content.len() - 1 { end = content.len() - 1 }
+  }
+  if start >= content.len() {
+    return with_hs(http.empty(416), common + [("ETag", etag), ("x-ms-error-code", "InvalidRange")])
+  }
+  let hs = [("ETag", etag), ("Content-Range", "bytes ${start}-${end}/${content.len()}"), ("Content-Length", "${end - start + 1}"), ("Content-Type", "application/octet-stream")]
+  with_hs(http.text(206, content[start..end + 1]), common + hs)
+}
+
+fn download_dump(x: DownloadStreamResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("AccessTier", x.access_tier)
+  d.t("AccessTierChangeTime", x.access_tier_change_time)
+  d.i("BlobCommittedBlockCount", x.blob_committed_block_count)
+  d.q("BlobContentMD5", x.blob_content_md5)
+  d.i("BlobSequenceNumber", x.blob_sequence_number)
+  d.s("BlobType", x.blob_type)
+  d.s("CacheControl", x.cache_control)
+  d.q("ContentCRC64", x.content_crc64)
+  d.s("ContentDisposition", x.content_disposition)
+  d.s("ContentEncoding", x.content_encoding)
+  d.s("ContentLanguage", x.content_language)
+  d.i("ContentLength", x.content_length)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ContentRange", x.content_range)
+  d.s("ContentType", x.content_type)
+  d.t("CopyCompletionTime", x.copy_completion_time)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyProgress", x.copy_progress)
+  d.s("CopySource", x.copy_source)
+  d.s("CopyStatus", x.copy_status)
+  d.s("CopyStatusDescription", x.copy_status_description)
+  d.t("CreationTime", x.creation_time)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.s("ErrorCode", x.error_code)
+  d.t("ImmutabilityPolicyExpiresOn", x.immutability_policy_expires_on)
+  d.s("ImmutabilityPolicyMode", x.immutability_policy_mode)
+  d.b("IsCurrentVersion", x.is_current_version)
+  d.b("IsSealed", x.is_sealed)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastAccessed", x.last_accessed)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.b("LegalHold", x.legal_hold)
+  d.m("Metadata", x.metadata)
+  d.s("ObjectReplicationPolicyID", x.object_replication_policy_id)
+  d.m("ObjectReplicationRules", x.object_replication_rules)
+  d.i("TagCount", x.tag_count)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+/// The dump, then the body, as the Go program prints a stream.
+fn stream_lines(name: Str, r: Result[DownloadStreamResponse, azcore.CallErr]) -> List[Str] {
+  match r {
+    Ok(x) => download_dump(x).show(name) + ["  body=${goq_bytes(x.body)}"]
+    Err(e) => err_lines(name, e)
+  }
+}
+
+fn buffer_lines(name: Str, r: Result[Bytes, azcore.CallErr]) -> List[Str] {
+  match r {
+    Ok(x) => ["== ${name}", "  n=${x.len()} data=${goq_bytes(x)}"]
+    Err(e) => err_lines(name, e)
+  }
+}
+
+test "downloads send what Go sends and read what Go reads" {
+  let log = serve_blob(os.net, [BEP], download_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(DOWNLOAD_GO_DATE))
+  let c = svc.new_container_client("c1")
+  let b = c.new_blob_client("b.txt")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+
+  out = out + add(stream_lines("d1 download stream, whole blob", b.download_stream()))
+  out = out + add(stream_lines("d2 download stream, a range with conditions and a key", b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: 2, count: 3}, conditions: ac, cpk_info: Some(cpk), range_get_content_md5: Some(true)})))
+  out = out + add(stream_lines("d3 download stream, from an offset to the end", b.download_stream(DownloadStreamOptions{range: HTTPRange{offset: 5}})))
+  out = out + add(stream_lines("d4 download stream, not modified", b.download_stream(DownloadStreamOptions{conditions: AccessConditions{if_none_match: Some("\"0x8D1\"")}})))
+  out = out + add(stream_lines("d5 download stream, precondition failed", b.download_stream(DownloadStreamOptions{conditions: AccessConditions{if_match: Some("\"other\"")}})))
+  out = out + add(buffer_lines("d6 download buffer, whole blob in blocks of 4", b.download_buffer(DownloadBufferOptions{block_size: 4, conditions: ac})))
+  out = out + add(buffer_lines("d7 download buffer, a range in blocks of 3", b.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 1, count: 7}, block_size: 3})))
+  out = out + add(buffer_lines("d8 download buffer, an empty blob", c.new_blob_client("empty").download_buffer(DownloadBufferOptions{block_size: 4})))
+  out = out + add(buffer_lines("d9 download buffer, a blob that changes", c.new_blob_client("changing").download_buffer(DownloadBufferOptions{block_size: 4})))
+  out = out + add(buffer_lines("d10 download buffer, an offset past the end", b.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 12}, block_size: 4})))
+  out = out + add(buffer_lines("d11 download buffer, the default block", b.download_buffer()))
+  out = out + add(buffer_lines("d12 download buffer, from an offset", b.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 3}, block_size: 4})))
+  let nr = c.new_blob_client("norange")
+  out = out + add(buffer_lines("d13 download buffer, a server that ignores the range", nr.download_buffer(DownloadBufferOptions{block_size: 4})))
+  out = out + add(buffer_lines("d14 download buffer, past the end of a server that ignores the range", nr.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 12}, block_size: 4})))
+  out = out + drain(log)
+  expect(out) == DOWNLOAD_OUTPUT
+}
+
+test "format_http_range is Go's FormatHTTPRange" {
+  expect(format_http_range(HTTPRange{})) == None
+  expect(format_http_range(HTTPRange{offset: 3})) == Some("bytes=3-")
+  expect(format_http_range(HTTPRange{count: 2})) == Some("bytes=0-1")
+}
+
+test "a Content-Range parses as Go parses it" {
+  expect(content_range_total("bytes 0-3/10")) == 10
+  expect(content_range_total("bytes 0-3/*")) == 0
+  expect(content_range_total("items 0-3/10")) == 0
+  expect(content_range_length("bytes 4-7/10")) == 4
+  expect(content_range_length("bytes x-7/10")) == 0
+}

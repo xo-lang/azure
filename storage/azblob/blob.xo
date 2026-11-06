@@ -1,0 +1,353 @@
+// The blob client, as azblob v1.8.3's blob/client.go and blob/models.go
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md), with the requests
+// of its generated BlobClient: properties, HTTP headers, metadata, tags and
+// delete. Each option's conditions are the ones Go's format() passes on.
+
+use std/base64
+use std/http
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+pub const ENCRYPTION_ALGORITHM_AES256: Str = "AES256"
+
+pub const DELETE_SNAPSHOTS_INCLUDE: Str = "include"
+pub const DELETE_SNAPSHOTS_ONLY: Str = "only"
+
+/// The only blob delete type: delete a soft-deleted blob for good.
+pub const DELETE_TYPE_PERMANENT: Str = "Permanent"
+
+/// A client of one blob.
+pub struct BlobClient {
+  /// The blob's URL.
+  pub url: Str
+  core: Core
+}
+
+fn blob_of(c: Core) -> BlobClient {
+  BlobClient{url: c.url, core: c}
+}
+
+/// A blob client with Entra ID tokens (blob.NewClient).
+pub fn new_blob_client(net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> BlobClient {
+  blob_of(core_with_token(net, clock, rand, blob_url, cred, options))
+}
+
+pub fn new_blob_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> BlobClient {
+  blob_of(core_with_shared_key(net, clock, rand, blob_url, cred, options))
+}
+
+/// A blob client with no credential: a SAS in `blob_url`, or public
+/// access.
+pub fn new_blob_client_with_no_credential(net: Net, clock: Clock, rand: Rand, blob_url: Str, options: ClientOptions = ClientOptions{}) -> BlobClient {
+  blob_of(core_with_no_credential(net, clock, rand, blob_url, options))
+}
+
+pub fn new_blob_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, container_name: Str, blob_name: Str, options: ClientOptions = ClientOptions{}) -> BlobClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, container_name), blob_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_blob_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_blob_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The blob `blob_name` in this container, on the same pipeline; the name
+/// is path escaped as one segment (a slash too), as Go's NewBlobClient
+/// escapes it.
+pub fn (c: ContainerClient) new_blob_client(blob_name: Str) -> BlobClient {
+  blob_of(c.core with {url: join_paths(c.url, url.path_escape(blob_name))})
+}
+
+/// A blob call's lease and conditions (Go's AccessConditions: its lease
+/// and ModifiedAccessConditions).
+pub struct AccessConditions {
+  pub lease_id: Str? = None
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+  /// A SQL where clause on the blob's tags (`x-ms-if-tags`).
+  pub if_tags: Str? = None
+}
+
+fn conditions_headers(a: AccessConditions) -> List[(Str, Str)] {
+  h_str("If-Match", a.if_match) + h_time("If-Modified-Since", a.if_modified_since) + h_str("If-None-Match", a.if_none_match) + h_time("If-Unmodified-Since", a.if_unmodified_since) + h_str("x-ms-if-tags", a.if_tags) + h_str("x-ms-lease-id", a.lease_id)
+}
+
+/// The conditions on a blob for a tags call (`x-ms-blob-if-*`; Go's
+/// BlobModifiedAccessConditions).
+pub struct BlobModifiedConditions {
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+}
+
+fn blob_conditions_headers(a: BlobModifiedConditions) -> List[(Str, Str)] {
+  h_str("x-ms-blob-if-match", a.if_match) + h_time("x-ms-blob-if-modified-since", a.if_modified_since) + h_str("x-ms-blob-if-none-match", a.if_none_match) + h_time("x-ms-blob-if-unmodified-since", a.if_unmodified_since)
+}
+
+/// A customer-provided key (Go's CPKInfo): the algorithm
+/// (`ENCRYPTION_ALGORITHM_AES256`), the key and its SHA-256, both base64.
+pub struct CPKInfo {
+  pub encryption_algorithm: Str? = None
+  pub encryption_key: Str? = None
+  pub encryption_key_sha256: Str? = None
+}
+
+fn cpk_headers(c: CPKInfo?) -> List[(Str, Str)] {
+  match c {
+    Some(k) => h_str("x-ms-encryption-algorithm", k.encryption_algorithm) + h_str("x-ms-encryption-key", k.encryption_key) + h_str("x-ms-encryption-key-sha256", k.encryption_key_sha256)
+    None => []
+  }
+}
+
+fn b64(v: Bytes?) -> Str? {
+  v.map(fn(b: Bytes) -> Str { base64.encode(b) })
+}
+
+fn r_b64(resp: http.Response, name: Str) -> Bytes? {
+  r_str(resp, name).and_then(fn(v: Str) -> Bytes? { base64.decode(v).ok() })
+}
+
+// Get properties.
+
+pub struct GetBlobPropertiesOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// A blob's properties (Go's BlobClientGetPropertiesResponse).
+pub struct GetBlobPropertiesResponse {
+  pub response: Response
+  pub accept_ranges: Str? = None
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_inferred: Bool? = None
+  pub archive_status: Str? = None
+  pub blob_committed_block_count: Int? = None
+  pub blob_sequence_number: Int? = None
+  pub blob_type: Str? = None
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  pub creation_time: Time? = None
+  pub destination_snapshot: Str? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub expires_on: Time? = None
+  pub immutability_policy_expires_on: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub is_current_version: Bool? = None
+  pub is_incremental_copy: Bool? = None
+  pub is_sealed: Bool? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_accessed: Time? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub legal_hold: Bool? = None
+  /// Names as Go's http.Header canonicalizes them (`Color`).
+  pub metadata: Map[Str, Str]? = None
+  pub object_replication_policy_id: Str? = None
+  /// Every `x-ms-or-*` header, prefix removed and names canonicalized
+  /// (`Policy-Id` included, as Go reads it).
+  pub object_replication_rules: Map[Str, Str]? = None
+  pub rehydrate_priority: Str? = None
+  pub smart_access_tier: Str? = None
+  pub tag_count: Int? = None
+  pub version_id: Str? = None
+}
+
+/// Headers whose names start with `prefix`, prefix removed and the rest
+/// canonicalized; None when there are none.
+fn r_prefixed(resp: http.Response, prefix: Str) -> Map[Str, Str]? {
+  var m: Map[Str, Str] = {}
+  for (k, v) in resp.headers {
+    if k.len() > prefix.len() && k.to_lower().starts_with(prefix) {
+      m[canonical_word(k[prefix.len()..k.len()])] = v
+    }
+  }
+  if m.is_empty() { None } else { Some(m) }
+}
+
+fn blob_properties_of(resp: http.Response) -> GetBlobPropertiesResponse {
+  let s = fn(n: Str) -> Str? { r_str(resp, n) }
+  let b = fn(n: Str) -> Bool? { r_bool(resp, n) }
+  let t = fn(n: Str) -> Time? { r_time(resp, n) }
+  let i = fn(n: Str) -> Int? { r_int(resp, n) }
+  GetBlobPropertiesResponse{
+    response: response_of(resp), accept_ranges: s("Accept-Ranges"), access_tier: s("x-ms-access-tier"),
+    access_tier_change_time: t("x-ms-access-tier-change-time"), access_tier_inferred: b("x-ms-access-tier-inferred"),
+    archive_status: s("x-ms-archive-status"), blob_committed_block_count: i("x-ms-blob-committed-block-count"),
+    blob_sequence_number: i("x-ms-blob-sequence-number"), blob_type: s("x-ms-blob-type"), cache_control: s("Cache-Control"),
+    content_disposition: s("Content-Disposition"), content_encoding: s("Content-Encoding"), content_language: s("Content-Language"),
+    content_length: i("Content-Length"), content_md5: r_b64(resp, "Content-MD5"), content_type: s("Content-Type"),
+    copy_completion_time: t("x-ms-copy-completion-time"), copy_id: s("x-ms-copy-id"), copy_progress: s("x-ms-copy-progress"),
+    copy_source: s("x-ms-copy-source"), copy_status: s("x-ms-copy-status"), copy_status_description: s("x-ms-copy-status-description"),
+    creation_time: t("x-ms-creation-time"), destination_snapshot: s("x-ms-copy-destination-snapshot"), etag: s("ETag"),
+    encryption_key_sha256: s("x-ms-encryption-key-sha256"), encryption_scope: s("x-ms-encryption-scope"), expires_on: t("x-ms-expiry-time"),
+    immutability_policy_expires_on: t("x-ms-immutability-policy-until-date"), immutability_policy_mode: s("x-ms-immutability-policy-mode"),
+    is_current_version: b("x-ms-is-current-version"), is_incremental_copy: b("x-ms-incremental-copy"), is_sealed: b("x-ms-blob-sealed"),
+    is_server_encrypted: b("x-ms-server-encrypted"), last_accessed: t("x-ms-last-access-time"), last_modified: t("Last-Modified"),
+    lease_duration: s("x-ms-lease-duration"), lease_state: s("x-ms-lease-state"), lease_status: s("x-ms-lease-status"),
+    legal_hold: b("x-ms-legal-hold"), metadata: r_meta(resp), object_replication_policy_id: s("x-ms-or-policy-id"),
+    object_replication_rules: r_prefixed(resp, "x-ms-or-"), rehydrate_priority: s("x-ms-rehydrate-priority"),
+    smart_access_tier: s("x-ms-smart-access-tier"), tag_count: i("x-ms-tag-count"), version_id: s("x-ms-version-id"),
+  }
+}
+
+pub fn (b: BlobClient) get_properties(options: GetBlobPropertiesOptions = GetBlobPropertiesOptions{}) -> GetBlobPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = conditions_headers(options.conditions) + cpk_headers(options.cpk_info)
+  Ok(blob_properties_of(b.core.send(Call{method: "HEAD", headers: hs, ok: [200]})?))
+}
+
+// HTTP headers and metadata.
+
+/// The blob's standard HTTP headers (Go's HTTPHeaders); each unset one is
+/// cleared by set_http_headers.
+pub struct HTTPHeaders {
+  pub blob_cache_control: Str? = None
+  pub blob_content_disposition: Str? = None
+  pub blob_content_encoding: Str? = None
+  pub blob_content_language: Str? = None
+  pub blob_content_md5: Bytes? = None
+  pub blob_content_type: Str? = None
+}
+
+pub struct SetHTTPHeadersResponse {
+  pub response: Response
+  pub blob_sequence_number: Int? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+pub fn (b: BlobClient) set_http_headers(http_headers: HTTPHeaders, conditions: AccessConditions = AccessConditions{}) -> SetHTTPHeadersResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let h = http_headers
+  let hs = conditions_headers(conditions) + h_str("x-ms-blob-cache-control", h.blob_cache_control) + h_str("x-ms-blob-content-disposition", h.blob_content_disposition) + h_str("x-ms-blob-content-encoding", h.blob_content_encoding) + h_str("x-ms-blob-content-language", h.blob_content_language) + h_str("x-ms-blob-content-md5", b64(h.blob_content_md5)) + h_str("x-ms-blob-content-type", h.blob_content_type)
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "properties")], headers: hs, ok: [200]})?
+  Ok(SetHTTPHeadersResponse{response: response_of(resp), blob_sequence_number: r_int(resp, "x-ms-blob-sequence-number"), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified")})
+}
+
+pub struct SetBlobMetadataOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  /// An encryption scope (Go's CPKScopeInfo).
+  pub encryption_scope: Str? = None
+}
+
+pub struct SetBlobMetadataResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// Replaces the blob's metadata (none clears it).
+pub fn (b: BlobClient) set_metadata(metadata: Map[Str, Str]? = None, options: SetBlobMetadataOptions = SetBlobMetadataOptions{}) -> SetBlobMetadataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = conditions_headers(options.conditions) + cpk_headers(options.cpk_info) + h_str("x-ms-encryption-scope", options.encryption_scope) + h_meta(metadata)
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "metadata")], headers: hs, ok: [200]})?
+  Ok(SetBlobMetadataResponse{response: response_of(resp), etag: r_str(resp, "ETag"), encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), encryption_scope: r_str(resp, "x-ms-encryption-scope"), is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"), last_modified: r_time(resp, "Last-Modified"), version_id: r_str(resp, "x-ms-version-id")})
+}
+
+// Tags.
+
+pub struct BlobTag {
+  pub key: Str? = None
+  pub value: Str? = None
+}
+
+/// The set_tags body, the tags in key order. Go writes them in its map's
+/// order, which changes from run to run.
+pub fn blob_tags_xml(tags: Map[Str, Str]) -> Str {
+  XML_HEADER + el("Tags", el("TagSet", tags.keys().sort().map(fn(k: Str) -> Str { el("Tag", x_str("Key", Some(k)) + x_str("Value", tags.get(k))) }).join("")))
+}
+
+pub fn parse_blob_tags(text: Str) -> List[BlobTag] ! Str {
+  let d = xml_doc(text, "blob tags")?
+  Ok(d.child("TagSet").map(fn(s: xml.Element) -> List[BlobTag] {
+    s.children_named("Tag").map(fn(t: xml.Element) -> BlobTag { BlobTag{key: c_text(t, "Key"), value: c_text(t, "Value")} })
+  }) ?? [])
+}
+
+pub struct SetTagsOptions {
+  pub version_id: Str? = None
+  pub transactional_content_crc64: Bytes? = None
+  pub transactional_content_md5: Bytes? = None
+  pub lease_id: Str? = None
+  /// Only `x-ms-if-tags` of the access conditions is sent (Go's format).
+  pub if_tags: Str? = None
+  pub blob_conditions: BlobModifiedConditions = BlobModifiedConditions{}
+}
+
+/// Replaces the blob's tags.
+pub fn (b: BlobClient) set_tags(tags: Map[Str, Str], options: SetTagsOptions = SetTagsOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var q = [("comp", "tags")]
+  if let Some(v) = o.version_id { q.push(("versionid", v)) }
+  let hs = h_str("Content-MD5", b64(o.transactional_content_md5)) + blob_conditions_headers(o.blob_conditions) + h_str("x-ms-content-crc64", b64(o.transactional_content_crc64)) + h_str("x-ms-if-tags", o.if_tags) + h_str("x-ms-lease-id", o.lease_id)
+  Ok(response_of(b.core.send(Call{method: "PUT", query: q, headers: hs, ok: [204], body: Some(blob_tags_xml(tags).bytes())})?))
+}
+
+pub struct GetTagsOptions {
+  pub snapshot: Str? = None
+  pub version_id: Str? = None
+  /// Sent as the `x-ms-blob-if-*` conditions and `x-ms-if-tags`, as Go's
+  /// format maps them. (Go's BlobModifiedAccessConditions field is never
+  /// read, so it is not offered.)
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+pub struct GetTagsResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub blob_tag_set: List[BlobTag] = []
+}
+
+pub fn (b: BlobClient) get_tags(options: GetTagsOptions = GetTagsOptions{}) -> GetTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var q = [("comp", "tags")]
+  if let Some(s) = o.snapshot { q.push(("snapshot", s)) }
+  if let Some(v) = o.version_id { q.push(("versionid", v)) }
+  let a = o.conditions
+  let hs = blob_conditions_headers(BlobModifiedConditions{if_match: a.if_match, if_none_match: a.if_none_match, if_modified_since: a.if_modified_since, if_unmodified_since: a.if_unmodified_since}) + h_str("x-ms-if-tags", a.if_tags) + h_str("x-ms-lease-id", a.lease_id)
+  let resp = b.core.send(Call{method: "GET", query: q, headers: hs, ok: [200], accept: Some("application/xml")})?
+  Ok(GetTagsResponse{response: response_of(resp), content_type: r_str(resp, "Content-Type"), blob_tag_set: decode_body(resp, parse_blob_tags)?})
+}
+
+// Delete.
+
+pub struct DeleteBlobOptions {
+  /// `DELETE_SNAPSHOTS_INCLUDE` or `DELETE_SNAPSHOTS_ONLY`.
+  pub delete_snapshots: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  /// `DELETE_TYPE_PERMANENT`.
+  pub blob_delete_type: Str? = None
+  /// The access tier conditions (Go's AccessTierConditions).
+  pub access_tier_if_modified_since: Time? = None
+  pub access_tier_if_unmodified_since: Time? = None
+}
+
+pub fn (b: BlobClient) delete(options: DeleteBlobOptions = DeleteBlobOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var q: List[(Str, Str)] = []
+  if let Some(t) = o.blob_delete_type { q.push(("deletetype", t)) }
+  let hs = conditions_headers(o.conditions) + h_time("x-ms-access-tier-if-modified-since", o.access_tier_if_modified_since) + h_time("x-ms-access-tier-if-unmodified-since", o.access_tier_if_unmodified_since) + h_str("x-ms-delete-snapshots", o.delete_snapshots)
+  Ok(response_of(b.core.send(Call{method: "DELETE", query: q, headers: hs, ok: [202]})?))
+}

@@ -1,0 +1,365 @@
+// The core the Go-shaped clients share (ServiceClient, ContainerClient,
+// BlobClient and the lease clients), as azblob v1.8.3's internal/base and
+// internal/shared and its generated clients' request code (MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md): one pipeline with Go's range
+// policy, the query in Go's sorted order, each header written only when
+// set, and each response header read as Go's handlers read it.
+
+use std/http
+use std/netip
+use std/path
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// A SAS URL asked of a client without an account key
+/// (bloberror.MissingSharedKeyCredential).
+pub const MISSING_SHARED_KEY_CREDENTIAL: Str = "SAS can only be signed with a SharedKeyCredential"
+
+/// Moves a `Range` header to `x-ms-range` (shared.NewRangePolicy).
+pub struct RangePolicy {}
+
+fn (p: RangePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let v = req.header("Range") ?? ""
+  if v == "" {
+    return next.send(req)
+  }
+  next.send(req with {headers: req.headers.filter(fn(h: (Str, Str)) -> Bool { h.0.to_lower() != "range" }) + [("x-ms-range", v)]})
+}
+
+/// What every Go-shaped client shares: the URL, the pipeline, the key for
+/// SAS URLs and the options.
+struct Core {
+  url: Str
+  pipeline: runtime.Pipeline
+  cred: SharedKeyCredential?
+  options: ClientOptions
+}
+
+fn core_pipeline(net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy], opts: ClientOptions) -> runtime.Pipeline {
+  runtime.new_pipeline("azblob", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [RangePolicy{}], per_retry: auth}, opts.client)
+}
+
+/// The token scope (base.GetAudience).
+fn audience_scope(opts: ClientOptions) -> Str {
+  if opts.audience.trim() == "" { TOKEN_SCOPE } else { "${opts.audience.trim_end_chars("/")}/.default" }
+}
+
+fn core_with_shared_key(net: Net, clock: Clock, rand: Rand, u: Str, cred: SharedKeyCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: core_pipeline(net, clock, rand, [exported.SharedKeyPolicy{credential: cred, clock: clock}], opts), cred: Some(cred), options: opts}
+}
+
+fn core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: core_pipeline(net, clock, rand, [runtime.bearer_token_policy(cred, [audience_scope(opts)], clock)], opts), cred: None, options: opts}
+}
+
+fn core_with_no_credential(net: Net, clock: Clock, rand: Rand, u: Str, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: core_pipeline(net, clock, rand, [], opts), cred: None, options: opts}
+}
+
+/// `root` with `segment` joined to its path, its query kept
+/// (runtime.JoinPaths with one path).
+fn join_paths(root: Str, segment: Str) -> Str {
+  var r = root
+  var qps = ""
+  if r.contains("?") {
+    // Go splits on every "?" and keeps the first two parts.
+    let parts = r.split("?")
+    r = parts[0]
+    qps = parts[1]
+  }
+  var p = if segment == "" { "" } else { path.clean(segment) }
+  if segment.ends_with("/") && !p.ends_with("/") {
+    p = p + "/"
+  }
+  if qps != "" {
+    p = if p.contains("?") { "${p}&${qps}" } else { "${p}?${qps}" }
+  }
+  if r.ends_with("/") && p.starts_with("/") {
+    r = r[0..r.len() - 1]
+  } else if !r.ends_with("/") && !p.starts_with("/") && !p.starts_with("?") {
+    p = "/" + p
+  }
+  r + p
+}
+
+/// `u` with `query` merged into the query it has, the keys sorted and
+/// spaces written `%20`, as Go's generated request code writes them.
+fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
+  let (base, raw) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var v = url.parse_query(raw).ok() ?? url.values()
+  for (k, x) in query {
+    v.set(k, x)
+  }
+  let q = v.encode().replace("+", "%20")
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+/// One request: its query and headers (x-ms-version is added), an
+/// optional Accept, the body and its content type, and the statuses that
+/// succeed.
+struct Call {
+  method: Str
+  query: List[(Str, Str)] = []
+  headers: List[(Str, Str)] = []
+  ok: List[Int]
+  body: Bytes? = None
+  content_type: Str = "application/xml"
+  accept: Str? = None
+}
+
+fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let u = with_query(c.url, call.query)
+  var hs = call.headers + [("x-ms-version", SERVICE_VERSION)]
+  if let Some(a) = call.accept { hs.push(("Accept", a)) }
+  var b = b""
+  if let Some(x) = call.body {
+    hs.push(("Content-Type", call.content_type))
+    b = x
+  }
+  let req = policy.Request{method: call.method, url: u, headers: hs, body: b}
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !call.ok.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(call.method, u, resp)))
+  }
+  Ok(resp)
+}
+
+fn decode_body[T](resp: http.Response, parse: fn(Str) -> T ! Str) -> T ! azcore.CallErr {
+  parse(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+// Request headers, each written only when set.
+
+fn h_str(name: Str, v: Str?) -> List[(Str, Str)] {
+  match v {
+    Some(x) => [(name, x)]
+    None => []
+  }
+}
+
+fn h_bool(name: Str, v: Bool?) -> List[(Str, Str)] {
+  match v {
+    Some(b) => [(name, "${b}")]
+    None => []
+  }
+}
+
+fn h_int(name: Str, v: Int?) -> List[(Str, Str)] {
+  match v {
+    Some(n) => [(name, "${n}")]
+    None => []
+  }
+}
+
+/// An HTTP date header (Go's datetime.RFC7231: the time in UTC).
+fn h_time(name: Str, v: Time?) -> List[(Str, Str)] {
+  match v {
+    Some(t) => [(name, exported.http_date(t))]
+    None => []
+  }
+}
+
+/// `x-ms-meta-*` headers, names as given, in key order.
+fn h_meta(metadata: Map[Str, Str]?) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  if let Some(m) = metadata {
+    for k in m.keys().sort() {
+      hs.push(("x-ms-meta-${k}", m.get(k) ?? ""))
+    }
+  }
+  hs
+}
+
+// Response headers, None when absent or empty, as Go's handlers skip "".
+
+fn r_str(resp: http.Response, name: Str) -> Str? {
+  match resp.header(name) {
+    Some(v) => if v == "" { None } else { Some(v) }
+    None => None
+  }
+}
+
+fn r_int(resp: http.Response, name: Str) -> Int? {
+  r_str(resp, name).and_then(fn(v: Str) -> Int? { Int.parse(v) })
+}
+
+fn r_bool(resp: http.Response, name: Str) -> Bool? {
+  r_str(resp, name).and_then(fn(v: Str) -> Bool? { go_parse_bool(v) })
+}
+
+fn r_time(resp: http.Response, name: Str) -> Time? {
+  r_str(resp, name).and_then(fn(v: Str) -> Time? { rfc1123(v) })
+}
+
+/// Go's strconv.ParseBool.
+fn go_parse_bool(s: Str) -> Bool? {
+  if ["1", "t", "T", "TRUE", "true", "True"].contains(s) {
+    return Some(true)
+  }
+  if ["0", "f", "F", "FALSE", "false", "False"].contains(s) {
+    return Some(false)
+  }
+  None
+}
+
+/// `x-ms-meta-*` response headers, prefix removed, names as Go's
+/// http.Header canonicalizes them (`Color`, `Big-Size`); None when there
+/// are none, as Go leaves the map nil.
+fn r_meta(resp: http.Response) -> Map[Str, Str]? {
+  var m: Map[Str, Str] = {}
+  for (k, v) in resp.headers {
+    if k.len() > 10 && k.to_lower().starts_with("x-ms-meta-") {
+      m[canonical_word(k[10..k.len()])] = v
+    }
+  }
+  if m.is_empty() { None } else { Some(m) }
+}
+
+/// Go's textproto.CanonicalMIMEHeaderKey on a name of letters, digits
+/// and dashes.
+fn canonical_word(s: Str) -> Str {
+  s.split("-").map(fn(w: Str) -> Str {
+    if w == "" { "" } else { w[0..1].to_upper() + w[1..w.len()].to_lower() }
+  }).join("-")
+}
+
+/// What every call returns: the client and service request IDs, the
+/// service version and the date.
+pub struct Response {
+  pub client_request_id: Str? = None
+  pub date: Time? = None
+  pub request_id: Str? = None
+  pub version: Str? = None
+}
+
+fn response_of(resp: http.Response) -> Response {
+  Response{client_request_id: r_str(resp, "x-ms-client-request-id"), date: r_time(resp, "Date"), request_id: r_str(resp, "x-ms-request-id"), version: r_str(resp, "x-ms-version")}
+}
+
+/// What a write that changes an ETag returns.
+pub struct ETagResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+fn etag_response(resp: http.Response) -> ETagResponse {
+  ETagResponse{response: response_of(resp), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified")}
+}
+
+/// The account's kind, SKU and whether it has a hierarchical namespace
+/// (GetAccountInfo).
+pub struct AccountInfoResponse {
+  pub response: Response
+  pub account_kind: Str? = None
+  pub is_hierarchical_namespace_enabled: Bool? = None
+  pub sku_name: Str? = None
+}
+
+fn account_info_of(resp: http.Response) -> AccountInfoResponse {
+  AccountInfoResponse{response: response_of(resp), account_kind: r_str(resp, "x-ms-account-kind"), is_hierarchical_namespace_enabled: r_bool(resp, "x-ms-is-hns-enabled"), sku_name: r_str(resp, "x-ms-sku-name")}
+}
+
+/// A storage connection string as azblob parses it: `BlobEndpoint` or
+/// `DefaultEndpointsProtocol`, `AccountName` and `EndpointSuffix`, then
+/// `AccountKey` or `SharedAccessSignature`. The service URL ends in `/`.
+pub struct ParsedConnectionString {
+  pub service_url: Str
+  pub account_name: Str = ""
+  pub account_key: Str = ""
+}
+
+pub fn parse_connection_string(connection_string: Str) -> ParsedConnectionString ! Str {
+  let malformed = "connection string is either blank or malformed. The expected connection string should contain key value pairs separated by semicolons. For example 'DefaultEndpointsProtocol=https;AccountName=<accountName>;AccountKey=<accountKey>;EndpointSuffix=core.windows.net'"
+  var m: Map[Str, Str] = {}
+  for part in connection_string.trim_end_chars(";").split(";") {
+    let i = part.find("=") ?? return Err(malformed)
+    m[part[0..i]] = part[i + 1..part.len()]
+  }
+  let protocol = m.get("DefaultEndpointsProtocol") ?? "https"
+  let suffix = m.get("EndpointSuffix") ?? "core.windows.net"
+  var service_url = match m.get("BlobEndpoint") {
+    Some(e) => e
+    None => match m.get("AccountName") {
+      Some(a) => "${protocol}://${a}.blob.${suffix}"
+      None => return Err("connection string needs either AccountName or BlobEndpoint")
+    }
+  }
+  if !service_url.ends_with("/") {
+    service_url = service_url + "/"
+  }
+  if let Some(a) = m.get("AccountName") {
+    if let Some(k) = m.get("AccountKey") {
+      return Ok(ParsedConnectionString{service_url: service_url, account_name: a, account_key: k})
+    }
+  }
+  match m.get("SharedAccessSignature") {
+    Some(s) => Ok(ParsedConnectionString{service_url: "${service_url}?${s}"})
+    None => Err("connection string needs either AccountKey or SharedAccessSignature")
+  }
+}
+
+/// `url` and its fragment (`#...`, kept apart).
+fn cut_fragment(u: Str) -> (Str, Str) {
+  match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+}
+
+/// `query` added to `u`'s query, before its fragment (sasurl.Append).
+fn append_sas(u: Str, query: Str) -> Str {
+  if query == "" {
+    return u
+  }
+  let (base, fragment) = cut_fragment(u)
+  "${base}${if base.contains("?") { "&" } else { "?" }}${query}${fragment}"
+}
+
+/// As append_sas, the path given a trailing slash first
+/// (sasurl.AppendToAccountURL).
+fn append_sas_to_account_url(u: Str, query: Str) -> Str {
+  let (base, fragment) = cut_fragment(u)
+  let (p, raw) = match base.find("?") {
+    Some(i) => (base[0..i], base[i..base.len()])
+    None => (base, "")
+  }
+  let withslash = if p.ends_with("/") { p } else { "${p}/" }
+  append_sas("${withslash}${raw}", query) + fragment
+}
+
+/// The container and blob names of a blob URL, as blob.ParseURL reads
+/// them: the path unescaped, the account first on an IP host.
+fn url_names(u: Str) -> (Str, Str) ! Str {
+  let p = http.parse_url(u) ?? e => return Err(e.display())
+  var rest = url.path_unescape(p.path).ok() ?? p.path
+  if rest.starts_with("/") {
+    rest = rest[1..rest.len()]
+  }
+  if is_ip_host(p.host) {
+    rest = match rest.find("/") {
+      Some(i) => rest[i + 1..rest.len()]
+      None => ""
+    }
+  }
+  match rest.find("/") {
+    Some(i) => Ok((rest[0..i], rest[i + 1..rest.len()]))
+    None => Ok((rest, ""))
+  }
+}
+
+/// shared.IsIPEndpointStyle on a host without its port: Go's
+/// net.ParseIP, which takes no zone.
+fn is_ip_host(host: Str) -> Bool {
+  let h = host.trim_start_chars("[").trim_end_chars("]")
+  match netip.parse_addr(h) {
+    Ok(a) => a.zone == ""
+    Err(_) => false
+  }
+}

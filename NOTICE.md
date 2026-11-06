@@ -12,7 +12,10 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
   v1.8.3 (the Blob client's container, blob, block and list calls, hand
-  written ahead of the generator; Shared Key, the user delegation
+  written ahead of the generator; the service, container, blob and
+  lease clients, their options, responses and XML models, connection
+  strings, and the download and buffered download logic, requests
+  checked against its code; Shared Key, the user delegation
   credential, and the `sas` package:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and

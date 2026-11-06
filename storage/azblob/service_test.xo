@@ -1,0 +1,273 @@
+// The service and container clients against a fake blob service that
+// answers as the Go program's fake does (svcvectors_test.xo): every request
+// must be Go's, byte for byte (the Shared Key signature included), and
+// what is read back must print as Go's reflective dump printed it.
+
+use std/http
+use std/time
+
+const SVC_GO_DATE: Str = "Fri, 06 Nov 2026 13:49:42 GMT"
+
+const SVC_PROPS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><Write>false</Write><Delete>true</Delete><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><HourMetrics><Version>1.0</Version><Enabled>true</Enabled><IncludeAPIs>false</IncludeAPIs><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></HourMetrics><MinuteMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></MinuteMetrics><Cors><CorsRule><AllowedOrigins>https://app.example.test</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods><AllowedHeaders>x-ms-meta-*</AllowedHeaders><ExposedHeaders></ExposedHeaders><MaxAgeInSeconds>60</MaxAgeInSeconds></CorsRule></Cors><DefaultServiceVersion>2020-10-02</DefaultServiceVersion><DeleteRetentionPolicy><Enabled>true</Enabled><Days>3</Days><AllowPermanentDelete>false</AllowPermanentDelete></DeleteRetentionPolicy><StaticWebsite><Enabled>true</Enabled><IndexDocument>index.html</IndexDocument><ErrorDocument404Path>404.html</ErrorDocument404Path><DefaultIndexDocumentPath>docs/index.html</DefaultIndexDocumentPath></StaticWebsite></StorageServiceProperties>"
+
+const CONTAINER_ACL: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>pol1</Id><AccessPolicy><Start>2026-11-05T00:00:00.0000000Z</Start><Expiry>2026-11-06T00:00:00.0000000Z</Expiry><Permission>rwl</Permission></AccessPolicy></SignedIdentifier><SignedIdentifier><Id>pol2</Id></SignedIdentifier></SignedIdentifiers>"
+
+/// The Go program's fake, answer for answer.
+fn svc_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let tag = [("ETag", "\"0x8D1\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let xml_body = fn(status: Int, body: Str, hs: List[(Str, Str)]) -> http.Response { with_hs(http.text(status, body), common + hs + [("Content-Type", "application/xml")]) }
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  if req.url.path.contains("missing") {
+    return xml_body(404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ContainerNotFound</Code><Message>The specified container does not exist.</Message></Error>", [("x-ms-error-code", "ContainerNotFound")])
+  }
+  if q("restype") == "service" && req.method == "GET" {
+    return xml_body(200, SVC_PROPS, [])
+  }
+  if q("restype") == "service" {
+    return empty(202, [])
+  }
+  if q("restype") == "account" {
+    return empty(200, [("x-ms-account-kind", "StorageV2"), ("x-ms-sku-name", "Standard_LRS"), ("x-ms-is-hns-enabled", "true")])
+  }
+  if q("comp") == "acl" && req.method == "GET" {
+    return xml_body(200, CONTAINER_ACL, tag + [("x-ms-blob-public-access", "blob")])
+  }
+  if q("comp") == "undelete" {
+    return empty(201, [])
+  }
+  if req.method == "PUT" && q("comp") == "" {
+    return empty(201, tag)
+  }
+  if req.method == "DELETE" {
+    return empty(202, [])
+  }
+  if req.method == "GET" || req.method == "HEAD" {
+    return empty(200, tag + [("x-ms-blob-public-access", "container"), ("x-ms-default-encryption-scope", "$account-encryption-key"), ("x-ms-deny-encryption-scope-override", "false"), ("x-ms-has-immutability-policy", "false"), ("x-ms-has-legal-hold", "true"), ("x-ms-immutable-storage-with-versioning-enabled", "false"), ("x-ms-lease-duration", "infinite"), ("x-ms-lease-state", "leased"), ("x-ms-lease-status", "locked"), ("x-ms-meta-color", "blue"), ("x-ms-meta-Big-Size", "L")])
+  }
+  empty(200, tag)
+}
+
+fn serve_blob(net: testing.FakeNet, eps: List[Str], answer: fn(http.Request) -> http.Response) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    answer(req)
+  }
+  for ep in eps {
+    for m in ["GET", "HEAD", "PUT", "POST", "DELETE"] {
+      for p in ["/", "/{a}", "/{a}/{b}", "/{a}/{b}/{c}"] {
+        net.handle("${m} ${ep}${p}", h)
+      }
+    }
+  }
+  log
+}
+
+fn (var d: Dump) retention(p: Str, r: RetentionPolicy?) {
+  if let Some(x) = r {
+    d.b("${p}.AllowPermanentDelete", x.allow_permanent_delete)
+    d.i("${p}.Days", x.days)
+    d.b("${p}.Enabled", x.enabled)
+  }
+}
+
+fn (var d: Dump) metrics(p: Str, m: Metrics?) {
+  if let Some(x) = m {
+    d.b("${p}.Enabled", x.enabled)
+    d.b("${p}.IncludeAPIs", x.include_apis)
+    d.retention("${p}.RetentionPolicy", x.retention_policy)
+    d.s("${p}.Version", x.version)
+  }
+}
+
+fn svc_props_dump(x: ServicePropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  let p = x.properties
+  if let Some(rs) = p.cors {
+    d.lines.push("CORS.len=${rs.len()}")
+    var i = 0
+    for r in rs {
+      d.s("CORS[${i}].AllowedHeaders", r.allowed_headers)
+      d.s("CORS[${i}].AllowedMethods", r.allowed_methods)
+      d.s("CORS[${i}].AllowedOrigins", r.allowed_origins)
+      d.s("CORS[${i}].ExposedHeaders", r.exposed_headers)
+      d.i("CORS[${i}].MaxAgeInSeconds", r.max_age_in_seconds)
+      i += 1
+    }
+  }
+  d.s("DefaultServiceVersion", p.default_service_version)
+  d.retention("DeleteRetentionPolicy", p.delete_retention_policy)
+  d.metrics("HourMetrics", p.hour_metrics)
+  if let Some(l) = p.logging {
+    d.b("Logging.Delete", l.delete)
+    d.b("Logging.Read", l.read)
+    d.retention("Logging.RetentionPolicy", l.retention_policy)
+    d.s("Logging.Version", l.version)
+    d.b("Logging.Write", l.write)
+  }
+  d.metrics("MinuteMetrics", p.minute_metrics)
+  if let Some(w) = p.static_website {
+    d.s("StaticWebsite.DefaultIndexDocumentPath", w.default_index_document_path)
+    d.b("StaticWebsite.Enabled", w.enabled)
+    d.s("StaticWebsite.ErrorDocument404Path", w.error_document_404_path)
+    d.s("StaticWebsite.IndexDocument", w.index_document)
+  }
+  d
+}
+
+fn resp_dump(x: Response) -> Dump {
+  var d = Dump{}
+  d.r(x)
+  d
+}
+
+fn etag_dump(x: ETagResponse) -> Dump {
+  var d = Dump{}
+  d.etag(x)
+  d
+}
+
+fn account_dump(x: AccountInfoResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("AccountKind", x.account_kind)
+  d.b("IsHierarchicalNamespaceEnabled", x.is_hierarchical_namespace_enabled)
+  d.s("SKUName", x.sku_name)
+  d
+}
+
+fn container_props_dump(x: ContainerPropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("BlobPublicAccess", x.blob_public_access)
+  d.s("DefaultEncryptionScope", x.default_encryption_scope)
+  d.b("DenyEncryptionScopeOverride", x.deny_encryption_scope_override)
+  d.s("ETag", x.etag)
+  d.b("HasImmutabilityPolicy", x.has_immutability_policy)
+  d.b("HasLegalHold", x.has_legal_hold)
+  d.b("IsImmutableStorageWithVersioningEnabled", x.is_immutable_storage_with_versioning_enabled)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.m("Metadata", x.metadata)
+  d
+}
+
+fn acl_dump(x: ContainerAccessPolicyResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("BlobPublicAccess", x.blob_public_access)
+  d.s("ContentType", x.content_type)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.lines.push("SignedIdentifiers.len=${x.signed_identifiers.len()}")
+  var i = 0
+  for s in x.signed_identifiers {
+    if let Some(a) = s.access_policy {
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Expiry", a.expiry)
+      d.s("SignedIdentifiers[${i}].AccessPolicy.Permission", a.permission)
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Start", a.start)
+    }
+    d.s("SignedIdentifiers[${i}].ID", s.id)
+    i += 1
+  }
+  d
+}
+
+fn sas_line(name: Str, r: Result[Str, Str]) -> List[Str] {
+  match r {
+    Ok(u) => ["== ${name}", "  ${hide_sas(u)}"]
+    Err(e) => ["== ${name}", "  error ${e}"]
+  }
+}
+
+fn at(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()).ok() ?? Time.UNIX_EPOCH
+}
+
+test "the service and container clients send what Go sends and read what Go reads" {
+  let log = serve_blob(os.net, [BEP, "http://127.0.0.1:10000"], svc_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(SVC_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, opts)
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+
+  out = out + add(shown("s1 service get properties", svc.get_properties(), svc_props_dump))
+  out = out + add(shown("s2 service set properties, no options", svc.set_properties(), resp_dump))
+  let every = StorageServiceProperties{
+    cors: Some([CorsRule{allowed_origins: Some("https://a.example.test"), allowed_methods: Some("GET")}, CorsRule{allowed_origins: Some("*"), allowed_methods: Some("PUT"), allowed_headers: Some("x-a"), exposed_headers: Some("x-b"), max_age_in_seconds: Some(9)}]),
+    default_service_version: Some("2020-10-02"),
+    delete_retention_policy: Some(RetentionPolicy{enabled: Some(true), days: Some(5), allow_permanent_delete: Some(false)}),
+    hour_metrics: Some(Metrics{enabled: Some(true), include_apis: Some(true), retention_policy: Some(RetentionPolicy{enabled: Some(true), days: Some(2)})}),
+    logging: Some(Logging{read: Some(true), write: Some(true), delete: Some(false), retention_policy: Some(RetentionPolicy{enabled: Some(false)})}),
+    minute_metrics: Some(Metrics{enabled: Some(false), version: Some("2.0")}),
+    static_website: Some(StaticWebsite{enabled: Some(true), index_document: Some("i.html"), error_document_404_path: Some("e<&>.html"), default_index_document_path: Some("d.html")}),
+  }
+  out = out + add(shown("s3 service set properties, every field", svc.set_properties(every), resp_dump))
+  out = out + add(shown("s3b service set properties, empty options", svc.set_properties(StorageServiceProperties{}), resp_dump))
+  out = out + add(shown("s4 service account info", svc.get_account_info(), account_dump))
+  out = out + sas_line("s5 service SAS URL", svc.get_sas_url("sco", "rl", at("2026-11-06T00:00:00Z"), start: Some(at("2026-11-05T01:02:03.5Z"))))
+  let nc = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}?sv=2026-12-06&sig=x", go_options(""))
+  out = out + sas_line("s6 service SAS URL without a key", nc.get_sas_url("s", "r", at("2026-11-06T00:00:00Z")))
+  out = out + add(match nc.get_properties() {
+    Ok(x) => one_str("s7 service get properties with a SAS in the URL", x.response.request_id)
+    Err(e) => err_lines("s7", e)
+  })
+
+  let c = svc.new_container_client("c1")
+  out = out + ["== c0 container URL", "  ${c.url}"]
+  out = out + add(shown("c1 container create, no options", c.create(), etag_dump))
+  out = out + add(shown("c2 container create, every option", c.create(CreateContainerOptions{access: Some(PUBLIC_ACCESS_TYPE_BLOB), metadata: Some({"color": "blue", "Size": "L"}), default_encryption_scope: Some("scope1"), prevent_encryption_scope_override: Some(true)}), etag_dump))
+  let when = at("2026-11-01T02:03:04.5Z")
+  out = out + add(shown("c3 container delete with conditions", c.delete(DeleteContainerOptions{lease_id: Some("l1"), conditions: ContainerConditions{if_modified_since: Some(when), if_unmodified_since: Some(when)}}), resp_dump))
+  out = out + add(match c.delete() {
+    Ok(x) => one_time("c3b container delete, no options", x.date)
+    Err(e) => err_lines("c3b", e)
+  })
+  out = out + add(shown("c4 container restore", c.restore("01D2"), resp_dump))
+  out = out + add(shown("c5 container get properties", c.get_properties(), container_props_dump))
+  out = out + add(match c.get_properties(lease_id: Some("l1")) {
+    Ok(x) => one_str("c5b container get properties with a lease", x.etag)
+    Err(e) => err_lines("c5b", e)
+  })
+  out = out + add(shown("c6 container set metadata with conditions", c.set_metadata(SetContainerMetadataOptions{metadata: Some({"a": "1"}), lease_id: Some("l1"), conditions: ContainerConditions{if_modified_since: Some(when), if_unmodified_since: Some(when)}}), etag_dump))
+  out = out + add(match c.set_metadata() {
+    Ok(x) => one_str("c6b container set metadata, no options", x.etag)
+    Err(e) => err_lines("c6b", e)
+  })
+  out = out + add(shown("c7 container get access policy", c.get_access_policy(lease_id: Some("l1")), acl_dump))
+  let acl = [
+    SignedIdentifier{id: Some("p<1>"), access_policy: Some(AccessPolicy{start: Some(at("2026-11-05T01:02:03.999Z")), expiry: Some(at("2026-11-06T01:02:03+02:00")), permission: Some("rw")})},
+    SignedIdentifier{id: Some("p2"), access_policy: Some(AccessPolicy{permission: Some("r")})},
+    SignedIdentifier{id: Some("p3")},
+  ]
+  out = out + add(shown("c8 container set access policy", c.set_access_policy(SetAccessPolicyOptions{access: Some(PUBLIC_ACCESS_TYPE_CONTAINER), conditions: ContainerConditions{if_unmodified_since: Some(when)}, container_acl: acl}), etag_dump))
+  out = out + add(match c.set_access_policy() {
+    Ok(x) => one_str("c8b container set access policy, no options", x.etag)
+    Err(e) => err_lines("c8b", e)
+  })
+  out = out + add(shown("c9 container account info", c.get_account_info(), account_dump))
+  out = out + sas_line("c10 container SAS URL", c.get_sas_url("rlw", at("2026-11-06T00:00:00Z")))
+  out = out + add(quiet("c11 container get properties, not found", svc.new_container_client("missing").get_properties()))
+  let odd = svc.new_container_client("a b%2F")
+  out = out + ["== c12 container URL of an odd name", "  ${odd.url}"]
+  out = out + add(quiet("c12b create it", odd.create()))
+
+  let ipc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://127.0.0.1:10000/devstoreaccount1", cred, opts)
+  out = out + sas_line("c13 container SAS URL on an IP endpoint", ipc.new_container_client("c2").get_sas_url("r", at("2026-11-06T00:00:00Z")))
+
+  let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
+  let fc = new_container_client_from_connection_string(os.net, os.clock, os.rand, cs, "c3", opts)?
+  out = out + ["== c14 container from a connection string", "  ${fc.url}"]
+  out = out + add(quiet("c14b get properties", fc.get_properties()))
+  let sc = new_container_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/c4?sv=2026-12-06&sig=x%2By", go_options(""))
+  out = out + add(quiet("c15 container set metadata with a SAS in the URL", sc.set_metadata(SetContainerMetadataOptions{metadata: Some({"k": "v"})})))
+  out = out + drain(log)
+  expect(out) == SVC_OUTPUT
+}

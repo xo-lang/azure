@@ -1,0 +1,148 @@
+// Blob and container leases, as azblob v1.8.3's lease package (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md), with the requests of
+// its generated BlobClient and ContainerClient. A container lease call
+// sends only the two date conditions, as Go's format() passes them.
+
+use std/http
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+/// A break period that lets the lease end on its own (Go's
+/// BreakNaturally): no break period is sent.
+pub const BREAK_NATURALLY: Int = -1
+
+/// The conditions on a blob lease call (Go's ModifiedAccessConditions).
+pub struct ModifiedConditions {
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+  pub if_tags: Str? = None
+}
+
+fn modified_headers(m: ModifiedConditions) -> List[(Str, Str)] {
+  conditions_headers(AccessConditions{if_match: m.if_match, if_none_match: m.if_none_match, if_modified_since: m.if_modified_since, if_unmodified_since: m.if_unmodified_since, if_tags: m.if_tags})
+}
+
+fn container_dates(c: ContainerConditions) -> List[(Str, Str)] {
+  h_time("If-Modified-Since", c.if_modified_since) + h_time("If-Unmodified-Since", c.if_unmodified_since)
+}
+
+/// What a lease call returns: acquire, change and renew read the lease
+/// ID, break reads the lease time, release reads neither.
+pub struct LeaseResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub lease_id: Str? = None
+  /// Seconds until a broken lease ends.
+  pub lease_time: Int? = None
+}
+
+fn lease_response(resp: http.Response, id: Bool, time: Bool) -> LeaseResponse {
+  var l = LeaseResponse{response: response_of(resp), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified")}
+  if id { l = l with {lease_id: r_str(resp, "x-ms-lease-id")} }
+  if time { l = l with {lease_time: r_int(resp, "x-ms-lease-time")} }
+  l
+}
+
+/// Go's GenerateLeaseID: the ID given, or a random (version 4) UUID.
+fn lease_id_or_new(rand: Rand, lease_id: Str?) -> Str uses rand {
+  lease_id ?? uuid.v4(rand).display()
+}
+
+/// Go's leasePeriodPointer: BREAK_NATURALLY sends no period.
+fn break_period_header(p: Int?) -> List[(Str, Str)] {
+  match p {
+    Some(x) => if x == BREAK_NATURALLY { [] } else { [("x-ms-lease-break-period", "${x}")] }
+    None => []
+  }
+}
+
+/// A lease on a blob (lease.BlobClient); `lease_id` is the one it
+/// proposes when acquiring and holds after `change_lease`.
+pub struct BlobLeaseClient {
+  pub lease_id: Str
+  blob: BlobClient
+}
+
+/// A blob lease client (lease.NewBlobClient); with no `lease_id` it
+/// makes a random one.
+pub fn new_blob_lease_client(rand: Rand, blob: BlobClient, lease_id: Str? = None) -> BlobLeaseClient uses rand {
+  BlobLeaseClient{lease_id: lease_id_or_new(rand, lease_id), blob: blob}
+}
+
+fn (l: BlobLeaseClient) call(ok: Int, headers: List[(Str, Str)]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  l.blob.core.send(Call{method: "PUT", query: [("comp", "lease")], headers: headers, ok: [ok]})
+}
+
+/// Acquires the lease for `duration` seconds (15 to 60, or -1 for an
+/// infinite lease).
+pub fn (l: BlobLeaseClient) acquire_lease(duration: Int, conditions: ModifiedConditions = ModifiedConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(201, modified_headers(conditions) + [("x-ms-lease-action", "acquire"), ("x-ms-lease-duration", "${duration}"), ("x-ms-proposed-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+/// Breaks the lease, after `break_period` seconds when given.
+pub fn (l: BlobLeaseClient) break_lease(break_period: Int? = None, conditions: ModifiedConditions = ModifiedConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(202, modified_headers(conditions) + [("x-ms-lease-action", "break")] + break_period_header(break_period))?
+  Ok(lease_response(resp, false, true))
+}
+
+/// Changes the lease's ID to `proposed_lease_id`; the client holds the
+/// new ID once the call succeeds.
+pub fn (var l: BlobLeaseClient) change_lease(proposed_lease_id: Str, conditions: ModifiedConditions = ModifiedConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, modified_headers(conditions) + [("x-ms-lease-action", "change"), ("x-ms-lease-id", l.lease_id), ("x-ms-proposed-lease-id", proposed_lease_id)])?
+  l.lease_id = proposed_lease_id
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (l: BlobLeaseClient) release_lease(conditions: ModifiedConditions = ModifiedConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, modified_headers(conditions) + [("x-ms-lease-action", "release"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, false, false))
+}
+
+pub fn (l: BlobLeaseClient) renew_lease(conditions: ModifiedConditions = ModifiedConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, modified_headers(conditions) + [("x-ms-lease-action", "renew"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+/// A lease on a container (lease.ContainerClient).
+pub struct ContainerLeaseClient {
+  pub lease_id: Str
+  container: ContainerClient
+}
+
+pub fn new_container_lease_client(rand: Rand, container: ContainerClient, lease_id: Str? = None) -> ContainerLeaseClient uses rand {
+  ContainerLeaseClient{lease_id: lease_id_or_new(rand, lease_id), container: container}
+}
+
+fn (l: ContainerLeaseClient) call(ok: Int, headers: List[(Str, Str)]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  l.container.core.send(container_call("PUT", Some("lease"), [ok]) with {headers: headers})
+}
+
+pub fn (l: ContainerLeaseClient) acquire_lease(duration: Int, conditions: ContainerConditions = ContainerConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(201, container_dates(conditions) + [("x-ms-lease-action", "acquire"), ("x-ms-lease-duration", "${duration}"), ("x-ms-proposed-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (l: ContainerLeaseClient) break_lease(break_period: Int? = None, conditions: ContainerConditions = ContainerConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(202, container_dates(conditions) + [("x-ms-lease-action", "break")] + break_period_header(break_period))?
+  Ok(lease_response(resp, false, true))
+}
+
+pub fn (var l: ContainerLeaseClient) change_lease(proposed_lease_id: Str, conditions: ContainerConditions = ContainerConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, container_dates(conditions) + [("x-ms-lease-action", "change"), ("x-ms-lease-id", l.lease_id), ("x-ms-proposed-lease-id", proposed_lease_id)])?
+  l.lease_id = proposed_lease_id
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (l: ContainerLeaseClient) release_lease(conditions: ContainerConditions = ContainerConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, container_dates(conditions) + [("x-ms-lease-action", "release"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, false, false))
+}
+
+pub fn (l: ContainerLeaseClient) renew_lease(conditions: ContainerConditions = ContainerConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, container_dates(conditions) + [("x-ms-lease-action", "renew"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}

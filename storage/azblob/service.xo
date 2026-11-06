@@ -1,0 +1,93 @@
+// The service client, as azblob v1.8.3's service/client.go and
+// service/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md), with the requests of its generated ServiceClient. Alongside
+// `Client` (azblob.Client's calls by container and blob name), it is the
+// root of the Go-shaped clients: ServiceClient, ContainerClient,
+// BlobClient and the lease clients.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob/sas
+
+/// A client of one storage account's Blob service.
+pub struct ServiceClient {
+  /// The service URL (with a SAS query when the client has no
+  /// credential).
+  pub url: Str
+  core: Core
+}
+
+fn service_of(c: Core) -> ServiceClient {
+  ServiceClient{url: c.url, core: c}
+}
+
+/// A service client with Entra ID tokens (service.NewClient).
+pub fn new_service_client(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service_of(core_with_token(net, clock, rand, service_url, cred, options))
+}
+
+pub fn new_service_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service_of(core_with_shared_key(net, clock, rand, service_url, cred, options))
+}
+
+/// A service client with no credential: a SAS in `service_url`, or
+/// public access.
+pub fn new_service_client_with_no_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service_of(core_with_no_credential(net, clock, rand, service_url, options))
+}
+
+pub fn new_service_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_service_client_with_shared_key_credential(net, clock, rand, p.service_url, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_service_client_with_no_credential(net, clock, rand, p.service_url, options))
+}
+
+/// The container `container_name` of this account, on the same pipeline.
+/// The name is joined as given, not escaped (Go's NewContainerClient).
+pub fn (s: ServiceClient) new_container_client(container_name: Str) -> ContainerClient {
+  container_of(s.core with {url: join_paths(s.url, container_name)})
+}
+
+pub struct ServicePropertiesResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub properties: StorageServiceProperties
+}
+
+pub fn (s: ServiceClient) get_properties() -> ServicePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(Call{method: "GET", query: [("comp", "properties"), ("restype", "service")], ok: [200], accept: Some("application/xml")})?
+  Ok(ServicePropertiesResponse{response: response_of(resp), content_type: r_str(resp, "Content-Type"), properties: decode_body(resp, parse_service_properties)?})
+}
+
+/// Sets the service's properties; what is unset stays as it is. As Go's
+/// SetPropertiesOptions.format, a CORS rule's unset allowed and exposed
+/// headers are sent empty and its max age 0, and a metrics or logging
+/// setting's unset version is `1.0`.
+pub fn (s: ServiceClient) set_properties(properties: StorageServiceProperties = StorageServiceProperties{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let v1 = fn(m: Metrics) -> Metrics { m with {version: Some(m.version ?? "1.0")} }
+  let p = properties with {
+    cors: properties.cors.map(fn(rs: List[CorsRule]) -> List[CorsRule] {
+      rs.map(fn(r: CorsRule) -> CorsRule { r with {allowed_headers: Some(r.allowed_headers ?? ""), exposed_headers: Some(r.exposed_headers ?? ""), max_age_in_seconds: Some(r.max_age_in_seconds ?? 0)} })
+    }),
+    hour_metrics: properties.hour_metrics.map(v1),
+    minute_metrics: properties.minute_metrics.map(v1),
+    logging: properties.logging.map(fn(l: Logging) -> Logging { l with {version: Some(l.version ?? "1.0")} }),
+  }
+  let resp = s.core.send(Call{method: "PUT", query: [("comp", "properties"), ("restype", "service")], ok: [202], body: Some(service_properties_xml(p).bytes())})?
+  Ok(response_of(resp))
+}
+
+pub fn (s: ServiceClient) get_account_info() -> AccountInfoResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(Call{method: "GET", query: [("comp", "properties"), ("restype", "account")], ok: [200]})?
+  Ok(account_info_of(resp))
+}
+
+/// An account SAS URL for the Blob service: `resource_types` letters of
+/// `sco`, `permissions` letters of `sas.ACCOUNT_PERMISSIONS`. No protocol
+/// is signed, as Go sets none.
+pub fn (s: ServiceClient) get_sas_url(resource_types: Str, permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = s.core.cred ?? return Err(MISSING_SHARED_KEY_CREDENTIAL)
+  let qps = sas.AccountSignatureValues{version: sas.VERSION, permissions: permissions, resource_types: resource_types, start: start, expiry: Some(expiry)}.sign_with_shared_key(cred)?
+  Ok(append_sas_to_account_url(s.url, qps.encode()))
+}

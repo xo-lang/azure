@@ -1,5 +1,18 @@
 # azblob changes
 
+## v0.3.0
+
+Adds Go v1.8.3's service, container, blob and lease clients for what
+azdatalake needs. `Client` and its calls are unchanged.
+
+- `ServiceClient`, `ContainerClient`, `BlobClient`, `BlobLeaseClient`
+  and `ContainerLeaseClient`, with Go's constructors (token, Shared Key,
+  no credential, connection string).
+- `ClientOptions.audience` (default `""`: the storage scope).
+- Blob `download_stream` (ranges, conditions, a customer key, 304 as a
+  response) and `download_buffer` (Go's ETag lock across blocks).
+- Each call's request and response match Go's on captured vectors.
+
 ## v0.2.0
 
 Moves the port from Go azblob v1.6.1 to v1.8.3.
