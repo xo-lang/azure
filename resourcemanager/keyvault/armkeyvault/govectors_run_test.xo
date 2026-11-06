@@ -1,0 +1,38 @@
+// The Vaults client against the Go program's fake Resource Manager: each
+// request, decoded result (system data times, network rules), page and
+// resume token must be Go's (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const GV_KVB: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.KeyVault/vaults/kv1\",\"name\":\"kv1\",\"type\":\"Microsoft.KeyVault/vaults\",\"location\":\"westus\",\"tags\":{},\"systemData\":{\"createdBy\":\"user-a\",\"createdByType\":\"User\",\"createdAt\":\"2026-01-02T03:04:05.123Z\",\"lastModifiedAt\":\"2026-01-02T04:04:05+00:00\",\"lastModifiedBy\":\"app-b\",\"lastModifiedByType\":\"Application\"},\"properties\":{\"tenantId\":\"00000000-0000-0000-0000-000000000000\",\"sku\":{\"family\":\"A\",\"name\":\"standard\"},\"accessPolicies\":[{\"tenantId\":\"00000000-0000-0000-0000-000000000000\",\"objectId\":\"o1\",\"permissions\":{\"keys\":[\"get\",\"list\"],\"secrets\":[\"all\"]}}],\"enableSoftDelete\":true,\"softDeleteRetentionInDays\":90,\"vaultUri\":\"https://kv1.vault.example.test/\",\"provisioningState\":\"Succeeded\",\"networkAcls\":{\"bypass\":\"AzureServices\",\"defaultAction\":\"Deny\",\"ipRules\":[{\"value\":\"192.0.2.0/24\"}]}}}"
+const GV_VAULTS: Str = "/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.KeyVault/vaults"
+const GV_LOC: Str = "/subscriptions/sub-test/providers/Microsoft.KeyVault/locations/westus"
+
+test "get, the purge poller and the list pages match Go's" {
+  let f = gv_serve(os.net)
+  let c = new_vaults_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  gv_add(f, "GET", "${GV_VAULTS}/kv1", GvReply{status: 200, body: GV_KVB})
+  gv_show(f, "get", c.get("rg1", "kv1"), fn(r: VaultsClientGetResponse) -> Str { gv_json(json.to_value(r.vault)) })
+  gv_add(f, "POST", "${GV_LOC}/deletedVaults/kv1/purge", GvReply{status: 202, body: "", headers: [("Location", "${EP}${GV_LOC}/operationResults/op5?api-version=2024-11-01")]})
+  gv_add(f, "GET", "${GV_LOC}/operationResults/op5", GvReply{status: 200, body: ""})
+  match c.begin_purge_deleted("kv1", "westus") {
+    Ok(p0) => {
+      var p = p0
+      gv_token(f, "purge_deleted", p)
+      gv_show(f, "purge_deleted", p.poll_until_done(os.clock, frequency: 1ms), fn(r: VaultsClientPurgeDeletedResponse) -> Str { "{}" })
+    }
+    Err(e) => gv_note(f, "ERR begin_purge_deleted: ${gv_err(e)}")
+  }
+  gv_add(f, "GET", GV_VAULTS, GvReply{status: 200, body: "{\"value\":[${GV_KVB}],\"nextLink\":\"${EP}${GV_VAULTS}?api-version=2024-11-01&\$top=1&\$skiptoken=k1\"}"})
+  gv_add(f, "GET", GV_VAULTS, GvReply{status: 200, body: "{\"value\":[]}"})
+  var pl = c.new_list_by_resource_group_pager("rg1", VaultsClientListByResourceGroupOptions{top: Some(1)})?
+  while pl.more() {
+    let pg = pl.next_page()
+    gv_show(f, "list_page", pg, fn(r: VaultsClientListByResourceGroupResponse) -> Str { gv_json(json.to_value(r.vault_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  gv_check(f)
+}

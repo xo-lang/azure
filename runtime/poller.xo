@@ -58,6 +58,9 @@ pub struct Poller[T] {
   /// InProgress, Succeeded, Failed, Canceled (as the service writes it).
   state: Str = "InProgress"
   last: http.Response? = None
+  /// The request `last` answered (its method and URL), for its error.
+  last_method: Str = ""
+  last_url: Str = ""
 }
 
 /// `name`'s first field when it is not empty, as azcore's pollers read
@@ -72,25 +75,47 @@ pub fn new_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Respons
   if ![200, 201, 202, 204].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }
-  let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: req.method, orig_url: req.url, final_state: final_state_via, last: Some(resp)}
-  let loc = header_of(resp, "Location").map(fn(l: Str) -> Str { resolve(req.url, l) }) ?? ""
+  let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: req.method, orig_url: req.url, final_state: final_state_via, last: Some(resp), last_method: req.method, last_url: req.url}
+  // azcore's NewPoller: async, op, loc, then body for a PUT or PATCH; a
+  // polling URL must be absolute (poller.IsValidURL)
+  let loc = header_of(resp, "Location") ?? ""
   if let Some(a) = header_of(resp, "Azure-AsyncOperation") {
-    return Ok(base with {kind: Kind.Async, poll_url: resolve(req.url, a), loc_url: loc, state: "InProgress"})
+    valid_url(a)?
+    // async.New: the body's provisioning state, else InProgress
+    return Ok(base with {kind: Kind.Async, poll_url: a, loc_url: loc, state: non_empty(state_from_body(resp)) ?? "InProgress"})
   }
   if let Some(o) = header_of(resp, "Operation-Location") {
-    return Ok(base with {kind: Kind.Op, poll_url: resolve(req.url, o), loc_url: loc, state: "InProgress"})
+    valid_url(o)?
+    // op.New: the body's status, else InProgress
+    return Ok(base with {kind: Kind.Op, poll_url: o, loc_url: loc, state: non_empty(status_of(resp)) ?? "InProgress"})
   }
   if loc != "" {
-    return Ok(base with {kind: Kind.Loc, poll_url: loc, state: if resp.status == 202 { "InProgress" } else { state_from_body(resp) ?? "Succeeded" }})
+    valid_url(loc)?
+    return Ok(base with {kind: Kind.Loc, poll_url: loc, state: non_empty(state_from_body(resp)) ?? "InProgress"})
   }
   if req.method == "PUT" || req.method == "PATCH" {
-    let st = match state_from_body(resp) {
-      Some(s) => s
-      None => if resp.status == 201 { "InProgress" } else { "Succeeded" }
+    // body.New
+    let prov = non_empty(state_from_body(resp))
+    let st = match resp.status {
+      201 => prov ?? "InProgress"
+      200 => prov ?? "Succeeded"
+      204 => "Succeeded"
+      _ => "InProgress"
     }
     return Ok(base with {kind: Kind.Body, poll_url: req.url, state: st})
   }
+  if resp.status == 202 && (req.method == "DELETE" || req.method == "POST") {
+    return Err(azcore.CallErr.InvalidInput("response is missing polling URL"))
+  }
   Ok(base with {state: "Succeeded"})
+}
+
+/// poller.IsValidURL's check, with azcore's error.
+fn valid_url(u: Str) -> () ! azcore.CallErr {
+  if !is_absolute(u) {
+    return Err(azcore.CallErr.InvalidInput("invalid polling URL ${u}"))
+  }
+  Ok(())
 }
 
 /// The poller of `req`, started with `resp`, as azadmin's restorePoller
@@ -146,6 +171,14 @@ fn state_from_body(resp: http.Response) -> Str? {
   }
 }
 
+/// `s` unless it is empty (azcore reads an empty state as none).
+fn non_empty(s: Str?) -> Str? {
+  match s {
+    Some(x) => if x == "" { None } else { Some(x) }
+    None => None
+  }
+}
+
 /// The `status` field of an operation status body (async and op).
 fn status_of(resp: http.Response) -> Str? {
   let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return None
@@ -194,28 +227,49 @@ pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dia
   let req = policy.Request{method: "GET", url: p.poll_url}
   let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   match p.kind {
+    // async.Poll and op.Poll
     Async | Op => {
-      if resp.status != 200 {
+      if !status_code_valid(resp.status) {
+        p.last = Some(resp)
+        p.last_method = "GET"
+        p.last_url = p.poll_url
         return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
       }
-      p.state = status_of(resp) ?? return Err(azcore.CallErr.Decode("the operation status has no status field"))
+      let doc = json_body(resp)?
+      p.state = match doc.get("status") {
+        Some(json.Value.Str(st)) => if st == "" { return Err(azcore.CallErr.Decode("the response did not contain a status")) } else { st }
+        _ => return Err(azcore.CallErr.Decode("the response did not contain a status"))
+      }
     }
+    // loc.Poll: a failure is a state, its response the result's error
     Loc => {
       if let Some(l) = header_of(resp, "Location") {
         p.poll_url = resolve(p.poll_url, l)
       }
-      p.state = match resp.status {
-        202 => "InProgress"
-        200 | 201 | 204 => state_from_body(resp) ?? "Succeeded"
-        408 | 429 | 500 | 502 | 503 | 504 => "InProgress"
-        _ => return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      if let Some(st) = non_empty(state_from_body(resp)) {
+        p.state = st
+      } else if resp.status == 202 {
+        p.state = "InProgress"
+      } else if resp.status > 199 && resp.status < 300 {
+        p.state = "Succeeded"
+      } else if ![408, 429, 500, 502, 503, 504].contains(resp.status) {
+        p.state = "Failed"
       }
     }
+    // body.Poll
     Body => {
-      p.state = match resp.status {
-        200 | 201 => state_from_body(resp) ?? if resp.status == 201 { "InProgress" } else { "Succeeded" }
-        204 => "Succeeded"
-        _ => return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      if !status_code_valid(resp.status) {
+        p.last = Some(resp)
+        p.last_method = "GET"
+        p.last_url = p.poll_url
+        return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      }
+      if resp.status == 204 {
+        p.state = "Succeeded"
+      } else if resp.body.is_empty() {
+        return Err(azcore.CallErr.Decode("the response did not contain a body"))
+      } else {
+        p.state = non_empty(state_from_body(resp)) ?? "Succeeded"
       }
     }
     Status => {
@@ -235,66 +289,134 @@ pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dia
     Done => {}
   }
   p.last = Some(resp)
+  p.last_method = "GET"
+  p.last_url = p.poll_url
   Ok(resp)
 }
 
-/// The final result: an error when the operation failed, else the
-/// result body, fetched by method and final-state-via as azcore does.
+/// The final result, as each of azcore's pollers gives it: an error when
+/// the operation failed, else the result body, fetched by method and
+/// final-state-via.
 pub fn (var p: Poller[T]) result() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
-  let last = p.last ?? http.text(200, "")
-  if failed(p.state) {
-    return Err(azcore.CallErr.Response(azcore.response_error(p.method, p.orig_url, last)))
-  }
   if !p.done() {
-    return Err(azcore.CallErr.InvalidInput("the operation has not finished"))
+    return Err(azcore.CallErr.InvalidInput("poller is in a non-terminal state"))
   }
-  if p.kind is Kind.Status {
-    // restorePoller.Result: a 204 or an empty body is the zero result
-    if last.status == 204 || last.body.is_empty() {
-      return (p.decode)(http.text(200, "{}")) ?? e => Err(azcore.CallErr.Decode(e))
-    }
-    if ![200, 201, 202, 204].contains(last.status) {
-      return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, last)))
-    }
-    return (p.decode)(last) ?? e => Err(azcore.CallErr.Decode(e))
-  }
-  let url = match p.kind {
-    Async | Op => final_url(p, last)
-    Loc | Body | Done | Status => None
-  }
-  let resp = match url {
-    Some(u) => {
-      let r = p.pipeline.send(policy.Request{method: "GET", url: u}) ?? e => return Err(azcore.CallErr.Send(e))
-      if r.status != 200 {
-        return Err(azcore.CallErr.Response(azcore.response_error("GET", u, r)))
+  let last = p.last ?? http.text(200, "")
+  match p.kind {
+    Status => {
+      if failed(p.state) {
+        return Err(azcore.CallErr.Response(azcore.response_error(p.method, p.orig_url, last)))
       }
-      r
+      // restorePoller.Result: a 204 or an empty body is the zero result
+      if last.status == 204 || last.body.is_empty() {
+        return p.zero()
+      }
+      if !status_code_valid(last.status) {
+        return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, last)))
+      }
+      (p.decode)(last) ?? e => Err(azcore.CallErr.Decode(e))
     }
-    None => if p.method == "DELETE" && p.kind is Kind.Async { http.text(200, "") } else { last }
+    // async.Result
+    Async => {
+      if last.status == 204 {
+        return p.zero()
+      }
+      if failed(p.state) {
+        return Err(azcore.CallErr.Response(azcore.response_error(p.last_method, p.last_url, last)))
+      }
+      let url = match p.method {
+        "PUT" | "PATCH" => Some(p.orig_url)
+        "POST" => if p.final_state == AZURE_ASYNC_OPERATION {
+          None
+        } else if p.final_state == ORIGINAL_URI {
+          Some(p.orig_url)
+        } else if p.loc_url != "" {
+          Some(p.loc_url)
+        } else {
+          None
+        }
+        _ => None
+      }
+      p.final_get(url)?
+      p.result_of(false)
+    }
+    // op.Result: the final GET comes before the failure check
+    Op => {
+      var url: Str? = None
+      if p.final_state == LOCATION && p.loc_url != "" {
+        url = Some(p.loc_url)
+      } else if let Some(rl) = resource_location(last)? {
+        url = Some(rl)
+      } else if p.method == "PUT" || p.method == "PATCH" {
+        url = Some(p.orig_url)
+      } else if p.method == "POST" && p.loc_url != "" {
+        url = Some(p.loc_url)
+      }
+      p.final_get(url)?
+      p.result_of(failed(p.state))
+    }
+    Loc | Body => p.result_of(failed(p.state))
+    // NewNopPoller: the first response
+    Done => p.result_of(false)
+  }
+}
+
+/// GETs `url`, when there is one, as the response the result comes from.
+fn (var p: Poller[T]) final_get(url: Str?) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(u) = url {
+    let r = p.pipeline.send(policy.Request{method: "GET", url: u}) ?? e => return Err(azcore.CallErr.Send(e))
+    p.last = Some(r)
+    p.last_method = "GET"
+    p.last_url = u
+  }
+  Ok(())
+}
+
+/// azcore's ResultHelper over the last response: a 204 is the zero
+/// result, a failure or an unexpected status the response's error, an
+/// empty body the zero result.
+fn (p: Poller[T]) result_of(op_failed: Bool) -> T ! azcore.CallErr {
+  let resp = p.last ?? http.text(200, "")
+  if resp.status == 204 {
+    return p.zero()
+  }
+  if !status_code_valid(resp.status) || op_failed {
+    return Err(azcore.CallErr.Response(azcore.response_error(p.last_method, p.last_url, resp)))
+  }
+  if resp.body.is_empty() {
+    return p.zero()
   }
   (p.decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
 }
 
-/// Where the result of a finished async or op operation is.
-fn final_url[T](p: Poller[T], last: http.Response) -> Str? {
-  if p.kind is Kind.Op {
-    let doc = json.parse_value(last.body.to_str_lossy()).ok()
-    if let Some(json.Value.Str(r)) = doc.and_then(fn(d: json.Value) -> json.Value? { d.get("resourceLocation") }) {
-      return Some(r)
-    }
+fn (p: Poller[T]) zero() -> T ! azcore.CallErr {
+  (p.decode)(http.text(200, "{}")) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// azcore's poller.StatusCodeValid.
+fn status_code_valid(status: Int) -> Bool {
+  [200, 201, 202, 204].contains(status)
+}
+
+/// The body as a JSON object (azcore's poller.GetJSON).
+fn json_body(resp: http.Response) -> json.Value ! azcore.CallErr {
+  if resp.body.is_empty() {
+    return Err(azcore.CallErr.Decode("the response did not contain a body"))
   }
-  match p.method {
-    "PUT" | "PATCH" => Some(p.orig_url)
-    "POST" => if p.final_state == AZURE_ASYNC_OPERATION || p.final_state == OPERATION_LOCATION {
-      None
-    } else if p.final_state == ORIGINAL_URI {
-      Some(p.orig_url)
-    } else if p.loc_url != "" {
-      Some(p.loc_url)
-    } else {
-      None
-    }
-    _ => None
+  json.parse_value(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e.display()))
+}
+
+/// The `resourceLocation` of an operation status body
+/// (poller.GetResourceLocation); none without a body.
+fn resource_location(resp: http.Response) -> Str? ! azcore.CallErr {
+  if resp.body.is_empty() {
+    return Ok(None)
+  }
+  let doc = json_body(resp)?
+  match doc.get("resourceLocation") {
+    Some(json.Value.Str(r)) => Ok(non_empty(Some(r)))
+    Some(other) => Err(azcore.CallErr.Decode("the resourceLocation value ${other.encode()} was not in string format"))
+    None => Ok(None)
   }
 }
 

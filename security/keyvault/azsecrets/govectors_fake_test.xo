@@ -1,0 +1,139 @@
+// The fake service of the Go program behind govectors_test.xo: each
+// request gets the next reply queued for its method and path (else 200
+// `{}`), and is logged as the Go program logs it (invented hosts).
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
+
+const GV_HOST: Str = "https://kv1.vault.example.test"
+/// Whether a request without a token gets Key Vault's challenge.
+const GV_CHALLENGE: Bool = true
+
+struct GvReply {
+  status: Int
+  headers: List[(Str, Str)] = []
+  body: Str = "{}"
+}
+
+struct GvFake {
+  log: Mutex[List[Str]]
+  queue: Mutex[List[(Str, GvReply)]]
+}
+
+fn gv_serve(net: testing.FakeNet) -> GvFake {
+  let f = GvFake{log: Mutex[List[Str]].new([]), queue: Mutex[List[(Str, GvReply)]].new([])}
+  let h = fn(req: http.Request) -> http.Response { gv_answer(f, req) }
+  for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+    net.handle("${m} ${GV_HOST}/{rest...}", h)
+  }
+  f
+}
+
+/// Queues `r` for the next `method path` request.
+fn gv_add(f: GvFake, method: Str, path: Str, r: GvReply) {
+  f.queue.with(fn(var q: List[(Str, GvReply)]) { q.push(("${method} ${path}", r)) })
+}
+
+fn gv_note(f: GvFake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length for a body; FakeNet hands the
+  // request over in process, so the recorder writes it
+  if !req.body.is_empty() {
+    hs.push("content-length=${req.body.len()}")
+  }
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  gv_note(f, "REQ ${req.method} ${GV_HOST}${uri}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}")
+  if GV_CHALLENGE && req.header("Authorization").is_none() {
+    return http.text(401, "").with_header("WWW-Authenticate", "Bearer authorization=\"https://login.example.test/tenant-a\", resource=\"https://vault.example.test\"")
+  }
+  let key = "${req.method} ${req.escaped_path()}"
+  let found = f.queue.with(fn(var q: List[(Str, GvReply)]) -> GvReply? {
+    for i in 0..q.len() {
+      if q[i].0 == key {
+        let r = q[i].1
+        q.remove_at(i)
+        return Some(r)
+      }
+    }
+    None
+  })
+  let r = found ?? GvReply{status: 200}
+  var resp = http.text(r.status, r.body).with_header("Content-Type", "application/json")
+  for (k, v) in r.headers {
+    resp = resp.with_header(k, v)
+  }
+  resp
+}
+
+/// `v` as Go's json.Marshal writes the response struct: keys sorted
+/// (as models_serde.go's MarshalJSON writes them), <, > and & escaped.
+fn gv_json(v: json.Value) -> Str {
+  var w = json.json_writer()
+  w.value(gv_sorted(v)) ?? e => return "unencodable: ${e.display()}"
+  w.finish().to_str_lossy()
+}
+
+fn gv_sorted(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, gv_sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { gv_sorted(x) }))
+    other => other
+  }
+}
+
+/// The Go program's line for a call's result: `out` writes the value.
+fn gv_show[T](f: GvFake, label: Str, r: Result[T, azcore.CallErr], out: fn(T) -> Str) {
+  match r {
+    Ok(v) => gv_note(f, "OUT ${label}: ${out(v)}")
+    Err(e) => gv_note(f, "ERR ${label}: ${gv_err(e)}")
+  }
+}
+
+/// The Go program's line for a poller's resume token.
+fn gv_token[T](f: GvFake, label: Str, p: runtime.Poller[T]) {
+  match p.resume_token() {
+    Ok(t) => gv_note(f, "TOK ${label}: ${t}")
+    Err(e) => gv_note(f, "ERR ${label}: ${e}")
+  }
+}
+
+/// Go's `%v` of an error, or the Go program's form of a response error.
+fn gv_err(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+/// Each logged line against Go's, the first difference reported.
+fn gv_check(f: GvFake) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.join("\n").split("\n") })
+  for i in 0..got.len() {
+    if i >= GO_OUT.len() {
+      expect(got[i]) == "(Go has no more lines)"
+      return
+    }
+    if got[i] != GO_OUT[i] {
+      expect("${i}: ${got[i]}") == "${i}: ${GO_OUT[i]}"
+      return
+    }
+  }
+  expect(got.len()) == GO_OUT.len()
+}

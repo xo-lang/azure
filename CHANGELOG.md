@@ -8,6 +8,40 @@ version has been tagged since.
 
 ## Unreleased
 
+`runtime.Poller` follows azcore's async, op, loc, body and nop pollers
+step for step (behavior fix; **breaking** where noted). Checked by a Go
+program that drives azcore v1.21.0's runtime.NewPoller through 31
+cases (`runtime/pollvectors_test.xo`: every request, Done, resume
+token, poll and result), and by one Go request, response, page and
+poller per module for armresources, armstorage, armcompute,
+armnetwork, armkeyvault, azkeys, azsecrets and azcertificates
+(`govectors_test.xo` in each):
+
+- The first state comes from the first response as azcore reads it: an
+  `Azure-AsyncOperation` or `Location` operation starts in the body's
+  `properties.provisioningState` (a PUT whose 201 body already says
+  `Succeeded` is done without polling), an `Operation-Location` one in
+  its `status`; a PUT or PATCH answered 202 without a polling URL keeps
+  polling its own URL.
+- **Breaking:** a DELETE or POST answered 202 without a polling URL is
+  the error `response is missing polling URL`, and a relative polling
+  URL is `invalid polling URL <url>` (both were taken as done, or
+  resolved against the request).
+- A status poll accepts 200, 201, 202 and 204, and a status without a
+  body or a `status` is azcore's error. A `Location` poll that fails is
+  the operation's failure, its response the result's error, not an
+  error of the poll; 408, 429 and 5xx leave it running.
+- The result comes from where azcore takes it: final-state-via
+  `location` first for an `Operation-Location` operation, which GETs
+  before it reports a failure; an `Azure-AsyncOperation` DELETE gives
+  its last status body; a 204 or an empty body is the zero result; any
+  of 200, 201, 202 or 204 on the final GET is decoded. A result asked
+  of an unfinished poller is `poller is in a non-terminal state`.
+
+`azcore.DateTime` writes a time read with a non-zero offset as the
+same instant in UTC, where Go keeps the offset (a known difference,
+documented on the type; Xo's Time has no offset).
+
 Every generated operation builds its request as Go's code does
 (behavior fix; requests and some errors change). Checked statically
 against each `*CreateRequest` of the pinned Go modules (1415

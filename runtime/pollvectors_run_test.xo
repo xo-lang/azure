@@ -1,0 +1,167 @@
+// The pollers against the Go program behind pollvectors_test.xo: each
+// case's first response, polls and final GET from a fake service, and
+// every request, Done, resume token, poll and result must be Go's.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const LRO: Str = "https://lro.example.test"
+
+struct LroRes {
+  name as "name,omitempty": Str? = None
+  status as "status,omitempty": Str? = None
+} derive Json
+
+struct LroReply {
+  status: Int
+  body: Str = ""
+  headers: List[(Str, Str)] = []
+}
+
+struct LroCase {
+  name: Str
+  method: Str
+  path: Str
+  first: LroReply
+  final_state: Str = ""
+  steps: List[(Str, LroReply)] = []
+}
+
+fn ok_status(s: Str) -> Str {
+  "{\"status\":\"${s}\"}"
+}
+
+fn lro_cases() -> List[LroCase] {
+  let st = fn(key: Str, status: Int, body: Str) -> (Str, LroReply) { (key, LroReply{status: status, body: body}) }
+  [
+    LroCase{name: "loc_200_without_state", method: "PUT", path: "/r/a", first: LroReply{status: 200, headers: [("Location", "${LRO}/op/a")]}, steps: [st("GET /op/a", 200, "{\"name\":\"a\"}")]},
+    LroCase{name: "loc_failure_is_a_state", method: "POST", path: "/r/b", first: LroReply{status: 202, headers: [("Location", "${LRO}/op/b")]}, steps: [st("GET /op/b", 409, "{\"error\":{\"code\":\"Conflict\",\"message\":\"busy\"}}")]},
+    LroCase{name: "loc_moves_then_204", method: "DELETE", path: "/r/c", first: LroReply{status: 202, headers: [("Location", "${LRO}/op/c")]}, steps: [("GET /op/c", LroReply{status: 202, headers: [("Location", "${LRO}/op/c2")]}), st("GET /op/c2", 204, "")]},
+    LroCase{name: "loc_state_in_body", method: "POST", path: "/r/c3", first: LroReply{status: 202, headers: [("Location", "${LRO}/op/c3")]}, steps: [st("GET /op/c3", 200, "{\"name\":\"c3\",\"properties\":{\"provisioningState\":\"Canceled\"}}")]},
+    LroCase{name: "body_201_without_state", method: "PUT", path: "/r/d", first: LroReply{status: 201, body: "{\"name\":\"d\"}"}, steps: [st("GET /r/d", 201, "{\"name\":\"d2\"}")]},
+    LroCase{name: "body_poll_without_body", method: "PATCH", path: "/r/e", first: LroReply{status: 201, body: "{\"properties\":{\"provisioningState\":\"Updating\"}}"}, steps: [st("GET /r/e", 200, "")]},
+    LroCase{name: "body_poll_204", method: "PUT", path: "/r/e2", first: LroReply{status: 201, body: "{\"properties\":{\"provisioningState\":\"Updating\"}}"}, steps: [st("GET /r/e2", 204, "")]},
+    LroCase{name: "async_done_from_first_body", method: "PUT", path: "/r/f", first: LroReply{status: 201, body: "{\"name\":\"f\",\"properties\":{\"provisioningState\":\"Succeeded\"}}", headers: [("Azure-AsyncOperation", "${LRO}/st/f")]}, steps: [st("GET /r/f", 200, "{\"name\":\"f-final\"}")]},
+    LroCase{name: "async_202_status_and_202_final", method: "PUT", path: "/r/g", first: LroReply{status: 201, body: "{}", headers: [("Azure-AsyncOperation", "${LRO}/st/g")]}, steps: [st("GET /st/g", 202, ok_status("InProgress")), st("GET /st/g", 200, ok_status("Succeeded")), st("GET /r/g", 202, "{\"name\":\"g\"}")]},
+    LroCase{name: "async_without_status", method: "DELETE", path: "/r/h", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/h")]}, steps: [st("GET /st/h", 200, "{\"foo\":1}")]},
+    LroCase{name: "async_empty_status", method: "DELETE", path: "/r/h2", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/h2")]}, steps: [st("GET /st/h2", 200, ok_status(""))]},
+    LroCase{name: "async_status_without_body", method: "DELETE", path: "/r/h3", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/h3")]}, steps: [st("GET /st/h3", 200, "")]},
+    LroCase{name: "async_poll_404", method: "DELETE", path: "/r/i", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/i")]}, steps: [st("GET /st/i", 404, "{\"error\":{\"code\":\"NotFound\"}}")]},
+    LroCase{name: "async_failed", method: "PUT", path: "/r/i2", first: LroReply{status: 201, body: "{}", headers: [("Azure-AsyncOperation", "${LRO}/st/i2")]}, steps: [st("GET /st/i2", 200, "{\"status\":\"Failed\",\"error\":{\"code\":\"QuotaExceeded\"}}")]},
+    LroCase{name: "async_post_original_uri", method: "POST", path: "/r/j", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/j"), ("Location", "${LRO}/loc/j")]}, final_state: ORIGINAL_URI, steps: [st("GET /st/j", 200, ok_status("Succeeded")), st("GET /r/j", 200, "{\"name\":\"j\"}")]},
+    LroCase{name: "async_post_location", method: "POST", path: "/r/k", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/k"), ("Location", "${LRO}/loc/k")]}, steps: [st("GET /st/k", 200, ok_status("Succeeded")), st("GET /loc/k", 200, "{\"name\":\"k\"}")]},
+    LroCase{name: "async_post_azure_async_operation", method: "POST", path: "/r/l", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/l"), ("Location", "${LRO}/loc/l")]}, final_state: AZURE_ASYNC_OPERATION, steps: [st("GET /st/l", 200, "{\"status\":\"Succeeded\",\"name\":\"l\"}")]},
+    LroCase{name: "async_delete_result_is_status", method: "DELETE", path: "/r/m", first: LroReply{status: 202, headers: [("Azure-AsyncOperation", "${LRO}/st/m")]}, steps: [st("GET /st/m", 200, "{\"status\":\"Succeeded\",\"name\":\"m\"}")]},
+    LroCase{name: "op_final_state_location", method: "POST", path: "/r/n", first: LroReply{status: 202, headers: [("Operation-Location", "${LRO}/ol/n"), ("Location", "${LRO}/loc/n")]}, final_state: LOCATION, steps: [st("GET /ol/n", 200, "{\"status\":\"Succeeded\",\"resourceLocation\":\"${LRO}/x/n\"}"), st("GET /loc/n", 200, "{\"name\":\"n\"}")]},
+    LroCase{name: "op_resource_location", method: "PUT", path: "/r/o", first: LroReply{status: 201, body: ok_status("NotStarted"), headers: [("Operation-Location", "${LRO}/ol/o")]}, steps: [st("GET /ol/o", 200, "{\"status\":\"Succeeded\",\"resourceLocation\":\"${LRO}/x/o\"}"), st("GET /x/o", 200, "{\"name\":\"o\"}")]},
+    LroCase{name: "op_failed_gets_first", method: "PUT", path: "/r/p", first: LroReply{status: 202, headers: [("Operation-Location", "${LRO}/ol/p")]}, steps: [st("GET /ol/p", 200, "{\"status\":\"Failed\",\"error\":{\"code\":\"Boom\"}}"), st("GET /r/p", 200, "{\"name\":\"p\"}")]},
+    LroCase{name: "op_delete_no_get", method: "DELETE", path: "/r/p2", first: LroReply{status: 202, headers: [("Operation-Location", "${LRO}/ol/p2")]}, steps: [st("GET /ol/p2", 200, "{\"status\":\"Succeeded\",\"name\":\"p2\"}")]},
+    LroCase{name: "nop_post_200", method: "POST", path: "/r/q", first: LroReply{status: 200, body: "{\"name\":\"q\"}"}},
+    LroCase{name: "nop_delete_204", method: "DELETE", path: "/r/r", first: LroReply{status: 204}},
+    LroCase{name: "nop_post_empty", method: "POST", path: "/r/r2", first: LroReply{status: 200}},
+    LroCase{name: "delete_202_without_url", method: "DELETE", path: "/r/t", first: LroReply{status: 202}},
+    LroCase{name: "post_202_without_url", method: "POST", path: "/r/t2", first: LroReply{status: 202}},
+    LroCase{name: "put_202_without_url", method: "PUT", path: "/r/t3", first: LroReply{status: 202, body: "{\"name\":\"t3\"}"}},
+    LroCase{name: "relative_location", method: "PUT", path: "/r/u", first: LroReply{status: 201, body: "{}", headers: [("Location", "/op/u")]}},
+    LroCase{name: "relative_async", method: "PUT", path: "/r/u2", first: LroReply{status: 201, body: "{}", headers: [("Azure-AsyncOperation", "/st/u2")]}},
+    LroCase{name: "first_409", method: "PUT", path: "/r/w", first: LroReply{status: 409, body: "{\"error\":{\"code\":\"Conflict\"}}"}},
+  ]
+}
+
+fn lro_err(e: azcore.CallErr) -> Str {
+  match e {
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    InvalidInput(m) => m
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+fn lro_decode(r: http.Response) -> LroRes ! Str {
+  json.decode_str[LroRes](r.body.to_str_lossy()) ?? e => Err(e.display())
+}
+
+test "the pollers poll, resume and finish as azcore's do" {
+  let log = Mutex[List[Str]].new([])
+  let queue = Mutex[List[(Str, LroReply)]].new([])
+  let note = fn(s: Str) { log.with(fn(var l: List[Str]) { l.push(s) }) }
+  let h = fn(req: http.Request) -> http.Response {
+    let qs = req.raw_query()
+    note("REQ ${req.method} ${LRO}${req.escaped_path()}${if qs == "" { "" } else { "?${qs}" }}")
+    let key = "${req.method} ${req.escaped_path()}"
+    let found = queue.with(fn(var q: List[(Str, LroReply)]) -> LroReply? {
+      for i in 0..q.len() {
+        if q[i].0 == key {
+          let r = q[i].1
+          q.remove_at(i)
+          return Some(r)
+        }
+      }
+      None
+    })
+    let r = found ?? LroReply{status: 404, body: "{\"error\":{\"code\":\"NoRoute\"}}"}
+    var resp = http.text(r.status, r.body).with_header("Content-Type", "application/json")
+    for (k, v) in r.headers {
+      resp = resp.with_header(k, v)
+    }
+    resp
+  }
+  for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+    os.net.handle("${m} ${LRO}/{rest...}", h)
+  }
+  let pipeline = new_pipeline("lrotest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: 0}})
+  for c in lro_cases() {
+    note("== ${c.name}")
+    queue.with(fn(var q: List[(Str, LroReply)]) {
+      q = []
+      q.push(("${c.method} ${c.path}", c.first))
+      for s in c.steps {
+        q.push(s)
+      }
+    })
+    let req = policy.Request{method: c.method, url: "${LRO}${c.path}"}
+    let resp = pipeline.send(req)?
+    let p0 = match new_poller(pipeline, req, resp, c.final_state, "Res", lro_decode) {
+      Ok(p) => p
+      Err(e) => {
+        note("ERR new: ${lro_err(e)}")
+        continue
+      }
+    }
+    var p = p0
+    note("DONE ${p.done()}")
+    match p.resume_token() {
+      Ok(t) => note("TOK ${t}")
+      Err(e) => note("ERR token: ${e}")
+    }
+    var i = 0
+    while i < 5 && !p.done() {
+      i += 1
+      match p.poll() {
+        Ok(r) => note("POLL ${r.status} done=${p.done()}")
+        Err(e) => {
+          note("ERR poll: ${lro_err(e)}")
+          break
+        }
+      }
+    }
+    match p.result() {
+      Ok(v) => note("OUT ${json.encode_str(v)}")
+      Err(e) => note("ERR result: ${lro_err(e)}")
+    }
+  }
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for i in 0..got.len() {
+    if i >= POLL_GO_OUT.len() {
+      expect(got[i]) == "(Go has no more lines)"
+      return
+    }
+    if got[i] != POLL_GO_OUT[i] {
+      expect("${i}: ${got[i]}") == "${i}: ${POLL_GO_OUT[i]}"
+      return
+    }
+  }
+  expect(got.len()) == POLL_GO_OUT.len()
+}
