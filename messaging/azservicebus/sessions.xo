@@ -1,0 +1,84 @@
+// Listing a session enabled entity's sessions, as azservicebus's
+// NewListSessionsForQueuePager and GetMessageSessions (client.go,
+// internal/mgmt.go) (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/amqp
+
+pub struct ListSessionsOptions {
+  /// Only sessions whose state changed after this time; None lists every
+  /// session with messages (Go sends the year 10000 for that).
+  pub session_state_updated_after: Time? = None
+}
+
+/// One page of session IDs.
+pub struct ListSessionsResponse {
+  pub sessions: List[Str]
+}
+
+/// Go's listSessionsPageSize.
+const LIST_SESSIONS_PAGE_SIZE: Int = 100
+
+/// 10000-01-01T00:00:00Z, Go's "no filter" time.
+const NO_UPDATED_AFTER_MS: Int = 253402300800000
+
+/// Pages of session IDs: each asks `$management` for the next 100,
+/// skipping what came before; a short page is the last.
+pub struct ListSessionsPager {
+  client: Client
+  entity: Str
+  last_updated_ms: Int
+  skip: Int = 0
+  done: Bool = false
+}
+
+pub fn (p: ListSessionsPager) more() -> Bool {
+  !p.done
+}
+
+pub fn (var p: ListSessionsPager) next_page() -> ListSessionsResponse ! ServiceBusErr uses (net.dial, clock, rand) {
+  if p.done {
+    return Ok(ListSessionsResponse{sessions: []})
+  }
+  let body = [
+    ("last-updated-time", amqp.Value.Timestamp(ms: p.last_updated_ms)),
+    ("skip", amqp.Value.Int(v: Int32(p.skip))),
+    ("top", amqp.Value.Int(v: Int32(LIST_SESSIONS_PAGE_SIZE))),
+  ]
+  let page = match p.client.rpc(p.entity, "", "get-message-sessions", body) {
+    Ok(r) => if r.code == 204 { [] } else {
+      items(field(r.body, "sessions-ids")).map(fn(v: amqp.Value) -> Str { val_str(v) ?? "" })
+    }
+    // The service says "no sessions" as a 404 whose description names
+    // it (Go's isSessionNotFound).
+    Err(e) if e.code == CODE_NOT_FOUND && is_session_not_found(e.msg) => []
+    Err(e) => {
+      p.done = true
+      return Err(e)
+    }
+  }
+  p.skip += page.len()
+  if page.len() < LIST_SESSIONS_PAGE_SIZE {
+    p.done = true
+  }
+  Ok(ListSessionsResponse{sessions: page})
+}
+
+fn is_session_not_found(description: Str) -> Bool {
+  let lower = description.to_lower()
+  lower.contains("sessionnotfound") || lower.contains("session not found")
+}
+
+fn (c: Client) list_sessions(entity: Str, options: ListSessionsOptions) -> ListSessionsPager {
+  ListSessionsPager{client: c, entity: entity, last_updated_ms: options.session_state_updated_after.map(fn(t: Time) -> Int { t.unix_millis() }) ?? NO_UPDATED_AFTER_MS}
+}
+
+/// Pages of the IDs of a session enabled queue's sessions.
+pub fn (c: Client) new_list_sessions_for_queue_pager(queue_name: Str, options: ListSessionsOptions = ListSessionsOptions{}) -> ListSessionsPager {
+  c.list_sessions(queue_name, options)
+}
+
+/// Pages of the IDs of a session enabled subscription's sessions.
+pub fn (c: Client) new_list_sessions_for_subscription_pager(topic_name: Str, subscription_name: Str, options: ListSessionsOptions = ListSessionsOptions{}) -> ListSessionsPager {
+  c.list_sessions("${topic_name}/Subscriptions/${subscription_name}", options)
+}

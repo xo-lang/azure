@@ -51,9 +51,12 @@ What it does:
   and correlation filters with typed parameters, SQL actions, and keep
   unknown filter and action types as XML.
 
-Not yet:
+Not yet checked against the broker:
 
-- `new_list_sessions_for_queue_pager`.
+- `new_list_sessions_for_queue_pager` and `_for_subscription_pager` are
+  written as Go's (pages of 100 on `$management`, 204 or a "session not
+  found" 404 as an empty page), but std/amqptest does not answer
+  `get-message-sessions` yet (asked of Xo).
 
 Where the AMQP side differs from Go v1.11.0:
 
