@@ -6,6 +6,7 @@
 // If-Modified-Since; an ETag condition is not sent.
 
 use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
 use github.com/xo-lang/azure/storage/azblob
 
 pub type Response = azblob.Response
@@ -20,6 +21,8 @@ pub struct FileSystemClient {
   /// The file system's blob URL.
   pub blob_url: Str
   container: azblob.ContainerClient
+  /// azdatalake's own pipeline, for the dfs calls and its blob-URL lists.
+  pipeline: runtime.Pipeline
 }
 
 /// The options the blob client gets: Go passes the pipeline options on
@@ -28,25 +31,25 @@ fn blob_options(options: ClientOptions) -> ClientOptions {
   options with {audience: ""}
 }
 
-fn file_system_of(file_system_url: Str, container: fn(Str) -> azblob.ContainerClient) -> FileSystemClient {
+fn file_system_of(file_system_url: Str, container: fn(Str) -> azblob.ContainerClient, pipeline: runtime.Pipeline) -> FileSystemClient {
   let (blob_url, dfs_url) = get_urls(file_system_url)
-  FileSystemClient{dfs_url: dfs_url, blob_url: blob_url, container: container(blob_url)}
+  FileSystemClient{dfs_url: dfs_url, blob_url: blob_url, container: container(blob_url), pipeline: pipeline}
 }
 
 /// A file system client with Entra ID tokens (filesystem.NewClient);
 /// `file_system_url` may be the dfs or the blob URL.
 pub fn new_file_system_client(net: Net, clock: Clock, rand: Rand, file_system_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
-  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client(net, clock, rand, u, cred, blob_options(options)) })
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client(net, clock, rand, u, cred, blob_options(options)) }, dfs_pipeline(net, clock, rand, token_auth(clock, cred, options), options))
 }
 
 pub fn new_file_system_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, file_system_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
-  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_shared_key_credential(net, clock, rand, u, cred, blob_options(options)) })
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_shared_key_credential(net, clock, rand, u, cred, blob_options(options)) }, dfs_pipeline(net, clock, rand, shared_key_auth(clock, cred), options))
 }
 
 /// A file system client with no credential: a SAS in `file_system_url`,
 /// or public access.
 pub fn new_file_system_client_with_no_credential(net: Net, clock: Clock, rand: Rand, file_system_url: Str, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
-  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_no_credential(net, clock, rand, u, blob_options(options)) })
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_no_credential(net, clock, rand, u, blob_options(options)) }, dfs_pipeline(net, clock, rand, [], options))
 }
 
 /// A file system client from a connection string and the file system's

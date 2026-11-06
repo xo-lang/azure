@@ -1,0 +1,124 @@
+// The DFS request core, as azdatalake v1.7.1's own generated clients
+// (internal/generated and internal/generated_blob, MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): one pipeline with azdatalake's
+// telemetry, used on the dfs URL and, for the lists Go generates
+// against it, the blob URL. Its requests carry azdatalake's REST API
+// version (2026-06-06), not azblob's. The Shared Key policy is azblob's
+// and the response error azcore's.
+
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// The REST API version of azdatalake's generated requests.
+pub const SERVICE_VERSION: Str = "2026-06-06"
+
+/// The scope of a token for Storage.
+pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
+
+/// The token scope (base.GetAudience).
+fn audience_scope(opts: ClientOptions) -> Str {
+  if opts.audience.trim() == "" { TOKEN_SCOPE } else { "${opts.audience.trim_end_chars("/")}/.default" }
+}
+
+fn dfs_pipeline(net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy], opts: ClientOptions) -> runtime.Pipeline {
+  runtime.new_pipeline("azdatalake", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: auth}, opts.client)
+}
+
+fn shared_key_auth(clock: Clock, cred: SharedKeyCredential) -> List[policy.Policy] {
+  [exported.SharedKeyPolicy{credential: cred, clock: clock}]
+}
+
+fn token_auth(clock: Clock, cred: azcore.TokenCredential, opts: ClientOptions) -> List[policy.Policy] {
+  [runtime.bearer_token_policy(cred, [audience_scope(opts)], clock, insecure_allow_http: opts.insecure_allow_credential_with_http)]
+}
+
+/// `u` with `query` merged into the query it has, the keys sorted and
+/// spaces written `%20`, as Go's generated request code writes them.
+fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
+  let (base, raw) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var v = url.parse_query(raw).ok() ?? url.values()
+  for (k, x) in query {
+    v.set(k, x)
+  }
+  let q = v.encode().replace("+", "%20")
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+/// A GET as Go's generated code builds it: the query merged and sorted,
+/// Accept and x-ms-version set.
+fn dfs_get(u: Str, query: List[(Str, Str)], accept: Str) -> policy.Request {
+  policy.Request{method: "GET", url: with_query(u, query), headers: [("Accept", accept), ("x-ms-version", SERVICE_VERSION)]}
+}
+
+/// Pages of a list, each error as a DFS one (Go's pagers run every error
+/// through ConvertToDFSError).
+pub struct DfsPager[T] {
+  inner: runtime.Pager[T]
+}
+
+/// Whether another page can be fetched.
+pub fn (p: DfsPager[T]) more() -> Bool {
+  p.inner.more()
+}
+
+/// The next page.
+pub fn (var p: DfsPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  p.inner.next_page().map_err(to_dfs_error)
+}
+
+/// A pager that sends `first` again with `name` set to each page's
+/// marker, the query re-sorted as Go rebuilds it; a marker of "" or None
+/// ends it.
+fn marker_pager[T](pipeline: runtime.Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, name: Str, marker: fn(T) -> Str?) -> DfsPager[T] {
+  DfsPager{inner: runtime.new_pager_with(pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
+    let m = marker(page) ?? return None
+    if m == "" {
+      return None
+    }
+    Some(prev with {url: with_query(prev.url, [(name, m)])})
+  })}
+}
+
+// Response headers, as Go's generated handlers read them.
+
+fn r_str(resp: http.Response, name: Str) -> Str? {
+  match resp.header(name) {
+    Some(v) => if v == "" { None } else { Some(v) }
+    None => None
+  }
+}
+
+/// An RFC 1123 time (`Thu, 05 Nov 2026 03:00:00 GMT`).
+fn rfc1123(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
+}
+
+fn r_time(resp: http.Response, name: Str) -> Time? {
+  r_str(resp, name).and_then(rfc1123)
+}
+
+fn response_of(resp: http.Response) -> Response {
+  Response{client_request_id: r_str(resp, "x-ms-client-request-id"), date: r_time(resp, "Date"), request_id: r_str(resp, "x-ms-request-id"), version: r_str(resp, "x-ms-version")}
+}
+
+/// Go's strconv.ParseBool.
+fn go_parse_bool(s: Str) -> Bool? {
+  if ["1", "t", "T", "TRUE", "true", "True"].contains(s) {
+    return Some(true)
+  }
+  if ["0", "f", "F", "FALSE", "false", "False"].contains(s) {
+    return Some(false)
+  }
+  None
+}

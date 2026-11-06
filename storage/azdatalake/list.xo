@@ -1,0 +1,388 @@
+// The list pagers, as azdatalake v1.7.1's service and filesystem
+// NewList*Pager and the generated list calls and models they use
+// (internal/generated and internal/generated_blob, MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). File systems and directory or
+// deleted paths are listed on the blob URL, paths on the dfs URL, all
+// through azdatalake's own pipeline.
+
+use std/base64
+use std/http
+use std/json
+use std/xml
+
+// XML reading, as Go's encoding/xml fills a generated model.
+
+fn c_text(e: xml.Element, name: Str) -> Str? {
+  e.child(name).map(fn(x: xml.Element) -> Str { x.text() })
+}
+
+fn c_bool(e: xml.Element, name: Str) -> Bool? ! Str {
+  match c_text(e, name) {
+    Some(t) => Ok(Some(go_parse_bool(t.trim()) ?? return Err("strconv.ParseBool: parsing ${t}: invalid syntax")))
+    None => Ok(None)
+  }
+}
+
+fn c_int(e: xml.Element, name: Str) -> Int? ! Str {
+  match c_text(e, name) {
+    Some(t) => Ok(Some(Int.parse(t.trim()) ?? return Err("strconv.ParseInt: parsing ${t}: invalid syntax")))
+    None => Ok(None)
+  }
+}
+
+/// An RFC 7231 element (Go's datetime.RFC7231); an empty one is unset.
+fn c_time(e: xml.Element, name: Str) -> Time? {
+  c_text(e, name).and_then(rfc1123)
+}
+
+fn xml_doc(text: Str, what: Str) -> xml.Element ! Str {
+  xml.parse(text) ?? e => Err("the ${what} is not XML: ${e.display()}")
+}
+
+// File systems.
+
+pub struct ListFileSystemsInclude {
+  pub metadata: Bool? = None
+  pub deleted: Bool? = None
+  pub system: Bool? = None
+}
+
+pub struct ListFileSystemsOptions {
+  pub include: ListFileSystemsInclude = ListFileSystemsInclude{}
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+}
+
+pub struct FileSystemProperties {
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub default_encryption_scope: Str? = None
+  pub deleted_time: Time? = None
+  pub has_immutability_policy: Bool? = None
+  pub has_legal_hold: Bool? = None
+  pub is_immutable_storage_with_versioning_enabled: Bool? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub prevent_encryption_scope_override: Bool? = None
+  pub public_access: Str? = None
+  pub remaining_retention_days: Int? = None
+}
+
+pub struct FileSystemItem {
+  pub name: Str? = None
+  pub properties: FileSystemProperties? = None
+  pub deleted: Bool? = None
+  /// Names lowercased, as Go's generated XML decoder stores them.
+  pub metadata: Map[Str, Str]? = None
+  pub version: Str? = None
+}
+
+/// One page of file systems (Go's ListFileSystemsResponse).
+pub struct ListFileSystemsPage {
+  pub response: Response
+  pub content_type: Str? = None
+  pub file_system_items: List[FileSystemItem] = []
+  pub service_endpoint: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+}
+
+fn file_system_properties_of(p: xml.Element) -> FileSystemProperties ! Str {
+  Ok(FileSystemProperties{
+    etag: c_text(p, "Etag"), last_modified: c_time(p, "Last-Modified"), default_encryption_scope: c_text(p, "DefaultEncryptionScope"),
+    deleted_time: c_time(p, "DeletedTime"), has_immutability_policy: c_bool(p, "HasImmutabilityPolicy")?, has_legal_hold: c_bool(p, "HasLegalHold")?,
+    is_immutable_storage_with_versioning_enabled: c_bool(p, "ImmutableStorageWithVersioningEnabled")?, lease_duration: c_text(p, "LeaseDuration"),
+    lease_state: c_text(p, "LeaseState"), lease_status: c_text(p, "LeaseStatus"), prevent_encryption_scope_override: c_bool(p, "DenyEncryptionScopeOverride")?,
+    public_access: c_text(p, "PublicAccess"), remaining_retention_days: c_int(p, "RemainingRetentionDays")?,
+  })
+}
+
+fn metadata_of(e: xml.Element) -> Map[Str, Str]? {
+  let md = e.child("Metadata") ?? return None
+  var m: Map[Str, Str] = {}
+  for n in md.children {
+    if let xml.Node.Elem(x) = n {
+      m[x.name.local.to_lower()] = x.text()
+    }
+  }
+  Some(m)
+}
+
+fn file_systems_page(resp: http.Response) -> ListFileSystemsPage ! Str {
+  let d = xml_doc(resp.body.to_str_lossy(), "file system list")?
+  var items: List[FileSystemItem] = []
+  if let Some(cs) = d.child("Containers") {
+    for c in cs.children_named("Container") {
+      let props = match c.child("Properties") {
+        Some(p) => Some(file_system_properties_of(p)?)
+        None => None
+      }
+      items.push(FileSystemItem{name: c_text(c, "Name"), properties: props, deleted: c_bool(c, "Deleted")?, metadata: metadata_of(c), version: c_text(c, "Version")})
+    }
+  }
+  Ok(ListFileSystemsPage{
+    response: response_of(resp), content_type: r_str(resp, "Content-Type"), file_system_items: items, service_endpoint: d.attr("ServiceEndpoint"),
+    marker: c_text(d, "Marker"), max_results: c_int(d, "MaxResults")?, next_marker: c_text(d, "NextMarker"), prefix: c_text(d, "Prefix"),
+  })
+}
+
+/// The account's file systems (service.NewListFileSystemsPager): Go's
+/// include order is deleted, metadata, system, each only when true.
+pub fn (s: ServiceClient) new_list_file_systems_pager(options: ListFileSystemsOptions = ListFileSystemsOptions{}) -> DfsPager[ListFileSystemsPage] {
+  let o = options
+  var include: List[Str] = []
+  if o.include.deleted == Some(true) { include.push("deleted") }
+  if o.include.metadata == Some(true) { include.push("metadata") }
+  if o.include.system == Some(true) { include.push("system") }
+  var q = [("comp", "list")]
+  if !include.is_empty() { q.push(("include", include.join(","))) }
+  if let Some(m) = o.marker { q.push(("marker", m)) }
+  if let Some(n) = o.max_results { q.push(("maxresults", "${n}")) }
+  if let Some(p) = o.prefix { q.push(("prefix", p)) }
+  marker_pager(s.pipeline, dfs_get(s.blob_url, q, "application/xml"), file_systems_page, "marker", fn(p: ListFileSystemsPage) -> Str? { p.next_marker })
+}
+
+// Paths (the dfs list).
+
+pub struct ListPathsOptions {
+  /// A continuation from an earlier page.
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  /// The directory to list (Go's `Prefix`, sent as `directory`).
+  pub prefix: Str? = None
+  /// Owner and group as user principal names, not object IDs.
+  pub upn: Bool? = None
+}
+
+/// A path in a dfs list (Go's generated Path).
+pub struct Path {
+  /// Parsed from the JSON string; one that does not parse is 0, as Go
+  /// ignores the error.
+  pub content_length: Int? = None
+  pub creation_time: Str? = None
+  pub etag: Str? = None
+  pub encryption_context: Str? = None
+  pub encryption_scope: Str? = None
+  pub expiry_time: Str? = None
+  pub group: Str? = None
+  /// Parsed from the JSON string; one that does not parse is false.
+  pub is_directory: Bool? = None
+  pub last_modified: Str? = None
+  pub name: Str? = None
+  pub owner: Str? = None
+  pub permissions: Str? = None
+}
+
+/// One page of paths (Go's ListPathsSegmentResponse).
+pub struct ListPathsPage {
+  pub response: Response
+  pub content_type: Str? = None
+  /// The next page's marker.
+  pub continuation: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub paths: List[Path] = []
+}
+
+/// A JSON string field as Go's unpopulate reads it into a *string: null
+/// leaves it unset, a non-string is an error.
+fn j_str(v: json.Value, key: Str) -> Str? ! Str {
+  match v {
+    Str(s) => Ok(Some(s))
+    Null => Ok(None)
+    _ => Err("unmarshalling type *generated.Path: ${key}: not a string")
+  }
+}
+
+fn path_of(v: json.Value) -> Path ! Str {
+  let fields = match v {
+    Object(fs) => fs
+    Null => return Ok(Path{})
+    _ => return Err("unmarshalling type *generated.Path: not an object")
+  }
+  var p = Path{}
+  for (k, x) in fields {
+    match k {
+      "contentLength" => p = p with {content_length: Some(Int.parse(j_str(x, k)? ?? "") ?? 0)}
+      "creationTime" => p = p with {creation_time: j_str(x, k)?}
+      "etag" => p = p with {etag: j_str(x, k)?}
+      "EncryptionContext" => p = p with {encryption_context: j_str(x, k)?}
+      "EncryptionScope" => p = p with {encryption_scope: j_str(x, k)?}
+      "expiryTime" => p = p with {expiry_time: j_str(x, k)?}
+      "group" => p = p with {group: j_str(x, k)?}
+      "isDirectory" => p = p with {is_directory: Some(go_parse_bool(j_str(x, k)? ?? "") ?? false)}
+      "lastModified" => p = p with {last_modified: j_str(x, k)?}
+      "name" => p = p with {name: j_str(x, k)?}
+      "owner" => p = p with {owner: j_str(x, k)?}
+      "permissions" => p = p with {permissions: j_str(x, k)?}
+      _ => {}
+    }
+  }
+  Ok(p)
+}
+
+fn paths_page(resp: http.Response) -> ListPathsPage ! Str {
+  let v = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(e.display())
+  var paths: List[Path] = []
+  if let Some(json.Value.List(items)) = v.get("paths") {
+    for it in items {
+      paths.push(path_of(it)?)
+    }
+  }
+  Ok(ListPathsPage{response: response_of(resp), content_type: r_str(resp, "Content-Type"), continuation: r_str(resp, "x-ms-continuation"), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified"), paths: paths})
+}
+
+/// The file system's paths, from the root or `options.prefix`
+/// (filesystem.NewListPathsPager); each page's `continuation` asks for
+/// the next.
+pub fn (fs: FileSystemClient) new_list_paths_pager(recursive: Bool, options: ListPathsOptions = ListPathsOptions{}) -> DfsPager[ListPathsPage] {
+  let o = options
+  var q = [("resource", "filesystem"), ("recursive", "${recursive}")]
+  if let Some(m) = o.marker { q.push(("continuation", m)) }
+  if let Some(p) = o.prefix { q.push(("directory", p)) }
+  if let Some(n) = o.max_results { q.push(("maxResults", "${n}")) }
+  if let Some(u) = o.upn { q.push(("upn", "${u}")) }
+  marker_pager(fs.pipeline, dfs_get(fs.dfs_url, q, "application/json"), paths_page, "continuation", fn(p: ListPathsPage) -> Str? { p.continuation })
+}
+
+// Directory and deleted paths (the blob hierarchy list).
+
+pub struct ListHierarchyPathsOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+}
+
+/// A path's properties in a hierarchy list (Go's PathProperties).
+pub struct PathProperties {
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_inferred: Bool? = None
+  pub blob_sequence_number: Int? = None
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status_description: Str? = None
+  pub creation_time: Time? = None
+  pub customer_provided_key_sha256: Str? = None
+  pub delete_time: Time? = None
+  pub deleted_time: Time? = None
+  pub destination_snapshot: Str? = None
+  pub encryption_scope: Str? = None
+  pub expires_on: Time? = None
+  pub incremental_copy: Bool? = None
+  pub is_sealed: Bool? = None
+  pub last_accessed_on: Time? = None
+  pub remaining_retention_days: Int? = None
+  pub server_encrypted: Bool? = None
+  pub tag_count: Int? = None
+}
+
+/// A path in a hierarchy list (Go's PathItem).
+pub struct PathItem {
+  pub deleted: Bool? = None
+  pub name: Str? = None
+  pub properties: PathProperties? = None
+  pub snapshot: Str? = None
+  pub deletion_id: Str? = None
+  pub is_current_version: Bool? = None
+  pub version_id: Str? = None
+}
+
+pub struct PathPrefix {
+  pub name: Str? = None
+}
+
+pub struct PathHierarchyListSegment {
+  pub path_items: List[PathItem] = []
+  pub path_prefixes: List[PathPrefix] = []
+}
+
+/// One page of a hierarchy list (Go's ListDirectoryPathsSegmentResponse
+/// and ListDeletedPathsSegmentResponse).
+pub struct ListHierarchyPathsPage {
+  pub response: Response
+  pub content_type: Str? = None
+  pub file_system_name: Str? = None
+  pub segment: PathHierarchyListSegment? = None
+  pub service_endpoint: Str? = None
+  pub delimiter: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+}
+
+fn path_properties_of(p: xml.Element) -> PathProperties ! Str {
+  let md5 = match c_text(p, "Content-MD5") {
+    Some(t) => Some(base64.decode(t) ?? _ => return Err("illegal base64 data in Content-MD5"))
+    None => None
+  }
+  Ok(PathProperties{
+    etag: c_text(p, "Etag"), last_modified: c_time(p, "Last-Modified"), access_tier_change_time: c_time(p, "AccessTierChangeTime"),
+    access_tier_inferred: c_bool(p, "AccessTierInferred")?, blob_sequence_number: c_int(p, "x-ms-blob-sequence-number")?, cache_control: c_text(p, "Cache-Control"),
+    content_disposition: c_text(p, "Content-Disposition"), content_encoding: c_text(p, "Content-Encoding"), content_language: c_text(p, "Content-Language"),
+    content_length: c_int(p, "Content-Length")?, content_md5: md5, content_type: c_text(p, "Content-Type"), copy_completion_time: c_time(p, "CopyCompletionTime"),
+    copy_id: c_text(p, "CopyId"), copy_progress: c_text(p, "CopyProgress"), copy_source: c_text(p, "CopySource"), copy_status_description: c_text(p, "CopyStatusDescription"),
+    creation_time: c_time(p, "Creation-Time"), customer_provided_key_sha256: c_text(p, "CustomerProvidedKeySha256"), delete_time: c_time(p, "DeleteTime"),
+    deleted_time: c_time(p, "DeletedTime"), destination_snapshot: c_text(p, "DestinationSnapshot"), encryption_scope: c_text(p, "EncryptionScope"),
+    expires_on: c_time(p, "Expiry-Time"), incremental_copy: c_bool(p, "IncrementalCopy")?, is_sealed: c_bool(p, "Sealed")?, last_accessed_on: c_time(p, "LastAccessTime"),
+    remaining_retention_days: c_int(p, "RemainingRetentionDays")?, server_encrypted: c_bool(p, "ServerEncrypted")?, tag_count: c_int(p, "TagCount")?,
+  })
+}
+
+fn hierarchy_page(resp: http.Response) -> ListHierarchyPathsPage ! Str {
+  let d = xml_doc(resp.body.to_str_lossy(), "path list")?
+  let segment = match d.child("Blobs") {
+    Some(bs) => {
+      var items: List[PathItem] = []
+      for b in bs.children_named("Blob") {
+        let props = match b.child("Properties") {
+          Some(p) => Some(path_properties_of(p)?)
+          None => None
+        }
+        items.push(PathItem{deleted: c_bool(b, "Deleted")?, name: c_text(b, "Name"), properties: props, snapshot: c_text(b, "Snapshot"), deletion_id: c_text(b, "DeletionId"), is_current_version: c_bool(b, "IsCurrentVersion")?, version_id: c_text(b, "VersionId")})
+      }
+      Some(PathHierarchyListSegment{path_items: items, path_prefixes: bs.children_named("BlobPrefix").map(fn(x: xml.Element) -> PathPrefix { PathPrefix{name: c_text(x, "Name")} })})
+    }
+    None => None
+  }
+  Ok(ListHierarchyPathsPage{
+    response: response_of(resp), content_type: r_str(resp, "Content-Type"), file_system_name: d.attr("ContainerName"), segment: segment,
+    service_endpoint: d.attr("ServiceEndpoint"), delimiter: c_text(d, "Delimiter"), marker: c_text(d, "Marker"), max_results: c_int(d, "MaxResults")?,
+    next_marker: c_text(d, "NextMarker"), prefix: c_text(d, "Prefix"),
+  })
+}
+
+fn (fs: FileSystemClient) hierarchy_pager(show_only: Str, o: ListHierarchyPathsOptions) -> DfsPager[ListHierarchyPathsPage] {
+  var q = [("restype", "container"), ("comp", "list"), ("showonly", show_only)]
+  if let Some(m) = o.marker { q.push(("marker", m)) }
+  if let Some(n) = o.max_results { q.push(("maxResults", "${n}")) }
+  if let Some(p) = o.prefix { q.push(("prefix", p)) }
+  marker_pager(fs.pipeline, dfs_get(fs.blob_url, q, "application/xml"), hierarchy_page, "marker", fn(p: ListHierarchyPathsPage) -> Str? { p.next_marker })
+}
+
+/// The file system's directories (filesystem.NewListDirectoryPathsPager:
+/// the blob list with `showonly=directories` and no delimiter).
+pub fn (fs: FileSystemClient) new_list_directory_paths_pager(options: ListHierarchyPathsOptions = ListHierarchyPathsOptions{}) -> DfsPager[ListHierarchyPathsPage] {
+  fs.hierarchy_pager("directories", options)
+}
+
+/// The file system's soft-deleted paths
+/// (filesystem.NewListDeletedPathsPager: `showonly=deleted`).
+pub fn (fs: FileSystemClient) new_list_deleted_paths_pager(options: ListHierarchyPathsOptions = ListHierarchyPathsOptions{}) -> DfsPager[ListHierarchyPathsPage] {
+  fs.hierarchy_pager("deleted", options)
+}

@@ -18,6 +18,14 @@ What it does:
   container call on the blob URL, with Go's options mapping: no ETag
   condition is sent, a delete or an access policy sends the lease and
   the two dates, set_metadata the lease and If-Modified-Since.
+- The list pagers: file systems (`new_list_file_systems_pager`, with
+  metadata, deleted and system ones), paths (`new_list_paths_pager`,
+  the dfs list, recursive or not, with a continuation), and directory
+  and soft-deleted paths (`new_list_directory_paths_pager`,
+  `new_list_deleted_paths_pager`). As Go's, they go through azdatalake's
+  own pipeline: the file system and hierarchy lists on the blob URL, the
+  path list on the dfs URL, each with azdatalake's REST API version
+  (2026-06-06, where azblob's calls send 2026-12-06).
 - Every error code as Go's `ConvertToDFSError` renames it (`blob` to
   `path`, `container` to `filesystem`: `ContainerNotFound` is
   `FileSystemNotFound`).
@@ -30,8 +38,14 @@ Where it differs from Go v1.7.1:
 - As in Go, a file system's blob calls ask for the default storage
   token scope even with `ClientOptions.audience` set: Go gives its
   container client the pipeline options only.
-- Not ported yet: the list pagers (file systems, paths, directory and
-  deleted paths), `GetUserDelegationCredential`, `GetSASURL`, the
+- `ListHierarchyPathsOptions` is the options of both hierarchy lists
+  (Go has `ListDirectoryPathsOptions` and `ListDeletedPathsOptions`,
+  the same three fields), and every pager is a `DfsPager`, which maps
+  each error as Go's do.
+- As Go's decoder does, a listed file system's metadata names are
+  lowercased, and a path's `contentLength` and `isDirectory` (JSON
+  strings) that do not parse are 0 and false.
+- Not ported yet: `GetUserDelegationCredential`, `GetSASURL`, the
   directory, file and path clients, ACLs, leases, `ParseURL` and
   `datalakeerror`.
 - Go names that are Xo keywords: none in what is ported.

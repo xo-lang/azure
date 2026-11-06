@@ -8,7 +8,6 @@ use std/crypto
 use std/http
 use std/testing
 use std/time
-use std/url
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -91,11 +90,8 @@ fn log_request(req: http.Request, log: Mutex[List[Str]]) {
   if req.method == "PUT" || req.method == "POST" {
     hs.push("content-length=${req.body.len()}")
   }
-  var qv = url.values()
-  for k in req.url.query.keys().sort() {
-    qv.add(k, req.url.query.get(k) ?? "")
-  }
-  let qs = hide_sas("?${qv.encode()}")[1..]
+  // The query as sent (the clients send it sorted, as Go does).
+  let qs = hide_sas("?${req.raw_query()}")[1..]
   // Go's URL.RequestURI: "/" for an empty path.
   let ep = if req.escaped_path() == "" { "/" } else { req.escaped_path() }
   let uri = if qs == "" { ep } else { "${ep}?${qs}" }
@@ -233,4 +229,19 @@ fn serve(net: testing.FakeNet, answer: fn(http.Request) -> http.Response) -> Mut
     }
   }
   log
+}
+
+/// Go's `%q` of bytes: printable ASCII as is, the C escapes, else \xNN.
+fn goq_bytes(b: Bytes) -> Str {
+  var out = "\""
+  for i in 0..b.len() {
+    let c = b[i]
+    out = out + (if c == 0x22 { "\\\"" } else if c == 0x5c { "\\\\" } else if c == 7 { "\\a" } else if c == 8 { "\\b" } else if c == 9 { "\\t" } else if c == 10 { "\\n" } else if c == 11 { "\\v" } else if c == 12 { "\\f" } else if c == 13 { "\\r" } else if c >= 0x20 && c < 0x7f { b[i..i + 1].to_str_lossy() } else { "\\x${Int(c).to_str_width(2, base: 16, zero: true)}" })
+  }
+  out + "\""
+}
+
+/// Bytes as Go's dump prints a byte slice: always, a nil one as "".
+fn (var d: Dump) q(name: Str, v: Bytes?) {
+  d.lines.push("${name}=${goq_bytes(v ?? b"")}")
 }

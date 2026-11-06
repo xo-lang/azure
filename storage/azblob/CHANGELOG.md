@@ -12,7 +12,8 @@ azdatalake needs. `Client` and its calls are unchanged.
   `insecure_allow_credential_with_http` (Go's azcore option, default
   false), read by the Go-shaped clients.
 - Blob `download_stream` (ranges, conditions, a customer key, 304 as a
-  response) and `download_buffer` (Go's ETag lock across blocks).
+  response) and `download_buffer` (Go's ETag lock across blocks). A
+  hash header that is absent is None, as Go leaves it nil.
 - Each call's request and response match Go's on captured vectors.
 
 ## v0.2.0

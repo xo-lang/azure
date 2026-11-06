@@ -1,0 +1,220 @@
+// The list pagers against a fake that answers as the Go program's fake
+// does (listvectors_test.xo).
+
+use std/http
+
+const FS_PAGE1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\"><Prefix>f</Prefix><MaxResults>2</MaxResults><Containers><Container><Name>fs1</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D1\"</Etag><LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState><PublicAccess>container</PublicAccess><DefaultEncryptionScope>$account-encryption-key</DefaultEncryptionScope><DenyEncryptionScopeOverride>false</DenyEncryptionScopeOverride><HasImmutabilityPolicy>false</HasImmutabilityPolicy><HasLegalHold>true</HasLegalHold><ImmutableStorageWithVersioningEnabled>false</ImmutableStorageWithVersioningEnabled></Properties><Metadata><Color>blue</Color><k>v</k></Metadata></Container><Container><Name>fs2</Name><Deleted>true</Deleted><Version>01D1</Version><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D2\"</Etag><DeletedTime>Wed, 04 Nov 2026 01:02:03 GMT</DeletedTime><RemainingRetentionDays>6</RemainingRetentionDays><LeaseDuration>infinite</LeaseDuration></Properties></Container></Containers><NextMarker>m 2+</NextMarker></EnumerationResults>"
+const FS_PAGE2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\"><Marker>m 2+</Marker><Containers><Container><Name>fs3</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D3\"</Etag></Properties></Container></Containers><NextMarker /></EnumerationResults>"
+const PATHS_PAGE1: Str = "{\"paths\":[{\"contentLength\":\"10\",\"creationTime\":\"134065686000000000\",\"etag\":\"0x8D1\",\"expiryTime\":\"0\",\"group\":\"g1\",\"isDirectory\":\"false\",\"lastModified\":\"Thu, 05 Nov 2026 03:00:00 GMT\",\"name\":\"d/a.txt\",\"owner\":\"o1\",\"permissions\":\"rw-r-----\",\"EncryptionContext\":\"ctx1\",\"EncryptionScope\":\"scope1\"},{\"contentLength\":\"0\",\"isDirectory\":\"true\",\"name\":\"d\",\"etag\":\"0x8D2\"}]}"
+const PATHS_PAGE2: Str = "{\"paths\":[{\"contentLength\":\"x\",\"name\":\"e\",\"isDirectory\":\"yes\"},{\"name\":\"f\"}]}"
+const HIER1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\" ContainerName=\"fs1\"><Prefix>d/</Prefix><MaxResults>2</MaxResults><Delimiter>/</Delimiter><Blobs><BlobPrefix><Name>d/sub/</Name></BlobPrefix><Blob><Name>d/x</Name><Deleted>true</Deleted><DeletionId>132</DeletionId><Snapshot>2026-11-01T00:00:00.0000000Z</Snapshot><VersionId>v1</VersionId><IsCurrentVersion>false</IsCurrentVersion><Properties><Creation-Time>Mon, 02 Nov 2026 01:02:03 GMT</Creation-Time><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>0x8D4</Etag><Content-Length>12</Content-Length><Content-Type>text/plain</Content-Type><Content-Encoding>gzip</Content-Encoding><Content-Language>en</Content-Language><Content-MD5>AQID</Content-MD5><Content-Disposition>inline</Content-Disposition><Cache-Control>no-cache</Cache-Control><x-ms-blob-sequence-number>3</x-ms-blob-sequence-number><AccessTierInferred>true</AccessTierInferred><AccessTierChangeTime>Tue, 03 Nov 2026 01:02:03 GMT</AccessTierChangeTime><CopyId>c1</CopyId><CopySource>https://src.example.test/x</CopySource><CopyProgress>1/1</CopyProgress><CopyCompletionTime>Tue, 03 Nov 2026 01:02:03 GMT</CopyCompletionTime><CopyStatusDescription>ok</CopyStatusDescription><ServerEncrypted>true</ServerEncrypted><IncrementalCopy>false</IncrementalCopy><DestinationSnapshot>s1</DestinationSnapshot><DeletedTime>Wed, 04 Nov 2026 01:02:03 GMT</DeletedTime><DeleteTime>Sat, 07 Nov 2026 01:02:03 GMT</DeleteTime><RemainingRetentionDays>3</RemainingRetentionDays><CustomerProvidedKeySha256>k256</CustomerProvidedKeySha256><EncryptionScope>scope1</EncryptionScope><Sealed>false</Sealed><LastAccessTime>Thu, 05 Nov 2026 02:02:03 GMT</LastAccessTime><TagCount>2</TagCount><Expiry-Time>Sun, 08 Nov 2026 01:02:03 GMT</Expiry-Time></Properties></Blob></Blobs><NextMarker>n2</NextMarker></EnumerationResults>"
+const HIER2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\" ContainerName=\"fs1\"><Marker>n2</Marker><Blobs><Blob><Name>d/y</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>0x8D5</Etag></Properties></Blob></Blobs><NextMarker/></EnumerationResults>"
+const LIST_GO_DATE: Str = "Fri, 06 Nov 2026 14:35:45 GMT"
+
+fn list_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-06-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let body = fn(text: Str, hs: List[(Str, Str)]) -> http.Response { with_hs(http.text(200, text), common + hs) }
+  if req.url.path.contains("missing") {
+    return with_hs(http.empty(404), common + [("x-ms-error-code", "BlobNotFound")])
+  }
+  let xml = [("Content-Type", "application/xml")]
+  if q("comp") == "list" && q("restype") == "" {
+    return body(if q("marker") == "" { FS_PAGE1 } else { FS_PAGE2 }, xml)
+  }
+  if q("resource") == "filesystem" {
+    let hs = [("Content-Type", "application/json;charset=utf-8"), ("ETag", "\"0x8D9\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+    if q("continuation") == "" {
+      return body(PATHS_PAGE1, hs + [("x-ms-continuation", "c 1/+")])
+    }
+    return body(PATHS_PAGE2, hs)
+  }
+  if q("comp") == "list" {
+    return body(if q("marker") == "" { HIER1 } else { HIER2 }, xml)
+  }
+  with_hs(http.empty(400), common)
+}
+
+fn fs_page_dump(x: ListFileSystemsPage) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  if !x.file_system_items.is_empty() {
+    d.lines.push("FileSystemItems.len=${x.file_system_items.len()}")
+  }
+  var i = 0
+  for it in x.file_system_items {
+    let p = "FileSystemItems[${i}]"
+    d.b("${p}.Deleted", it.deleted)
+    d.m("${p}.Metadata", it.metadata)
+    d.s("${p}.Name", it.name)
+    if let Some(pr) = it.properties {
+      d.s("${p}.Properties.DefaultEncryptionScope", pr.default_encryption_scope)
+      d.t("${p}.Properties.DeletedTime", pr.deleted_time)
+      d.s("${p}.Properties.ETag", pr.etag)
+      d.b("${p}.Properties.HasImmutabilityPolicy", pr.has_immutability_policy)
+      d.b("${p}.Properties.HasLegalHold", pr.has_legal_hold)
+      d.b("${p}.Properties.IsImmutableStorageWithVersioningEnabled", pr.is_immutable_storage_with_versioning_enabled)
+      d.t("${p}.Properties.LastModified", pr.last_modified)
+      d.s("${p}.Properties.LeaseDuration", pr.lease_duration)
+      d.s("${p}.Properties.LeaseState", pr.lease_state)
+      d.s("${p}.Properties.LeaseStatus", pr.lease_status)
+      d.b("${p}.Properties.PreventEncryptionScopeOverride", pr.prevent_encryption_scope_override)
+      d.s("${p}.Properties.PublicAccess", pr.public_access)
+      d.i("${p}.Properties.RemainingRetentionDays", pr.remaining_retention_days)
+    }
+    d.s("${p}.Version", it.version)
+    i += 1
+  }
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  d.s("Prefix", x.prefix)
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d
+}
+
+fn paths_page_dump(x: ListPathsPage) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.s("Continuation", x.continuation)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  if !x.paths.is_empty() {
+    d.lines.push("Paths.len=${x.paths.len()}")
+  }
+  var i = 0
+  for p in x.paths {
+    let n = "Paths[${i}]"
+    d.i("${n}.ContentLength", p.content_length)
+    d.s("${n}.CreationTime", p.creation_time)
+    d.s("${n}.ETag", p.etag)
+    d.s("${n}.EncryptionContext", p.encryption_context)
+    d.s("${n}.EncryptionScope", p.encryption_scope)
+    d.s("${n}.ExpiryTime", p.expiry_time)
+    d.s("${n}.Group", p.group)
+    d.b("${n}.IsDirectory", p.is_directory)
+    d.s("${n}.LastModified", p.last_modified)
+    d.s("${n}.Name", p.name)
+    d.s("${n}.Owner", p.owner)
+    d.s("${n}.Permissions", p.permissions)
+    i += 1
+  }
+  d
+}
+
+fn hierarchy_dump(x: ListHierarchyPathsPage) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.s("Delimiter", x.delimiter)
+  d.s("FileSystemName", x.file_system_name)
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  d.s("Prefix", x.prefix)
+  d.s("ServiceEndpoint", x.service_endpoint)
+  if let Some(seg) = x.segment {
+    if !seg.path_items.is_empty() {
+      d.lines.push("Segment.PathItems.len=${seg.path_items.len()}")
+    }
+    var i = 0
+    for it in seg.path_items {
+      let n = "Segment.PathItems[${i}]"
+      d.b("${n}.Deleted", it.deleted)
+      d.s("${n}.DeletionID", it.deletion_id)
+      d.b("${n}.IsCurrentVersion", it.is_current_version)
+      d.s("${n}.Name", it.name)
+      if let Some(p) = it.properties {
+        let r = "${n}.Properties"
+        d.t("${r}.AccessTierChangeTime", p.access_tier_change_time)
+        d.b("${r}.AccessTierInferred", p.access_tier_inferred)
+        d.i("${r}.BlobSequenceNumber", p.blob_sequence_number)
+        d.s("${r}.CacheControl", p.cache_control)
+        d.s("${r}.ContentDisposition", p.content_disposition)
+        d.s("${r}.ContentEncoding", p.content_encoding)
+        d.s("${r}.ContentLanguage", p.content_language)
+        d.i("${r}.ContentLength", p.content_length)
+        d.q("${r}.ContentMD5", p.content_md5)
+        d.s("${r}.ContentType", p.content_type)
+        d.t("${r}.CopyCompletionTime", p.copy_completion_time)
+        d.s("${r}.CopyID", p.copy_id)
+        d.s("${r}.CopyProgress", p.copy_progress)
+        d.s("${r}.CopySource", p.copy_source)
+        d.s("${r}.CopyStatusDescription", p.copy_status_description)
+        d.t("${r}.CreationTime", p.creation_time)
+        d.s("${r}.CustomerProvidedKeySHA256", p.customer_provided_key_sha256)
+        d.t("${r}.DeleteTime", p.delete_time)
+        d.t("${r}.DeletedTime", p.deleted_time)
+        d.s("${r}.DestinationSnapshot", p.destination_snapshot)
+        d.s("${r}.ETag", p.etag)
+        d.s("${r}.EncryptionScope", p.encryption_scope)
+        d.t("${r}.ExpiresOn", p.expires_on)
+        d.b("${r}.IncrementalCopy", p.incremental_copy)
+        d.b("${r}.IsSealed", p.is_sealed)
+        d.t("${r}.LastAccessedOn", p.last_accessed_on)
+        d.t("${r}.LastModified", p.last_modified)
+        d.i("${r}.RemainingRetentionDays", p.remaining_retention_days)
+        d.b("${r}.ServerEncrypted", p.server_encrypted)
+        d.i("${r}.TagCount", p.tag_count)
+      }
+      d.s("${n}.Snapshot", it.snapshot)
+      d.s("${n}.VersionID", it.version_id)
+      i += 1
+    }
+    if !seg.path_prefixes.is_empty() {
+      d.lines.push("Segment.PathPrefixes.len=${seg.path_prefixes.len()}")
+    }
+    var j = 0
+    for p in seg.path_prefixes {
+      d.s("Segment.PathPrefixes[${j}].Name", p.name)
+      j += 1
+    }
+  }
+  d
+}
+
+/// Every page, as the Go program prints them, the log drained between.
+fn pages[T](log: Mutex[List[Str]], name: Str, pager: DfsPager[T], dump: fn(T) -> Dump) -> List[Str] {
+  var p = pager
+  var out: List[Str] = []
+  var n = 0
+  while p.more() {
+    n += 1
+    let r = p.next_page()
+    out = out + drain(log) + shown("${name}, page ${n}", r, dump)
+    if r.is_err() {
+      return out
+    }
+  }
+  out
+}
+
+test "the list pagers send what Go sends and read what Go reads" {
+  let log = serve(os.net, list_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(LIST_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  var out: List[Str] = []
+  out = out + pages(log, "p1 list file systems", svc.new_list_file_systems_pager(), fs_page_dump)
+  out = out + pages(log, "p2 list file systems with every option", svc.new_list_file_systems_pager(ListFileSystemsOptions{include: ListFileSystemsInclude{metadata: Some(true), deleted: Some(true), system: Some(true)}, marker: Some("m0"), max_results: Some(2), prefix: Some("f")}), fs_page_dump)
+  out = out + pages(log, "p2b list file systems, include false", svc.new_list_file_systems_pager(ListFileSystemsOptions{include: ListFileSystemsInclude{metadata: Some(false), system: Some(true)}}), fs_page_dump)
+  out = out + pages(log, "p2c list file systems, system false", svc.new_list_file_systems_pager(ListFileSystemsOptions{include: ListFileSystemsInclude{system: Some(false)}, max_results: Some(1)}), fs_page_dump)
+  let fs = svc.new_file_system_client("fs1")
+  out = out + pages(log, "p3 list paths recursive", fs.new_list_paths_pager(true), paths_page_dump)
+  out = out + pages(log, "p4 list paths with every option", fs.new_list_paths_pager(false, ListPathsOptions{marker: Some("c0"), max_results: Some(5), prefix: Some("d/e f"), upn: Some(true)}), paths_page_dump)
+  out = out + pages(log, "p5 list directory paths", fs.new_list_directory_paths_pager(), hierarchy_dump)
+  let ho = ListHierarchyPathsOptions{marker: Some("n0"), max_results: Some(2), prefix: Some("d/")}
+  out = out + pages(log, "p6 list directory paths with every option", fs.new_list_directory_paths_pager(ho), hierarchy_dump)
+  out = out + pages(log, "p7 list deleted paths with every option", fs.new_list_deleted_paths_pager(ho), hierarchy_dump)
+  let missing = svc.new_file_system_client("missing")
+  out = out + pages(log, "p8 list paths, not found", missing.new_list_paths_pager(true), paths_page_dump)
+  out = out + pages(log, "p9 list directory paths, not found", missing.new_list_directory_paths_pager(), hierarchy_dump)
+  let nocred = new_file_system_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs2?sv=x&sig=y", go_options(""))
+  out = out + pages(log, "p10 list paths with a SAS", nocred.new_list_paths_pager(true, ListPathsOptions{marker: Some("c0")}), paths_page_dump)
+  let direct = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/fs5", cred, opts)
+  out = out + pages(log, "p11 list paths, a file system client from its blob URL", direct.new_list_paths_pager(false, ListPathsOptions{marker: Some("c0")}), paths_page_dump)
+  out = out + drain(log)
+  expect(out) == LIST_OUTPUT
+}
