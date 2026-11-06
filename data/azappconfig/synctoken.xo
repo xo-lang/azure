@@ -1,0 +1,130 @@
+// Sync tokens and the audience error policy, as azappconfig/v2 v2.3.0's
+// internal/exported/sync_token.go, internal/synctoken and
+// internal/audience (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md).
+
+use std/http
+use github.com/xo-lang/azure/policy
+
+/// One `<id>=<value>;sn=<version>` part of a sync token.
+struct SyncTokenValues {
+  id: Str
+  value: Str
+  version: Int
+}
+
+/// The parts of a sync token, with Go's errors (ParseSyncToken).
+fn parse_sync_token(token: Str) -> List[SyncTokenValues] ! Str {
+  let raw = token.trim()
+  if raw == "" {
+    return Err("syncToken can't be empty")
+  }
+  var out: List[SyncTokenValues] = []
+  for part in raw.split(",") {
+    let items = part.split(";")
+    if items.len() != 2 {
+      return Err("invalid token ${part}")
+    }
+    let (id, value) = items[0].cut("=") ?? return Err("unexpected token format ${items[0]}")
+    let (_, sn) = items[1].cut("=") ?? return Err("unexpected token version format ${items[1]}")
+    let v = sn.trim()
+    let version = Int.parse(v) ?? return Err("strconv.ParseInt: parsing \"${v}\": invalid syntax")
+    out.push(SyncTokenValues{id: id.trim(), value: value.trim(), version: version})
+  }
+  Ok(out)
+}
+
+/// The newest sync token of each id a client has seen (Go's Cache).
+struct SyncTokenCache {
+  tokens: Mutex[Map[Str, SyncTokenValues]]
+}
+
+fn new_sync_token_cache() -> SyncTokenCache {
+  SyncTokenCache{tokens: Mutex.new({})}
+}
+
+/// Adds the token's parts, each kept only if newer than the one held.
+fn (c: SyncTokenCache) set(token: Str) -> () ! Str {
+  let parts = parse_sync_token(token)?
+  c.tokens.with(fn(var m: Map[Str, SyncTokenValues]) {
+    for t in parts {
+      if let Some(held) = m.get(t.id) {
+        if held.version >= t.version {
+          continue
+        }
+      }
+      m.put(t.id, t)
+    }
+  })
+  Ok(())
+}
+
+/// The `Sync-Token` request header: `<id>=<value>` for each id, comma
+/// separated, sorted by id (Go's order is its map's, random).
+fn (c: SyncTokenCache) get() -> Str {
+  c.tokens.with_read(fn(m: Map[Str, SyncTokenValues]) -> Str {
+    var ids: List[Str] = []
+    for (k, _) in m {
+      ids.push(k)
+    }
+    ids.sort().map(fn(k: Str) -> Str {
+      let t = m.get(k) ?? SyncTokenValues{id: k, value: "", version: 0}
+      "${t.id}=${t.value}"
+    }).join(",")
+  })
+}
+
+/// Sends the cached sync tokens and caches each response's (Go's
+/// synctoken.Policy); a response's token that does not parse is an error
+/// the retry policy does not retry.
+struct SyncTokenPolicy {
+  cache: SyncTokenCache
+}
+
+fn (p: SyncTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let st = p.cache.get()
+  let r = if st == "" { req } else { req.with_header("Sync-Token", st) }
+  let resp = next.send(r)?
+  for v in resp.header_values("Sync-Token") {
+    if v == "" {
+      continue
+    }
+    p.cache.set(v) ?? e => return Err(policy.SendErr.Final(http.ClientErr.Connect(e)))
+  }
+  Ok(resp)
+}
+
+const AAD_AUDIENCE_ERROR_CODE: Str = "AADSTS500011"
+
+/// Explains an Entra ID audience error (AADSTS500011) from the policies
+/// after it and the transport (Go's AudienceErrorHandlingPolicy).
+struct AudiencePolicy {
+  configured: Bool
+}
+
+fn audience_message(configured: Bool, err: Str) -> Str {
+  if configured {
+    "unable to authenticate to Azure App Configuration. An incorrect token audience was provided. Please set ClientOptions.Cloud for the target cloud . For details on how to configure the authentication token audience visit https://aka.ms/appconfig/client-token-audience. ${err}"
+  } else {
+    "unable to authenticate to Azure App Configuration. No authentication token audience was provided. Please set ClientOptions.Cloud for the target cloud. For details on how to configure the authentication token audience visit https://aka.ms/appconfig/client-token-audience. ${err}"
+  }
+}
+
+fn (p: AudiencePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  match next.send(req) {
+    Ok(resp) => Ok(resp)
+    Err(e) => {
+      let text = e.display()
+      if !text.contains(AAD_AUDIENCE_ERROR_CODE) {
+        return Err(e)
+      }
+      let msg = audience_message(p.configured, text)
+      match e {
+        policy.SendErr.Http(_) => Err(policy.SendErr.Http(http.ClientErr.Connect(msg)))
+        policy.SendErr.Final(_) => Err(policy.SendErr.Final(http.ClientErr.Connect(msg)))
+        policy.SendErr.Auth(_) => Err(policy.SendErr.Final(http.ClientErr.Connect(msg)))
+        policy.SendErr.FinalResponse(_) => Err(e)
+      }
+    }
+  }
+}

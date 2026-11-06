@@ -68,7 +68,14 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   against its own), `sdk/monitor/query/azlogs` v1.2.0,
   `sdk/monitor/query/azmetrics` v1.3.0 and `sdk/monitor/ingestion/azlogs`
   v1.1.0 (their clients, options, models, cloud configuration and
-  serialization, hand written; requests checked against their own), and
+  serialization, hand written; requests checked against their own),
+  `sdk/data/azappconfig/v2` v2.3.0 (its client, settings, selectors,
+  snapshots, responses, cloud configuration, the HMAC-SHA256 policy
+  and connection string of `internal/auth`, the sync token cache and
+  policy, the audience error policy, query normalization, and the
+  pagers of `internal/generated/custom_client.go`, hand written over
+  the generated layer; requests and signatures checked against its
+  own), and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:

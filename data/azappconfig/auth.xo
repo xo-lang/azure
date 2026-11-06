@@ -1,0 +1,90 @@
+// App Configuration's HMAC-SHA256 request signing and connection string,
+// as azappconfig/v2 v2.3.0's internal/auth/policy_hmac_auth.go (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md).
+// https://learn.microsoft.com/en-us/azure/azure-app-configuration/rest-api-authentication-hmac
+
+use std/crypto
+use std/http
+use std/time
+use github.com/xo-lang/azure/policy
+
+/// Signs each try (Go's HMACPolicy): `Date` from the clock,
+/// `x-ms-content-sha256` the base64 SHA-256 of the body, and
+/// `Authorization` the HMAC-SHA256, keyed by the secret, of the method,
+/// the path and query as sent, the date, the host and the body's hash.
+struct HmacPolicy {
+  credential: Str
+  secret: Bytes
+  clock: Clock
+}
+
+/// Go's http.TimeFormat: `Fri, 06 Nov 2026 21:57:21 GMT`.
+fn http_date(t: Time) -> Str {
+  time.format(t, time.utc(), time.RFC1123).replace(" UTC", " GMT")
+}
+
+/// The host and the escaped path and query of an absolute URL (Go's
+/// URL.Host, and EscapedPath with `?` and RawQuery when there is one).
+fn host_and_path(u: Str) -> (Str, Str) {
+  let rest = match u.find("://") {
+    Some(i) => u[i + 3..u.len()]
+    None => u
+  }
+  let no_frag = match rest.find("#") {
+    Some(i) => rest[0..i]
+    None => rest
+  }
+  let end = no_frag.find_any("/?") ?? no_frag.len()
+  let host = no_frag[0..end]
+  var pq = no_frag[end..no_frag.len()]
+  // Go writes no "?" for an empty query
+  if pq.ends_with("?") {
+    pq = pq[0..pq.len() - 1]
+  }
+  (host, pq)
+}
+
+/// The text Go's HMACPolicy signs.
+fn string_to_sign(method: Str, u: Str, date: Str, content_hash: Str) -> Str {
+  let (host, pq) = host_and_path(u)
+  "${method.to_upper()}\n${pq}\n${date};${host};${content_hash}"
+}
+
+fn (p: HmacPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let date = http_date(p.clock.now())
+  let hash = crypto.sha256(req.body).to_base64()
+  let sig = crypto.hmac_sha256(p.secret, string_to_sign(req.method, req.url, date, hash).bytes()).to_base64()
+  let auth = "HMAC-SHA256 Credential=${p.credential}, SignedHeaders=date;host;x-ms-content-sha256, Signature=${sig}"
+  next.send(req.with_header("x-ms-content-sha256", hash).with_header("Date", date).with_header("Authorization", auth))
+}
+
+/// A connection string's parts (Go's auth.ParseConnectionString).
+struct ConnectionString {
+  endpoint: Str
+  credential: Str
+  secret: Bytes
+}
+
+/// `Endpoint=...;Id=...;Secret=<base64>`, in any order; other sections
+/// are ignored, a repeated one is an error, as Go's.
+fn parse_connection_string(cs: Str) -> ConnectionString ! Str {
+  var ept = ""
+  var cred = ""
+  var sec: Bytes? = None
+  for seg in cs.split(";") {
+    if let Some(v) = seg.cut_prefix("Endpoint=") {
+      if ept != "" { return Err("duplicate Endpoint= section") }
+      ept = v
+    } else if let Some(v) = seg.cut_prefix("Id=") {
+      if cred != "" { return Err("duplicate Id= section") }
+      cred = v
+    } else if let Some(v) = seg.cut_prefix("Secret=") {
+      if sec.is_some() { return Err("duplicate Secret= section") }
+      sec = Some(Bytes.from_base64(v) ?? return Err("illegal base64 data in Secret= section"))
+    }
+  }
+  if ept == "" { return Err("missing Endpoint= section") }
+  if cred == "" { return Err("missing Id= section") }
+  let s = sec ?? return Err("missing Secret= section")
+  Ok(ConnectionString{endpoint: ept, credential: cred, secret: s})
+}

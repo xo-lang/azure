@@ -1,0 +1,383 @@
+// Go's calls (clientvectors_test.xo) made again through this client on
+// the same scripted responses: every request, the token scopes asked
+// for, and what each call returned must be Go's, line for line.
+
+use std/http
+use std/testing
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+const EP: Str = "https://store1.azconfig.example.test"
+
+/// Go's credential: each token request logged with its scopes.
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+/// A scripted response: its vector lines and what it sends.
+struct Scripted {
+  lines: List[Str]
+  status: Int
+  headers: List[(Str, Str)]
+  body: Str
+}
+
+/// The responses of the vector, in order.
+fn script(lines: List[Str]) -> List[Scripted] {
+  var out: List[Scripted] = []
+  var i = 0
+  while i < lines.len() {
+    if let Some(st) = lines[i].cut_prefix("RESP ") {
+      var hs: List[(Str, Str)] = []
+      let h = lines[i + 1].cut_prefix("  H ") ?? ""
+      if h != "" {
+        for kv in h.split(" | ") {
+          hs.push(kv.cut("=") ?? (kv, ""))
+        }
+      }
+      out.push(Scripted{lines: lines[i..i + 3], status: Int.parse(st) ?? 0, headers: hs, body: lines[i + 2].cut_prefix("  B ") ?? ""})
+      i += 3
+    } else {
+      i += 1
+    }
+  }
+  out
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  queue: Mutex[List[Scripted]]
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  let q = req.raw_query()
+  let port = match req.url.port {
+    Some(p) => ":${p}"
+    None => ""
+  }
+  let u = "${req.url.scheme}://${req.url.host}${port}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}"
+  note(f, "REQ ${req.method} ${u}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let next = f.queue.with(fn(var l: List[Scripted]) -> Scripted? {
+    let x = l.get(0) ?? return None
+    l = l[1..l.len()]
+    Some(x)
+  })
+  let s = next ?? return http.text(599, "no response queued")
+  for l in s.lines {
+    note(f, l)
+  }
+  var resp = http.Response{status: s.status, headers: {}, body: s.body.bytes()}
+  for (k, v) in s.headers {
+    resp = resp.add_header(k, v)
+  }
+  resp
+}
+
+fn serve(net: testing.FakeNet, lines: List[Str]) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), queue: Mutex[List[Scripted]].new(script(lines))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for host in ["store1.azconfig.example.test", "s.azconfig.io", "s.azconfig.azure.cn", "s.eastus.appconfig-staging.azure.com", "S.AppConfig.Example.Test:8443", "s.example.test"] {
+    for m in ["GET", "PUT", "DELETE", "PATCH", "HEAD"] {
+      net.handle("${m} https://${host}/{rest...}", h)
+    }
+  }
+  f
+}
+
+fn ps(s: Str?) -> Str {
+  match s {
+    Some(v) => "[${v}]"
+    None => "<nil>"
+  }
+}
+
+fn pt(t: Time?) -> Str {
+  match t {
+    Some(v) => time.format(v, time.utc(), time.RFC3339)
+    None => "<nil>"
+  }
+}
+
+fn pi(i: Int?) -> Str {
+  match i {
+    Some(v) => "${v}"
+    None => "<nil>"
+  }
+}
+
+fn pb(b: Bool?) -> Str {
+  match b {
+    Some(v) => "${v}"
+    None => "<nil>"
+  }
+}
+
+fn ptags(m: Map[Str, Str]?) -> Str {
+  let tags = m ?? return "<nil>"
+  var ks: List[Str] = []
+  for (k, v) in tags {
+    ks.push("${k}:[${v}]")
+  }
+  "{${ks.sort().join(",")}}"
+}
+
+fn setting_text(s: Setting) -> Str {
+  "key=${ps(s.key)} value=${ps(s.value)} label=${ps(s.label)} ct=${ps(s.content_type)} desc=${ps(s.description)} etag=${ps(s.etag)} tags=${ptags(s.tags)} lm=${pt(s.last_modified)} ro=${pb(s.is_read_only)}"
+}
+
+fn settings_text(ss: List[Setting]) -> Str {
+  "${ss.len()} ${ss.map(fn(s: Setting) -> Str { "(${setting_text(s)})" }).join(" ")}"
+}
+
+fn snapshot_text(s: Snapshot) -> Str {
+  let fs = s.filters.map(fn(f: SettingFilter) -> Str { "${ps(f.key_filter)}/${ps(f.label_filter)}" }).join(",")
+  let ct = s.composition_type.map(fn(c: CompositionType) -> Str { c.0 }) ?? "<nil>"
+  let st = s.status.map(fn(c: SnapshotStatus) -> Str { c.0 }) ?? "<nil>"
+  "name=${ps(s.name)} filters=${s.filters.len()}[${fs}] ct=${ct} desc=${ps(s.description)} ret=${pi(s.retention_period)} tags=${ptags(s.tags)} created=${pt(s.created)} etag=${ps(s.etag)} expires=${pt(s.expires)} items=${pi(s.items_count)} size=${pi(s.size)} status=${st}"
+}
+
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    InvalidInput(m) => "error ${m}"
+    Decode(m) => "error ${m}"
+    Send(se) => "error ${se.display()}"
+  }
+}
+
+fn out[T](f: Fake, name: Str, r: Result[T, azcore.CallErr], text: fn(T) -> Str) {
+  match r {
+    Ok(v) => note(f, "OUT ${name}: ${text(v)}")
+    Err(e) => note(f, "OUT ${name}: ${err_text(e)}")
+  }
+}
+
+fn out_s[T](f: Fake, name: Str, r: Result[T, Str]) {
+  match r {
+    Ok(_) => note(f, "OUT ${name}: ok")
+    Err(e) => note(f, "OUT ${name}: error ${e}")
+  }
+}
+
+fn ok_text[T](x: T) -> Str {
+  "ok"
+}
+
+fn opts(c: cloud.Configuration) -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{cloud: c, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn at(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()).or_fault("time")
+}
+
+/// The OUT lines whose text is Go's own wording of an error this port
+/// words differently (Go's url.Parse and encoding/json messages).
+const KIND_ONLY: List[Str] = ["get_bad_json", "new_client_bad"]
+
+fn comparable(l: Str) -> Str {
+  for k in KIND_ONLY {
+    if l.starts_with("OUT ${k}: ") {
+      return l[0..(l.find(": error") ?? l.len()) + 7]
+    }
+  }
+  l
+}
+
+test "every public call sends, gets and returns what Go's does" {
+  let f = serve(os.net, CLIENT_GO)
+  let cred = Cred{log: f.log}
+  let c = new_client(os.net, os.clock, os.rand, EP, cred, opts(cloud.AZURE_PUBLIC))?
+
+  out_s(f, "set_sync_token", c.set_sync_token("zz=t0;sn=1"))
+  out_s(f, "set_sync_token_bad", c.set_sync_token("bad"))
+  out_s(f, "set_sync_token_sn", c.set_sync_token("zz=t0;sn=x"))
+  out_s(f, "set_sync_token_eq", c.set_sync_token("zz=t0;sn"))
+
+  out(f, "get", c.get_setting("app/color"), fn(g: GetSettingResponse) -> Str { "${setting_text(g.setting)} lm=${pt(g.last_modified)} st=${g.sync_token}" })
+  out(f, "get_304", c.get_setting("app/color", GetSettingOptions{label: Some("prod"), only_if_changed: Some("e1"), accept_date_time: Some(at("2026-11-01T00:00:00.123Z"))}), ok_text)
+  out(f, "add", c.add_setting("k", Some("v"), AddSettingOptions{label: Some("l"), content_type: Some("text/plain"), description: Some("de<sc>"), tags: Some({"t": "1"})}), fn(r: AddSettingResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "set_any", c.set_setting("k", None, SetSettingOptions{only_if_unchanged: Some("*")}), fn(r: SetSettingResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "set_if", c.set_setting("k", Some("v2"), SetSettingOptions{only_if_unchanged: Some("e2"), label: Some("")}), fn(r: SetSettingResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "lock", c.set_read_only("k", true, SetReadOnlyOptions{only_if_unchanged: Some("e3")}), fn(r: SetReadOnlyResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "unlock", c.set_read_only("k", false, SetReadOnlyOptions{label: Some("l")}), fn(r: SetReadOnlyResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "delete", c.delete_setting("k", DeleteSettingOptions{label: Some(""), only_if_unchanged: Some("e4")}), fn(r: DeleteSettingResponse) -> Str { "${setting_text(r.setting)} st=${r.sync_token}" })
+  out(f, "get_older_token", c.get_setting("k"), ok_text)
+  out(f, "get_bad_token", c.get_setting("k"), ok_text)
+  out(f, "get_404", c.get_setting("missing"), ok_text)
+  out(f, "set_412", c.set_setting("k", Some("v"), SetSettingOptions{only_if_unchanged: Some("e9")}), ok_text)
+  out(f, "get_empty_key", c.get_setting(""), ok_text)
+  out(f, "get_bad_json", c.get_setting("k"), ok_text)
+
+  var lp = c.new_list_settings_pager(SettingSelector{key_filter: Some("app/*"), label_filter: Some("\0"), tags_filter: Some(["a=b", "c=d"]), accept_date_time: Some(at("2026-11-02T03:04:05Z"))}, ListSettingsOptions{match_conditions: [MatchConditions{if_none_match: Some("\"p1\"")}, MatchConditions{if_none_match: Some("\"p2\""), if_match: Some("\"m\"")}]})
+  var i = 0
+  while lp.more() && i < 5 {
+    out(f, "list_settings ${i}", lp.next_page(), fn(p: ListSettingsPageResponse) -> Str { "${settings_text(p.settings)} etag=${ps(p.etag)} st=${p.sync_token}" })
+    i += 1
+  }
+  note(f, "OUT list_settings more: ${lp.more()}")
+
+  lp = c.new_list_settings_pager(SettingSelector{fields: Some([SETTING_FIELDS_KEY, SETTING_FIELDS_IS_READ_ONLY])})
+  out(f, "list_fail", lp.next_page(), ok_text)
+  note(f, "OUT list_fail more: ${lp.more()}")
+  out(f, "list_fail again", lp.next_page(), ok_text)
+
+  var rp = c.new_list_revisions_pager(SettingSelector{key_filter: Some("r"), fields: Some([SETTING_FIELDS_KEY, SETTING_FIELDS_VALUE]), accept_date_time: Some(at("2026-11-02T03:04:05.6Z"))})
+  i = 0
+  while rp.more() && i < 5 {
+    out(f, "revisions ${i}", rp.next_page(), fn(p: ListRevisionsPageResponse) -> Str { "${settings_text(p.settings)} st=${p.sync_token}" })
+    i += 1
+  }
+
+  var cp = c.new_check_settings_pager(SettingSelector{label_filter: Some("prod"), accept_date_time: Some(at("2026-11-02T03:04:05Z"))}, CheckSettingsOptions{match_conditions: [MatchConditions{if_none_match: Some("\"c1\"")}, MatchConditions{if_none_match: Some("\"c2\"")}]})
+  i = 0
+  while cp.more() && i < 5 {
+    out(f, "check ${i}", cp.next_page(), fn(p: CheckSettingsPageResponse) -> Str { "etag=${ps(p.etag)} st=${p.sync_token}" })
+    i += 1
+  }
+
+  var sp = c.new_list_snapshots_pager(ListSnapshotsOptions{name: Some("s*"), status: Some([SNAPSHOT_STATUS_READY, SNAPSHOT_STATUS_ARCHIVED]), select_: Some([SNAPSHOT_FIELDS_NAME, SNAPSHOT_FIELDS_STATUS])})
+  i = 0
+  while sp.more() && i < 5 {
+    out(f, "snapshots ${i}", sp.next_page(), fn(p: ListSnapshotsResponse) -> Str { "${p.snapshots.map(fn(s: Snapshot) -> Str { "(${snapshot_text(s)})" }).join(" ")} st=${p.sync_token}" })
+    i += 1
+  }
+  sp = c.new_list_snapshots_pager()
+  out(f, "snapshots_nil", sp.next_page(), ok_text)
+
+  var fp = c.new_list_settings_for_snapshot_pager("s1")
+  i = 0
+  while fp.more() && i < 5 {
+    out(f, "snapshot_settings ${i}", fp.next_page(), fn(p: ListSettingsForSnapshotResponse) -> Str { "${settings_text(p.settings)} st=${p.sync_token}" })
+    i += 1
+  }
+  fp = c.new_list_settings_for_snapshot_pager("s 1", ListSettingsForSnapshotOptions{key: "k*", label: "l", accept_datetime: Some("2026-11-01T00:00:00Z"), after: Some("a"), if_match: Some("\"m\""), select_: Some([SETTING_FIELDS_KEY])})
+  out(f, "snapshot_settings_opts", fp.next_page(), ok_text)
+
+  out(f, "get_snapshot", c.get_snapshot("s1", GetSnapshotOptions{if_match: Some("\"se1\""), select_: Some([SNAPSHOT_FIELDS_NAME])}), fn(r: GetSnapshotResponse) -> Str { "${snapshot_text(r.snapshot)} link=${ps(r.link)} st=${r.sync_token}" })
+  out(f, "archive", c.archive_snapshot("s1", ArchiveSnapshotOptions{if_none_match: Some("\"x\"")}), fn(r: ArchiveSnapshotResponse) -> Str { "${snapshot_text(r.snapshot)} link=${ps(r.link)} st=${r.sync_token}" })
+  out(f, "recover", c.recover_snapshot("s1"), fn(r: RecoverSnapshotResponse) -> Str { "${snapshot_text(r.snapshot)} link=${ps(r.link)} st=${r.sync_token}" })
+
+  let begun = c.begin_create_snapshot("s1", [SettingFilter{key_filter: Some("app/*")}, SettingFilter{key_filter: Some("b"), label_filter: Some("l")}], BeginCreateSnapshotOptions{composition_type: Some(COMPOSITION_TYPE_KEY), retention_period: Some(3600), tags: Some({"k": "v"}), description: Some("d")})
+  out(f, "begin_create", begun, ok_text)
+  if let Ok(p0) = begun {
+    var pl = p0
+    note(f, "OUT begin_create done: ${pl.done()}")
+    let tok = pl.resume_token()
+    out_s(f, "begin_create token", tok)
+    out(f, "poll 1", pl.poll(), fn(r: http.Response) -> Str { "${pl.done()}" })
+    let resumed = c.begin_create_snapshot("s1", [], BeginCreateSnapshotOptions{resume_token: tok.ok() ?? ""})
+    out(f, "resume", resumed, ok_text)
+    if let Ok(r0) = resumed {
+      var rp2 = r0
+      let polled = rp2.poll()
+      out(f, "resume poll", polled, fn(r: http.Response) -> Str { "${rp2.done()}" })
+      out(f, "resume result", rp2.result(), fn(r: CreateSnapshotResponse) -> Str { snapshot_text(r.snapshot) })
+    }
+  }
+  let all = c.begin_create_snapshot("s2", [])
+  out(f, "begin_create_all", all, ok_text)
+  if let Ok(p0) = all {
+    var pl = p0
+    let polled = pl.poll()
+    out(f, "poll failed", polled, fn(r: http.Response) -> Str { "${pl.done()}" })
+    out(f, "result failed", pl.result(), ok_text)
+  }
+
+  for (name, ep, cl) in [
+    ("azconfig.io", "https://s.azconfig.io", cloud.AZURE_PUBLIC),
+    ("china", "https://s.azconfig.azure.cn", cloud.AZURE_PUBLIC),
+    ("staging", "https://s.eastus.appconfig-staging.azure.com", cloud.AZURE_PUBLIC),
+    ("upper port", "https://S.AppConfig.Example.Test:8443/x", cloud.AZURE_PUBLIC),
+    ("none", "https://s.example.test", cloud.AZURE_PUBLIC),
+    ("china cloud", "https://s.example.test", cloud.AZURE_CHINA),
+    ("gov cloud", "https://s.example.test", cloud.AZURE_GOVERNMENT),
+    ("custom cloud", "https://s.azconfig.io", cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "https://aud.example.test", endpoint: ""}}}),
+    ("custom no entry", "https://s.azconfig.io", cloud.Configuration{authority_host: "https://login.example.test/"}),
+  ] {
+    match new_client(os.net, os.clock, os.rand, ep, cred, opts(cl)) {
+      Ok(ac) => out(f, "audience ${name}", ac.get_setting("k"), ok_text)
+      Err(e) => note(f, "OUT audience ${name}: error ${e}")
+    }
+  }
+  out_s(f, "new_client_bad", new_client(os.net, os.clock, os.rand, "://bad", cred))
+  out_s(f, "from_cs_bad", new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=x"))
+
+  // the audience errors need a failing transport: the test below
+  var want: List[Str] = []
+  for l in CLIENT_GO {
+    if l.starts_with("OUT audience_error") {
+      break
+    }
+    want.push(l)
+  }
+  // the last client's token request and request, before the failure
+  while want.len() > 0 && !want[want.len() - 1].starts_with("OUT ") {
+    want = want[0..want.len() - 1]
+  }
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for k in 0..(if got.len() < want.len() { got.len() } else { want.len() }) {
+    expect(comparable(got[k])) == comparable(want[k])
+  }
+  expect(got.len()) == want.len()
+}
+
+/// A transport error, as Go's fake transport returns it.
+struct Fail {
+  msg: Str
+}
+
+fn (p: Fail) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  Err(policy.SendErr.Http(http.ClientErr.Connect(p.msg)))
+}
+
+test "an Entra ID audience error is explained as Go's" {
+  var want: List[Str] = []
+  for l in CLIENT_GO {
+    if l.starts_with("OUT audience_error") {
+      want.push(l)
+    }
+  }
+  expect(want.len()) == 2
+  for (k, (name, configured)) in [("unconfigured", false), ("configured", true)].indexed() {
+    let pl = runtime.new_pipeline(MODULE, VERSION, os.net, os.clock, os.rand, runtime.PipelineOptions{per_retry: [AudiencePolicy{configured: configured}, Fail{msg: "AADSTS500011: resource principal not found"}]}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}})
+    let got = match pl.send(policy.Request{method: "GET", url: EP}) {
+      Ok(_) => "ok"
+      Err(e) => "error ${e.display()}"
+    }
+    expect("OUT audience_error ${name}: ${got}") == want[k]
+  }
+  // the cloud sets the audience only when it is not the public cloud
+  expect(configured_audience(opts(cloud.AZURE_PUBLIC))) == None
+  expect(configured_audience(opts(cloud.AZURE_CHINA))) == Some("https://appconfig.azure.cn")
+}
+
+test "sync tokens are cached by id, newest version kept, sent sorted" {
+  let c = new_sync_token_cache()
+  c.set("b=1;sn=2, a=x;sn=1")?
+  c.set("b=old;sn=1")?
+  c.set("b=new;sn=3")?
+  expect(c.get()) == "a=x,b=new"
+  expect(c.set("").err()) == Some("syncToken can't be empty")
+}

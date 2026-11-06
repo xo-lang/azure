@@ -1,0 +1,33 @@
+// App Configuration's query normalization, as azappconfig/v2 v2.3.0's
+// internal/querynormalization/policy.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): each name lower case, sorted by name (a
+// repeated name keeps its order), each name and value query escaped.
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/policy
+
+struct QueryNormalizationPolicy {}
+
+/// `raw` (a query without its `?`) as Go's policy rewrites it.
+fn normalize_query(raw: Str) -> Str {
+  var params: List[(Str, Str)] = []
+  for pair in raw.split("&") {
+    if pair == "" {
+      continue
+    }
+    let (name, value) = pair.cut("=") ?? (pair, "")
+    let n = url.query_unescape(name) ?? _ => name
+    let v = url.query_unescape(value) ?? _ => value
+    params.push((n.to_lower(), v))
+  }
+  params.sort_by(fn(p: (Str, Str)) -> Str { p.0 }).map(fn(p: (Str, Str)) -> Str { "${url.query_escape(p.0)}=${url.query_escape(p.1)}" }).join("&")
+}
+
+fn (p: QueryNormalizationPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let (base, raw) = req.url.cut("?") ?? return next.send(req)
+  if raw == "" {
+    return next.send(req)
+  }
+  next.send(req with {url: "${base}?${normalize_query(raw)}"})
+}

@@ -1,0 +1,119 @@
+// Go's signed requests (hmacvectors_test.xo) sent again through the
+// query normalization and HMAC policies, the clock set to each one's
+// Date: every header, the URL and the body must be Go's, byte for byte.
+
+use std/http
+use std/time
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+const SECRET_B64: Str = "aW52ZW50ZWQtc2VjcmV0LWJ5dGVz"
+
+/// One request as the Go program prints it.
+fn go_lines(req: http.Request) -> List[Str] {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport sees Content-Length for a body
+  if req.body.len() > 0 {
+    hs.push("content-length=${req.body.len()}")
+  }
+  let q = req.raw_query()
+  let port = match req.url.port {
+    Some(p) => ":${p}"
+    None => ""
+  }
+  let u = "${req.url.scheme}://${req.url.host}${port}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}"
+  ["REQ ${req.method} ${u}", "  H ${hs.sort().join(" | ")}", "  B ${req.body.to_str_lossy()}"]
+}
+
+/// The vector's requests: method, URL, the headers the client set (not
+/// the signature's three) and the body, with the Date each was signed at.
+struct Sent {
+  method: Str
+  url: Str
+  headers: List[(Str, Str)]
+  body: Bytes
+  date: Str
+}
+
+fn sent_of(lines: List[Str]) -> List[Sent] {
+  var out: List[Sent] = []
+  var i = 0
+  while i < lines.len() {
+    if let Some(rest) = lines[i].cut_prefix("REQ ") {
+      let (method, u) = rest.cut(" ") ?? (rest, "")
+      var hs: List[(Str, Str)] = []
+      var date = ""
+      for h in (lines[i + 1].cut_prefix("  H ") ?? "").split(" | ") {
+        let (k, v) = h.cut("=") ?? (h, "")
+        if k == "date" {
+          date = v
+        } else if k != "authorization" && k != "x-ms-content-sha256" && k != "content-length" {
+          hs.push((k, v))
+        }
+      }
+      let body = (lines[i + 2].cut_prefix("  B ") ?? "").bytes()
+      out.push(Sent{method: method, url: u, headers: hs, body: body, date: date})
+      i += 3
+    } else {
+      i += 1
+    }
+  }
+  out
+}
+
+test "each request is signed as Go's HMAC policy signs it, byte for byte" {
+  let cs = parse_connection_string("Endpoint=https://store1.azconfig.example.test;Id=id-1:x9;Secret=${SECRET_B64}")?
+  let got = Mutex[List[Str]].new([])
+  for m in ["GET", "PUT", "DELETE"] {
+    for p in ["/{a}", "/{a}/{b}"] {
+      os.net.handle("${m} https://store1.azconfig.example.test${p}", fn(req: http.Request) -> http.Response {
+        got.with(fn(var l: List[Str]) { l = l + go_lines(req) })
+        http.text(200, "{}")
+      })
+    }
+  }
+  let auth = HmacPolicy{credential: cs.credential, secret: cs.secret, clock: os.clock}
+  let pl = runtime.new_pipeline("azappconfig", VERSION, os.net, os.clock, os.rand, runtime.PipelineOptions{per_retry: [QueryNormalizationPolicy{}, auth]}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}})
+  var want: List[Str] = []
+  for line in HMAC_GO {
+    if !line.starts_with("OUT ") {
+      want.push(line)
+    }
+  }
+  for s in sent_of(HMAC_GO) {
+    os.clock.set(time.parse(s.date.replace(" GMT", " UTC"), time.RFC1123, time.utc())?)
+    pl.send(policy.Request{method: s.method, url: s.url, headers: s.headers, body: s.body})?
+  }
+  let lines = got.with_read(fn(l: List[Str]) -> List[Str] { l })
+  expect(lines.len()) == want.len()
+  for i in 0..lines.len() {
+    expect(lines[i]) == want[i]
+  }
+}
+
+test "the signed text is Go's: method, path and query as sent, date, host, body hash" {
+  expect(string_to_sign("get", "https://h.example.test:8443/kv/a%2Fb?x=1&y=2", "D", "H")) == "GET\n/kv/a%2Fb?x=1&y=2\nD;h.example.test:8443;H"
+  expect(string_to_sign("PUT", "https://h.example.test/kv/k?", "D", "H")) == "PUT\n/kv/k\nD;h.example.test;H"
+  expect(string_to_sign("GET", "https://h.example.test", "D", "H")) == "GET\n\nD;h.example.test;H"
+}
+
+test "the query is normalized as Go's policy does it" {
+  expect(normalize_query("b=2&A=1&a=0&%24Select=key%2Cvalue&label=%00")) == "%24select=key%2Cvalue&a=1&a=0&b=2&label=%00"
+  expect(normalize_query("x=%zz&&y")) == "x=%25zz&y="
+}
+
+test "a connection string is parsed as Go parses it" {
+  let cs = parse_connection_string("Id=i;Secret=${SECRET_B64};Endpoint=https://e.example.test;Other=1")?
+  expect(cs.endpoint) == "https://e.example.test"
+  expect(cs.credential) == "i"
+  expect(cs.secret) == b"invented-secret-bytes"
+  for (text, msg) in [("Id=i;Secret=AA==", "missing Endpoint= section"), ("Endpoint=e;Secret=AA==", "missing Id= section"), ("Endpoint=e;Id=i", "missing Secret= section"), ("Endpoint=e;Endpoint=f;Id=i;Secret=AA==", "duplicate Endpoint= section")] {
+    expect(parse_connection_string(text).err()) == Some(msg)
+  }
+}

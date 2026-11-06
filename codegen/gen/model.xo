@@ -53,6 +53,9 @@ pub struct Param {
   pub required: Bool
   pub typ: Str
   pub skip_encoding: Bool = false
+  /// An array sent as one query parameter per value (collectionFormat
+  /// multi; Go's `for _, qv := range ...{ reqQP.Add(...) }`).
+  pub multi: Bool = false
   /// subscriptionId: a client field
   pub client: Bool = false
   /// api-version and other constants
@@ -85,6 +88,11 @@ pub struct Op {
   /// module's custom handler, such as azadmin's restorePoller).
   pub status_poller: Bool = false
   pub doc: Str = ""
+  /// The operation's `produces` content types (Go's Accept value).
+  pub produces: List[Str] = []
+  /// The headers of its success responses (wire names, in order) and
+  /// whether each is an integer.
+  pub resp_headers: List[(Str, Bool)] = []
 }
 
 /// A polymorphic type (a definition with a `discriminator`): Go's
@@ -647,7 +655,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   Param{
     name: snake(go_name), go_name: go_name,
     wire: wire, loc: loc, required: required, typ: typ,
-    skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")), client: client, constant: constant, doc: doc_of(p),
+    skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")), multi: str_of(p.get("collectionFormat")) == "multi" && loc == "query", client: client, constant: constant, doc: doc_of(p),
   }
 }
 
@@ -703,6 +711,8 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // autorest.go sends Accept when any response, the error one
           // too, has a schema
           var accept = false
+          var resp_headers: List[(Str, Bool)] = []
+          let produces = list_of(o.get("produces")).map(fn(x: json.Value) -> Str { str_of(Some(x)) }).filter(fn(t: Str) -> Bool { t != "" })
           for (code, r) in fields_of(o.get("responses")) {
             if b.deref(file, r).2.get("schema").is_some() {
               accept = true
@@ -716,6 +726,11 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             let n = Int.parse(code) ?? continue
             if n >= 200 && n < 300 {
               okc.push(n)
+              for (h, hv) in fields_of(b.deref(file, r).2.get("headers")) {
+                if !resp_headers.any(fn(x: (Str, Bool)) -> Bool { x.0 == h }) {
+                  resp_headers.push((h, str_of(hv.get("type")) == "integer"))
+                }
+              }
               if resp.is_none() {
                 if let Some(s) = b.deref(file, r).2.get("schema") {
                   resp = Some(b.type_of(file, s, "${group}${name}Response"))
@@ -740,6 +755,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             group: group, name: name, method: method.to_upper(), path: path, params: params, ok: okc.sort(), resp: resp,
             pageable: pg.is_some() && !lro, next_link: next, item_name: if item_name == "" { "value" } else { item_name },
             lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, accept: accept, status_poller: lro && b.custom.status_pollers.contains(id.to_lower()), doc: doc_of(o),
+            produces: produces, resp_headers: resp_headers,
           })
         }
       }

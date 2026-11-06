@@ -8,6 +8,30 @@ version has been tagged since.
 
 ## Unreleased
 
+The generator handles TypeSpec-emitted data plane specs as Go's
+TypeSpec emitter does (for `data/azappconfig`, `reachable_only`
+packages), and two of its fixes reach ARM modules. Checked by
+comparing each generated request with Go's code and by azappconfig's
+Go vectors:
+
+- Accept is the operation's `produces` (without
+  `application/json`), comma joined, as Go sends it; armcompute's
+  `CloudServiceRoleInstancesClient.get_remote_desktop_file` now sends
+  `application/x-rdp`, as Go's.
+- A response's documented headers are fields of its response type
+  (`etag`, `sync_token`, `link`, `request_id`, ...; an integer header
+  that does not parse is Go's `strconv.ParseInt` error) in TypeSpec
+  packages, and in ARM operations that document them: armkeyvault's
+  `PrivateEndpointConnectionsClient.put` and
+  `MhsmPrivateEndpointConnectionsClient.put` responses gain
+  `azure_async_operation` and `retry_after`, as Go's.
+- In a TypeSpec package an empty body decodes as the zero value (Go's
+  UnmarshalAsJSON; a 304 page), a list of enum values in the query is
+  comma joined, a `collectionFormat: multi` array is one parameter per
+  value, and a HEAD operation's response has no `success` field.
+- `runtime.header_value(resp, name)`: a header, None when missing or
+  empty (Go's `if val := resp.Header.Get(...); val != ""`).
+
 `runtime.Poller` follows azcore's async, op, loc, body and nop pollers
 step for step (behavior fix; **breaking** where noted). Checked by a Go
 program that drives azcore v1.21.0's runtime.NewPoller through 31

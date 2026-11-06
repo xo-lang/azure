@@ -1,0 +1,240 @@
+// The hand written part of azappconfig's generated layer, as Go's
+// internal/generated/custom_client.go (azappconfig/v2 v2.3.0; MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): the client over the
+// azappconfig Client's pipeline. The rest of the package is generated
+// (client.xo, models.xo). Its pagers are Go's: next links the service
+// gives relative to the endpoint are resolved, and the key-value pagers
+// take a match condition per page and read the next link from the Link
+// header.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+struct Setup {
+  pipeline: runtime.Pipeline
+  endpoint: Str
+}
+
+/// The generated operations (Go's AzureAppConfigurationClient).
+pub struct Client {
+  setup: Setup
+}
+
+/// A client sending through `pipeline` to `endpoint`
+/// (NewAzureAppConfigurationClient).
+pub fn new_client(pipeline: runtime.Pipeline, endpoint: Str) -> Client {
+  Client{setup: Setup{pipeline: pipeline, endpoint: endpoint}}
+}
+
+/// The client's pipeline (AzureAppConfigurationClient.Pipeline).
+pub fn (c: Client) pipeline() -> runtime.Pipeline {
+  c.setup.pipeline
+}
+
+pub fn (c: Client) endpoint() -> Str {
+  c.setup.endpoint
+}
+
+/// An If-Match and an If-None-Match ETag (azcore.MatchConditions).
+pub struct MatchConditions {
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+}
+
+/// A pager over a list operation, as Go's runtime.Pager over this
+/// package's PagingHandlers: once a page fails, `more` is false and
+/// every `next_page` gives that error again.
+pub struct Pager[T] {
+  pipeline: runtime.Pipeline
+  endpoint: Str
+  /// The first request, given the page's match conditions.
+  first: fn(MatchConditions) -> policy.Request ! azcore.CallErr
+  decode: fn(http.Response) -> T ! Str
+  next_link: fn(T) -> Str?
+  /// HEAD for the check pager, else GET (with Accept application/json).
+  method: Str = "GET"
+  /// Taken one per page, in order.
+  conditions: List[MatchConditions] = []
+  ok_status: List[Int] = [200]
+  started: Bool = false
+  link: Str = ""
+  failed: azcore.CallErr? = None
+}
+
+/// Whether another page can be fetched.
+pub fn (p: Pager[T]) more() -> Bool {
+  if p.failed.is_some() {
+    return false
+  }
+  !p.started || p.link != ""
+}
+
+/// The next page.
+pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(e) = p.failed {
+    return Err(e)
+  }
+  if p.started && p.link == "" {
+    return Err(azcore.CallErr.InvalidInput("no more pages"))
+  }
+  match p.fetch() {
+    Ok(page) => {
+      p.started = true
+      p.link = (p.next_link)(page) ?? ""
+      Ok(page)
+    }
+    Err(e) => {
+      p.failed = Some(e)
+      Err(e)
+    }
+  }
+}
+
+fn (var p: Pager[T]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  var cond = MatchConditions{}
+  if !p.conditions.is_empty() {
+    cond = p.conditions[0]
+    p.conditions = p.conditions[1..p.conditions.len()]
+  }
+  let req = if !p.started { (p.first)(cond)? } else {
+    var r = policy.Request{method: p.method, url: next_link_url(p.endpoint, runtime.encode_query(escape_semicolons(p.link)))}
+    if p.method == "GET" {
+      r = r.with_header("Accept", "application/json")
+    }
+    if let Some(v) = cond.if_match {
+      r = r.with_header("If-Match", v)
+    }
+    if let Some(v) = cond.if_none_match {
+      r = r.with_header("If-None-Match", v)
+    }
+    r
+  }
+  let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !p.ok_status.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  (p.decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// Go's EncodeQueryParams escapes `;` before it parses the query.
+fn escape_semicolons(link: Str) -> Str {
+  match link.cut("?") {
+    Some((before, after)) => "${before}?${after.replace(";", "%3B")}"
+    None => link
+  }
+}
+
+/// Whether `s` starts with a URI scheme (Go's hasScheme).
+fn has_scheme(s: Str) -> Bool {
+  let b = s.bytes()
+  for (i, c) in b.indexed() {
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) {
+      continue
+    }
+    if c == 58 {
+      return i > 0
+    }
+    if i == 0 {
+      return false
+    }
+    if (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 46 {
+      continue
+    }
+    return false
+  }
+  false
+}
+
+/// A next link as Go's NewRequestForNextLink sends it: the query encoded
+/// with `%20` for a space, and a link without a scheme joined to the
+/// endpoint.
+fn next_link_url(endpoint: Str, link: Str) -> Str {
+  let l = runtime.encode_query(escape_semicolons(link)).replace("+", "%20")
+  if has_scheme(l) { l } else { runtime.join_paths(endpoint, l) }
+}
+
+/// The URL of a `<url>; rel="next"` Link header.
+fn link_header(resp: http.Response) -> Str? {
+  let link = resp.header("Link") ?? return None
+  let end = link.find(">") ?? return None
+  if end > 0 { Some(link[1..end]) } else { None }
+}
+
+/// The key-value pages the options select, each with its match
+/// conditions; a 304 page is empty (NewGetKeyValuesPagerWithMatchConditions).
+pub fn (c: Client) new_get_key_values_pager_with_match_conditions(conditions: List[MatchConditions], options: GetKeyValuesOptions) -> Pager[GetKeyValuesResponse] {
+  Pager{
+    pipeline: c.setup.pipeline, endpoint: c.setup.endpoint,
+    first: fn(m: MatchConditions) -> policy.Request ! azcore.CallErr { c.get_key_values_create_request(options with {if_match: m.if_match, if_none_match: m.if_none_match}) },
+    decode: fn(r: http.Response) -> GetKeyValuesResponse ! Str {
+      let page = get_key_values_handle(r)?
+      if page.key_value_list_result.next_link.is_some() {
+        return Ok(page)
+      }
+      Ok(page with {key_value_list_result: page.key_value_list_result with {next_link: link_header(r)}})
+    },
+    next_link: fn(p: GetKeyValuesResponse) -> Str? { p.key_value_list_result.next_link },
+    conditions: conditions, ok_status: [200, 304],
+  }
+}
+
+/// A page of the check pager: its headers and the Link header's next link.
+pub struct CheckKeyValuesPagerResponse {
+  pub etag: Str? = None
+  pub sync_token: Str? = None
+  pub next_link: Str? = None
+}
+
+/// HEADs of the key-value pages the options select
+/// (NewCheckKeyValuesPagerWithMatchConditions).
+pub fn (c: Client) new_check_key_values_pager_with_match_conditions(conditions: List[MatchConditions], options: CheckKeyValuesOptions) -> Pager[CheckKeyValuesPagerResponse] {
+  Pager{
+    pipeline: c.setup.pipeline, endpoint: c.setup.endpoint,
+    first: fn(m: MatchConditions) -> policy.Request ! azcore.CallErr { c.check_key_values_create_request(options with {if_match: m.if_match, if_none_match: m.if_none_match}) },
+    decode: fn(r: http.Response) -> CheckKeyValuesPagerResponse ! Str {
+      let h = check_key_values_handle(r)?
+      Ok(CheckKeyValuesPagerResponse{etag: h.etag, sync_token: h.sync_token, next_link: link_header(r)})
+    },
+    next_link: fn(p: CheckKeyValuesPagerResponse) -> Str? { p.next_link },
+    method: "HEAD", conditions: conditions, ok_status: [200, 304],
+  }
+}
+
+/// The key-value pages, relative next links resolved
+/// (NewGetKeyValuesPagerWithNextLinks).
+pub fn (c: Client) new_get_key_values_pager_with_next_links(options: GetKeyValuesOptions) -> Pager[GetKeyValuesResponse] {
+  Pager{
+    pipeline: c.setup.pipeline, endpoint: c.setup.endpoint,
+    first: fn(m: MatchConditions) -> policy.Request ! azcore.CallErr { c.get_key_values_create_request(options) },
+    decode: fn(r: http.Response) -> GetKeyValuesResponse ! Str { get_key_values_handle(r) },
+    next_link: fn(p: GetKeyValuesResponse) -> Str? { p.key_value_list_result.next_link },
+  }
+}
+
+/// The revision pages (NewGetRevisionsPagerWithNextLinks).
+pub fn (c: Client) new_get_revisions_pager_with_next_links(options: GetRevisionsOptions) -> Pager[GetRevisionsResponse] {
+  Pager{
+    pipeline: c.setup.pipeline, endpoint: c.setup.endpoint,
+    first: fn(m: MatchConditions) -> policy.Request ! azcore.CallErr { c.get_revisions_create_request(options) },
+    decode: fn(r: http.Response) -> GetRevisionsResponse ! Str { get_revisions_handle(r) },
+    next_link: fn(p: GetRevisionsResponse) -> Str? { p.key_value_list_result.next_link },
+  }
+}
+
+/// The snapshot pages (NewGetSnapshotsPagerWithNextLinks).
+pub fn (c: Client) new_get_snapshots_pager_with_next_links(options: GetSnapshotsOptions) -> Pager[GetSnapshotsResponse] {
+  Pager{
+    pipeline: c.setup.pipeline, endpoint: c.setup.endpoint,
+    first: fn(m: MatchConditions) -> policy.Request ! azcore.CallErr { c.get_snapshots_create_request(options) },
+    decode: fn(r: http.Response) -> GetSnapshotsResponse ! Str { get_snapshots_handle(r) },
+    next_link: fn(p: GetSnapshotsResponse) -> Str? { p.snapshot_list_result.next_link },
+  }
+}
+
+/// The PUT that starts making a snapshot, for the azappconfig client's
+/// own poller (Go's exported CreateSnapshot).
+pub fn (c: Client) create_snapshot_request(name: Str, entity: Snapshot) -> policy.Request ! azcore.CallErr {
+  c.create_snapshot_create_request(name, entity, BeginCreateSnapshotOptions{})
+}
