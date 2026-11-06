@@ -1,0 +1,75 @@
+// Shared Key and SAS against Azurite (decision 0005, layer 4): run by
+// scripts/integration-azurite.sh, which starts Azurite on 127.0.0.1 and
+// sets XO_AZURE_TEST_BLOB. Azurite checks both signatures. Only its
+// public development account is used; the client's Net reaches only the
+// loopback host. Without `xo test --real` these tests are skipped.
+
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas
+
+/// Azurite's public development account and key; valid nowhere else.
+const DEV_ACCOUNT: Str = "devstoreaccount1"
+const DEV_KEY: Str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+const CONTAINER: Str = "xo-lang-azure-it"
+const STORAGE_VERSION: Str = "2025-05-05"
+
+fn pipeline(net: Net, clock: Clock, rand: Rand, per_retry: List[policy.Policy]) -> runtime.Pipeline {
+  runtime.new_pipeline("azblob", "v0.1.0", net, clock, rand, runtime.PipelineOptions{per_retry: per_retry}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: 1}})
+}
+
+fn req(method: Str, url: Str, body: Bytes = b"") -> policy.Request {
+  policy.Request{method: method, url: url, body: body, headers: [("x-ms-version", STORAGE_VERSION)]}
+}
+
+test "Shared Key and SAS round trip against Azurite" uses net, env, clock {
+  let ep = (os.env.get("XO_AZURE_TEST_BLOB") ?? "http://127.0.0.1:20000/devstoreaccount1").trim_end_chars("/")
+  let net = os.net.only(["127.0.0.1", "localhost"])
+  let cred = exported.new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  let signed = pipeline(net, os.clock, os.rand, [exported.shared_key_policy(cred, os.clock)])
+  let anon = pipeline(net, os.clock, os.rand, [])
+  let blob = "${ep}/${CONTAINER}/dir/hello%20world.txt"
+
+  // Shared Key: create the container, put and get a blob
+  let made = signed.send(req("PUT", "${ep}/${CONTAINER}?restype=container"))?
+  expect([201, 409].contains(made.status)) == true
+  let put = signed.send(req("PUT", blob, b"hello from xo") with {headers: [("x-ms-version", STORAGE_VERSION), ("x-ms-blob-type", "BlockBlob"), ("Content-Type", "text/plain"), ("x-ms-meta-Project", "xo")]})?
+  expect(put.status) == 201
+  let got = signed.send(req("GET", blob))?
+  expect(got.status) == 200
+  expect(got.body) == b"hello from xo"
+
+  // a wrong key is refused
+  let wrong = exported.new_shared_key_credential(DEV_ACCOUNT, "d3Jvbmcta2V5LW5vdC1yZWFs")?
+  let refused = pipeline(net, os.clock, os.rand, [exported.shared_key_policy(wrong, os.clock)]).send(req("GET", blob))?
+  expect(refused.status) == 403
+
+  let expiry = os.clock.now() + 1h
+  // a service SAS for reading the blob
+  let read = sas.BlobSignatureValues{expiry: Some(expiry), permissions: "r", container_name: CONTAINER, blob_name: "dir/hello world.txt"}.sign_with_shared_key(cred)?
+  let by_sas = anon.send(req("GET", "${blob}?${read.encode()}"))?
+  expect(by_sas.status) == 200
+  expect(by_sas.body) == b"hello from xo"
+  // ... which cannot write
+  let denied = anon.send(req("PUT", "${blob}?${read.encode()}", b"x") with {headers: [("x-ms-version", STORAGE_VERSION), ("x-ms-blob-type", "BlockBlob")]})?
+  expect(denied.status) == 403
+
+  // a container SAS that may create blobs
+  let write = sas.BlobSignatureValues{expiry: Some(expiry), permissions: "cw", container_name: CONTAINER}.sign_with_shared_key(cred)?
+  let created = anon.send(req("PUT", "${ep}/${CONTAINER}/by-sas.txt?${write.encode()}", b"via sas") with {headers: [("x-ms-version", STORAGE_VERSION), ("x-ms-blob-type", "BlockBlob")]})?
+  expect(created.status) == 201
+
+  // an account SAS that may list containers
+  let acct = sas.AccountSignatureValues{expiry: Some(expiry), permissions: "l", resource_types: "s"}.sign_with_shared_key(cred)?
+  let listed = anon.send(req("GET", "${ep}/?comp=list&${acct.encode()}"))?
+  expect(listed.status) == 200
+  expect(listed.body.to_str_lossy().contains("<Name>${CONTAINER}</Name>")) == true
+
+  // a tampered signature is refused
+  let bad = read.encode().replace("sig=", "sig=AAAA")
+  expect(anon.send(req("GET", "${blob}?${bad}"))?.status) == 403
+
+  let gone = signed.send(req("DELETE", "${ep}/${CONTAINER}?restype=container"))?
+  expect(gone.status) == 202
+}
