@@ -1,0 +1,117 @@
+// Share and file leases, as azfile's lease package (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md), with the requests of its generated
+// ShareClient and FileClient.
+
+use std/http
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+/// What a lease call returns; release reads no lease ID, and only a
+/// share break reads the lease time.
+pub struct LeaseResponse {
+  pub response: Response
+  pub client_request_id: Str? = None
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub lease_id: Str? = None
+  /// Seconds until a broken lease ends (a share break).
+  pub lease_time: Int? = None
+}
+
+fn lease_response(resp: http.Response, id: Bool, time: Bool) -> LeaseResponse {
+  var l = LeaseResponse{response: response_of(resp), client_request_id: header(resp, "x-ms-client-request-id"), date: header_time(resp, "Date"), etag: header(resp, "ETag"), last_modified: header_time(resp, "Last-Modified")}
+  if id { l = l with {lease_id: header(resp, "x-ms-lease-id")} }
+  if time { l = l with {lease_time: header_int(resp, "x-ms-lease-time")} }
+  l
+}
+
+/// Go's GenerateLeaseID: the ID given, or a random (version 4) UUID.
+fn lease_id_or_new(rand: Rand, lease_id: Str?) -> Str uses rand {
+  lease_id ?? uuid.v4(rand).display()
+}
+
+/// A lease on a share (or a share snapshot); `lease_id` is the one it
+/// proposes when acquiring and holds after `change`.
+pub struct ShareLeaseClient {
+  pub lease_id: Str
+  share: ShareClient
+}
+
+pub fn new_share_lease_client(rand: Rand, share: ShareClient, lease_id: Str? = None) -> ShareLeaseClient uses rand {
+  ShareLeaseClient{lease_id: lease_id_or_new(rand, lease_id), share: share}
+}
+
+fn (l: ShareLeaseClient) call(ok: Int, share_snapshot: Str?, headers: List[(Str, Str)]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let c = share_call("PUT", Some("lease"), [ok])
+  l.share.core.send(c with {query: c.query + snapshot_query(share_snapshot), headers: headers})
+}
+
+/// Acquires the lease for `duration` seconds (15 to 60, or -1 for an
+/// infinite lease).
+pub fn (l: ShareLeaseClient) acquire(duration: Int, share_snapshot: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(201, share_snapshot, [("x-ms-lease-action", "acquire"), ("x-ms-lease-duration", "${duration}"), ("x-ms-proposed-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+/// Breaks the lease, after `break_period` seconds when given; `lease_id`
+/// is a condition (Go's AccessConditions), not this client's ID.
+pub fn (l: ShareLeaseClient) break_lease(break_period: Int? = None, share_snapshot: Str? = None, lease_id: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(202, share_snapshot, [("x-ms-lease-action", "break")] + int_header("x-ms-lease-break-period", break_period) + lease_header(lease_id))?
+  Ok(lease_response(resp, true, true))
+}
+
+/// Changes the lease's ID to `proposed_lease_id`; the client holds the
+/// new ID once the call succeeds.
+pub fn (var l: ShareLeaseClient) change(proposed_lease_id: Str, share_snapshot: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, share_snapshot, [("x-ms-lease-action", "change"), ("x-ms-lease-id", l.lease_id), ("x-ms-proposed-lease-id", proposed_lease_id)])?
+  l.lease_id = proposed_lease_id
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (l: ShareLeaseClient) release(share_snapshot: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, share_snapshot, [("x-ms-lease-action", "release"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, false, false))
+}
+
+pub fn (l: ShareLeaseClient) renew(share_snapshot: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, share_snapshot, [("x-ms-lease-action", "renew"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+/// A lease on a file (always infinite).
+pub struct FileLeaseClient {
+  pub lease_id: Str
+  file: FileClient
+}
+
+pub fn new_file_lease_client(rand: Rand, file: FileClient, lease_id: Str? = None) -> FileLeaseClient uses rand {
+  FileLeaseClient{lease_id: lease_id_or_new(rand, lease_id), file: file}
+}
+
+fn (l: FileLeaseClient) call(ok: Int, headers: List[(Str, Str)]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let c = l.file.core
+  c.send(file_call(c, "PUT", [ok], query: [("comp", "lease")], headers: headers))
+}
+
+pub fn (l: FileLeaseClient) acquire() -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(201, [("x-ms-lease-action", "acquire"), ("x-ms-lease-duration", "-1"), ("x-ms-proposed-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, true, false))
+}
+
+/// Breaks the lease; `lease_id` is a condition, not this client's ID.
+pub fn (l: FileLeaseClient) break_lease(lease_id: Str? = None) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(202, [("x-ms-lease-action", "break")] + lease_header(lease_id))?
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (var l: FileLeaseClient) change(proposed_lease_id: Str) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, [("x-ms-lease-action", "change"), ("x-ms-lease-id", l.lease_id), ("x-ms-proposed-lease-id", proposed_lease_id)])?
+  l.lease_id = proposed_lease_id
+  Ok(lease_response(resp, true, false))
+}
+
+pub fn (l: FileLeaseClient) release() -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = l.call(200, [("x-ms-lease-action", "release"), ("x-ms-lease-id", l.lease_id)])?
+  Ok(lease_response(resp, false, false))
+}

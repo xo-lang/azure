@@ -1,0 +1,114 @@
+// The lease clients against the Go program's fake (leasevectors_test.xo):
+// every request byte for byte, every field read back as Go dumps it.
+
+use std/http
+use std/uuid
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const LEASE_GO_DATE: Str = "Fri, 06 Nov 2026 11:18:58 GMT"
+
+struct LeaseFixed {}
+
+fn (p: LeaseFixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", LEASE_GO_DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+fn lease_answer(req: http.Request) -> http.Response {
+  let id = req.header("x-ms-proposed-lease-id") ?? (req.header("x-ms-lease-id") ?? "")
+  let status = match req.header("x-ms-lease-action") ?? "" {
+    "acquire" => 201
+    "break" => 202
+    _ => 200
+  }
+  with_headers(http.empty(status), [("ETag", "\"0x8E1\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT"), ("x-ms-client-request-id", "echo-2"), ("x-ms-lease-time", "5"), ("x-ms-lease-id", "srv-${id}")])
+}
+
+fn lease_dump(x: LeaseResponse) -> Dump {
+  var d = Dump{}
+  d.s("ClientRequestID", x.client_request_id)
+  d.t("Date", x.date)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseID", x.lease_id)
+  d.i("LeaseTime", x.lease_time)
+  d.r(x.response)
+  d
+}
+
+test "the lease clients send what Go sends and read what Go reads" {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    record(req, log)
+    stamped(lease_answer(req))
+  }
+  for path in ["/{a}", "/{a}/{b}", "/{a}/{b}/{c}"] {
+    os.net.handle("PUT ${EP}${path}", h)
+  }
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [LeaseFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let snap = Some("2026-11-05T01:00:00.0000000Z")
+  var out: List[Str] = []
+  let take = fn() -> List[Str] {
+    log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+  }
+  let add = fn(lines: List[Str]) -> List[Str] { take() + lines }
+  let res = fn(name: Str, r: Result[LeaseResponse, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(x) => lease_dump(x).show(name)
+      Err(e) => err_lines(name, e)
+    }
+  }
+  let pick = fn(name: Str, r: Result[LeaseResponse, azcore.CallErr], get: fn(LeaseResponse) -> Str?) -> List[Str] {
+    match r {
+      Ok(x) => one(name, get(x))
+      Err(e) => err_lines(name, e)
+    }
+  }
+  let id = fn(x: LeaseResponse) -> Str? { x.lease_id }
+  let etag = fn(x: LeaseResponse) -> Str? { x.etag }
+
+  var sl = new_share_lease_client(os.rand, sh, Some("l-1"))
+  out = out + add(res("l1 share acquire for 60 seconds on a snapshot", sl.acquire(60, snap)))
+  out = out + add(pick("l1b share acquire, infinite", sl.acquire(-1), id))
+  out = out + add(res("l2 share break with a period and a lease", sl.break_lease(Some(10), snap, Some("l-1"))))
+  out = out + add(match sl.break_lease() {
+    Ok(x) => ["== l2b share break, no options", "  =${x.lease_time ?? -1}"]
+    Err(e) => err_lines("l2b", e)
+  })
+  out = out + add(res("l3 share change", sl.change("l-2", snap)))
+  out = out + ["== l3b lease ID after change", "  ${sl.lease_id}"]
+  out = out + add(res("l4 share renew", sl.renew(snap)))
+  out = out + add(res("l5 share release", sl.release(snap)))
+  out = out + add(pick("l5b share release, no options", sl.release(), etag))
+
+  var fl = new_file_lease_client(os.rand, sh.new_directory_client("d1").new_file_client("f.txt"), Some("fl-1"))
+  out = out + add(res("l6 file acquire", fl.acquire()))
+  out = out + add(res("l7 file break with a lease", fl.break_lease(Some("fl-1"))))
+  out = out + add(pick("l7b file break, no options", fl.break_lease(), id))
+  out = out + add(res("l8 file change", fl.change("fl-2")))
+  out = out + ["== l8b lease ID after change", "  ${fl.lease_id}"]
+  out = out + add(res("l9 file release", fl.release()))
+
+  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let dl = new_share_lease_client(os.rand, dots, Some("l-3"))
+  out = out + add(pick("l10 share acquire with trailing dots and an intent", dl.acquire(15), id))
+  let dfl = new_file_lease_client(os.rand, dots.new_root_directory_client().new_file_client("f."), Some("fl-3"))
+  out = out + add(pick("l11 file acquire with trailing dots and an intent", dfl.acquire(), id))
+  out = out + add(pick("l12 file release with trailing dots and an intent", dfl.release(), etag))
+  expect(out) == LEASE_OUTPUT
+}
+
+test "a lease client with no ID proposes a random version 4 UUID" {
+  let sh = new_share_client_with_no_credential(os.net, os.clock, os.rand, "${EP}/s1")
+  let a = new_share_lease_client(os.rand, sh)
+  let b = new_file_lease_client(os.rand, sh.new_root_directory_client().new_file_client("f"))
+  expect(uuid.parse(a.lease_id)?.version()) == 4
+  expect(uuid.parse(b.lease_id)?.version()) == 4
+  expect(a.lease_id != b.lease_id) == true
+}

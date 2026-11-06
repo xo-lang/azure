@@ -46,6 +46,12 @@ What it does:
   and the chunked `download_buffer` and `upload_buffer`. Ranges format as
   Go's (`bytes=10-14`, `bytes=3-` to the end), and a count of 0 from a
   URL sends Go's empty destination range.
+- Leases: `new_share_lease_client` (acquire for 15 to 60 seconds or -1,
+  break with a period, change, release, renew, each on a snapshot too)
+  and `new_file_lease_client` (acquire, always infinite, break, change,
+  release). With no ID given the client proposes a random UUID, as Go's
+  does; `change` updates the client's `lease_id` once it succeeds. A
+  break's `lease_id` is a condition, not the client's ID, as in Go.
 - `ClientOptions.file_request_intent` (`backup`) on the share calls,
   not the service's, as Go's generated clients send it; the trailing dot
   options on directory calls.
@@ -80,4 +86,7 @@ Where it differs from Go v1.7.1:
   `UploadStream`, `DownloadFile` and progress callbacks are not ported:
   `upload_buffer` and `download_buffer` cover them. Go's unused
   `UploadRangeFromURLOptions.SourceContentCRC64` field is left out.
-- Not ported yet: leases, SAS.
+- Lease `Break` is `break_lease` (`break` is a keyword). A lease client
+  always holds an ID, so Go's "leaseID cannot be nil" errors cannot
+  occur.
+- Not ported yet: SAS.
