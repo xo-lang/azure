@@ -28,6 +28,8 @@ pub struct StrEnum {
 
 pub struct Param {
   pub name: Str
+  /// Go's parameter name (in its error messages).
+  pub go_name: Str = ""
   pub wire: Str
   /// path, query, header or body
   pub loc: Str
@@ -67,7 +69,33 @@ pub struct Api {
   pub report: List[Str]
 }
 
+/// A module's renames and fixes beyond the OpenAPI: TypeSpec's Go
+/// `@@clientName`s (read from client.tsp) and the transforms Go's
+/// module applies after generating (codegen/custom/<module>.toml).
+pub struct Custom {
+  /// operationId (any case) to Go's operation name.
+  pub ops: Map[Str, Str] = {}
+  /// definition name to Go's type name.
+  pub models: Map[Str, Str] = {}
+  /// `Definition.property` to Go's field name.
+  pub fields: Map[Str, Str] = {}
+  /// parameter wire name to Go's parameter name.
+  pub params: Map[Str, Str] = {}
+  /// Go field name (lower case) of a `Str` field to its type (`ID`).
+  pub field_types: Map[Str, Str] = {}
+  /// Generated type names replaced by another type (`DeletionRecoveryLevel` by `Str`).
+  pub replace_types: Map[Str, Str] = {}
+  /// Parameters dropped from every operation (wire names).
+  pub drop_params: List[Str] = []
+  /// Path parameters that may be empty (wire names).
+  pub allow_empty: List[Str] = []
+  /// Emit only the types operations reach (TypeSpec's Go emitter), not
+  /// every definition (autorest.go).
+  pub reachable_only: Bool = false
+}
+
 pub struct Builder {
+  custom: Custom = Custom{}
   files: Map[Str, json.Value]
   models: List[Model] = []
   enums: List[StrEnum] = []
@@ -79,13 +107,16 @@ pub struct Builder {
   stutter: Str = ""
 }
 
-pub fn builder(files: Map[Str, json.Value], package: Str) -> Builder {
+pub fn builder(files: Map[Str, json.Value], package: Str, custom: Custom = Custom{}) -> Builder {
   let p = package.to_lower()
-  Builder{files: files, stutter: if p.starts_with("arm") { p[3..p.len()] } else { p }}
+  Builder{files: files, custom: custom, stutter: if p.starts_with("arm") { p[3..p.len()] } else { p }}
 }
 
 /// A schema name as a type name, without the package's stutter.
 fn (b: Builder) type_name(s: Str) -> Str {
+  if let Some(r) = b.custom.models.get(s) {
+    return reserve(r)
+  }
   let n = pascal(s)
   let k = b.stutter.len()
   if k > 0 && n.len() > k && n[0..k].to_lower() == b.stutter {
@@ -236,6 +267,10 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value) -> Str {
   if let Some(t) = b.known.get(name) {
     return t
   }
+  if let Some(r) = b.custom.replace_types.get(name) {
+    b.known[name] = r
+    return r
+  }
   if !list_of(v.get("enum")).is_empty() {
     let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
     return b.str_enum(if en != "" { b.type_name(en) } else { name }, v)
@@ -266,9 +301,16 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value) -> Str {
       continue
     }
     seen.push(wire)
-    let client = str_of(prop.get("x-ms-client-name"))
-    let typ = b.type_of(pf, prop, "${name}${pascal(wire)}")
-    fields.push(Field{name: snake(if client != "" { client } else { wire }), wire: wire, typ: typ, doc: doc_of(prop)})
+    let raw_client = str_of(prop.get("x-ms-client-name"))
+    let client = b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
+    var typ = b.type_of(pf, prop, "${name}${pascal(wire)}")
+    let go_name = if client != "" { client } else { wire }
+    if typ == "Str" {
+      if let Some(t) = b.custom.field_types.get(go_name.to_lower()) {
+        typ = t
+      }
+    }
+    fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop)})
   }
   b.models.push(Model{name: name, fields: fields, doc: doc_of(v)})
   name
@@ -298,9 +340,10 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     b.inline(f, p, pascal(wire))
   }
   let constant = if wire == "api-version" { Some("API_VERSION") } else { None }
+  let go_name = b.custom.params.get(wire) ?? (if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { wire })
   let client = wire == "subscriptionId" || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
   Param{
-    name: snake(if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { wire }),
+    name: snake(go_name), go_name: go_name,
     wire: wire, loc: loc, required: bool_of(p.get("required")) || loc == "path", typ: typ,
     skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")), client: client, constant: constant, doc: doc_of(p),
   }
@@ -325,13 +368,17 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             continue
           }
           let id = str_of(o.get("operationId"))
-          let (group, name) = match id.find("_") {
+          let (group, raw_name) = match id.find("_") {
             Some(i) => (id[0..i], id[i + 1..id.len()])
             None => ("", id)
           }
+          let name = b.custom.ops.get(id.to_lower()) ?? raw_name
           var params: List[Param] = []
           for raw in shared + list_of(o.get("parameters")) {
             let p = b.param(file, raw)
+            if b.custom.drop_params.contains(p.wire) {
+              continue
+            }
             params = params.filter(fn(q: Param) -> Bool { q.wire != p.wire || q.loc != p.loc })
             params.push(p)
           }
@@ -379,8 +426,8 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
       }
     }
   }
-  // Go emits every definition of the input files, used or not.
-  for file in inputs {
+  // autorest.go emits every definition of the input files, used or not.
+  for file in if b.custom.reachable_only { [] } else { inputs } {
     let doc = b.files.get(file) ?? json.Value.Null
     for (def, v) in fields_of(doc.get("definitions")) {
       if errors.contains("/definitions/${def}") {

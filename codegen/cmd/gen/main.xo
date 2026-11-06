@@ -1,23 +1,89 @@
 // The generator's command, run from the repository root:
-//   xo run ./codegen/cmd/gen -- arm <spec folder> <readme tag> <module dir> <version>
-// reads codegen/.specs/<spec folder>/readme.md, the tag's input files and
-// every file they `$ref`, and writes the module into <module dir> (its
-// xo.mod, models.xo and one <group>_client.xo per operation group).
+//   xo run ./codegen/cmd/gen -- <module dir>
+// finds the module's row in codegen/services.toml, reads its spec from
+// codegen/.specs/<commit>/ (codegen/fetch-specs.sh): a readme tag's
+// input files (an autorest module) or one OpenAPI file emitted from
+// TypeSpec with the project's Go renames (a TypeSpec module), plus
+// every file they `$ref` and codegen/custom/<module>.toml when present,
+// and writes the module into <module dir>.
 // What the generator does not handle is printed, never dropped silently.
 
 use std/json
+use std/toml
 use github.com/xo-lang/azure/codegen/gen
 use github.com/xo-lang/azure/codegen/spec
 
+struct Service {
+  pub dir: Str
+  pub spec: Str
+  pub readme_tag: Str = ""
+  /// A TypeSpec module's emitted OpenAPI file, from the repository root.
+  pub openapi: Str = ""
+  /// The spec commit, when not specs.lock's.
+  pub commit: Str = ""
+  pub go_module: Str = ""
+  pub go_version: Str = ""
+  pub version: Str
+} derive Json
+
+struct Services {
+  pub service: List[Service]
+} derive Json
+
+/// codegen/custom/<module>.toml: what Go's module changes after
+/// generating (its transforms), and the data plane shape.
+struct CustomFile {
+  pub data_plane: Bool = false
+  pub reachable_only: Bool = false
+  pub field_types: Map[Str, Str] = {}
+  pub replace_types: Map[Str, Str] = {}
+  pub drop_params: List[Str] = []
+  pub allow_empty: List[Str] = []
+  /// Other modules of this repository the hand written files use.
+  pub needs as "requires": List[Str] = []
+} derive Json
+
 fn main(os: Os) -> () ! Error {
   let args = os.env.args()
-  if args.len() != 5 || args[0] != "arm" {
-    os.stdio.println("usage: gen arm <spec folder> <readme tag> <module dir> <version>")
+  if args.len() != 1 {
+    os.stdio.println("usage: gen <module dir>")
     return Ok(())
   }
-  let root = "codegen/.specs/${args[1]}"
-  let readme = os.fs.read_text("${root}/readme.md")?
-  let inputs = spec.input_files(readme, args[2])?.map(fn(f: Str) -> Str { "${root}/${f}" })
+  let dir = args[0]
+  let services = toml.decode[Services](os.fs.read_text("codegen/services.toml")?)?
+  let svc = services.service.filter(fn(s: Service) -> Bool { s.dir == dir }).get(0) ?? return Err("no row for ${dir} in codegen/services.toml")
+  var commit = svc.commit
+  if commit == "" {
+    for line in os.fs.read_text("codegen/specs.lock")?.split("\n") {
+      if line.starts_with("commit ") {
+        commit = line[7..line.len()].trim()
+      }
+    }
+  }
+  let base = "codegen/.specs/${commit}"
+  let name = dir.split("/").last() ?? dir
+  let custom_path = "codegen/custom/${name}.toml"
+  let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
+  var custom = gen.Custom{field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only}
+  var inputs: List[Str] = []
+  var source = ""
+  if svc.openapi != "" {
+    inputs = ["${base}/${svc.openapi}"]
+    var texts: List[Str] = []
+    for f in os.fs.read_dir("${base}/${svc.spec}")? {
+      if f.name.ends_with(".tsp") {
+        texts.push(os.fs.read_text("${base}/${svc.spec}/${f.name}")?)
+      }
+    }
+    let r = spec.renames(texts)?
+    custom = custom with {ops: r.ops, models: r.models, fields: r.fields, params: r.params}
+    source = "${svc.openapi} (from ${svc.spec})"
+  } else {
+    let root = "${base}/${svc.spec}"
+    let readme = os.fs.read_text("${root}/readme.md")?
+    inputs = spec.input_files(readme, svc.readme_tag)?.map(fn(f: Str) -> Str { "${root}/${f}" })
+    source = "${svc.spec}, tag ${svc.readme_tag}"
+  }
   var files: Map[Str, json.Value] = {}
   var queue = inputs
   while let Some(f) = queue.pop() {
@@ -32,13 +98,11 @@ fn main(os: Os) -> () ! Error {
     }
     files[f] = doc
   }
-  let dir = args[3]
-  let name = dir.split("/").last() ?? dir
-  var b = gen.builder(files, name)
+  var b = gen.builder(files, name, custom)
   let api = b.build(inputs)
-  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: args[4], source: "${args[1]}, tag ${args[2]}"}
+  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty}
   os.fs.create_dir_all(dir)?
-  os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n").bytes())?
+  os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n" + cf.needs.map(fn(r: Str) -> Str { "require ${r} v0.1.0\n" }).join("")).bytes())?
   let m = gen.emit_models(p, api)
   os.fs.write("${dir}/${m.name}", (m.text).bytes())?
   for f in gen.emit_clients(p, api) {

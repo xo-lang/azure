@@ -115,3 +115,34 @@ What the first generated module (armresources) showed:
 - Discriminators, `x-ms-client-flatten`, `x-ms-client-name` on models
   and `x-ms-parameter-location` are next; the report lists every spec
   feature not handled yet.
+
+## Amendment 2 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+
+What the first TypeSpec module (azsecrets v1.4.0, api-version 7.6) showed:
+
+- **A row may pin its own spec commit.** specs.lock's commit is the one
+  Go's armresources v1.2.0 was generated from (2022); Key Vault 7.6 is
+  only at Go's tsp-location commit. A row's `commit` overrides
+  specs.lock (the decision's table already lists a commit per row);
+  `codegen/fetch-specs.sh` keeps one sparse checkout per commit in
+  `codegen/.specs/<commit>/`. Rows without one follow specs.lock as
+  before.
+- **TypeSpec modules read the emitted OpenAPI and the project's Go
+  renames.** A row names the emitted file (`openapi`); the generator
+  reads `@@clientName(..., "go")` statements and `@clientName("x", "go")`
+  parameter decorators from the project's .tsp files, so names match
+  Go (`GetSecrets` is `new_list_secret_properties_pager`) without a
+  TypeSpec compiler.
+- **What Go changes after generating is a per module file**,
+  `codegen/custom/<module>.toml`, mirroring Go's transforms: field
+  types (`id` is `ID`), replaced types, dropped and may-be-empty
+  parameters, reachable-only models (TypeSpec's Go emitter), the data
+  plane shape (`<Op>Options`, a hand written `custom_client.xo` with
+  the client and its constructor, as Go's custom_client.go), and
+  extra module requirements.
+- The generator's command is `xo run ./codegen/cmd/gen -- <module dir>`;
+  everything else comes from the module's row.
+- A Go type name Xo predeclares gets the `Model` suffix (`Secret` is
+  `SecretModel`), and a response's field keeps Go's embedded name
+  (`GetSecretResponse.secret`).
+

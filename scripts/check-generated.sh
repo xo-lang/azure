@@ -7,24 +7,24 @@
 set -u
 cd "$(dirname "$0")/.."
 xo=${XO_CLI:-xo}
-if [ ! -d codegen/.specs/.git ]; then
+if [ ! -d codegen/.specs ]; then
   echo "check-generated: codegen/.specs is missing: run codegen/fetch-specs.sh" >&2
   exit 2
 fi
-rows=$(awk -F'"' '
-  /^\[\[service\]\]/ { if (dir != "") print dir, spec, tag, ver; dir = spec = tag = ver = "" }
-  /^dir *=/ { dir = $2 } /^spec *=/ { spec = $2 } /^readme_tag *=/ { tag = $2 } /^version *=/ { ver = $2 }
-  END { if (dir != "") print dir, spec, tag, ver }' codegen/services.toml)
+dirs=$(awk -F'"' '/^dir *=/ { print $2 }' codegen/services.toml)
 fail=0
-echo "$rows" | while read -r dir spec tag ver; do
+echo "$dirs" | while read -r dir; do
   [ -n "$dir" ] || continue
   if [ -n "$(git status --porcelain -- "$dir")" ]; then
     echo "check-generated: $dir has uncommitted changes: commit or stash them first" >&2
     exit 1
   fi
-  # Generated files only: tests are written by hand.
-  git ls-files -- "$dir" | grep '\.xo$' | grep -v '_test\.xo$' | while read -r f; do rm -f "$f"; done
-  if ! "$xo" run ./codegen/cmd/gen -- arm "$spec" "$tag" "$dir" "$ver" >/dev/null; then
+  # Generated files only (marked DO NOT EDIT): tests and custom_client.xo
+  # are written by hand.
+  git ls-files -- "$dir" | grep '\.xo$' | while read -r f; do
+    if grep -q '^// DO NOT EDIT\.$' "$f"; then rm -f "$f"; fi
+  done
+  if ! "$xo" run ./codegen/cmd/gen -- "$dir" >/dev/null; then
     echo "check-generated: the generator failed for $dir" >&2
     exit 1
   fi

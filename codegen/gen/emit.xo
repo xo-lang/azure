@@ -15,6 +15,12 @@ pub struct Package {
   pub module: Str
   pub version: Str
   pub source: Str
+  /// A data plane module (TypeSpec's Go emitter, one `Client`): names
+  /// are `<Op>Options` and `<Op>Response`, and the client struct and
+  /// constructor are written by hand (custom_client.xo), as Go's are.
+  pub data_plane: Bool = false
+  /// Path parameters that may be empty (wire names).
+  pub allow_empty: List[Str] = []
 }
 
 /// A string literal's contents.
@@ -66,7 +72,8 @@ fn to_text(api: Api, t: Str, v: Str) -> Str {
 pub fn emit_models(p: Package, api: Api) -> File {
   var s = header(p)
   let wire_types = api.models.any(fn(m: Model) -> Bool { m.fields.any(fn(f: Field) -> Bool { f.typ.contains("azcore.") }) })
-  s = s + "use std/json\n" + (if wire_types { "use github.com/xo-lang/azure/azcore\n" } else { "" }) + "\n"
+  let head = s
+  s = ""
   s = s + "pub const MODULE: Str = \"${p.name}\"\npub const VERSION: Str = \"${p.version}\"\n/// The REST API version these operations are generated for.\npub const API_VERSION: Str = \"${esc(api.api_version)}\"\n"
   for e in api.enums {
     s = s + "\n" + doc("", e.doc) + "pub type ${e.name} struct(Str)\n"
@@ -82,7 +89,8 @@ pub fn emit_models(p: Package, api: Api) -> File {
     }
     s = s + "} derive Json\n"
   }
-  File{name: "models.xo", text: s}
+  let imports = (if s.contains("json.") { "use std/json\n" } else { "" }) + (if wire_types { "use github.com/xo-lang/azure/azcore\n" } else { "" })
+  File{name: "models.xo", text: head + imports + (if imports == "" { "" } else { "\n" }) + s}
 }
 
 /// The parameters an operation's method takes in order, and those its
@@ -103,11 +111,14 @@ fn client_name_in(p: Package, group: Str) -> Str {
 }
 
 fn resp_name(p: Package, op: Op) -> Str {
+  if p.data_plane {
+    return "${part(op.name)}Response"
+  }
   "${client_name_in(p, op.group)}${part(op.name)}Response"
 }
 
 fn opts_name(p: Package, op: Op) -> Str {
-  let cn = client_name_in(p, op.group)
+  let cn = if p.data_plane { "" } else { client_name_in(p, op.group) }
   if op.lro { "${cn}Begin${part(op.name)}Options" } else { "${cn}${part(op.name)}Options" }
 }
 
@@ -118,7 +129,7 @@ fn method_name(op: Op) -> Str {
 /// The response struct's field holding the body.
 fn body_field(api: Api, op: Op) -> Str {
   match op.resp {
-    Some(t) => if is_model(api, t) { snake(t) } else { "value" }
+    Some(t) => if is_model(api, t) { snake(unreserve(t)) } else { "value" }
     None => ""
   }
 }
@@ -129,6 +140,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let rn = resp_name(p, op)
   let on = opts_name(p, op)
   let snake_op = snake(op.name)
+  let hname = if op.group == "" { "${snake_op}_handle" } else { "${snake(op.group)}_${snake_op}_handle" }
   var s = "\n" + doc("", "${on}: the optional parameters of ${cn}.${method_name(op)}.") + "pub struct ${on} {\n"
   for x in opt {
     s = s + doc("  ", x.doc) + "  pub ${x.name}: ${x.typ}? = None\n"
@@ -146,7 +158,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   s = s + "}\n"
   // the pure response handler
-  s = s + "\nfn ${snake(op.group)}_${snake_op}_handle(resp: http.Response) -> ${rn} ! Str {\n"
+  s = s + "\nfn ${hname}(resp: http.Response) -> ${rn} ! Str {\n"
   if op.method == "HEAD" {
     s = s + "  Ok(${rn}{success: resp.status >= 200 && resp.status < 300})\n"
   } else if let Some(t) = op.resp {
@@ -163,7 +175,9 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   s = s + "  var path = \"${esc(op.path)}\"\n"
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "path" }) {
     let v = if x.client { "c.${x.name}" } else { to_text(api, x.typ, x.name) }
-    s = s + "  if ${v} == \"\" {\n    return Err(azcore.CallErr.InvalidInput(\"parameter ${esc(x.wire)} cannot be empty\"))\n  }\n"
+    if !p.allow_empty.contains(x.wire) {
+      s = s + "  if ${v} == \"\" {\n    return Err(azcore.CallErr.InvalidInput(\"parameter ${esc(if x.go_name != "" { x.go_name } else { x.wire })} cannot be empty\"))\n  }\n"
+    }
     let enc = if x.skip_encoding { v } else { "url.path_escape(${v})" }
     s = s + "  path = path.replace(\"{${esc(x.wire)}}\", ${enc})\n"
   }
@@ -193,7 +207,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
   let ok_list = if op.method == "HEAD" { "[${ok}, 404]" } else { "[${ok}]" }
   let call_args = req.map(fn(x: Param) -> Str { x.name }).join(", ")
-  let handler = "fn(r: http.Response) -> ${rn} ! Str { ${snake(op.group)}_${snake_op}_handle(r) }"
+  let handler = "fn(r: http.Response) -> ${rn} ! Str { ${hname}(r) }"
   s = s + "\n" + doc("", op.doc)
   if op.pageable {
     let pg = opts_name(p, op)
@@ -217,7 +231,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
     s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
     s = s + "  if !${ok_list}.contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  ${snake(op.group)}_${snake_op}_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))\n}\n"
+    s = s + "  ${hname}(resp) ?? e => Err(azcore.CallErr.Decode(e))\n}\n"
   }
   s
 }
@@ -243,11 +257,16 @@ pub fn emit_clients(p: Package, api: Api) -> List[File] {
     if body_text.contains("json.") {
       s = s + "use std/json\n"
     }
-    s = s + "use std/url\nuse github.com/xo-lang/azure/arm\nuse github.com/xo-lang/azure/azcore\nuse github.com/xo-lang/azure/policy\n"
+    s = s + "use std/url\n" + (if p.data_plane { "" } else { "use github.com/xo-lang/azure/arm\n" }) + "use github.com/xo-lang/azure/azcore\nuse github.com/xo-lang/azure/policy\n"
     if body_text.contains("runtime.") {
       s = s + "use github.com/xo-lang/azure/runtime\n"
     }
     s = s + "\n"
+    if p.data_plane {
+      s = s + body_text
+      out.push(File{name: if g == "" { "client.xo" } else { "${snake(g)}_client.xo" }, text: s})
+      continue
+    }
     s = s + "/// ${cn}: the ${g} operations (Go's ${p.name}.${cn}).\npub struct ${cn} {\n  setup: arm.Setup\n"
     if has_sub {
       s = s + "  subscription_id: Str\n"
