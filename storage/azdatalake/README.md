@@ -3,8 +3,8 @@
 Azure Data Lake Storage Gen2 for Xo, a port of Go's
 `sdk/storage/azdatalake` v1.7.1 (over azblob v1.8.3, REST API version
 2026-12-06). In progress: the service, file system, directory and file
-clients' path, ACL and file data calls, the lease clients and SAS are
-ported.
+clients' path, ACL and file data calls, the lease clients, SAS and
+`datalakeerror` are ported.
 
 What it does:
 
@@ -75,6 +75,10 @@ What it does:
   rebuild a URL as Go's `ParseURL` and `URLParts.String`.
 - A dfs response header that does not parse (a bool, a number, a date)
   fails the call, as Go's generated handlers do, with Go's error text.
+- `datalakeerror`: Go's error codes as `Str` constants
+  (`FILE_SYSTEM_NOT_FOUND`, `PATH_NOT_FOUND`, ...), `has_code`, and the
+  `MISSING_SHARED_KEY_CREDENTIAL`, `MISSING_PARAMETERS` and
+  `UNSUPPORTED_CHECKSUM` messages.
 - Every error code as Go's `ConvertToDFSError` renames it (`blob` to
   `path`, `container` to `filesystem`: `ContainerNotFound` is
   `FileSystemNotFound`).
@@ -156,7 +160,11 @@ Where it differs from Go v1.7.1:
   up to the layout; an out-of-range field (`T25:00`) says so in Go's
   own words but here as the layout error. An empty `SignedStart` or
   `SignedExpiry` is the Unix epoch (Go panics when it signs with one).
-- Not ported yet: `datalakeerror`.
+- `datalakeerror` names are Go's in upper snake case
+  (`LeaseIDMismatchWithLeaseOperation` is
+  `LEASE_ID_MISMATCH_WITH_LEASE_OPERATION`), and Go's `StorageErrorCode`
+  type is `Str`; `has_code` takes a list. Its three error values are
+  their messages.
 - Go names that are Xo keywords: a failed ACL entry's `Type` is
   `entry_type`.
 

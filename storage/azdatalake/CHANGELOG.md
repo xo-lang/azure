@@ -1,5 +1,11 @@
 # azdatalake changes
 
+## v0.6.0
+
+- `datalakeerror`: Go azdatalake v1.7.1's error codes, `has_code` and
+  its error messages. Each of Go's azdatalake packages now has its Xo
+  form; what is not ported within them is listed in the README.
+
 ## v0.5.0
 
 SAS, at Go azdatalake v1.7.1 parity on captured vectors.
