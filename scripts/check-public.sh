@@ -47,8 +47,13 @@ if [ -f "$gl" ]; then
   cfg="$cfgdir/gitleaks.toml"
   printf '[extend]\npath = "%s"\n\n' "$(cd "$(dirname "$gl")" && pwd)/$(basename "$gl")" >"$cfg"
   cat scripts/gitleaks-extra.toml >>"$cfg"
-  if ! gitleaks git --no-banner -c "$cfg" . >/dev/null 2>&1 || ! gitleaks dir --no-banner -c "$cfg" . >/dev/null 2>&1; then
-    echo "check-public: gitleaks found leaks (run: gitleaks git -c $cfg .)" >&2
+  # The directory scan covers what git would commit (tracked and
+  # untracked files, not ignored ones such as codegen/.specs, Microsoft's
+  # spec cache), copied with their paths so the allowlist still applies.
+  mkdir "$cfgdir/tree"
+  git ls-files -co --exclude-standard | rsync -a --files-from=- . "$cfgdir/tree/"
+  if ! gitleaks git --no-banner -c "$cfg" . >/dev/null 2>&1 || ! (cd "$cfgdir/tree" && gitleaks dir --no-banner -c "$cfg" . >/dev/null 2>&1); then
+    echo "check-public: gitleaks found leaks (run: gitleaks git -c $cfg . and gitleaks dir over the tracked files)" >&2
     fail=1
   fi
   rm -rf "$cfgdir"
