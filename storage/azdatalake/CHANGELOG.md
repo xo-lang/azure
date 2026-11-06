@@ -1,5 +1,16 @@
 # azdatalake changes
 
+## v0.5.0
+
+SAS, at Go azdatalake v1.7.1 parity on captured vectors.
+
+- The `sas` package: `DatalakeSignatureValues` (file system, directory
+  and file SAS, with the account key or a user delegation key) and
+  `AccountSignatureValues`, over azblob's signer.
+- `get_sas_url` on the service, file system, directory and file
+  clients; `ServiceClient.get_user_delegation_credential` (`KeyInfo`);
+  `parse_url` and `URLParts`.
+
 ## v0.4.0
 
 Leases, at Go azdatalake v1.7.1 parity on captured vectors.

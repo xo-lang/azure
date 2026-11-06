@@ -1,0 +1,139 @@
+// Shared access signatures for Data Lake Storage, as azdatalake v1.7.1's
+// sas package (account.go, service.go, query_params.go; MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md). A file system, directory or
+// file SAS is azblob's service SAS signed for the matching resource
+// (`c`, `d` with its depth `sdd`, `b`), with Data Lake's REST version and
+// permission letters, which include the ACL ones: execute (`e`),
+// ownership (`o`) and permissions (`p`). The signing and the query are
+// azblob's; this package adds what Data Lake's differs in.
+
+use std/time
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+/// The service version signed into a SAS when none is given (Go's
+/// sas.Version, azdatalake's REST version).
+pub const VERSION: Str = "2026-06-06"
+
+pub const PROTOCOL_HTTPS: Str = "https"
+pub const PROTOCOL_HTTPS_AND_HTTP: Str = "https,http"
+
+/// The letters of a file system SAS (Go's FileSystemPermissions), in the
+/// order a SAS writes them.
+pub const FILE_SYSTEM_PERMISSIONS: Str = "racwdltmeop"
+/// The letters of a directory or file SAS (Go's DirectoryPermissions and
+/// FilePermissions).
+pub const PATH_PERMISSIONS: Str = "racwdltmeop"
+/// The letters of an account SAS (Go's datalake AccountPermissions:
+/// filter (`f`) before tag (`t`), where azblob's has them the other way).
+pub const ACCOUNT_PERMISSIONS: Str = "rwdxylacupfti"
+pub const ACCOUNT_RESOURCE_TYPES: Str = "sco"
+
+pub type QueryParameters = blobsas.QueryParameters
+pub type SharedKeyCredential = exported.SharedKeyCredential
+pub type UserDelegationCredential = exported.UserDelegationCredential
+
+/// An account SAS (Blob service only, as Go signs it).
+pub struct AccountSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub permissions: Str = ""
+  /// `start` or `start-end` (IP addresses).
+  pub ip_range: Str = ""
+  pub resource_types: Str = ""
+  pub encryption_scope: Str = ""
+}
+
+fn format_time(t: Time) -> Str {
+  time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}Z")
+}
+
+pub fn (v: AccountSignatureValues) sign_with_shared_key(cred: SharedKeyCredential) -> QueryParameters ! Str {
+  let missing = "account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType"
+  let expiry = v.expiry ?? return Err(missing)
+  if v.permissions == "" || v.resource_types == "" {
+    return Err(missing)
+  }
+  let version = if v.version == "" { VERSION } else { v.version }
+  let perms = blobsas.normalize(v.permissions, ACCOUNT_PERMISSIONS, "permission character")?
+  let rt = blobsas.normalize(v.resource_types, ACCOUNT_RESOURCE_TYPES, "resource type character")?
+  let start = v.start.map(format_time) ?? ""
+  let sts = [cred.account_name, perms, "b", rt, start, format_time(expiry), v.ip_range, v.protocol, version, v.encryption_scope, ""].join("\n")
+  Ok(QueryParameters{
+    version: version, protocol: v.protocol, start: v.start, expiry: Some(expiry), permissions: perms,
+    ip_range: v.ip_range, encryption_scope: v.encryption_scope, services: "b", resource_types: rt,
+    signature: Secret.new(cred.compute_hmac_sha256(sts)),
+  })
+}
+
+/// A file system, directory or file SAS (Go's DatalakeSignatureValues).
+/// With `directory_path` set it is a directory SAS and `file_path` is
+/// ignored; with neither it is a file system SAS.
+pub struct DatalakeSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub permissions: Str = ""
+  pub ip_range: Str = ""
+  /// A stored access policy's name (`si`).
+  pub identifier: Str = ""
+  pub file_system_name: Str
+  pub file_path: Str = ""
+  pub directory_path: Str = ""
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  pub encryption_scope: Str = ""
+  /// User delegation only (`sduoid`).
+  pub signed_delegated_user_object_id: Str = ""
+  /// User delegation only (`srh`, `srq`), signed in this order. Go takes
+  /// maps and signs them in map order, which varies from run to run.
+  pub signed_request_headers: List[(Str, Str)] = []
+  pub signed_request_query_parameters: List[(Str, Str)] = []
+}
+
+/// The same SAS as azblob's values: azblob picks the resource the same
+/// way (a directory first, then a file, else the file system, so a file
+/// path beside a directory is ignored) and signs the same fields; only
+/// the version and the letters differ.
+fn (v: DatalakeSignatureValues) blob_values(perms: Str) -> blobsas.BlobSignatureValues {
+  blobsas.BlobSignatureValues{
+    version: if v.version == "" { VERSION } else { v.version }, protocol: v.protocol, start: v.start, expiry: v.expiry,
+    permissions: perms, ip_range: v.ip_range, identifier: v.identifier, container_name: v.file_system_name,
+    blob_name: v.file_path, directory: v.directory_path,
+    cache_control: v.cache_control, content_disposition: v.content_disposition, content_encoding: v.content_encoding,
+    content_language: v.content_language, content_type: v.content_type, authorized_object_id: v.authorized_object_id,
+    unauthorized_object_id: v.unauthorized_object_id, correlation_id: v.correlation_id, encryption_scope: v.encryption_scope,
+    signed_delegated_user_object_id: v.signed_delegated_user_object_id,
+    signed_request_headers: v.signed_request_headers, signed_request_query_parameters: v.signed_request_query_parameters,
+  }
+}
+
+/// Signs with the account key. As Go's, it needs the permissions, and
+/// an expiry unless a stored access policy is named (azblob's lets a
+/// policy stand in for the permissions too).
+pub fn (v: DatalakeSignatureValues) sign_with_shared_key(cred: SharedKeyCredential) -> QueryParameters ! Str {
+  if (v.identifier == "" && v.expiry.is_none()) || v.permissions == "" {
+    return Err("service SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let perms = blobsas.normalize(v.permissions, PATH_PERMISSIONS, "permission")?
+  v.blob_values(perms).sign_with_shared_key(cred)
+}
+
+/// Signs with a user delegation key.
+pub fn (v: DatalakeSignatureValues) sign_with_user_delegation(cred: UserDelegationCredential) -> QueryParameters ! Str {
+  if v.expiry.is_none() || v.permissions == "" {
+    return Err("user delegation SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let file_system = v.directory_path == "" && v.file_path == ""
+  let perms = blobsas.normalize(v.permissions, if file_system { FILE_SYSTEM_PERMISSIONS } else { PATH_PERMISSIONS }, "permission")?
+  v.blob_values(perms).sign_with_user_delegation(cred)
+}

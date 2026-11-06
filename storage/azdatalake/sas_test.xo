@@ -1,0 +1,198 @@
+// The SAS signers, the clients' SAS URLs, the user delegation key call
+// and ParseURL, against a fake that answers as the Go program's fake
+// does (sasvectors_test.xo).
+
+use std/http
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azdatalake/sas
+
+const SAS_GO_DATE: Str = "Fri, 06 Nov 2026 15:52:15 GMT"
+
+const UDK_XML: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>00000000-0000-0000-0000-000000000000</SignedOid><SignedTid>00000000-0000-0000-0000-000000000000</SignedTid><SignedStart>2026-11-05T00:00:00Z</SignedStart><SignedExpiry>2026-11-07T00:00:00Z</SignedExpiry><SignedService>b</SignedService><SignedVersion>2026-06-06</SignedVersion><Value>aW52ZW50ZWQtdWRrLWtleQ==</Value>"
+
+fn dl_udk_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let body = req.body.to_str_lossy()
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let xml_ok = fn(text: Str) -> http.Response { with_hs(http.text(200, text), common + [("Content-Type", "application/xml")]) }
+  if req.method != "POST" || q("comp") != "userdelegationkey" || q("restype") != "service" {
+    return with_hs(http.empty(400), common)
+  }
+  if body.contains("denied") {
+    return with_hs(http.empty(403), common + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  if body.contains("badxml") {
+    return xml_ok("<UserDelegationKey><SignedStart>soon</SignedStart></UserDelegationKey>")
+  }
+  if body.contains("DelegatedUserTid") {
+    return xml_ok("${UDK_XML}<SignedDelegatedUserTid>00000000-0000-0000-0000-000000000000</SignedDelegatedUserTid></UserDelegationKey>")
+  }
+  xml_ok("${UDK_XML}</UserDelegationKey>")
+}
+
+/// A value or an error, as the Go program prints it (`  =value`).
+fn sas_line(name: Str, r: Result[Str, Str]) -> List[Str] {
+  match r {
+    Ok(v) => ["== ${name}", "  =${hide_sas(v)}"]
+    Err(e) => ["== ${name}", "  error ${e}"]
+  }
+}
+
+fn qp_line(name: Str, r: Result[sas.QueryParameters, Str]) -> List[Str] {
+  sas_line(name, r.map(fn(p: sas.QueryParameters) -> Str { p.encode() }))
+}
+
+fn parts_lines(name: Str, u: Str) -> List[Str] {
+  match parse_url(u) {
+    Ok(p) => [
+      "== ${name}",
+      "  scheme=${goq(p.scheme)} host=${goq(p.host)} ip_account=${goq(p.ip_account_name)} fs=${goq(p.file_system_name)} path=${goq(p.path_name)}",
+      "  unparsed=${goq(p.unparsed_params)}", "  sas=${goq(p.sas)}", "  string=${goq(p.to_url())}",
+    ]
+    Err(e) => ["== ${name}", "  error ${e}"]
+  }
+}
+
+/// Go's time error goes on to say which part did not parse; Xo's stops
+/// at the layout (README).
+fn cut_time_err(l: Str) -> Str {
+  if l.contains("parsing time") { l.split(": cannot parse")[0] } else { l }
+}
+
+test "the SAS API signs, sends and parses what Go does" {
+  let log = serve(os.net, dl_udk_answer)
+  let ip_h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    dl_udk_answer(req)
+  }
+  os.net.handle("POST http://192.0.2.1:10000/acct1", ip_h)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(SAS_GO_DATE)
+  var out: List[Str] = []
+  let t1 = at("2026-11-05T01:02:03Z")
+  let t2 = at("2026-11-06T00:00:00Z")
+
+  let all = sas.DatalakeSignatureValues{
+    version: "2026-06-06", protocol: sas.PROTOCOL_HTTPS, start: Some(t1), expiry: Some(t2), permissions: "poemtldwcar",
+    ip_range: "192.0.2.1-192.0.2.9", identifier: "pol1", file_system_name: "fs1", cache_control: "no-cache", content_disposition: "inline",
+    content_encoding: "gzip", content_language: "en", content_type: "text/plain", authorized_object_id: "a1",
+    unauthorized_object_id: "u1", correlation_id: "c1", encryption_scope: "es1",
+  }
+  out = out + qp_line("sk fs all fields", all.sign_with_shared_key(cred))
+  let v_file = all with {file_path: "a b\\c.txt"}
+  out = out + qp_line("sk file", v_file.sign_with_shared_key(cred))
+  out = out + qp_line("sk directory over file", (v_file with {directory_path: "/d1/d2/d3/"}).sign_with_shared_key(cred))
+  out = out + qp_line("sk directory root", sas.DatalakeSignatureValues{file_system_name: "fs1", directory_path: "/", permissions: "r", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("sk policy no expiry", sas.DatalakeSignatureValues{file_system_name: "fs1", identifier: "pol1", permissions: "r"}.sign_with_shared_key(cred))
+  out = out + qp_line("sk policy no permissions", sas.DatalakeSignatureValues{file_system_name: "fs1", identifier: "pol1"}.sign_with_shared_key(cred))
+  out = out + qp_line("sk no expiry", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "r"}.sign_with_shared_key(cred))
+  out = out + qp_line("sk bad permission", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "rz", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("sk x permission", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "rx", expiry: Some(t2)}.sign_with_shared_key(cred))
+
+  let acct = sas.AccountSignatureValues{version: "2026-06-06", protocol: sas.PROTOCOL_HTTPS_AND_HTTP, start: Some(t1), expiry: Some(t2), permissions: "itfpucalyxdwr", ip_range: "192.0.2.1", resource_types: "ocs", encryption_scope: "es1"}
+  out = out + qp_line("account all", acct.sign_with_shared_key(cred))
+  out = out + qp_line("account minimal", sas.AccountSignatureValues{permissions: "r", resource_types: "s", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("account no expiry", sas.AccountSignatureValues{permissions: "r", resource_types: "s"}.sign_with_shared_key(cred))
+  out = out + qp_line("account no permissions", sas.AccountSignatureValues{resource_types: "s", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("account no resource types", sas.AccountSignatureValues{permissions: "r", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("account bad permission", sas.AccountSignatureValues{permissions: "rq", resource_types: "s", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + qp_line("account bad resource type", sas.AccountSignatureValues{permissions: "r", resource_types: "sb", expiry: Some(t2)}.sign_with_shared_key(cred))
+  out = out + ["== permission strings", "  account=${sas.ACCOUNT_PERMISSIONS} fs=${sas.FILE_SYSTEM_PERMISSIONS} file=${sas.PATH_PERMISSIONS} dir=${sas.PATH_PERMISSIONS} rt=${sas.ACCOUNT_RESOURCE_TYPES}"]
+
+  let fsc = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1", cred, opts)
+  out = out + sas_line("fs GetSASURL", fsc.get_sas_url(sas.FILE_SYSTEM_PERMISSIONS, t2, Some(t1)))
+  out = out + sas_line("fs GetSASURL nil options", fsc.get_sas_url("r", t2))
+  out = out + sas_line("fs GetSASURL no permissions", fsc.get_sas_url("", t2))
+  let fsn = new_file_system_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1", opts)
+  out = out + sas_line("fs GetSASURL no key", fsn.get_sas_url("r", t2))
+  let fsq = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1?comp=list&x=1", cred, opts)
+  out = out + sas_line("fs GetSASURL with query", fsq.get_sas_url("r", t2))
+
+  let dir = fsc.new_directory_client("a b/c%d")
+  out = out + sas_line("dir GetSASURL", dir.get_sas_url(sas.PATH_PERMISSIONS, t2, Some(t1)))
+  out = out + sas_line("subdir GetSASURL", dir.new_subdirectory_client("e").get_sas_url("l", t2))
+  let dn = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1", opts)
+  out = out + sas_line("dir GetSASURL no key", dn.get_sas_url("l", t2))
+  let dip = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://192.0.2.1:10000/acct1/fs1/d1/d2", cred, opts)
+  out = out + sas_line("dir GetSASURL on an IP endpoint", dip.get_sas_url("r", t2))
+
+  out = out + sas_line("file GetSASURL", fsc.new_file_client("a b/c+d.txt").get_sas_url(sas.PATH_PERMISSIONS, t2, Some(t1)))
+  out = out + sas_line("dir file GetSASURL", dir.new_file_client("x.txt").get_sas_url("rw", t2))
+  let fnc = new_file_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/x.txt", opts)
+  out = out + sas_line("file GetSASURL no key", fnc.get_sas_url("r", t2))
+
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  out = out + sas_line("service GetSASURL all", svc.get_sas_url("sco", sas.ACCOUNT_PERMISSIONS, t2, Some(t1)))
+  out = out + sas_line("service GetSASURL tag and filter only", svc.get_sas_url("o", "tf", t2))
+  let svn = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/", opts)
+  out = out + sas_line("service GetSASURL no key", svn.get_sas_url("sco", "r", t2))
+
+  let ki = KeyInfo{start: "2026-11-05T00:00:00Z", expiry: "2026-11-07T00:00:00Z"}
+  let udc = svc.get_user_delegation_credential(ki)
+  out = out + drain(log) + shown("udk", udc, fn(_: exported.UserDelegationCredential) -> Dump { Dump{lines: ["=true"]} })
+  let udc2 = svc.get_user_delegation_credential(ki with {delegated_user_tenant_id: Some("00000000-0000-0000-0000-000000000000")})
+  out = out + drain(log) + shown("udk delegated tenant", udc2, fn(_: exported.UserDelegationCredential) -> Dump { Dump{lines: ["=true"]} })
+  let denied = svc.get_user_delegation_credential(KeyInfo{start: "denied", expiry: "x"})
+  out = out + drain(log) + quiet("udk denied", denied)
+  let bad = svc.get_user_delegation_credential(KeyInfo{start: "badxml", expiry: "x"})
+  out = out + drain(log) + quiet("udk bad xml", bad)
+  let svip = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://192.0.2.1:10000/acct1", cred, opts)
+  let udc3 = svip.get_user_delegation_credential(ki)
+  out = out + drain(log) + shown("udk on an IP endpoint", udc3, fn(_: exported.UserDelegationCredential) -> Dump { Dump{lines: ["=true"]} })
+  let k1 = udc?
+  let k2 = udc2?
+  let k3 = udc3?
+
+  let ud = all with {identifier: "", signed_delegated_user_object_id: "duo1", signed_request_headers: [("x-ms-h", "v1")], signed_request_query_parameters: [("q1", "v2")], permissions: "rm"}
+  out = out + qp_line("ud fs", ud.sign_with_user_delegation(k1))
+  let ud_file = ud with {file_path: "a/b.txt", permissions: "eo"}
+  out = out + qp_line("ud file", ud_file.sign_with_user_delegation(k1))
+  out = out + qp_line("ud directory", (ud_file with {directory_path: "d1/d2"}).sign_with_user_delegation(k2))
+  out = out + qp_line("ud ip account", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "r", expiry: Some(t2)}.sign_with_user_delegation(k3))
+  out = out + qp_line("ud no expiry", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "r"}.sign_with_user_delegation(k1))
+  out = out + qp_line("ud no permissions", sas.DatalakeSignatureValues{file_system_name: "fs1", identifier: "p", expiry: Some(t2)}.sign_with_user_delegation(k1))
+  out = out + qp_line("ud bad permission", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "rq", expiry: Some(t2)}.sign_with_user_delegation(k1))
+  out = out + qp_line("ud identifier", sas.DatalakeSignatureValues{file_system_name: "fs1", permissions: "r", identifier: "pol1", expiry: Some(t2)}.sign_with_user_delegation(k1))
+
+  out = out + parts_lines("parse file with SAS", "https://acct1.dfs.example.test/fs1/a%20b/c.txt?sv=2026-06-06&sp=r&sig=abc%2B&foo=bar&se=2026-11-06T00:00:00Z")
+  out = out + parts_lines("parse IP file", "http://192.0.2.1:10000/acct1/fs1/dir/x?comp=list&SR=c")
+  out = out + parts_lines("parse IP account only", "http://192.0.2.1/acct1")
+  out = out + parts_lines("parse account", "https://acct1.dfs.example.test")
+  out = out + parts_lines("parse account slash", "https://acct1.dfs.example.test/")
+  out = out + parts_lines("parse file system", "https://acct1.dfs.example.test/fs1")
+  out = out + parts_lines("parse trailing slash", "https://acct1.dfs.example.test/fs1/")
+  out = out + parts_lines("parse bad", "http://[::1")
+  out = out + parts_lines("parse sas times and ip", "https://acct1.dfs.example.test/fs1?st=2026-11-05&se=2026-11-06T01:02Z&sip=192.0.2.1-192.0.2.5&skoid=o&sktid=t&skt=2026-11-05T00:00:00Z&ske=bad&sks=b&skv=v&sdd=2")
+  out = out + drain(log)
+  expect(out) == SAS_OUTPUT.map(cut_time_err)
+}
+
+test "a user delegation key time reads as Go's datetime.RFC3339 reads it" {
+  // Go's results (UnmarshalText; an empty element is Go's zero time, no
+  // value), each error up to its layout.
+  let cases = [
+    ("", "0001-01-01T00:00:00Z"),
+    ("2026-11-05T00:00:00Z", "2026-11-05T00:00:00Z"),
+    ("2026-11-05t01:02:03.5z", "2026-11-05T01:02:03.5Z"),
+    ("2026-11-05T01:02:03+02:00", "2026-11-04T23:02:03Z"),
+    ("2026-11-05 01:02:03Z", "2026-11-05T01:02:03Z"),
+    ("2026-11-05 01:02:03-01:30", "2026-11-05T02:32:03Z"),
+    ("2026-11-05T01:02:03", "2026-11-05T01:02:03Z"),
+    ("2026-11-05 01:02:03.25", "2026-11-05T01:02:03.25Z"),
+    ("soon", "error parsing time \"SOON\" as \"2006-01-02 15:04:05.999999999\""),
+    ("2026-11-05", "error parsing time \"2026-11-05\" as \"2006-01-02 15:04:05.999999999\""),
+    ("later-", "error parsing time \"LATER-\" as \"2006-01-02T15:04:05.999999999Z07:00\""),
+    ("tomorrow", "error parsing time \"TOMORROW\" as \"2006-01-02T15:04:05.999999999\""),
+    ("1:2", "error parsing time \"1:2\" as \"2006-01-02 15:04:05.999999999\""),
+    ("x+1:2", "error parsing time \"X+1:2\" as \"2006-01-02 15:04:05.999999999Z07:00\""),
+    ("x+1:2\"", "error parsing time \"X+1:2\\\"\" as \"2006-01-02 15:04:05.999999999Z07:00\""),
+  ]
+  for (input, want) in cases {
+    let got = match key_time(input) {
+      Ok(Some(t)) => go_time(t)
+      Ok(None) => "0001-01-01T00:00:00Z"
+      Err(e) => "error ${e}"
+    }
+    expect("${input} ${got}") == "${input} ${want}"
+  }
+}

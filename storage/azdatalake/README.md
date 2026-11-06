@@ -3,8 +3,8 @@
 Azure Data Lake Storage Gen2 for Xo, a port of Go's
 `sdk/storage/azdatalake` v1.7.1 (over azblob v1.8.3, REST API version
 2026-12-06). In progress: the service, file system, directory and file
-clients' path, ACL and file data calls and the lease clients are
-ported; SAS follows.
+clients' path, ACL and file data calls, the lease clients and SAS are
+ported.
 
 What it does:
 
@@ -61,6 +61,18 @@ What it does:
   on the blob URL. As in Go, a file system lease call sends only the two
   date conditions, a path lease call all four, and `change_lease` keeps
   the new ID only when it succeeds.
+- SAS: the `sas` package (`DatalakeSignatureValues`, signed with the
+  account key or a user delegation key, and `AccountSignatureValues`)
+  is azblob's signer with Data Lake's REST version (2026-06-06) and
+  letters (`racwdltmeop`, with the ACL ones: execute `e`, ownership
+  `o`, permissions `p`); a directory SAS signs its depth (`sdd`).
+  `get_sas_url` on a file system, directory or file signs for the blob
+  URL, names taken as `parse_url` gives them (unescaped), and appends
+  the SAS to that URL. The service's `get_sas_url` is azblob's, as Go's
+  is, and `get_user_delegation_credential` posts `KeyInfo` to the blob
+  service on azdatalake's pipeline and names the credential for the
+  host's first label. `parse_url` and `URLParts.to_url` split and
+  rebuild a URL as Go's `ParseURL` and `URLParts.String`.
 - A dfs response header that does not parse (a bool, a number, a date)
   fails the call, as Go's generated handlers do, with Go's error text.
 - Every error code as Go's `ConvertToDFSError` renames it (`blob` to
@@ -122,8 +134,29 @@ Where it differs from Go v1.7.1:
   and its per-call option structs are a `conditions` argument (and
   `break_period` for a break). Every lease response is azblob's
   `LeaseResponse`.
-- Not ported yet: `GetUserDelegationCredential`, `GetSASURL`,
-  `ParseURL` and `datalakeerror`.
+- SAS permissions, resource types and services are letter strings
+  (`sas.FILE_SYSTEM_PERMISSIONS`, `sas.PATH_PERMISSIONS`,
+  `sas.ACCOUNT_PERMISSIONS`), put in Go's order when signed, not Go's
+  bool structs. As in Go, an account SAS puts filter (`f`) before tag
+  (`t`) where azblob's puts `t` first: the REST docs fix no order, and
+  .NET writes `t f` and Python `f t`.
+- As in Go, the service's `get_sas_url` keeps only the `rwdlacup`
+  letters (Go's option mapping drops `x`, `y`, `f`, `t` and `i`), and
+  signs with azblob's version (2026-12-06) and order; with only dropped
+  letters it is the missing-permissions error.
+- As Go's, a Shared Key SAS needs its permissions even with a stored
+  access policy (`identifier`), where azblob's lets the policy stand in.
+- `URLParts.sas` is the SAS query as Go's `QueryParameters.Encode`
+  writes it, not a parsed struct; a SAS field change needs a new
+  signature anyway.
+- The signed request headers and query parameters of a user delegation
+  SAS are lists, signed in their order; Go's are maps, signed in map
+  order, which varies from run to run.
+- A user delegation key time that does not parse gives Go's error text
+  up to the layout; an out-of-range field (`T25:00`) says so in Go's
+  own words but here as the layout error. An empty `SignedStart` or
+  `SignedExpiry` is the Unix epoch (Go panics when it signs with one).
+- Not ported yet: `datalakeerror`.
 - Go names that are Xo keywords: a failed ACL entry's `Type` is
   `entry_type`.
 

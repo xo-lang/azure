@@ -1,0 +1,221 @@
+// SAS URLs, user delegation keys and URL parts, as azdatalake v1.7.1's
+// GetSASURL methods, service.GetUserDelegationCredential and sas.ParseURL
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md). A client's SAS
+// is signed for its blob URL, named as ParseURL names it, and appended
+// to that URL.
+
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+use github.com/xo-lang/azure/storage/azdatalake/sas
+
+/// The error of a GetSASURL on a client with no account key.
+pub const MISSING_SHARED_KEY_CREDENTIAL: Str = azblob.MISSING_SHARED_KEY_CREDENTIAL
+
+/// The account's letters an account SAS URL keeps: Go's service
+/// GetSASURL hands azblob only these eight, so `x`, `y`, `f`, `t` and `i`
+/// are dropped.
+const SERVICE_SAS_PERMISSIONS: Str = "rwdlacup"
+
+/// The parts of a Data Lake URL (Go's sas.URLParts). `sas` is the SAS
+/// query as Go encodes it and `unparsed_params` the rest of the query.
+pub struct URLParts {
+  pub scheme: Str
+  pub host: Str
+  /// The account of an IP-style URL (`http://192.0.2.1:10000/acct/fs`),
+  /// "" for any other.
+  pub ip_account_name: Str = ""
+  pub file_system_name: Str = ""
+  /// The path in the file system, unescaped.
+  pub path_name: Str = ""
+  pub sas: Str = ""
+  pub unparsed_params: Str = ""
+}
+
+/// The parts of `u` (Go's ParseURL): names unescaped, the SAS keys out of
+/// the query.
+pub fn parse_url(u: Str) -> URLParts ! Str {
+  let r = split_url(u.split("#")[0])?
+  if r.host.starts_with("[") && !r.host.contains("]") {
+    return Err("parse ${go_quote(u)}: missing ']' in host")
+  }
+  var p = url.path_unescape(r.path) ?? e => return Err("parse ${go_quote(u)}: ${e.display()}")
+  if p.starts_with("/") {
+    p = p[1..p.len()]
+  }
+  var account = ""
+  if is_ip_endpoint(r.host) {
+    match p.find("/") {
+      Some(j) => {
+        account = p[0..j]
+        p = p[j + 1..p.len()]
+      }
+      None => {
+        account = p
+        p = ""
+      }
+    }
+  }
+  let (fs_name, path_name) = match p.find("/") {
+    Some(j) => (p[0..j], p[j + 1..p.len()])
+    None => (p, "")
+  }
+  let (rest, sas_query) = sas_query_split(r.query ?? "")
+  Ok(URLParts{scheme: r.scheme, host: r.host, ip_account_name: account, file_system_name: fs_name, path_name: path_name, sas: sas_query, unparsed_params: rest})
+}
+
+/// The URL again (Go's URLParts.String): the path escaped, the other
+/// parameters and then the SAS.
+pub fn (p: URLParts) to_url() -> Str {
+  var path = if is_ip_endpoint(p.host) && p.ip_account_name != "" { "/${p.ip_account_name}" } else { "" }
+  if p.file_system_name != "" {
+    path = "${path}/${p.file_system_name}"
+    if p.path_name != "" {
+      path = "${path}/${p.path_name}"
+    }
+  }
+  let q = if p.unparsed_params != "" && p.sas != "" { "${p.unparsed_params}&${p.sas}" } else { p.unparsed_params + p.sas }
+  let base = "${p.scheme}://${p.host}${go_escape_path(path)}"
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+/// `query` on `u` (sasurl.Append): after `&` when `u` has a query.
+fn append_sas(u: Str, query: Str) -> Str {
+  if query == "" {
+    return u
+  }
+  let (base, fragment) = match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+  "${base}${if base.contains("?") { "&" } else { "?" }}${query}${fragment}"
+}
+
+/// A SAS URL of a file system, directory or file at `blob_url`.
+fn path_sas_url(blob_url: Str, key: SharedKeyCredential?, directory: Bool, permissions: Str, expiry: Time, start: Time?) -> Str ! Str {
+  let cred = key ?? return Err(MISSING_SHARED_KEY_CREDENTIAL)
+  let parts = parse_url(blob_url)?
+  let v = sas.DatalakeSignatureValues{
+    version: sas.VERSION, file_system_name: parts.file_system_name, permissions: permissions, start: start, expiry: Some(expiry),
+    directory_path: if directory { parts.path_name } else { "" }, file_path: parts.path_name,
+  }
+  Ok(append_sas(blob_url, v.sign_with_shared_key(cred)?.encode()))
+}
+
+/// A file system SAS URL (Go's GetSASURL): `permissions` letters of
+/// `sas.FILE_SYSTEM_PERMISSIONS`, from `start` when given.
+pub fn (fs: FileSystemClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = fs.shared_key ?? return Err(MISSING_SHARED_KEY_CREDENTIAL)
+  let parts = parse_url(fs.blob_url)?
+  let v = sas.DatalakeSignatureValues{version: sas.VERSION, file_system_name: parts.file_system_name, permissions: permissions, start: start, expiry: Some(expiry)}
+  Ok(append_sas(fs.blob_url, v.sign_with_shared_key(cred)?.encode()))
+}
+
+/// A directory SAS URL: `permissions` letters of `sas.PATH_PERMISSIONS`;
+/// its depth (`sdd`) is signed.
+pub fn (d: DirectoryClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  path_sas_url(d.blob_url, d.core.shared_key, true, permissions, expiry, start)
+}
+
+/// A file SAS URL: `permissions` letters of `sas.PATH_PERMISSIONS`.
+pub fn (f: FileClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  path_sas_url(f.blob_url, f.core.shared_key, false, permissions, expiry, start)
+}
+
+/// An account SAS URL for the Blob service (Go's service GetSASURL, which
+/// is azblob's): `resource_types` letters of `sco`, `permissions` letters
+/// of `sas.ACCOUNT_PERMISSIONS` of which only `rwdlacup` are kept. It is
+/// azblob's SAS, with azblob's version and letter order.
+pub fn (s: ServiceClient) get_sas_url(resource_types: Str, permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let all = blobsas.normalize(permissions, sas.ACCOUNT_PERMISSIONS, "permission character")?
+  var kept = ""
+  for c in all.runes() {
+    if SERVICE_SAS_PERMISSIONS.contains("${c}") {
+      kept = kept + "${c}"
+    }
+  }
+  s.service.get_sas_url(resource_types, kept, expiry, start)
+}
+
+/// The times a user delegation key is valid, as ISO 8601 text (Go's
+/// KeyInfo), and the delegated user's tenant.
+pub struct KeyInfo {
+  pub start: Str
+  pub expiry: Str
+  pub delegated_user_tenant_id: Str? = None
+}
+
+fn key_info_xml(k: KeyInfo) -> Str {
+  let el = fn(n: Str, v: Str) -> Str { "<${n}>${xml.escape(v)}</${n}>" }
+  let tid = k.delegated_user_tenant_id.map(fn(t: Str) -> Str { el("DelegatedUserTid", t) }) ?? ""
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<KeyInfo>${el("Expiry", k.expiry)}${el("Start", k.start)}${tid}</KeyInfo>"
+}
+
+/// A key time as Go's datetime.RFC3339 reads it: upper-cased, with or
+/// without the `T` and the zone (UTC when it has none). None for an empty
+/// element. Go's error goes on to say which part did not parse; this one
+/// stops at the layout.
+fn key_time(v: Str) -> Time? ! Str {
+  if v == "" {
+    return Ok(None)
+  }
+  let u = v.to_upper()
+  let tz = key_tz_offset(u)
+  let has_t = u.contains("T")
+  let layout = if tz && has_t { "2006-01-02T15:04:05.999999999Z07:00" } else if tz { "2006-01-02 15:04:05.999999999Z07:00" } else if has_t { "2006-01-02T15:04:05.999999999" } else { "2006-01-02 15:04:05.999999999" }
+  var text = if has_t { u } else { u.replace_n(" ", "T", 1) }
+  if !tz {
+    text = text + "Z"
+  }
+  match Time.parse_rfc3339(text) {
+    Some(t) => Ok(Some(t))
+    None => Err("parsing time ${go_quote(u)} as ${go_quote(layout)}")
+  }
+}
+
+/// Go's tzOffsetRegex, `(?:Z|z|\+|-)(?:\d+:\d+)*"*$`, on upper-cased text.
+fn key_tz_offset(v: Str) -> Bool {
+  var s = v.trim_end_chars("\"")
+  while {
+    let n = s.len()
+    var i = n
+    while i > 0 && s.bytes()[i - 1] >= 0x30 && s.bytes()[i - 1] <= 0x39 { i = i - 1 }
+    if i == n || i == 0 || s.bytes()[i - 1] != 0x3a {
+      break
+    }
+    var j = i - 1
+    while j > 0 && s.bytes()[j - 1] >= 0x30 && s.bytes()[j - 1] <= 0x39 { j = j - 1 }
+    if j == i - 1 {
+      break
+    }
+    s = s[0..j]
+  }
+  s.ends_with("Z") || s.ends_with("+") || s.ends_with("-")
+}
+
+fn user_delegation_key_of(body: Str) -> exported.UserDelegationKey ! Str {
+  let what = "unmarshalling type *generated_blob.UserDelegationKey"
+  let d = xml.parse(body) ?? e => return Err("${what}: ${e.display()}")
+  let s = fn(n: Str) -> Str { d.child(n).map(fn(x: xml.Element) -> Str { x.text() }) ?? "" }
+  let start = key_time(s("SignedStart")) ?? e => return Err("${what}: ${e}")
+  let expiry = key_time(s("SignedExpiry")) ?? e => return Err("${what}: ${e}")
+  Ok(exported.UserDelegationKey{
+    signed_oid: s("SignedOid"), signed_tid: s("SignedTid"), signed_start: start ?? Time.UNIX_EPOCH, signed_expiry: expiry ?? Time.UNIX_EPOCH,
+    signed_service: s("SignedService"), signed_version: s("SignedVersion"), value: Secret.new(s("Value")),
+    signed_delegated_user_tenant_id: s("SignedDelegatedUserTid"),
+  })
+}
+
+/// A user delegation credential (Go's GetUserDelegationCredential): the
+/// key from the blob service, which needs an Entra ID token, named for
+/// the URL host's first label, as Go names it.
+pub fn (s: ServiceClient) get_user_delegation_credential(info: KeyInfo) -> exported.UserDelegationCredential ! azcore.CallErr uses (net.dial, clock, rand) {
+  let parts = parse_url(s.blob_url) ?? e => return Err(azcore.CallErr.Decode(e))
+  let req = dfs_request("POST", s.blob_url, [("comp", "userdelegationkey"), ("restype", "service")], [("Accept", "application/xml"), ("Content-Type", "application/xml")]) with {body: key_info_xml(info).bytes()}
+  let resp = dfs_send(s.pipeline, req, [200])?
+  let key = user_delegation_key_of(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(exported.new_user_delegation_credential(parts.host.split(".")[0], key))
+}
