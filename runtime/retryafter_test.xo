@@ -1,0 +1,40 @@
+// retry_after against azcore v1.21.0's shared.RetryAfter (a local Go
+// program running a verbatim copy of it, its clock fixed at
+// 2026-01-01T00:00:00Z): the first field of each header, a value above
+// zero, then the next header. Each case's expected delay in
+// milliseconds is that program's output (0 is none).
+
+use std/http
+
+const RETRY_AFTER_CASES: List[(List[(Str, Str)], Int)] = [
+  ([], 0),
+  ([("Retry-After", "5")], 5000),
+  ([("Retry-After", "5"), ("Retry-After", "9")], 5000),
+  ([("Retry-After-Ms", "250"), ("Retry-After", "5")], 250),
+  ([("Retry-After-Ms", "0"), ("Retry-After", "5")], 5000),
+  ([("Retry-After-Ms", "-3"), ("x-ms-retry-after-ms", "40")], 40),
+  ([("Retry-After-Ms", " 250"), ("Retry-After", "5")], 5000),
+  ([("Retry-After-Ms", "+7")], 7),
+  ([("Retry-After-Ms", "abc"), ("Retry-After", "2")], 2000),
+  ([("Retry-After-Ms", ""), ("Retry-After-Ms", "30"), ("Retry-After", "2")], 2000),
+  ([("x-ms-retry-after-ms", "15"), ("x-ms-retry-after-ms", "99")], 15),
+  ([("Retry-After", "Thu, 01 Jan 2026 00:00:30 GMT")], 30000),
+  ([("Retry-After", "Wed, 31 Dec 2025 23:59:30 GMT")], 0),
+  ([("Retry-After", "Thu, 01 Jan 2026 00:00:30 GMT"), ("Retry-After", "Thu, 01 Jan 2026 00:01:00 GMT")], 30000),
+  ([("Retry-After", "0")], 0),
+  ([("Retry-After", "1.5")], 0),
+  ([("Retry-After", " 3 ")], 0),
+  ([("Retry-After", "soon"), ("Retry-After-Ms", "0")], 0),
+]
+
+test "retry_after is azcore's shared.RetryAfter" {
+  let now = Time.parse_rfc3339("2026-01-01T00:00:00Z")?
+  for (i, (hs, want)) in RETRY_AFTER_CASES.indexed() {
+    var resp = http.text(429, "")
+    for (k, v) in hs {
+      resp = resp.add_header(k, v)
+    }
+    let got = retry_after(resp, now).map(fn(d: Duration) -> Int { d.millis() }) ?? 0
+    expect("${i} ${got}") == "${i} ${want}"
+  }
+}

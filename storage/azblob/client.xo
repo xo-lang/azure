@@ -117,6 +117,7 @@ fn meta_headers(metadata: Map[Str, Str]) -> List[(Str, Str)] {
 fn metadata_of(resp: http.Response) -> Map[Str, Str] {
   var m: Map[Str, Str] = {}
   for (k, v) in resp.headers {
+    let v = resp.header_values(k).first() ?? v
     if k.to_lower().starts_with("x-ms-meta-") {
       m[k[10..k.len()]] = v
     }
@@ -124,9 +125,15 @@ fn metadata_of(resp: http.Response) -> Map[Str, Str] {
   m
 }
 
+/// `name`'s first field, as Go's `resp.Header.Get` reads one; the
+/// fields of a repeated header are not joined.
+fn first_header(resp: http.Response, name: Str) -> Str? {
+  resp.header_values(name).first()
+}
+
 /// An HTTP date header as a Time.
 fn http_time(resp: http.Response, name: Str) -> Time? {
-  rfc1123(resp.header(name) ?? return None)
+  rfc1123(first_header(resp, name) ?? return None)
 }
 
 /// An HTTP date (`Thu, 05 Nov 2026 03:04:05 GMT`) as a Time.
@@ -138,7 +145,7 @@ fn rfc1123(v: Str) -> Time? {
 }
 
 fn int_header(resp: http.Response, name: Str) -> Int? {
-  Int.parse(resp.header(name) ?? "")
+  Int.parse(first_header(resp, name) ?? "")
 }
 
 /// What a write returns (ETag, Last-Modified and request ID).
@@ -150,7 +157,7 @@ pub struct WriteResponse {
 }
 
 fn write_response(resp: http.Response) -> WriteResponse {
-  WriteResponse{etag: resp.header("ETag") ?? "", last_modified: http_time(resp, "Last-Modified"), request_id: resp.header("x-ms-request-id") ?? "", version_id: resp.header("x-ms-version-id") ?? ""}
+  WriteResponse{etag: first_header(resp, "ETag") ?? "", last_modified: http_time(resp, "Last-Modified"), request_id: first_header(resp, "x-ms-request-id") ?? "", version_id: first_header(resp, "x-ms-version-id") ?? ""}
 }
 
 /// Public read access of a new container.
@@ -225,7 +232,7 @@ pub fn (c: Client) download_buffer(container: Str, blob: Str, range: Str = "") -
   let resp = c.call(policy.Request{method: "GET", url: c.url_for(blob_path(container, blob)), headers: hs}, [200, 206])?
   Ok(DownloadResponse{
     body: resp.body, content_length: int_header(resp, "Content-Length") ?? resp.body.len(),
-    content_type: resp.header("Content-Type") ?? "", etag: resp.header("ETag") ?? "",
+    content_type: first_header(resp, "Content-Type") ?? "", etag: first_header(resp, "ETag") ?? "",
     last_modified: http_time(resp, "Last-Modified"), metadata: metadata_of(resp),
   })
 }
@@ -243,9 +250,9 @@ pub struct BlobProperties {
 pub fn (c: Client) get_blob_properties(container: Str, blob: Str) -> BlobProperties ! azcore.CallErr uses (net.dial, clock, rand) {
   let resp = c.call(policy.Request{method: "HEAD", url: c.url_for(blob_path(container, blob))}, [200])?
   Ok(BlobProperties{
-    content_length: int_header(resp, "Content-Length") ?? 0, content_type: resp.header("Content-Type") ?? "",
-    etag: resp.header("ETag") ?? "", last_modified: http_time(resp, "Last-Modified"),
-    blob_type: resp.header("x-ms-blob-type") ?? "", metadata: metadata_of(resp),
+    content_length: int_header(resp, "Content-Length") ?? 0, content_type: first_header(resp, "Content-Type") ?? "",
+    etag: first_header(resp, "ETag") ?? "", last_modified: http_time(resp, "Last-Modified"),
+    blob_type: first_header(resp, "x-ms-blob-type") ?? "", metadata: metadata_of(resp),
   })
 }
 

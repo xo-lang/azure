@@ -2,6 +2,7 @@
 // every request byte for byte, every field read back as Go dumps it.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -159,6 +160,16 @@ fn one(name: Str, v: Str?) -> List[Str] {
 }
 
 test "the directory client sends what Go sends and reads what Go reads" {
+  expect(directory_run(os.net, os.clock, os.rand, [])?) == DIRECTORY_OUTPUT
+}
+
+test "the directory client sends what Go sends and reads what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(directory_run(os.net, os.clock, os.rand, [Doubling{}])?) == DIRECTORY_OUTPUT
+}
+
+fn directory_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
   let log = Mutex[List[Str]].new([])
   let h = fn(req: http.Request) -> http.Response {
     record(req, log)
@@ -166,12 +177,12 @@ test "the directory client sends what Go sends and reads what Go reads" {
   }
   for m in ["GET", "PUT", "DELETE"] {
     for path in ["/{a}/{b}", "/{a}/{b}/{c}"] {
-      os.net.handle("${m} ${EP}${path}", h)
+      net.handle("${m} ${EP}${path}", h)
     }
   }
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DirFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DirFixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts)
   let d = sh.new_directory_client("d1")
   var out: List[Str] = []
   let take = fn() -> List[Str] {
@@ -255,7 +266,7 @@ test "the directory client sends what Go sends and reads what Go reads" {
     }
     Err(e) => err_lines("d17", e)
   })
-  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let dots = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
   let src = dots.new_directory_client("d1/old.")
   out = out + add(res("d18 rename with options, trailing dots and an intent", src.rename("  /new dir/x.?sv=1&sig=a%2Bb  ", RenameDirectoryOptions{
     smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{hidden: true}), creation_time: Some(t1), last_write_time: Some(t2)}),
@@ -269,13 +280,13 @@ test "the directory client sends what Go sends and reads what Go reads" {
     Err(azcore.CallErr.InvalidInput(m)) => ["== d21 rename to nothing", "  error ${m}"]
     Err(e) => err_lines("d21 rename to nothing", e)
   })
-  let cs = new_directory_client_from_connection_string(os.net, os.clock, os.rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s1", "d1\\d2", opts)?
+  let cs = new_directory_client_from_connection_string(net, clock, rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s1", "d1\\d2", opts)?
   out = out + ["== d22 urls", "  ${d.new_subdirectory_client("a b/c/").url}", "  ${d.file_url("x y/z%.txt")}", "  ${sh.new_root_directory_client().file_url("top")}", "  ${cs.url}"]
   out = out + add(match cs.delete() {
     Ok(x) => one("d23 delete from a connection string client", x.response.request_id)
     Err(e) => err_lines("d23", e)
   })
-  expect(out) == DIRECTORY_OUTPUT
+  Ok(out)
 }
 
 test "NTFS attributes print and parse as Go's" {

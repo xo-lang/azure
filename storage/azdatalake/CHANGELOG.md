@@ -1,5 +1,17 @@
 # azdatalake changes
 
+## v0.9.0
+
+Behavior fix: a response header that repeats is read as Go's
+`resp.Header.Get` reads it, its first field. Before, the fields were
+joined with `, `, so a repeated header read as `a, zz` and a repeated
+number, date or boolean did not parse.
+
+- Every dfs response header the clients read (the blob-backed calls
+  read through azblob v0.10.0). The Go vector tests rerun with every
+  response header field repeated, which leaves Go azdatalake v1.7.1's
+  output unchanged.
+
 ## v0.8.0
 
 - Error texts quote a value as Go's strconv.Quote, control bytes

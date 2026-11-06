@@ -3,6 +3,7 @@
 // read back as Go dumps it.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -96,17 +97,27 @@ fn download_dump(x: DownloadResponse) -> Dump {
 }
 
 test "the file data calls send what Go sends and read what Go reads" {
+  expect(data_run(os.net, os.clock, os.rand, [])?) == DATA_OUTPUT
+}
+
+test "the file data calls send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(data_run(os.net, os.clock, os.rand, [Doubling{}])?) == DATA_OUTPUT
+}
+
+fn data_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
   let log = Mutex[List[Str]].new([])
   let h = fn(req: http.Request) -> http.Response {
     record(req, log)
     stamped(data_answer(req))
   }
   for m in ["GET", "PUT", "HEAD"] {
-    os.net.handle("${m} ${EP}/{a}/{b}", h)
+    net.handle("${m} ${EP}/{a}/{b}", h)
   }
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DataFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DataFixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts)
   let f = sh.new_root_directory_client().new_file_client("f.bin")
   var out: List[Str] = []
   let take = fn() -> List[Str] {
@@ -150,7 +161,7 @@ test "the file data calls send what Go sends and read what Go reads" {
   })))
   out = out + add(retag("r6 upload a range from a URL, count 0", f.upload_range_from_url("http://src.example.test/s/f", 7, 0, 0)))
   out = out + add(rr("r6b upload a range from a URL at a negative offset", f.upload_range_from_url("http://src.example.test/s/f", -1, 0, 5)))
-  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let dots = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
   out = out + add(retag("r6c upload a range from a URL with trailing dots", dots.new_root_directory_client().new_file_client("f.").upload_range_from_url("http://src.example.test/s/f.", 0, 0, 1)))
   out = out + add(match f.get_range_list(GetRangeListOptions{prev_share_snapshot: Some("2026-11-04T01:00:00.0000000Z"), range: HttpRange{offset: 0, count: 4096}, share_snapshot: Some("2026-11-05T01:00:00.0000000Z"), lease_id: lease, support_rename: Some(true)}) {
     Ok(x) => {
@@ -200,7 +211,7 @@ test "the file data calls send what Go sends and read what Go reads" {
   out = out + add(up("r12b upload an empty buffer", f.upload_buffer(b"")))
   out = out + add(up("r12c upload a buffer, no options", f.upload_buffer(b"12345")))
   out = out + add(up("r13 upload a stream", f.upload_buffer(b"xyz")))
-  expect(out) == DATA_OUTPUT
+  Ok(out)
 }
 
 test "a range formats as Go's FormatHTTPRange" {

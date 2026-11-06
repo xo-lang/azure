@@ -1,5 +1,21 @@
 # azblob changes
 
+## v0.10.0
+
+Behavior fix: a response header that repeats is read as Go's
+`resp.Header.Get` reads it, its first field. Before, the fields were
+joined with `, `, so a repeated header read as `a, zz` and a repeated
+number, date or boolean did not parse.
+
+- Every response header the clients read, and each `x-ms-meta-*` and
+  `x-ms-or-*` entry (Go's `Header.Get(hh)` on each name).
+- The error code a call returns comes from azcore's reading (the root
+  module): `x-ms-error-code`'s first field, and an empty first field
+  reads the body's code, as Go's.
+- Checked against Go azblob v1.8.3 (`repeated_headers_test.xo`), and
+  each Go vector test reruns with every response header field repeated
+  (a second field "zz"), which leaves Go's output unchanged.
+
 ## v0.9.0
 
 - `exported.parse_go_url` reads a URL as Go's url.Parse does, errors

@@ -4,6 +4,8 @@
 // read back printed as Go's dump printed it.
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 
 const BLOB_GO_DATE: Str = "Fri, 06 Nov 2026 13:59:44 GMT"
 
@@ -156,10 +158,20 @@ fn tags_dump(x: GetTagsResponse) -> Dump {
 }
 
 test "the blob client sends what Go sends and reads what Go reads" {
-  let log = serve_blob(os.net, [BEP], blob_answer)
+  expect(blob_run(os.net, os.clock, os.rand, [])?) == BLOB_OUTPUT
+}
+
+test "the blob client sends what Go sends and reads what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(blob_run(os.net, os.clock, os.rand, [Doubling{}])?) == BLOB_OUTPUT
+}
+
+fn blob_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_blob(net, [BEP], blob_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(BLOB_GO_DATE)
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, opts)
+  let opts = go_options_with(extra, BLOB_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, opts)
   let c = svc.new_container_client("c1")
   let b = c.new_blob_client("dir/a b+c.txt")
   var out: List[Str] = ["== b0 blob URL", "  ${b.url}"]
@@ -202,11 +214,11 @@ test "the blob client sends what Go sends and reads what Go reads" {
   })
   out = out + add(quiet("b8 blob get properties, not found", c.new_blob_client("missing").get_properties()))
   let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
-  let fb = new_blob_client_from_connection_string(os.net, os.clock, os.rand, cs, "c2", "x/y z.txt", opts)?
+  let fb = new_blob_client_from_connection_string(net, clock, rand, cs, "c2", "x/y z.txt", opts)?
   out = out + ["== b9 blob from a connection string", "  ${fb.url}"]
   out = out + add(quiet("b9b delete it", fb.delete()))
   out = out + drain(log)
-  expect(out) == BLOB_OUTPUT
+  Ok(out)
 }
 
 test "set_tags writes the tags in key order" {

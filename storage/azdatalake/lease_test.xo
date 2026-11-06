@@ -2,6 +2,8 @@
 // the Go program's fake does (leasevectors_test.xo).
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 
 const LEASE_GO_DATE: Str = "Fri, 06 Nov 2026 15:37:11 GMT"
 
@@ -41,18 +43,28 @@ fn dl_lease_dump(x: LeaseResponse) -> Dump {
 }
 
 test "the lease clients send what Go sends and read what Go reads" {
-  let log = serve(os.net, dl_lease_answer)
+  expect(lease_run(os.net, os.clock, os.rand, [])?) == LEASE_OUTPUT
+}
+
+test "the lease clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(lease_run(os.net, os.clock, os.rand, [Doubling{}])?) == LEASE_OUTPUT
+}
+
+fn lease_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net, dl_lease_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(LEASE_GO_DATE)
+  let opts = go_options_with(extra, LEASE_GO_DATE)
   var out: List[Str] = []
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
   let t1 = at("2026-11-01T02:03:04Z")
   let t2 = at("2026-11-02T02:03:04Z")
   let mac = ModifiedAccessConditions{if_match: Some("e1"), if_none_match: Some("e2"), if_modified_since: Some(t1), if_unmodified_since: Some(t2)}
-  let fs_of = fn(name: Str) -> FileSystemClient { new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/${name}", cred, opts) }
+  let fs_of = fn(name: Str) -> FileSystemClient { new_file_system_client_with_shared_key_credential(net, clock, rand, "${DEP}/${name}", cred, opts) }
   let fsc = fs_of("fs1")
 
-  var fl = new_file_system_lease_client(os.rand, fsc, Some("l1"))
+  var fl = new_file_system_lease_client(rand, fsc, Some("l1"))
   out = out + one_str("fs LeaseID", Some(fl.lease_id))
   out = out + add(shown("fs Acquire nil", fl.acquire_lease(15), dl_lease_dump))
   out = out + add(shown("fs Acquire conditions", fl.acquire_lease(-1, mac), dl_lease_dump))
@@ -64,14 +76,14 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + add(shown("fs Renew", fl.renew_lease(), dl_lease_dump))
   out = out + add(shown("fs Renew conditions", fl.renew_lease(mac), dl_lease_dump))
   out = out + add(shown("fs Release", fl.release_lease(mac), dl_lease_dump))
-  let ml = new_file_system_lease_client(os.rand, fs_of("missing"), Some("l1"))
+  let ml = new_file_system_lease_client(rand, fs_of("missing"), Some("l1"))
   out = out + add(shown("fs Acquire missing", ml.acquire_lease(15), dl_lease_dump))
-  var bl = new_file_system_lease_client(os.rand, fs_of("busy"), Some("l1"))
+  var bl = new_file_system_lease_client(rand, fs_of("busy"), Some("l1"))
   out = out + add(shown("fs Change busy", bl.change_lease("l9"), dl_lease_dump))
   out = out + one_str("fs LeaseID after failed change", Some(bl.lease_id))
 
-  let dir = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1", cred, opts)
-  var dl = new_directory_lease_client(os.rand, dir, Some("p1"))
+  let dir = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/d1", cred, opts)
+  var dl = new_directory_lease_client(rand, dir, Some("p1"))
   out = out + one_str("dir LeaseID", Some(dl.lease_id))
   out = out + add(shown("dir Acquire conditions", dl.acquire_lease(30, mac), dl_lease_dump))
   out = out + add(shown("dir Break 0 conditions", dl.break_lease(Some(0), mac), dl_lease_dump))
@@ -81,18 +93,18 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + add(shown("dir Renew conditions", dl.renew_lease(mac), dl_lease_dump))
   out = out + add(shown("dir Release", dl.release_lease(), dl_lease_dump))
 
-  let fl2 = new_file_lease_client(os.rand, fsc.new_file_client("a b/c.txt"), Some("q1"))
+  let fl2 = new_file_lease_client(rand, fsc.new_file_client("a b/c.txt"), Some("q1"))
   out = out + add(shown("fs file Acquire", fl2.acquire_lease(15), dl_lease_dump))
   out = out + add(shown("fs file Release conditions", fl2.release_lease(mac), dl_lease_dump))
   out = out + add(shown("fs file Break nil", fl2.break_lease(), dl_lease_dump))
-  let fm = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing.txt", cred, opts)
-  out = out + add(shown("file Renew missing", new_file_lease_client(os.rand, fm, Some("q1")).renew_lease(), dl_lease_dump))
-  let fb = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/busy.txt", cred, opts)
-  var fbl = new_file_lease_client(os.rand, fb, Some("q1"))
+  let fm = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/missing.txt", cred, opts)
+  out = out + add(shown("file Renew missing", new_file_lease_client(rand, fm, Some("q1")).renew_lease(), dl_lease_dump))
+  let fb = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/busy.txt", cred, opts)
+  var fbl = new_file_lease_client(rand, fb, Some("q1"))
   out = out + add(shown("file Change busy", fbl.change_lease("q9", mac), dl_lease_dump))
   out = out + one_str("file LeaseID after failed change", Some(fbl.lease_id))
   out = out + drain(log)
-  expect(out) == LEASE_OUTPUT
+  Ok(out)
 }
 
 test "a lease client with no lease ID makes a random UUID" {

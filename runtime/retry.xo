@@ -64,20 +64,39 @@ pub fn delay(opts: policy.RetryOptions, try: Int, jitter: Float) -> Duration {
   if d > opts.max_retry_delay { opts.max_retry_delay } else { d }
 }
 
-/// The server's requested delay, in azcore's order of headers.
+/// The server's requested delay, as azcore's shared.RetryAfter: the first
+/// field of `Retry-After-Ms`, `x-ms-retry-after-ms`, then `Retry-After`,
+/// whichever first gives a delay above zero (a whole number, as
+/// strconv.Atoi reads one, or for `Retry-After` an RFC 1123 date in the
+/// future). None where Go's is 0.
 pub fn retry_after(resp: http.Response, now: Time) -> Duration? {
-  for h in ["Retry-After-Ms", "x-ms-retry-after-ms"] {
-    if let Some(v) = resp.header(h) {
-      if let Some(n) = Int.parse(v.trim()) {
-        return Some(Duration.from_millis(n))
+  for (h, unit) in [("Retry-After-Ms", 1), ("x-ms-retry-after-ms", 1), ("Retry-After", 1000)] {
+    let v = resp.header_values(h).first() ?? continue
+    if v == "" {
+      continue
+    }
+    if let Some(n) = go_atoi(v) {
+      if n > 0 {
+        return Some(Duration.from_millis(n * unit))
+      }
+    }
+    if h == "Retry-After" {
+      if let Ok(t) = time.parse(v, time.RFC1123, time.utc()) {
+        let ms = t.unix_millis() - now.unix_millis()
+        if ms > 0 {
+          return Some(Duration.from_millis(ms))
+        }
       }
     }
   }
-  let v = resp.header("Retry-After") ?? return None
-  if let Some(n) = Int.parse(v.trim()) {
-    return Some(Duration.from_millis(n * 1000))
+  None
+}
+
+/// Go's strconv.Atoi: an optional sign and decimal digits, nothing else.
+fn go_atoi(v: Str) -> Int? {
+  let digits = if v.starts_with("+") || v.starts_with("-") { v[1..v.len()] } else { v }
+  if digits == "" || !digits.runes().all(fn(r: Rune) -> Bool { r >= '0' && r <= '9' }) {
+    return None
   }
-  let t = time.parse(v.trim(), time.RFC1123, time.utc()) ?? _ => return None
-  let ms = t.unix_millis() - now.unix_millis()
-  Some(Duration.from_millis(if ms > 0 { ms } else { 0 }))
+  Int.parse(v.trim_prefix("+"))
 }

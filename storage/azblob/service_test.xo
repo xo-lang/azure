@@ -4,6 +4,8 @@
 // what is read back must print as Go's reflective dump printed it.
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 use std/time
 
 const SVC_GO_DATE: Str = "Fri, 06 Nov 2026 13:49:42 GMT"
@@ -191,10 +193,20 @@ fn at(s: Str) -> Time {
 }
 
 test "the service and container clients send what Go sends and read what Go reads" {
-  let log = serve_blob(os.net, [BEP, "http://127.0.0.1:10000"], svc_answer)
+  expect(service_run(os.net, os.clock, os.rand, [])?) == SVC_OUTPUT
+}
+
+test "the service and container clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(service_run(os.net, os.clock, os.rand, [Doubling{}])?) == SVC_OUTPUT
+}
+
+fn service_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_blob(net, [BEP, "http://127.0.0.1:10000"], svc_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(SVC_GO_DATE)
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, opts)
+  let opts = go_options_with(extra, SVC_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, opts)
   var out: List[Str] = []
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
 
@@ -213,7 +225,7 @@ test "the service and container clients send what Go sends and read what Go read
   out = out + add(shown("s3b service set properties, empty options", svc.set_properties(StorageServiceProperties{}), resp_dump))
   out = out + add(shown("s4 service account info", svc.get_account_info(), account_dump))
   out = out + sas_line("s5 service SAS URL", svc.get_sas_url("sco", "rl", at("2026-11-06T00:00:00Z"), start: Some(at("2026-11-05T01:02:03.5Z"))))
-  let nc = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}?sv=2026-12-06&sig=x", go_options(""))
+  let nc = new_service_client_with_no_credential(net, clock, rand, "${BEP}?sv=2026-12-06&sig=x", go_options_with(extra, ""))
   out = out + sas_line("s6 service SAS URL without a key", nc.get_sas_url("s", "r", at("2026-11-06T00:00:00Z")))
   out = out + add(match nc.get_properties() {
     Ok(x) => one_str("s7 service get properties with a SAS in the URL", x.response.request_id)
@@ -259,15 +271,15 @@ test "the service and container clients send what Go sends and read what Go read
   out = out + ["== c12 container URL of an odd name", "  ${odd.url}"]
   out = out + add(quiet("c12b create it", odd.create()))
 
-  let ipc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://127.0.0.1:10000/devstoreaccount1", cred, opts)
+  let ipc = new_service_client_with_shared_key_credential(net, clock, rand, "http://127.0.0.1:10000/devstoreaccount1", cred, opts)
   out = out + sas_line("c13 container SAS URL on an IP endpoint", ipc.new_container_client("c2").get_sas_url("r", at("2026-11-06T00:00:00Z")))
 
   let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
-  let fc = new_container_client_from_connection_string(os.net, os.clock, os.rand, cs, "c3", opts)?
+  let fc = new_container_client_from_connection_string(net, clock, rand, cs, "c3", opts)?
   out = out + ["== c14 container from a connection string", "  ${fc.url}"]
   out = out + add(quiet("c14b get properties", fc.get_properties()))
-  let sc = new_container_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/c4?sv=2026-12-06&sig=x%2By", go_options(""))
+  let sc = new_container_client_with_no_credential(net, clock, rand, "${BEP}/c4?sv=2026-12-06&sig=x%2By", go_options_with(extra, ""))
   out = out + add(quiet("c15 container set metadata with a SAS in the URL", sc.set_metadata(SetContainerMetadataOptions{metadata: Some({"k": "v"})})))
   out = out + drain(log)
-  expect(out) == SVC_OUTPUT
+  Ok(out)
 }

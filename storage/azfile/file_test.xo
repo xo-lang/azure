@@ -3,6 +3,7 @@
 // back as Go dumps it.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -100,6 +101,16 @@ fn file_dump(x: FileResponse) -> Dump {
 }
 
 test "the file client sends what Go sends and reads what Go reads" {
+  expect(file_run(os.net, os.clock, os.rand, [])?) == FILE_OUTPUT
+}
+
+test "the file client sends what Go sends and reads what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(file_run(os.net, os.clock, os.rand, [Doubling{}])?) == FILE_OUTPUT
+}
+
+fn file_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
   let log = Mutex[List[Str]].new([])
   let h = fn(req: http.Request) -> http.Response {
     record(req, log)
@@ -107,12 +118,12 @@ test "the file client sends what Go sends and reads what Go reads" {
   }
   for m in ["GET", "PUT", "DELETE", "HEAD"] {
     for path in ["/{a}/{b}", "/{a}/{b}/{c}", "/{a}/{b}/{c}/{d}"] {
-      os.net.handle("${m} ${EP}${path}", h)
+      net.handle("${m} ${EP}${path}", h)
     }
   }
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [FileFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [FileFixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts)
   let f = sh.new_directory_client("d1").new_file_client("f.txt")
   var out: List[Str] = []
   let take = fn() -> List[Str] {
@@ -188,7 +199,7 @@ test "the file client sends what Go sends and reads what Go reads" {
   out = out + add(res("f17 abort copy", f.abort_copy("c-1", lease)))
   out = out + add(pick("f18 resize", f.resize(4096, lease), etag))
   out = out + add(pick("f18b resize, no options", f.resize(0), etag))
-  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(true), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let dots = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(true), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
   let src = dots.new_root_directory_client().new_file_client("old.")
   out = out + add(res("f19 rename with options, trailing dots and an intent", src.rename(" /d2/new name.txt?sv=1 ", RenameFileOptions{
     smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{temporary: true}), last_write_time: Some(t2)}),
@@ -236,8 +247,8 @@ test "the file client sends what Go sends and reads what Go reads" {
   out = out + add(pick("f24c create a symbolic link, no options", f.create_symbolic_link("t"), etag))
   out = out + add(res("f25 get a symbolic link", src.get_symbolic_link(Some("2026-11-05T01:00:00.0000000Z"))))
   out = out + add(pick("f25b get a symbolic link, no options", f.get_symbolic_link(), fn(x: FileResponse) -> Str? { x.link_text }))
-  let cs = new_file_client_from_connection_string(os.net, os.clock, os.rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s1", "d1\\a b\\f.txt", opts)?
+  let cs = new_file_client_from_connection_string(net, clock, rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s1", "d1\\a b\\f.txt", opts)?
   out = out + ["== f26 urls", "  ${f.url}", "  ${src.url}", "  ${cs.url}"]
   out = out + add(pick("f27 delete from a connection string client", cs.delete(), fn(x: FileResponse) -> Str? { x.response.request_id }))
-  expect(out) == FILE_OUTPUT
+  Ok(out)
 }

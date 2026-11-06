@@ -2,6 +2,7 @@
 // every request byte for byte, every field read back as Go dumps it.
 
 use std/http
+use std/testing
 use std/uuid
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
@@ -37,17 +38,27 @@ fn lease_dump(x: LeaseResponse) -> Dump {
 }
 
 test "the lease clients send what Go sends and read what Go reads" {
+  expect(lease_run(os.net, os.clock, os.rand, [])?) == LEASE_OUTPUT
+}
+
+test "the lease clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(lease_run(os.net, os.clock, os.rand, [Doubling{}])?) == LEASE_OUTPUT
+}
+
+fn lease_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
   let log = Mutex[List[Str]].new([])
   let h = fn(req: http.Request) -> http.Response {
     record(req, log)
     stamped(lease_answer(req))
   }
   for path in ["/{a}", "/{a}/{b}", "/{a}/{b}/{c}"] {
-    os.net.handle("PUT ${EP}${path}", h)
+    net.handle("PUT ${EP}${path}", h)
   }
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [LeaseFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [LeaseFixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts)
   let snap = Some("2026-11-05T01:00:00.0000000Z")
   var out: List[Str] = []
   let take = fn() -> List[Str] {
@@ -73,7 +84,7 @@ test "the lease clients send what Go sends and read what Go reads" {
   let id = fn(x: LeaseResponse) -> Str? { x.lease_id }
   let etag = fn(x: LeaseResponse) -> Str? { x.etag }
 
-  var sl = new_share_lease_client(os.rand, sh, Some("l-1"))
+  var sl = new_share_lease_client(rand, sh, Some("l-1"))
   out = out + add(res("l1 share acquire for 60 seconds on a snapshot", sl.acquire(60, snap)))
   out = out + add(pick("l1b share acquire, infinite", sl.acquire(-1), id))
   out = out + add(res("l2 share break with a period and a lease", sl.break_lease(Some(10), snap, Some("l-1"))))
@@ -87,7 +98,7 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + add(res("l5 share release", sl.release(snap)))
   out = out + add(pick("l5b share release, no options", sl.release(), etag))
 
-  var fl = new_file_lease_client(os.rand, sh.new_directory_client("d1").new_file_client("f.txt"), Some("fl-1"))
+  var fl = new_file_lease_client(rand, sh.new_directory_client("d1").new_file_client("f.txt"), Some("fl-1"))
   out = out + add(res("l6 file acquire", fl.acquire()))
   out = out + add(res("l7 file break with a lease", fl.break_lease(Some("fl-1"))))
   out = out + add(pick("l7b file break, no options", fl.break_lease(), id))
@@ -95,13 +106,13 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + ["== l8b lease ID after change", "  ${fl.lease_id}"]
   out = out + add(res("l9 file release", fl.release()))
 
-  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
-  let dl = new_share_lease_client(os.rand, dots, Some("l-3"))
+  let dots = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let dl = new_share_lease_client(rand, dots, Some("l-3"))
   out = out + add(pick("l10 share acquire with trailing dots and an intent", dl.acquire(15), id))
-  let dfl = new_file_lease_client(os.rand, dots.new_root_directory_client().new_file_client("f."), Some("fl-3"))
+  let dfl = new_file_lease_client(rand, dots.new_root_directory_client().new_file_client("f."), Some("fl-3"))
   out = out + add(pick("l11 file acquire with trailing dots and an intent", dfl.acquire(), id))
   out = out + add(pick("l12 file release with trailing dots and an intent", dfl.release(), etag))
-  expect(out) == LEASE_OUTPUT
+  Ok(out)
 }
 
 test "a lease client with no ID proposes a random version 4 UUID" {

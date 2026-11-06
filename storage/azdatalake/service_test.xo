@@ -3,6 +3,8 @@
 // for byte, and what is read back printed as Go's dump printed it.
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/azcore
 
 const FS_GO_DATE: Str = "Fri, 06 Nov 2026 14:25:18 GMT"
@@ -128,14 +130,24 @@ fn urls(name: Str, dfs: Str, blob: Str) -> List[Str] {
 }
 
 test "the service and file system clients send what Go sends and read what Go reads" {
-  let log = serve(os.net, fs_answer)
+  expect(service_run(os.net, os.clock, os.rand, [])?) == FS_OUTPUT
+}
+
+test "the service and file system clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(service_run(os.net, os.clock, os.rand, [Doubling{}])?) == FS_OUTPUT
+}
+
+fn service_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net, fs_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(FS_GO_DATE)
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  let opts = go_options_with(extra, FS_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${DEP}/", cred, opts)
   var out = urls("s0 service URLs", svc.dfs_url, svc.blob_url)
-  let fb = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/?sv=x&sig=y", go_options(""))
+  let fb = new_service_client_with_no_credential(net, clock, rand, "${BEP}/?sv=x&sig=y", go_options_with(extra, ""))
   out = out + urls("s0b service URLs from a blob URL with a SAS", fb.dfs_url, fb.blob_url)
-  let twice = new_service_client_with_no_credential(os.net, os.clock, os.rand, "http://acct1.dfs.example.dfs.test/", go_options(""))
+  let twice = new_service_client_with_no_credential(net, clock, rand, "http://acct1.dfs.example.dfs.test/", go_options_with(extra, ""))
   let tf = twice.new_file_system_client("fs9")
   out = out + ["== s0c a host with .dfs. twice", "  dfs=${twice.dfs_url}", "  blob=${twice.blob_url}", "  fs dfs=${tf.dfs_url}", "  fs blob=${tf.blob_url}"]
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
@@ -163,17 +175,17 @@ test "the service and file system clients send what Go sends and read what Go re
   out = out + add(quiet("f8 set metadata, a blob error code", svc.new_file_system_client("blobby").set_metadata()))
 
   let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
-  let fc = new_file_system_client_from_connection_string(os.net, os.clock, os.rand, cs, "fs3", opts)?
+  let fc = new_file_system_client_from_connection_string(net, clock, rand, cs, "fs3", opts)?
   out = out + urls("f9 file system from a connection string", fc.dfs_url, fc.blob_url)
   out = out + add(quiet("f9b delete it", fc.delete()))
-  let sc = new_service_client_from_connection_string(os.net, os.clock, os.rand, cs, opts)?
+  let sc = new_service_client_from_connection_string(net, clock, rand, cs, opts)?
   out = out + urls("s6 service from a connection string", sc.dfs_url, sc.blob_url)
 
-  let tok_opts = go_options("") with {audience: "https://acct1.blob.example.test", insecure_allow_credential_with_http: true}
-  let ft = new_file_system_client(os.net, os.clock, os.rand, "${DEP}/fs4", ScopeLog{log: log}, tok_opts)
+  let tok_opts = go_options_with(extra, "") with {audience: "https://acct1.blob.example.test", insecure_allow_credential_with_http: true}
+  let ft = new_file_system_client(net, clock, rand, "${DEP}/fs4", ScopeLog{log: log}, tok_opts)
   out = out + add(quiet("f10 a token with an audience: the blob call's scope", ft.get_properties()))
   out = out + drain(log)
-  expect(out) == FS_OUTPUT
+  Ok(out)
 }
 
 test "get_urls swaps the first .dfs. or .blob." {

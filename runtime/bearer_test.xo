@@ -151,3 +151,23 @@ test "auxiliary tenants' tokens are for the policy's scopes" {
   new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bp]}, policy.ClientOptions{}).send(policy.Request{method: "GET", url: ARM})?
   expect(cred.seen.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == [":https://management.test/.default", "t1:https://management.test/.default"]
 }
+
+test "challenges in repeated WWW-Authenticate fields are parsed field by field, as azcore's" {
+  let r = http.text(401, "").add_header("WWW-Authenticate", "PoP realm=\"x\", nonce=\"n\"").add_header("WWW-Authenticate", "Bearer error=\"insufficient_claims\", claims=\"e30=\"")
+  expect(parse_challenges(r).map(fn(c: Challenge) -> Str { c.scheme })) == ["PoP", "Bearer"]
+  expect(cae_claims(r)?) == Some("{}")
+}
+
+test "a 401 whose first WWW-Authenticate field is empty is returned unhandled, as azcore's Header.Get gate" {
+  let n = Atomic[Int].new(0)
+  os.net.handle("GET ${ARM}/empty-first", fn(req: http.Request) -> http.Response {
+    n.add(1)
+    http.text(401, "").add_header("WWW-Authenticate", "").add_header("WWW-Authenticate", "Bearer error=\"insufficient_claims\", claims=\"${CHALLENGE_CLAIMS}\"")
+  })
+  let cred = Recording{seen: Mutex.new([])}
+  let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock)]}, policy.ClientOptions{})
+  expect(p.send(policy.Request{method: "GET", url: "${ARM}/empty-first"})?.status) == 401
+  // sent once, with no CAE token
+  expect(n.get()) == 1
+  expect(cred.seen.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == ["cae=true claims="]
+}

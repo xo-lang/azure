@@ -3,6 +3,7 @@
 // routing map's rules.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -78,13 +79,23 @@ fn (f: PkFake) take() -> List[Str] {
   })
 }
 
-fn pk_client(net: Net, clock: Clock, rand: Rand) -> Client ! Str {
+fn pk_client(net: Net, clock: Clock, rand: Rand, extra: List[policy.Policy] = []) -> Client ! Str {
   let cred = new_key_credential(KEY)?
-  Ok(new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}))
+  Ok(new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}))
 }
 
 test "ReadFeedRanges sends what Go sends and gives the caller what Go gives" {
-  let f = pk_serve(os.net)
+  pkranges_run(os.net, os.clock, os.rand, [])?
+}
+
+test "ReadFeedRanges sends what Go sends and gives the caller what Go gives, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  pkranges_run(os.net, os.clock, os.rand, [Doubling{}])?
+}
+
+fn pkranges_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> () ! Error uses (net.dial, clock, rand) {
+  let f = pk_serve(net)
   let e1 = "\"e1\""
   f.feed("c1", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("0", "", "FF"), rng("1", "", "80", ["0"]), rng("2", "80", "FF", ["0"])])}, FeedAnswer{status: 304, etag: e1}])
   f.feed("c2", [FeedAnswer{status: 200, etag: e1, body: ranges_body([rng("1", "", "40"), rng("2", "40", "80")])}, FeedAnswer{status: 200, etag: "\"e2\"", body: ranges_body([rng("3", "80", "FF")])}])
@@ -98,7 +109,7 @@ test "ReadFeedRanges sends what Go sends and gives the caller what Go gives" {
   f.feed("c10", [FeedAnswer{status: 200, etag: e1, body: "{\"PartitionKeyRanges\":[]}"}])
   f.feed("c11", [FeedAnswer{status: 200, etag: e1, body: "not json"}])
 
-  let c = pk_client(os.net, os.clock, os.rand)?
+  let c = pk_client(net, clock, rand, extra)?
   var out: List[Str] = []
   let report = fn(name: Str, r: Result[List[FeedRange], azcore.CallErr]) -> List[Str] {
     var add = ["== ${name}"]
@@ -121,9 +132,9 @@ test "ReadFeedRanges sends what Go sends and gives the caller what Go gives" {
   out = out + report("p1 the container is read, then the feed until 304; parents are gone", rf("c1"))
   out = out + report("p2 the second call is cached", rf("c1"))
   out = out + report("p3 pages accumulate with each etag", rf("c2"))
-  let before = os.clock.now()
+  let before = clock.now()
   let r4 = rf("c3")
-  let slept = os.clock.now() - before
+  let slept = clock.now() - before
   out = out + report("p4 a throttled page is retried", r4)
   out = out + report("p5 a gap is an error", rf("c4"))
   out = out + report("p6 a first range not at the start is an error", rf("c5"))
@@ -145,6 +156,7 @@ test "ReadFeedRanges sends what Go sends and gives the caller what Go gives" {
   // Two throttled tries: 100ms and 200ms, each plus under 50ms of jitter.
   expect(slept >= Duration.from_millis(300)) == true
   expect(slept < Duration.from_millis(400)) == true
+  Ok(())
 }
 
 fn pr(id: Str, lo: Str, hi: Str, parents: List[Str] = []) -> PkRange {

@@ -3,6 +3,7 @@
 
 use std/http
 use std/testing
+use github.com/xo-lang/azure/policy
 
 const PATH_GO_DATE: Str = "Fri, 06 Nov 2026 15:05:22 GMT"
 
@@ -300,11 +301,21 @@ fn serve_ip(net: testing.FakeNet, log: Mutex[List[Str]]) {
 }
 
 test "the directory and file clients send what Go sends and read what Go reads" {
-  let log = serve(os.net, path_answer)
-  serve_ip(os.net, log)
+  expect(path_run(os.net, os.clock, os.rand, [])?) == PATH_OUTPUT
+}
+
+test "the directory and file clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(path_run(os.net, os.clock, os.rand, [Doubling{}])?) == PATH_OUTPUT
+}
+
+fn path_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net, path_answer)
+  serve_ip(net, log)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(PATH_GO_DATE)
-  let nokey = go_options("")
+  let opts = go_options_with(extra, PATH_GO_DATE)
+  let nokey = go_options_with(extra, "")
   var out: List[Str] = []
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
   let t1 = at("2026-11-01T02:03:04Z")
@@ -313,18 +324,18 @@ test "the directory and file clients send what Go sends and read what Go reads" 
   let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
 
   // URLs.
-  let fsc = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1", cred, opts)
+  let fsc = new_file_system_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1", cred, opts)
   let d0 = fsc.new_directory_client("a b\\c/d%")
   out = out + path_urls("fs NewDirectoryClient", d0.dfs_url, d0.blob_url)
   let f0 = fsc.new_file_client("x/y z.txt")
   out = out + path_urls("fs NewFileClient", f0.dfs_url, f0.blob_url)
-  let dir = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1", cred, opts)
+  let dir = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/d1", cred, opts)
   out = out + path_urls("directory NewClientWithSharedKeyCredential", dir.dfs_url, dir.blob_url)
   let nf = dir.new_file_client("n/m q")
   out = out + path_urls("dir NewFileClient", nf.dfs_url, nf.blob_url)
   let ns = dir.new_subdirectory_client("sub x//")
   out = out + path_urls("dir NewSubdirectoryClient", ns.dfs_url, ns.blob_url)
-  let bl = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/fs1/b1?sig=s", nokey)
+  let bl = new_directory_client_with_no_credential(net, clock, rand, "${BEP}/fs1/b1?sig=s", nokey)
   out = out + path_urls("directory from blob URL", bl.dfs_url, bl.blob_url)
 
   // Create.
@@ -335,9 +346,9 @@ test "the directory and file clients send what Go sends and read what Go reads" 
     lease_duration: Some(15), proposed_lease_id: Some("pl1"), permissions: Some("0750"), umask: Some("0027"), owner: Some("o1"), group: Some("g1"), acl: Some("user::rwx"),
   }
   out = out + add(shown("dir Create full", dir.create(full), create_dump))
-  let bb = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/badbool", cred, opts)
+  let bb = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/badbool", cred, opts)
   out = out + add(shown("dir Create bad bool", bb.create(), create_dump))
-  let miss = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing", cred, opts)
+  let miss = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/missing", cred, opts)
   out = out + add(shown("dir Create missing", miss.create(), create_dump))
 
   // Delete.
@@ -361,38 +372,38 @@ test "the directory and file clients send what Go sends and read what Go reads" 
   // Rename.
   out = out + add(shown("dir Rename", dir.rename(" /new dir/x;y,z/ "), rename_dump))
   out = out + add(shown("dir Rename empty", dir.rename("  / "), rename_dump))
-  let src = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/src%20dir?foo=1&sv=2026-06-06&sp=rw&sig=c2ln", nokey)
+  let src = new_directory_client_with_no_credential(net, clock, rand, "${DEP}/fs1/src%20dir?foo=1&sv=2026-06-06&sp=rw&sig=c2ln", nokey)
   let src_conditions = SourceAccessConditions{source_lease_id: Some("sl1"), source_if_match: Some("se1"), source_if_none_match: Some("se2"), source_if_modified_since: Some(t1), source_if_unmodified_since: Some(t2)}
   out = out + add(shown("dir Rename SAS source", src.rename("dst", RenamePathOptions{conditions: ac, cpk_info: Some(cpk), source_conditions: src_conditions}), rename_dump))
   out = out + add(shown("dir Rename dest query", src.rename("dst/q?sv=2&sig=z z", RenamePathOptions{source_conditions: SourceAccessConditions{source_lease_id: Some("sl2")}}), rename_dump))
   out = out + add(shown("dir Rename missing", miss.rename("x"), rename_dump))
-  let sas = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/s%7Ex(1)?b=2&SV=2026-06-06&st=2026-11-01&se=bad&sip=192.0.2.4-::ffff:198.51.100.8&skoid=o1&skt=2026-11-01T00:00:00Z&ske=x&a=1&a=0&sr=d&sig=x%20y&sdd=1&zz=&sp=r&sp=w", nokey)
+  let sas = new_directory_client_with_no_credential(net, clock, rand, "${DEP}/fs1/s%7Ex(1)?b=2&SV=2026-06-06&st=2026-11-01&se=bad&sip=192.0.2.4-::ffff:198.51.100.8&skoid=o1&skt=2026-11-01T00:00:00Z&ske=x&a=1&a=0&sr=d&sig=x%20y&sdd=1&zz=&sp=r&sp=w", nokey)
   out = out + add(shown("dir Rename SAS rebuilt", sas.rename("a b/c\\d"), rename_dump))
-  let sas2 = new_directory_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/s2?se=2026-11-09T01:02Z&st=2026-11-01T00:00:00.1234567Z&sip=203.0.113.1&spr=https&sp=r&sv=1", nokey)
+  let sas2 = new_directory_client_with_no_credential(net, clock, rand, "${DEP}/fs1/s2?se=2026-11-09T01:02Z&st=2026-11-01T00:00:00.1234567Z&sip=203.0.113.1&spr=https&sp=r&sv=1", nokey)
   out = out + add(shown("dir Rename SAS times", sas2.rename("t"), rename_dump))
-  let twoq = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/q?a=1?b=2", cred, opts)
+  let twoq = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/q?a=1?b=2", cred, opts)
   out = out + add(shown("dir Rename two question marks", twoq.rename("r?x=1?y=2"), rename_dump))
-  let ipd = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://127.0.0.1:10000/acct1/fs1/ip%20dir", cred, opts)
+  let ipd = new_directory_client_with_shared_key_credential(net, clock, rand, "http://127.0.0.1:10000/acct1/fs1/ip%20dir", cred, opts)
   out = out + path_urls("ip directory", ipd.dfs_url, ipd.blob_url)
   out = out + add(shown("dir Rename IP endpoint", ipd.rename("ip2"), rename_dump))
   let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
-  let csd = new_directory_client_from_connection_string(os.net, os.clock, os.rand, cs, "x y\\z", "fs1", opts)?
+  let csd = new_directory_client_from_connection_string(net, clock, rand, cs, "x y\\z", "fs1", opts)?
   out = out + path_urls("directory from a connection string", csd.dfs_url, csd.blob_url)
-  let csf = new_file_client_from_connection_string(os.net, os.clock, os.rand, cs, "f.txt", "fs1", opts)?
+  let csf = new_file_client_from_connection_string(net, clock, rand, cs, "f.txt", "fs1", opts)?
   out = out + path_urls("file from a connection string", csf.dfs_url, csf.blob_url)
   out = out + add(shown("connection string file Create", csf.create(), create_dump))
 
   // Recursive ACLs.
-  let rec = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec", cred, opts)
+  let rec = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/rec", cred, opts)
   out = out + add(recursive_lines("Set recursive nil (stops on failure)", rec.set_access_control_recursive("user::rwx")))
   out = out + add(recursive_lines("Update recursive continue on failure", rec.update_access_control_recursive("user::r-x", AccessControlRecursiveOptions{continue_on_failure: Some(true), batch_size: Some(2)})))
   out = out + add(recursive_lines("Remove recursive max batches 1", rec.remove_access_control_recursive("user:x", AccessControlRecursiveOptions{max_batches: Some(1)})))
   out = out + add(recursive_lines("Set recursive marker", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{marker: Some("k1"), continue_on_failure: Some(true)})))
   out = out + add(recursive_lines("Set recursive max batches 2 continue", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{max_batches: Some(2), continue_on_failure: Some(true)})))
   out = out + add(recursive_lines("Set recursive max batches 0", rec.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{max_batches: Some(0)})))
-  let recerr = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/recerr", cred, opts)
+  let recerr = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/recerr", cred, opts)
   out = out + add(recursive_lines("Set recursive error on page 2", recerr.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{continue_on_failure: Some(true)})))
-  let rec2 = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec2", cred, opts)
+  let rec2 = new_directory_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/rec2", cred, opts)
   out = out + add(recursive_lines("Set recursive failures on two pages", rec2.set_access_control_recursive("user::rwx", AccessControlRecursiveOptions{continue_on_failure: Some(true)})))
   out = out + add(recursive_lines("Set recursive missing", miss.set_access_control_recursive("user::rwx")))
 
@@ -411,7 +422,7 @@ test "the directory and file clients send what Go sends and read what Go reads" 
   out = out + add(shown("dir SetTags full", dir.set_tags({"a": "1"}, SetPathTagsOptions{version_id: Some("v1"), transactional_content_crc64: Some(b"\x09"), transactional_content_md5: Some(b"\x08"), conditions: ac}), response_dump))
 
   // File.
-  let fc = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1/f.txt", cred, opts)
+  let fc = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/d1/f.txt", cred, opts)
   out = out + add(shown("file Create nil", fc.create(), create_dump))
   let ffull = CreateFileOptions{
     conditions: ac, cpk_info: Some(cpk), http_headers: Some(HTTPHeaders{cache_control: Some("no-cache"), content_type: Some("text/plain"), content_md5: Some(b"\x01")}),
@@ -425,13 +436,13 @@ test "the directory and file clients send what Go sends and read what Go reads" 
   out = out + add(shown("file Delete full", fc.delete(DeletePathOptions{conditions: ac}), delete_dump))
   out = out + add(shown("file UpdateAccessControl", fc.update_access_control("user::rw-"), update_dump))
   out = out + add(shown("file RemoveAccessControl", fc.remove_access_control("user:x"), update_dump))
-  let frec = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/rec", cred, opts)
+  let frec = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/rec", cred, opts)
   out = out + add(shown("file UpdateAccessControl with failures", frec.update_access_control("user::rw-"), update_dump))
-  let fnf = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/nofail.txt", cred, opts)
+  let fnf = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/nofail.txt", cred, opts)
   out = out + add(shown("file UpdateAccessControl without failedEntries", fnf.update_access_control("user::rw-"), update_dump))
-  let fok = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/ok200", cred, opts)
+  let fok = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/ok200", cred, opts)
   out = out + add(shown("file Create answered 200", fok.create(), create_dump))
-  let fmiss = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing.txt", cred, opts)
+  let fmiss = new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/missing.txt", cred, opts)
   out = out + add(shown("file UpdateAccessControl missing", fmiss.update_access_control("user::rw-"), update_dump))
   out = out + add(shown("file SetExpiry zero", fc.set_expiry(), path_etag_dump))
   out = out + add(shown("file SetExpiry absolute", fc.set_expiry(SetExpiryValues{expiry_type: SET_EXPIRY_ABSOLUTE, expires_on: "Sun, 08 Nov 2026 01:02:03 GMT"}), path_etag_dump))
@@ -446,19 +457,19 @@ test "the directory and file clients send what Go sends and read what Go reads" 
   // Tokens: the dfs pipeline asks for the audience's scope, the blob
   // client for the default one.
   let tok = ScopeLog{log: log}
-  let tdir = new_directory_client(os.net, os.clock, os.rand, "${DEP}/fs1/t1", tok, go_options("") with {audience: "https://aud.example.test/", insecure_allow_credential_with_http: true})
+  let tdir = new_directory_client(net, clock, rand, "${DEP}/fs1/t1", tok, go_options_with(extra, "") with {audience: "https://aud.example.test/", insecure_allow_credential_with_http: true})
   out = out + add(shown("token dir Create", tdir.create(), create_dump))
   out = out + add(shown("token dir GetProperties", tdir.get_properties(), properties_dump))
   let tf = tdir.new_file_client("t.txt")
   out = out + add(shown("token dir file GetProperties", tf.get_properties(), properties_dump))
 
   // A file from a service client's file system.
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${DEP}/", cred, opts)
   let sf = svc.new_file_system_client("fs2").new_file_client("dir/s.txt")
   out = out + add(shown("service fs file GetProperties", sf.get_properties(), properties_dump))
   out = out + add(shown("service fs file Create", sf.create(), create_dump))
   out = out + drain(log)
-  expect(out) == PATH_OUTPUT
+  Ok(out)
 }
 
 test "a recursive ACL page without its counts is an error with the totals so far" {

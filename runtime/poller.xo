@@ -53,17 +53,24 @@ pub struct Poller[T] {
   last: http.Response? = None
 }
 
+/// `name`'s first field when it is not empty, as azcore's pollers read
+/// one (`resp.Header.Get(name) != ""`).
+fn header_of(resp: http.Response, name: Str) -> Str? {
+  let v = resp.header_values(name).first() ?? return None
+  if v == "" { None } else { Some(v) }
+}
+
 /// The poller of the operation `req` started with `resp`.
 pub fn new_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
   if ![200, 201, 202, 204].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }
   let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: req.method, orig_url: req.url, final_state: final_state_via, last: Some(resp)}
-  let loc = resp.header("Location").map(fn(l: Str) -> Str { resolve(req.url, l) }) ?? ""
-  if let Some(a) = resp.header("Azure-AsyncOperation") {
+  let loc = header_of(resp, "Location").map(fn(l: Str) -> Str { resolve(req.url, l) }) ?? ""
+  if let Some(a) = header_of(resp, "Azure-AsyncOperation") {
     return Ok(base with {kind: Kind.Async, poll_url: resolve(req.url, a), loc_url: loc, state: "InProgress"})
   }
-  if let Some(o) = resp.header("Operation-Location") {
+  if let Some(o) = header_of(resp, "Operation-Location") {
     return Ok(base with {kind: Kind.Op, poll_url: resolve(req.url, o), loc_url: loc, state: "InProgress"})
   }
   if loc != "" {
@@ -143,7 +150,7 @@ pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dia
       p.state = status_of(resp) ?? return Err(azcore.CallErr.Decode("the operation status has no status field"))
     }
     Loc => {
-      if let Some(l) = resp.header("Location") {
+      if let Some(l) = header_of(resp, "Location") {
         p.poll_url = resolve(p.poll_url, l)
       }
       p.state = match resp.status {

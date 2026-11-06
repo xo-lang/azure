@@ -5,6 +5,8 @@
 // blob, ignoring the range, for the blob named "norange".
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/azcore
 
 const DOWNLOAD_GO_DATE: Str = "Fri, 06 Nov 2026 14:10:39 GMT"
@@ -120,9 +122,19 @@ fn buffer_lines(name: Str, r: Result[Bytes, azcore.CallErr]) -> List[Str] {
 }
 
 test "downloads send what Go sends and read what Go reads" {
-  let log = serve_blob(os.net, [BEP], download_answer)
+  expect(download_run(os.net, os.clock, os.rand, [])?) == DOWNLOAD_OUTPUT
+}
+
+test "downloads send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(download_run(os.net, os.clock, os.rand, [Doubling{}])?) == DOWNLOAD_OUTPUT
+}
+
+fn download_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_blob(net, [BEP], download_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(DOWNLOAD_GO_DATE))
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options_with(extra, DOWNLOAD_GO_DATE))
   let c = svc.new_container_client("c1")
   let b = c.new_blob_client("b.txt")
   var out: List[Str] = []
@@ -147,7 +159,7 @@ test "downloads send what Go sends and read what Go reads" {
   out = out + add(buffer_lines("d13 download buffer, a server that ignores the range", nr.download_buffer(DownloadBufferOptions{block_size: 4})))
   out = out + add(buffer_lines("d14 download buffer, past the end of a server that ignores the range", nr.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 12}, block_size: 4})))
   out = out + drain(log)
-  expect(out) == DOWNLOAD_OUTPUT
+  Ok(out)
 }
 
 test "format_http_range is Go's FormatHTTPRange" {

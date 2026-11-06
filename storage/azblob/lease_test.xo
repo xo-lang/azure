@@ -2,6 +2,8 @@
 // does (leasevectors_test.xo): every request Go's, byte for byte.
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 
 const LEASE_GO_DATE: Str = "Fri, 06 Nov 2026 14:08:47 GMT"
 
@@ -29,9 +31,19 @@ fn lease_dump(x: LeaseResponse) -> Dump {
 }
 
 test "the lease clients send what Go sends and read what Go reads" {
-  let log = serve_blob(os.net, [BEP], lease_answer)
+  expect(lease_run(os.net, os.clock, os.rand, [])?) == LEASE_OUTPUT
+}
+
+test "the lease clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(lease_run(os.net, os.clock, os.rand, [Doubling{}])?) == LEASE_OUTPUT
+}
+
+fn lease_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_blob(net, [BEP], lease_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(LEASE_GO_DATE))
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options_with(extra, LEASE_GO_DATE))
   let c = svc.new_container_client("c1")
   var out: List[Str] = []
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
@@ -39,7 +51,7 @@ test "the lease clients send what Go sends and read what Go reads" {
   let mac = ModifiedConditions{if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
   let dates = ContainerConditions{if_modified_since: Some(when), if_unmodified_since: Some(when)}
 
-  var bl = new_blob_lease_client(os.rand, c.new_blob_client("b.txt"), Some("lease-1"))
+  var bl = new_blob_lease_client(rand, c.new_blob_client("b.txt"), Some("lease-1"))
   out = out + add(shown("l1 blob acquire with conditions", bl.acquire_lease(30, mac), lease_dump))
   out = out + add(shown("l1b blob acquire, infinite", bl.acquire_lease(-1), lease_dump))
   out = out + add(shown("l2 blob break with a period and conditions", bl.break_lease(Some(5), mac), lease_dump))
@@ -50,12 +62,12 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + add(shown("l4 blob renew with conditions", bl.renew_lease(mac), lease_dump))
   out = out + add(shown("l5 blob release with conditions", bl.release_lease(mac), lease_dump))
   out = out + add(shown("l5b blob release", bl.release_lease(), lease_dump))
-  var held = new_blob_lease_client(os.rand, c.new_blob_client("held"), Some("lease-3"))
+  var held = new_blob_lease_client(rand, c.new_blob_client("held"), Some("lease-3"))
   out = out + add(shown("l6 blob acquire, already leased", held.acquire_lease(15), lease_dump))
   let _ = held.change_lease("lease-4").ignore_err("the 409 is the point: the ID must stay")
   out = out + add(["== l6b lease ID after a failed change", "  ${held.lease_id}"])
 
-  var cl = new_container_lease_client(os.rand, c, Some("lease-5"))
+  var cl = new_container_lease_client(rand, c, Some("lease-5"))
   out = out + add(shown("l7 container acquire with conditions", cl.acquire_lease(60, dates), lease_dump))
   out = out + add(shown("l8 container break with a period and conditions", cl.break_lease(Some(3), dates), lease_dump))
   out = out + add(shown("l8b container break", cl.break_lease(), lease_dump))
@@ -64,7 +76,7 @@ test "the lease clients send what Go sends and read what Go reads" {
   out = out + add(shown("l11 container release with conditions", cl.release_lease(dates), lease_dump))
   out = out + ["== l12 container lease ID", "  ${cl.lease_id}"]
   out = out + drain(log)
-  expect(out) == LEASE_OUTPUT
+  Ok(out)
 }
 
 test "a lease client with no ID makes a random UUID" {

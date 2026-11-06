@@ -2,6 +2,8 @@
 // fake does (filedatavectors_test.xo).
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/azcore
 
 const FILEDATA_GO_DATE: Str = "Fri, 06 Nov 2026 15:28:45 GMT"
@@ -167,9 +169,19 @@ fn buffer_lines(name: Str, r: Result[Bytes, azcore.CallErr]) -> List[Str] {
 }
 
 test "the file data calls send what Go sends and read what Go reads" {
-  let log = serve(os.net, filedata_answer)
+  expect(filedata_run(os.net, os.clock, os.rand, [])?) == FILEDATA_OUTPUT
+}
+
+test "the file data calls send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(filedata_run(os.net, os.clock, os.rand, [Doubling{}])?) == FILEDATA_OUTPUT
+}
+
+fn filedata_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net, filedata_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(FILEDATA_GO_DATE)
+  let opts = go_options_with(extra, FILEDATA_GO_DATE)
   var out: List[Str] = []
   let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
   let t1 = at("2026-11-01T02:03:04Z")
@@ -177,7 +189,7 @@ test "the file data calls send what Go sends and read what Go reads" {
   let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("e1"), if_none_match: Some("e2"), if_modified_since: Some(t1), if_unmodified_since: Some(t2)}
   let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
   let hh = HTTPHeaders{cache_control: Some("no-cache"), content_disposition: Some("inline"), content_encoding: Some("gzip"), content_language: Some("en"), content_md5: Some(b"\x01\x02\x03"), content_type: Some("text/plain")}
-  let fc = fn(name: Str) -> FileClient { new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d/${name}", cred, opts) }
+  let fc = fn(name: Str) -> FileClient { new_file_client_with_shared_key_credential(net, clock, rand, "${DEP}/fs1/d/${name}", cred, opts) }
   let f = fc("f.txt")
 
   // AppendData.
@@ -234,7 +246,7 @@ test "the file data calls send what Go sends and read what Go reads" {
   out = out + add(buffer_lines("DownloadBuffer changed", fc("chg.txt").download_buffer(DownloadBufferOptions{chunk_size: 6})))
   out = out + add(buffer_lines("DownloadBuffer missing", fc("missing").download_buffer()))
   out = out + drain(log)
-  expect(out) == FILEDATA_OUTPUT
+  Ok(out)
 }
 
 test "an upload's chunk size may not be negative" {

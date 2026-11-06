@@ -5,6 +5,7 @@
 
 use std/crypto
 use std/http
+use std/testing
 use std/time
 use std/url
 use github.com/xo-lang/azure/azcore
@@ -388,10 +389,20 @@ fn props_dump(g: GetSharePropertiesResponse) -> Dump {
 }
 
 test "the service and share clients send what Go sends and read what Go reads" {
-  let log = serve(os.net)
+  expect(share_run(os.net, os.clock, os.rand, [])?) == SHARE_OUTPUT
+}
+
+test "the service and share clients send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(share_run(os.net, os.clock, os.rand, [Doubling{}])?) == SHARE_OUTPUT
+}
+
+fn share_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net)
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${EP}/", cred, opts)
   var out: List[Str] = []
   let take = fn() -> List[Str] {
     log.with(fn(var l: List[Str]) -> List[Str] {
@@ -485,7 +496,7 @@ test "the service and share clients send what Go sends and read what Go reads" {
     }
   }
 
-  let svc2 = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let svc2 = new_service_client_with_shared_key_credential(net, clock, rand, "${EP}/", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP)})
   out = out + add(match svc2.set_properties() {
     Ok(r) => {
       var d = Dump{}
@@ -615,17 +626,17 @@ test "the service and share clients send what Go sends and read what Go reads" {
     Ok(x) => delete_dump(x).show("h14 delete a snapshot client")
     Err(e) => err_lines("h14 delete a snapshot client", e)
   })
-  let sh2 = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s3", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP), allow_trailing_dot: Some(true)})
+  let sh2 = new_share_client_with_shared_key_credential(net, clock, rand, "${EP}/s3", cred, opts with {file_request_intent: Some(TOKEN_INTENT_BACKUP), allow_trailing_dot: Some(true)})
   out = out + add(match sh2.get_properties() {
     Ok(g) => ["== h15 a share client with a file request intent", "  =${goq(g.etag ?? "")}"]
     Err(e) => err_lines("h15 a share client with a file request intent", e)
   })
-  let sh3 = new_share_client_from_connection_string(os.net, os.clock, os.rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s4", opts)?
+  let sh3 = new_share_client_from_connection_string(net, clock, rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s4", opts)?
   out = out + add(match sh3.get_properties() {
     Ok(g) => ["== h16 a share client from a connection string", "  =${goq(g.etag ?? "")}"]
     Err(e) => err_lines("h16 a share client from a connection string", e)
   })
-  expect(out) == SHARE_OUTPUT
+  Ok(out)
 }
 
 test "connection strings and URL parts parse as Go parses them" {

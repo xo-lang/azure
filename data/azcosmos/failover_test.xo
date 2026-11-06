@@ -3,6 +3,7 @@
 // each attempt goes to, and what the caller gets.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -87,7 +88,17 @@ fn fail_serve(net: testing.FakeNet) -> FailFake {
 }
 
 test "retries and failover go where Go's go, and give the caller what Go gives" {
-  let f = fail_serve(os.net)
+  failover_run(os.net, os.clock, os.rand, [])?
+}
+
+test "retries and failover go where Go's go, and give the caller what Go gives, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  failover_run(os.net, os.clock, os.rand, [Doubling{}])?
+}
+
+fn failover_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> () ! Error uses (net.dial, clock, rand) {
+  let f = fail_serve(net)
   let out = Mutex[List[Str]].new([])
   let accounts = Atomic.new(0)
   let flush = fn(name: Str, r: Result[(), azcore.CallErr]) {
@@ -112,8 +123,8 @@ test "retries and failover go where Go's go, and give the caller what Go gives" 
     out.with(fn(var o: List[Str]) { o = o + add })
   }
   let cred = new_key_credential(KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, preferred_regions: ["East US", "West US"]}
-  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}, preferred_regions: ["East US", "West US"]}
+  let c = new_client_with_key(net, clock, rand, "${EP}/", cred, opts)
   let ct = c.new_container("db1", "c1")?
   let pk = new_partition_key_string("a")
   let read = fn(id: Str) -> Result[(), azcore.CallErr] uses (net.dial, clock, rand) { ct.read_item(pk, id).map(fn(_: ItemResponse) {}) }
@@ -126,7 +137,7 @@ test "retries and failover go where Go's go, and give the caller what Go gives" 
   flush("s6 404/1002 twice fails", read("s6"))
   // A request failed with FakeNet.fail never reaches the handler, so its
   // attempts are taken from FakeNet's own request record.
-  let east_s7 = fn() -> Int { os.net.requests().filter(fn(r: http.Request) -> Bool { r.url.host == "acct1-eastus.documents.example.test" && r.escaped_path().ends_with("/s7") }).len() }
+  let east_s7 = fn() -> Int { net.requests().filter(fn(r: http.Request) -> Bool { r.url.host == "acct1-eastus.documents.example.test" && r.escaped_path().ends_with("/s7") }).len() }
   let before = east_s7()
   let r7 = read("s7")
   let failed = east_s7() - before
@@ -139,18 +150,19 @@ test "retries and failover go where Go's go, and give the caller what Go gives" 
   flush("s7b the marked region is last for reads now", read("s1"))
   flush("s8 429 is not the cosmos policy's", read("s8"))
   let opts3 = opts with {preferred_regions: ["East US"]}
-  let ct3 = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts3).new_container("db1", "c1")?
+  let ct3 = new_client_with_key(net, clock, rand, "${EP}/", cred, opts3).new_container("db1", "c1")?
   flush("s5b with East alone preferred, the session retry goes to the write region", ct3.read_item(pk, "s5").map(fn(_: ItemResponse) {}))
   flush("w1 503 on a write to a single-write account fails", ct.create_item(new_partition_key_string("w503"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
   flush("w2 403/3 marks the write region and retries after the account moved it", ct.create_item(new_partition_key_string("w403"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
 
-  let c2 = new_client_with_key(os.net, os.clock, os.rand, "${ACCT2}/", cred, opts)
+  let c2 = new_client_with_key(net, clock, rand, "${ACCT2}/", cred, opts)
   let ct2 = c2.new_container("db1", "c1")?
   flush("m1 a multi-write account writes to the preferred region, tentatively", ct2.create_item(pk, "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
   flush("m2 503 moves a multi-write write to the next region", ct2.create_item(new_partition_key_string("w503"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
 
   expect(out.with_read(fn(o: List[Str]) -> List[Str] { o })) == FAILOVER_OUTPUT
   expect(accounts.get()) == FAILOVER_ACCOUNT_READS
+  Ok(())
 }
 
 test "a response the Cosmos policy gives up on is not retried again by azcore's retry policy" {

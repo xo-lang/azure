@@ -8,6 +8,7 @@
 
 use std/crypto
 use std/http
+use std/testing
 use std/json
 use github.com/xo-lang/azure/policy
 
@@ -159,11 +160,21 @@ fn str_list(xs: List[Str]) -> Str {
 }
 
 test "every call sends Go's request, byte for byte, and reads back what Go reads" {
-  let log = serve(os.net)
+  calls_run(os.net, os.clock, os.rand, [])?
+}
+
+test "every call sends Go's request, byte for byte, and reads back what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  calls_run(os.net, os.clock, os.rand, [Doubling{}])?
+}
+
+fn calls_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> () ! Error uses (net.dial, clock, rand) {
+  let log = serve(net)
   var out: List[Str] = []
   let cred = new_key_credential(KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let c = new_client_with_key(net, clock, rand, "${EP}/", cred, opts)
 
   out.push("== databases")
   let cd = c.create_database(DatabaseProperties{id: "db1"}, CreateDatabaseOptions{throughput_properties: Some(new_manual_throughput_properties(400))})?
@@ -247,6 +258,7 @@ test "every call sends Go's request, byte for byte, and reads back what Go reads
   // test below.
   let want_out = GO_OUTPUT.filter(fn(l: Str) -> Bool { l != "quote id: true" }).map(fn(l: Str) -> Str { l.replace("err true 404 Not Found 404", "err true NotFound 404") })
   expect(out.map(hide)) == want_out
+  Ok(())
 }
 
 test "an id with a quote is a JSON string (Go writes it with %s and fails to marshal)" {

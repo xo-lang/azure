@@ -157,3 +157,29 @@ test "a pager stops on an error status with the response error" {
   }
 }
 
+
+test "a repeated Azure-AsyncOperation or Location polls its first field, as azcore's Header.Get" {
+  os.net.handle("GET ${BASE}/ops/21", fn(req: http.Request) -> http.Response { http.text(200, "{\"status\":\"Succeeded\"}") })
+  os.net.handle("GET ${BASE}/ops/22", fn(req: http.Request) -> http.Response { fault("polled the second Azure-AsyncOperation field") })
+  os.net.handle("GET ${BASE}/res/r21", fn(req: http.Request) -> http.Response { http.text(200, "{\"name\":\"r21\"}") })
+  let req = policy.Request{method: "PUT", url: "${BASE}/res/r21"}
+  let first = http.text(201, "{}").add_header("Azure-AsyncOperation", "${BASE}/ops/21").add_header("Azure-AsyncOperation", "${BASE}/ops/22")
+  var p = new_poller(pl(os.net, os.clock, os.rand), req, first, "", "armtest.CreateResponse", name_of)?
+  expect(p.poll_until_done(os.clock, frequency: 1s)?) == "r21"
+
+  os.net.handle("GET ${BASE}/loc/23", fn(req: http.Request) -> http.Response { http.text(200, "{\"name\":\"l23\"}") })
+  os.net.handle("GET ${BASE}/loc/24", fn(req: http.Request) -> http.Response { fault("polled the second Location field") })
+  let post = policy.Request{method: "POST", url: "${BASE}/res/r21/restart"}
+  var q = new_poller(pl(os.net, os.clock, os.rand), post, http.text(202, "").add_header("Location", "/loc/23").add_header("Location", "/loc/24"), "", "armtest.RestartResponse", name_of)?
+  expect(q.poll_until_done(os.clock, frequency: 1s)?) == "l23"
+}
+
+test "an empty first Azure-AsyncOperation field is no async operation, as azcore's" {
+  // Header.Get is "", so azcore falls through to the Location poller
+  os.net.handle("GET ${BASE}/ops/25", fn(req: http.Request) -> http.Response { fault("polled the second Azure-AsyncOperation field") })
+  os.net.handle("GET ${BASE}/loc/25", fn(req: http.Request) -> http.Response { http.text(200, "{\"name\":\"l25\"}") })
+  let req = policy.Request{method: "POST", url: "${BASE}/res/r25/restart"}
+  let first = http.text(202, "").add_header("Azure-AsyncOperation", "").add_header("Azure-AsyncOperation", "${BASE}/ops/25").with_header("Location", "${BASE}/loc/25")
+  var p = new_poller(pl(os.net, os.clock, os.rand), req, first, "", "armtest.RestartResponse", name_of)?
+  expect(p.poll_until_done(os.clock, frequency: 1s)?) == "l25"
+}

@@ -2,6 +2,8 @@
 // does (listvectors_test.xo).
 
 use std/http
+use std/testing
+use github.com/xo-lang/azure/policy
 
 const FS_PAGE1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\"><Prefix>f</Prefix><MaxResults>2</MaxResults><Containers><Container><Name>fs1</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D1\"</Etag><LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState><PublicAccess>container</PublicAccess><DefaultEncryptionScope>$account-encryption-key</DefaultEncryptionScope><DenyEncryptionScopeOverride>false</DenyEncryptionScopeOverride><HasImmutabilityPolicy>false</HasImmutabilityPolicy><HasLegalHold>true</HasLegalHold><ImmutableStorageWithVersioningEnabled>false</ImmutableStorageWithVersioningEnabled></Properties><Metadata><Color>blue</Color><k>v</k></Metadata></Container><Container><Name>fs2</Name><Deleted>true</Deleted><Version>01D1</Version><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D2\"</Etag><DeletedTime>Wed, 04 Nov 2026 01:02:03 GMT</DeletedTime><RemainingRetentionDays>6</RemainingRetentionDays><LeaseDuration>infinite</LeaseDuration></Properties></Container></Containers><NextMarker>m 2+</NextMarker></EnumerationResults>"
 const FS_PAGE2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.blob.example.test/\"><Marker>m 2+</Marker><Containers><Container><Name>fs3</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:00:00 GMT</Last-Modified><Etag>\"0x8D3\"</Etag></Properties></Container></Containers><NextMarker /></EnumerationResults>"
@@ -192,10 +194,20 @@ fn pages[T](log: Mutex[List[Str]], name: Str, pager: DfsPager[T], dump: fn(T) ->
 }
 
 test "the list pagers send what Go sends and read what Go reads" {
-  let log = serve(os.net, list_answer)
+  expect(list_run(os.net, os.clock, os.rand, [])?) == LIST_OUTPUT
+}
+
+test "the list pagers send what Go sends and read what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(list_run(os.net, os.clock, os.rand, [Doubling{}])?) == LIST_OUTPUT
+}
+
+fn list_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve(net, list_answer)
   let cred = new_shared_key_credential("acct1", BKEY)?
-  let opts = go_options(LIST_GO_DATE)
-  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  let opts = go_options_with(extra, LIST_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${DEP}/", cred, opts)
   var out: List[Str] = []
   out = out + pages(log, "p1 list file systems", svc.new_list_file_systems_pager(), fs_page_dump)
   out = out + pages(log, "p2 list file systems with every option", svc.new_list_file_systems_pager(ListFileSystemsOptions{include: ListFileSystemsInclude{metadata: Some(true), deleted: Some(true), system: Some(true)}, marker: Some("m0"), max_results: Some(2), prefix: Some("f")}), fs_page_dump)
@@ -211,10 +223,10 @@ test "the list pagers send what Go sends and read what Go reads" {
   let missing = svc.new_file_system_client("missing")
   out = out + pages(log, "p8 list paths, not found", missing.new_list_paths_pager(true), paths_page_dump)
   out = out + pages(log, "p9 list directory paths, not found", missing.new_list_directory_paths_pager(), hierarchy_dump)
-  let nocred = new_file_system_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs2?sv=x&sig=y", go_options(""))
+  let nocred = new_file_system_client_with_no_credential(net, clock, rand, "${DEP}/fs2?sv=x&sig=y", go_options_with(extra, ""))
   out = out + pages(log, "p10 list paths with a SAS", nocred.new_list_paths_pager(true, ListPathsOptions{marker: Some("c0")}), paths_page_dump)
-  let direct = new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/fs5", cred, opts)
+  let direct = new_file_system_client_with_shared_key_credential(net, clock, rand, "${BEP}/fs5", cred, opts)
   out = out + pages(log, "p11 list paths, a file system client from its blob URL", direct.new_list_paths_pager(false, ListPathsOptions{marker: Some("c0")}), paths_page_dump)
   out = out + drain(log)
-  expect(out) == LIST_OUTPUT
+  Ok(out)
 }

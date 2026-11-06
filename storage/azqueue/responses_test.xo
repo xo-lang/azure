@@ -352,14 +352,37 @@ fn upd_dump(x: UpdateMessageResponse) -> RDump {
 }
 
 test "every response and error reads as Go's" {
+  expect(responses_run(os.net, os.clock, os.rand, r_answer)?) == RESPONSES_OUTPUT.map(cut_time_tail)
+}
+
+test "every response and error reads as Go's with each header field repeated" {
+  // Go's program, its fake answering every header twice (the second
+  // field "zz", Content-Length twice the same), prints RESPONSES_OUTPUT
+  // unchanged: Go reads a header's first field
+  let answer = fn(req: http.Request) -> http.Response { doubled(r_answer(req)) }
+  expect(responses_run(os.net, os.clock, os.rand, answer)?) == RESPONSES_OUTPUT.map(cut_time_tail)
+}
+
+/// `r` with each header field followed by a second one, "zz" (the same
+/// value for Content-Length, as Go's transport refuses two lengths).
+fn doubled(r: http.Response) -> http.Response {
+  var x = r
+  for (k, v) in r.headers {
+    x = x.add_header(k, if k.to_lower() == "content-length" { v } else { "zz" })
+  }
+  x
+}
+
+/// The Go program's calls against `answer`, dumped as Go dumps them.
+fn responses_run(net: testing.FakeNet, clock: Clock, rand: Rand, answer: fn(http.Request) -> http.Response) -> List[Str] ! Str uses (net.dial, clock, rand) {
   for m in ["GET", "PUT", "POST", "DELETE"] {
     for p in ["/", "/{q}", "/{q}/", "/{q}/messages", "/{q}/messages/{id}"] {
-      os.net.handle("${m} ${EP}${p}", r_answer)
+      net.handle("${m} ${EP}${p}", answer)
     }
   }
   let cred = new_shared_key_credential("acct1", KEY)?
   let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let svc_at = fn(p: Str) -> ServiceClient { new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}${p}", cred, opts) }
+  let svc_at = fn(p: Str) -> ServiceClient { new_service_client_with_shared_key_credential(net, clock, rand, "${EP}${p}", cred, opts) }
   let svc = svc_at("/")
   var out: List[Str] = []
   for (name, s) in [("", svc), ("empty ", svc_at("/empty/")), ("bad ", svc_at("/bad/")), ("busy ", svc_at("/busy/")), ("baddate ", svc_at("/baddate/"))] {
@@ -400,7 +423,7 @@ test "every response and error reads as Go's" {
   }
   out = out + r_shown("q1 DequeueMessage", svc.new_queue_client("q1").dequeue_message(), deq_dump)
   out = out + r_shown("q1 PeekMessage", svc.new_queue_client("q1").peek_message(), peek_dump)
-  expect(out) == RESPONSES_OUTPUT.map(cut_time_tail)
+  Ok(out)
 }
 
 /// Go's time error goes on to say which part did not parse; Xo's stops

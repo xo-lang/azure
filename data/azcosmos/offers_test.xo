@@ -3,6 +3,7 @@
 // and what the caller gets.
 
 use std/http
+use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -62,15 +63,25 @@ fn opt_go(v: Int?) -> Str {
 }
 
 test "ReadThroughput and ReplaceThroughput send what Go sends and give what Go gives" {
+  expect(offers_run(os.net, os.clock, os.rand, [])?) == OFFERS_OUTPUT
+}
+
+test "ReadThroughput and ReplaceThroughput send what Go sends and give what Go gives, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(offers_run(os.net, os.clock, os.rand, [Doubling{}])?) == OFFERS_OUTPUT
+}
+
+fn offers_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Error uses (net.dial, clock, rand) {
   let f = OffFake{log: Mutex[List[Str]].new([])}
   let h = fn(req: http.Request) -> http.Response { f.answer(req) }
   for m in ["GET", "POST", "PUT"] {
     for path in ["/", "/{a}", "/{a}/{b}", "/{a}/{b}/", "/{a}/{b}/{c}/{d}"] {
-      os.net.handle("${m} ${EP}${path}", h)
+      net.handle("${m} ${EP}${path}", h)
     }
   }
   let cred = new_key_credential(KEY)?
-  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}})
+  let c = new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}})
   let db = c.new_database("db1")?
   let c1 = db.new_container("c1")?
   let c2 = db.new_container("c2")?
@@ -104,7 +115,7 @@ test "ReadThroughput and ReplaceThroughput send what Go sends and give what Go g
   out = out + report("t5 a container without its own throughput", c2.read_throughput())
   out = out + report("t6 read if none match", c1.read_throughput(ThroughputOptions{if_none_match_etag: etag}))
   out = out + report("t7 replace with autoscale 6000", db.replace_throughput(new_autoscale_throughput_properties(6000)))
-  expect(out) == OFFERS_OUTPUT
+  Ok(out)
 }
 
 test "an offer's content round-trips as Go writes it" {

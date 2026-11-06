@@ -1,0 +1,148 @@
+// Response headers whose fields repeat, read as Go's azblob v1.8.3 reads
+// them: a header is its first field (Go's resp.Header.Get), so an empty
+// first field is an absent one, and a metadata entry is its name's first
+// field. The expectations are a local Go program's output: GetProperties
+// against a fake answering every BLOB_PROPS header twice (the second
+// field "zz", Content-Length twice the same, as Go's transport refuses
+// two different lengths), with empty first fields, and errors whose
+// x-ms-error-code repeats or is empty first (Delete, so that the body's
+// code is read; a HEAD has no body).
+
+use std/http
+
+const REPEATED_GO: List[Str] = [
+  "== h1 every property header repeated",
+  "  AcceptRanges=\"bytes\"",
+  "  AccessTier=\"Hot\"",
+  "  AccessTierChangeTime=2026-11-04T01:02:03Z",
+  "  AccessTierInferred=true",
+  "  ArchiveStatus=\"rehydrate-pending-to-hot\"",
+  "  BlobCommittedBlockCount=3",
+  "  BlobSequenceNumber=7",
+  "  BlobType=\"BlockBlob\"",
+  "  CacheControl=\"no-cache\"",
+  "  ClientRequestID=\"echo-1\"",
+  "  ContentDisposition=\"inline\"",
+  "  ContentEncoding=\"gzip\"",
+  "  ContentLanguage=\"en\"",
+  "  ContentLength=1024",
+  "  ContentMD5=\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\a\\b\\t\\n\\v\\f\\r\\x0e\\x0f\"",
+  "  ContentType=\"text/plain\"",
+  "  CopyCompletionTime=2026-11-03T01:02:03Z",
+  "  CopyID=\"cp1\"",
+  "  CopyProgress=\"10/10\"",
+  "  CopySource=\"https://src.example.test/c/b\"",
+  "  CopyStatus=\"success\"",
+  "  CopyStatusDescription=\"done\"",
+  "  CreationTime=2026-11-02T01:02:03Z",
+  "  Date=2026-11-05T03:04:05Z",
+  "  DestinationSnapshot=\"2026-11-02T01:02:03.0000000Z\"",
+  "  ETag=\"\\\"0x8D2\\\"\"",
+  "  EncryptionKeySHA256=\"k256\"",
+  "  EncryptionScope=\"scope1\"",
+  "  ExpiresOn=2026-11-07T01:02:03Z",
+  "  ImmutabilityPolicyExpiresOn=2026-11-08T01:02:03Z",
+  "  ImmutabilityPolicyMode=\"unlocked\"",
+  "  IsCurrentVersion=true",
+  "  IsIncrementalCopy=false",
+  "  IsSealed=false",
+  "  IsServerEncrypted=true",
+  "  LastAccessed=2026-11-05T02:02:03Z",
+  "  LastModified=2026-11-05T03:00:00Z",
+  "  LeaseDuration=\"fixed\"",
+  "  LeaseState=\"leased\"",
+  "  LeaseStatus=\"locked\"",
+  "  LegalHold=true",
+  "  Metadata.len=2",
+  "  Metadata[Big-Size]=\"L\"",
+  "  Metadata[Color]=\"blue\"",
+  "  ObjectReplicationPolicyID=\"pol1\"",
+  "  ObjectReplicationRules.len=2",
+  "  ObjectReplicationRules[Pol1_rule1]=\"complete\"",
+  "  ObjectReplicationRules[Policy-Id]=\"pol1\"",
+  "  RehydratePriority=\"High\"",
+  "  RequestID=\"r1\"",
+  "  SmartAccessTier=\"Cool\"",
+  "  TagCount=2",
+  "  Version=\"2026-12-06\"",
+  "  VersionID=\"2026-11-05T03:00:00.0000000Z\"",
+  "== h2 an empty first field",
+  "  ClientRequestID=\"echo-1\"",
+  "  ContentMD5=\"\"",
+  "  Date=2026-11-05T03:04:05Z",
+  "  Metadata.len=1",
+  "  Metadata[Color]=\"\"",
+  "  RequestID=\"r1\"",
+  "  Version=\"2026-12-06\"",
+  "== h3 a repeated x-ms-error-code",
+  "  error status 404 code BlobNotFound",
+  "== h4 an empty first x-ms-error-code, the body's code",
+  "  error status 404 code BodyCode",
+]
+
+fn repeated_answer(req: http.Request) -> http.Response {
+  let base = http.empty(200).add_header("x-ms-request-id", "r1").add_header("x-ms-request-id", "r2")
+    .with_header("x-ms-version", "2026-12-06").add_header("Date", BDATE).add_header("Date", "Fri, 06 Nov 2026 03:04:05 GMT")
+    .with_header("x-ms-client-request-id", "echo-1")
+  let path = req.url.path
+  if path.ends_with("missing1") {
+    return base with {status: 404}.add_header("x-ms-error-code", "BlobNotFound").add_header("x-ms-error-code", "Other")
+  }
+  if path.ends_with("missing2") {
+    let r = http.text(404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>BodyCode</Code><Message>m</Message></Error>")
+    return with_hs(r, [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE)]).with_header("Content-Type", "application/xml")
+      .add_header("x-ms-error-code", "").add_header("x-ms-error-code", "Other")
+  }
+  if path.ends_with("empty") {
+    return base.add_header("x-ms-blob-type", "").add_header("x-ms-blob-type", "BlockBlob")
+      .add_header("x-ms-meta-color", "").add_header("x-ms-meta-color", "blue")
+      .add_header("x-ms-tag-count", "").add_header("x-ms-tag-count", "9")
+  }
+  var r = base
+  for (k, v) in BLOB_PROPS {
+    r = r.add_header(k, v).add_header(k, if k == "Content-Length" { v } else { "zz" })
+  }
+  r
+}
+
+test "repeated response header fields are read as Go's azblob reads them" {
+  let log = serve_blob(os.net, [BEP], repeated_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(BLOB_GO_DATE))
+  let c = svc.new_container_client("c1")
+  var out: List[Str] = []
+  out = out + shown("h1 every property header repeated", c.new_blob_client("rep").get_properties(), blob_props_dump)
+  out = out + shown("h2 an empty first field", c.new_blob_client("empty").get_properties(), blob_props_dump)
+  out = out + quiet("h3 a repeated x-ms-error-code", c.new_blob_client("missing1").get_properties())
+  out = out + quiet("h4 an empty first x-ms-error-code, the body's code", c.new_blob_client("missing2").delete())
+  drain(log)
+  for (i, l) in out.indexed() {
+    expect("${i} ${l}") == "${i} ${REPEATED_GO.get(i) ?? ""}"
+  }
+  expect(out.len()) == REPEATED_GO.len()
+}
+
+test "the Client's reads take each header's first field, as Go's Header.Get" {
+  let rep = fn(r: http.Response) -> http.Response {
+    r.add_header("ETag", "\"0x1\"").add_header("ETag", "\"0x2\"")
+      .add_header("Last-Modified", "Thu, 05 Nov 2026 03:04:05 GMT").add_header("Last-Modified", "Fri, 06 Nov 2026 03:04:05 GMT")
+      .add_header("Content-Type", "text/plain").add_header("Content-Type", "text/html")
+      .add_header("x-ms-blob-type", "BlockBlob").add_header("x-ms-blob-type", "PageBlob")
+      .add_header("x-ms-meta-k", "a").add_header("x-ms-meta-k", "b")
+      .add_header("x-ms-request-id", "r1").add_header("x-ms-request-id", "r2")
+      .add_header("x-ms-version-id", "v1").add_header("x-ms-version-id", "v2")
+  }
+  os.net.handle("HEAD ${EP}/c/b", fn(req: http.Request) -> http.Response { rep(http.empty(200)).add_header("Content-Length", "4").add_header("Content-Length", "4") })
+  os.net.handle("GET ${EP}/c/b", fn(req: http.Request) -> http.Response { rep(http.empty(200) with {body: b"data"}) })
+  os.net.handle("PUT ${EP}/c/b", fn(req: http.Request) -> http.Response { rep(http.empty(201)) })
+  let c = client(os.net, os.clock, os.rand)?
+  let p = c.get_blob_properties("c", "b")?
+  expect((p.etag, p.content_type, p.blob_type, p.content_length)) == ("\"0x1\"", "text/plain", "BlockBlob", 4)
+  expect(p.last_modified.map(fn(t: Time) -> Int { t.unix() })) == Some(1793847845)
+  expect(p.metadata) == {"K": "a"}
+  let d = c.download_buffer("c", "b")?
+  expect((d.etag, d.content_type, d.metadata)) == ("\"0x1\"", "text/plain", {"K": "a"})
+  let w = c.upload_buffer("c", "b", b"hi")?
+  expect((w.etag, w.request_id, w.version_id)) == ("\"0x1\"", "r1", "v1")
+  expect(w.last_modified.map(fn(t: Time) -> Int { t.unix() })) == Some(1793847845)
+}

@@ -1,5 +1,16 @@
 # azqueue changes
 
+## v0.4.0
+
+Behavior fix: a response header that repeats is read as Go's
+`resp.Header.Get` reads it, its first field. Before, the fields were
+joined with `, `, so a repeated header read as `a, zz` and a repeated
+number, date or boolean did not parse.
+
+- Every response header the clients read, and each `x-ms-meta-*`
+  entry. The Go vector test reruns with every response header field
+  repeated, which leaves Go azqueue v1.0.1's output unchanged.
+
 ## v0.3.0
 
 - `parse_url` reads the URL with azblob's Go url.Parse port (ports,

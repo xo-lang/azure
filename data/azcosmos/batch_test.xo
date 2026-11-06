@@ -3,6 +3,7 @@
 // and read back (batchvectors_test.xo).
 
 use std/http
+use std/testing
 use std/json
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
@@ -35,11 +36,21 @@ fn print_batch(r: TransactionalBatchResponse) -> List[Str] {
 }
 
 test "a batch sends Go's request, byte for byte, and reads its results as Go does" {
-  let log = serve(os.net)
+  expect(batch_run(os.net, os.clock, os.rand, [])?) == BATCH_OUTPUT
+}
+
+test "a batch sends Go's request, byte for byte, and reads its results as Go does, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  expect(batch_run(os.net, os.clock, os.rand, [Doubling{}])?) == BATCH_OUTPUT
+}
+
+fn batch_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> List[Str] ! Error uses (net.dial, clock, rand) {
+  let log = serve(net)
   var out: List[Str] = []
   let cred = new_key_credential(KEY)?
-  let base = policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}
-  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: base})
+  let base = policy.ClientOptions{per_call_policies: [Fixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}
+  let c = new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: base})
   let ct = c.new_container("db1", "c1")?
   let pk = new_partition_key_string("a")
 
@@ -76,7 +87,7 @@ test "a batch sends Go's request, byte for byte, and reads its results as Go doe
   out.push("invalid item: ${ct.execute_transactional_batch(ct.new_transactional_batch(pk).create_item("{\"id\":")).is_err()}")
 
   out.push("== client priority and bucket")
-  let c2 = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: base, priority_level: Some(PRIORITY_LEVEL_LOW), throughput_bucket: Some(2)})
+  let c2 = new_client_with_key(net, clock, rand, "${EP}/", cred, ClientOptions{client: base, priority_level: Some(PRIORITY_LEVEL_LOW), throughput_bucket: Some(2)})
   let ct2 = c2.new_container("db1", "c1")?
   ct2.read_item(pk, "i1")?
   ct2.read_item(pk, "i1", ItemOptions{priority_level: Some(PRIORITY_LEVEL_HIGH), throughput_bucket: Some(5)})?
@@ -89,7 +100,7 @@ test "a batch sends Go's request, byte for byte, and reads its results as Go doe
     let w = want.split("\n").filter(fn(l: Str) -> Bool { !l.starts_with("  content-length=") }).join("\n")
     expect(hide(got.get(i) ?? "")) == w
   }
-  expect(out) == BATCH_OUTPUT
+  Ok(out)
 }
 
 test "compact drops white space outside strings and escapes as encoding/json does" {

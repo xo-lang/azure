@@ -7,6 +7,7 @@
 
 use std/crypto
 use std/http
+use std/testing
 use std/time
 use std/json
 use github.com/xo-lang/azure/azcore
@@ -195,11 +196,21 @@ fn as_go_table_sas(u: Str) -> Str {
 }
 
 test "every call sends Go's request, byte for byte, and reads back what Go reads" {
-  let log = serve(os.net)
+  calls_run(os.net, os.clock, os.rand, [])?
+}
+
+test "every call sends Go's request, byte for byte, and reads back what Go reads, each response header field repeated" {
+  // Go's program prints the same output when its fake answers every
+  // header twice (the second field "zz"): Go reads the first field
+  calls_run(os.net, os.clock, os.rand, [Doubling{}])?
+}
+
+fn calls_run(net: testing.FakeNet, clock: Clock, rand: Rand, extra: List[policy.Policy]) -> () ! Error uses (net.dial, clock, rand) {
+  let log = serve(net)
   var out: List[Str] = []
   let cred = new_shared_key_credential("acct1", KEY)?
-  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
-  let svc = new_service_client_with_shared_key(os.net, os.clock, os.rand, EP, cred, opts)
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], per_retry_policies: extra, retry: policy.RetryOptions{max_retries: -1}}}
+  let svc = new_service_client_with_shared_key(net, clock, rand, EP, cred, opts)
 
   out.push("== tables")
   out.push("created ${svc.create_table("t1")?.table_name ?? ""}")
@@ -273,7 +284,7 @@ test "every call sends Go's request, byte for byte, and reads back what Go reads
   out.push("err ${is_resp} ${code} ${status}")
 
   out.push("== cosmos")
-  let cos = new_client_with_shared_key(os.net, os.clock, os.rand, "${COSMOS}/t1", cred, opts)?
+  let cos = new_client_with_shared_key(net, clock, rand, "${COSMOS}/t1", cred, opts)?
   cos.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r1\",\"Age\":1}")?
   cos.submit_transaction([TransactionAction{action_type: TRANSACTION_TYPE_INSERT_MERGE, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r1\"}"}])?
 
@@ -294,13 +305,13 @@ test "every call sends Go's request, byte for byte, and reads back what Go reads
     "AccountName=acct1",
     "nonsense",
   ] {
-    match new_service_client_from_connection_string(os.net, os.clock, os.rand, cs) {
+    match new_service_client_from_connection_string(net, clock, rand, cs) {
       Ok(_) => out.push("cs ok")
       Err(e) => out.push("cs err: ${e}")
     }
   }
   for u in ["${EP}/t1", "${EMU}/devstoreaccount1/t1", "${EP}/t1?sv=2019-02-02&sig=abc"] {
-    let cl = new_client_with_no_credential(os.net, os.clock, os.rand, u, opts)?
+    let cl = new_client_with_no_credential(net, clock, rand, u, opts)?
     out.push("url client ${cl.get_entity("p", "r").is_ok()}")
   }
 
@@ -315,6 +326,7 @@ test "every call sends Go's request, byte for byte, and reads back what Go reads
     expect(hide(got.get(i) ?? "")) == w
   }
   expect(out.map(hide)) == GO_OUTPUT
+  Ok(())
 }
 
 fn invalid_msg(e: azcore.CallErr) -> Str {
