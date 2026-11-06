@@ -29,7 +29,6 @@ Where it differs from Go v1.3.0:
 
 - An empty `resource_ids` is left out of the body (`{}`); Go writes
   `[]` for a non-nil empty slice.
-- A time stamp is written in UTC (Go keeps the offset it read).
 - A decode error is `azcore.CallErr.Decode` with Xo's reader's text
   (Go's names each struct on the way down).
 - Every request has an `x-ms-client-request-id` (decision 0003).

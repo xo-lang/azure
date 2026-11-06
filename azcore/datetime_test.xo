@@ -12,10 +12,10 @@ const T: Int = 1793847845
 test "date-time reads RFC 3339 with or without an offset, as Go's generated code does" {
   for s in ["2026-11-05T03:04:05Z", "2026-11-05T03:04:05.1234567Z", "2026-11-05T03:04:05.1234567", "2026-11-05T05:04:05+02:00", "2026-11-04T22:04:05-05:00", "2026-11-05t03:04:05z"] {
     let d = json.decode_str[Doc]("{\"at\":\"${s}\"}")?
-    expect(d.at.map(fn(t: DateTime) -> Int { t.0.unix() })) == Some(T)
+    expect(d.at.map(fn(t: DateTime) -> Int { t.time.unix() })) == Some(T)
   }
   expect(json.decode_str[Doc]("{\"at\":\"yesterday\"}").is_err()) == true
-  expect(json.encode_str(Doc{at: Some(DateTime(Time.from_unix(T)))})) == "{\"at\":\"2026-11-05T03:04:05Z\"}"
+  expect(json.encode_str(Doc{at: Some(utc_date_time(Time.from_unix(T)))})) == "{\"at\":\"2026-11-05T03:04:05Z\"}"
 }
 
 test "date-time-rfc1123, unixtime and base64url have their own wire forms" {
@@ -26,4 +26,33 @@ test "date-time-rfc1123, unixtime and base64url have their own wire forms" {
   expect(json.decode_str[Doc]("{\"raw\":\"-_8=\"}")?.raw.map(fn(b: Base64URL) -> Bytes { b.0 })) == Some(b"\xfb\xff")
   let out = Doc{http: Some(DateTimeRFC1123(Time.from_unix(T))), unix: Some(UnixTime(Time.from_unix(T))), raw: Some(Base64URL(b"\xfb\xff"))}
   expect(json.encode_str(out)) == "{\"http\":\"Thu, 05 Nov 2026 03:04:05 GMT\",\"unix\":1793847845,\"raw\":\"-_8\"}"
+}
+
+/// Each text and what Go's armkeyvault v1.5.0 dateTimeRFC3339 writes
+/// back after reading it (a local Go program, TZ=UTC).
+const ROUND_TRIPS: List[(Str, Str, Int)] = [
+  ("2026-11-05T03:04:05Z", "2026-11-05T03:04:05Z", 1793847845),
+  ("2026-11-05T03:04:05.1234567Z", "2026-11-05T03:04:05.1234567Z", 1793847845),
+  ("2026-11-05T03:04:05.1234567", "2026-11-05T03:04:05.1234567Z", 1793847845),
+  ("2026-11-05T05:04:05+02:00", "2026-11-05T05:04:05+02:00", 1793847845),
+  ("2026-11-04T22:04:05-05:00", "2026-11-04T22:04:05-05:00", 1793847845),
+  ("2026-11-05t03:04:05z", "2026-11-05T03:04:05Z", 1793847845),
+  ("2026-01-02T04:04:05+01:00", "2026-01-02T04:04:05+01:00", 1767323045),
+  ("2026-01-02T03:04:05+00:00", "2026-01-02T03:04:05Z", 1767323045),
+  ("2026-01-02T03:04:05-00:00", "2026-01-02T03:04:05Z", 1767323045),
+  ("2026-01-02T08:34:05.5+05:30", "2026-01-02T08:34:05.5+05:30", 1767323045),
+  ("2026-01-02 03:04:05", "2026-01-02T03:04:05Z", 1767323045),
+  ("2026-01-02 04:04:05+01:00", "2026-01-02T04:04:05+01:00", 1767323045),
+]
+
+test "date-time keeps the offset it read and writes it back, as Go's time.Time" {
+  for (s, want, unix) in ROUND_TRIPS {
+    let d = json.decode_str[Doc]("{\"at\":\"${s}\"}")?
+    expect(d.at.map(fn(t: DateTime) -> Int { t.time.unix() })) == Some(unix)
+    expect(json.encode_str(d)) == "{\"at\":\"${want}\"}"
+  }
+  let plus1 = parse_date_time("2026-01-02T04:04:05+01:00")?
+  expect(plus1.offset) == 1h
+  expect(plus1 == utc_date_time(plus1.time)) == false
+  expect(date_time_text(DateTime{time: Time.from_unix(1767323045), offset: 0s - 90m})) == "2026-01-02T01:34:05-01:30"
 }

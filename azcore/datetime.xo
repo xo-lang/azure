@@ -7,17 +7,29 @@
 use std/base64
 use std/time
 
-/// A `date-time`: RFC 3339, and, as Go reads it, a time without an
-/// offset is UTC (`2026-11-05T03:04:05.1234567`, which some services
-/// send). Written as RFC 3339 in UTC. Unlike Go's, which keeps the
-/// offset it read (a time.Time's Location), a time read with a non-zero
-/// offset is written back as the same instant in UTC
-/// (`2026-01-02T04:04:05+01:00` as `2026-01-02T03:04:05Z`): Xo's Time is
-/// an instant.
-pub type DateTime struct(Time) derive Json(via: Str, to: date_time_text, from: parse_date_time)
+/// A `date-time`: RFC 3339, read and written as Go's generated
+/// dateTimeRFC3339 (a time.Time) reads and writes it. The offset
+/// round-trips: a time read as `2026-01-02T04:04:05+01:00` keeps `offset`
+/// +01:00 and is written back as `2026-01-02T04:04:05+01:00`, as Go's
+/// time.Time keeps the offset it parsed. A time without an offset
+/// (`2026-11-05T03:04:05.1234567`, which some services send) is UTC, a
+/// space may stand for the `T`, and a zero offset is written `Z`.
+/// Equality compares the offset too, as Go's == on a time.Time compares
+/// its location; compare `time` for the instant alone.
+pub struct DateTime {
+  /// The instant.
+  pub time: Time
+  /// The offset from UTC it is written with (east positive); 0 writes `Z`.
+  pub offset: Duration = 0s
+} derive Json(via: Str, to: date_time_text, from: parse_date_time)
+
+/// `t` as a DateTime written in UTC.
+pub fn utc_date_time(t: Time) -> DateTime {
+  DateTime{time: t}
+}
 
 pub fn date_time_text(t: DateTime) -> Str {
-  t.0.format_rfc3339()
+  time.format(t.time, time.fixed("", t.offset), time.RFC3339)
 }
 
 /// Whether `s` ends in an offset: `Z`, `z`, or `+hh:mm`/`-hh:mm` after
@@ -31,10 +43,39 @@ fn has_offset(s: Str) -> Bool {
   rest.contains("+") || rest.contains("-")
 }
 
+/// The offset an RFC 3339 text with a `T` ends in: 0 for `Z`, else its
+/// `+hh:mm` or `-hh:mm`.
+fn offset_of(text: Str) -> Duration? {
+  if text.ends_with("Z") {
+    return Some(0s)
+  }
+  let t = text.find("T") ?? return None
+  let rest = text[t..text.len()]
+  let i = rest.rfind("+") ?? rest.rfind("-") ?? return None
+  let z = rest[i + 1..rest.len()]
+  let (hh, mm) = z.cut(":") ?? return None
+  let h = Int.parse(hh) ?? return None
+  let m = Int.parse(mm) ?? return None
+  let d = Duration.from_secs_int(h * 3600 + m * 60)
+  Some(if rest[i..i + 1] == "-" { 0s - d } else { d })
+}
+
 pub fn parse_date_time(s: Str) -> DateTime ! Str {
-  let text = if has_offset(s) { s } else { "${s}Z" }
-  let t = Time.parse_rfc3339(text.replace("t", "T").replace("z", "Z")) ?? return Err("invalid date-time \"${s}\"")
-  Ok(DateTime(t))
+  var text = s.replace("t", "T").replace("z", "Z")
+  if !text.contains("T") {
+    // Go's layouts without the T take a space there
+    text = text.replace_n(" ", "T", 1)
+  }
+  if !has_offset(text) {
+    text = "${text}Z"
+  }
+  let bad = Err("invalid date-time \"${s}\"")
+  let t = Time.parse_rfc3339(text) ?? return bad
+  let offset = offset_of(text) ?? return bad
+  if offset.abs() >= 24h {
+    return bad
+  }
+  Ok(DateTime{time: t, offset: offset})
 }
 
 /// A `date-time-rfc1123`: `Thu, 05 Nov 2026 03:04:05 GMT`.

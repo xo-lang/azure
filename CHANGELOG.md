@@ -38,9 +38,22 @@ armnetwork, armkeyvault, azkeys, azsecrets and azcertificates
   of 200, 201, 202 or 204 on the final GET is decoded. A result asked
   of an unfinished poller is `poller is in a non-terminal state`.
 
-`azcore.DateTime` writes a time read with a non-zero offset as the
-same instant in UTC, where Go keeps the offset (a known difference,
-documented on the type; Xo's Time has no offset).
+**Breaking:** `azcore.DateTime` keeps the offset it read and writes it
+back, as Go's time.Time does (`2026-01-02T04:04:05+01:00` round-trips;
+it was written as the same instant in UTC). It is now a struct,
+`DateTime{time: Time, offset: Duration = 0s}`, instead of a newtype of
+Time:
+
+- `d.0` is `d.time`; `azcore.DateTime(t)` is `azcore.utc_date_time(t)`
+  (or `DateTime{time: t}`), which writes `Z`.
+- `==` compares the offset too, as Go's `==` on a time.Time compares
+  its location; compare `.time` for the instant.
+- A zero offset (`+00:00`, `-00:00`) is written `Z`, and a space may
+  stand for the `T` (`2026-01-02 03:04:05`), as Go's generated
+  dateTimeRFC3339 reads it.
+- Checked against Go's armkeyvault v1.5.0 on 12 texts
+  (`azcore/datetime_test.xo`), and the armkeyvault vector's
+  `lastModifiedAt` is `+01:00` again.
 
 Every generated operation builds its request as Go's code does
 (behavior fix; requests and some errors change). Checked statically
