@@ -47,3 +47,16 @@ familiar. The AWS SDK for Xo did the same for aws-sdk-go-v2 (its decision
 
 - An Xo first API (one client per service with nested groups): more
   idiomatic perhaps, but it loses the familiarity the owner asked for.
+
+## Amendment 1 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+
+- **One error type for all operations**, `azcore.CallErr`
+  (`Response(ResponseError)`, `Send(...)`, `InvalidInput(Str)`,
+  `Decode(Str)`), not an enum per operation. Every operation's
+  variants were the same, so per operation enums only multiplied
+  types (95 more in armresources). Matching stays as planned:
+  `Err(azcore.CallErr.Response(e)) if e.error_code == "ResourceGroupNotFound"`.
+- **x-ms-enum enums are all newtypes over `Str`** with constants and
+  `possible_<x>_values()`, closed ones too. A closed enum in the spec
+  still gains values over api-versions; Go's types are strings for
+  both, so this keeps code that compares against a new value working.

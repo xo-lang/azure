@@ -1,0 +1,425 @@
+// The model of one ARM package, built from its OpenAPI 2.0 files: the
+// operations grouped into clients as Go groups them (the operationId's
+// `Group_Op`), and the types they reach. A type is carried as its Xo
+// source text (`List[ResourceGroup]`).
+
+use std/json
+use github.com/xo-lang/azure/codegen/spec
+
+pub struct Field {
+  pub name: Str
+  pub wire: Str
+  pub typ: Str
+  pub doc: Str = ""
+}
+
+pub struct Model {
+  pub name: Str
+  pub fields: List[Field]
+  pub doc: Str = ""
+}
+
+/// An extensible string enum (x-ms-enum): a newtype with constants.
+pub struct StrEnum {
+  pub name: Str
+  pub values: List[(Str, Str, Str)]
+  pub doc: Str = ""
+}
+
+pub struct Param {
+  pub name: Str
+  pub wire: Str
+  /// path, query, header or body
+  pub loc: Str
+  pub required: Bool
+  pub typ: Str
+  pub skip_encoding: Bool = false
+  /// subscriptionId: a client field
+  pub client: Bool = false
+  /// api-version and other constants
+  pub constant: Str? = None
+  pub doc: Str = ""
+}
+
+pub struct Op {
+  /// Go's client group (`ResourceGroups`) and method (`CreateOrUpdate`).
+  pub group: Str
+  pub name: Str
+  pub method: Str
+  pub path: Str
+  pub params: List[Param]
+  pub ok: List[Int]
+  /// The response body's type name, None without a body.
+  pub resp: Str? = None
+  pub pageable: Bool = false
+  pub next_link: Str? = None
+  pub item_name: Str = "value"
+  pub lro: Bool = false
+  pub final_state: Str = ""
+  pub doc: Str = ""
+}
+
+pub struct Api {
+  pub api_version: Str
+  pub ops: List[Op]
+  pub models: List[Model]
+  pub enums: List[StrEnum]
+  pub report: List[Str]
+}
+
+pub struct Builder {
+  files: Map[Str, json.Value]
+  models: List[Model] = []
+  enums: List[StrEnum] = []
+  known: Map[Str, Str] = {}
+  report: List[Str] = []
+  /// The package's name without `arm` (`resources`): Go's generator
+  /// drops it from the front of type names (`ResourcesMoveInfo` is
+  /// `MoveInfo`), so names don't stutter.
+  stutter: Str = ""
+}
+
+pub fn builder(files: Map[Str, json.Value], package: Str) -> Builder {
+  let p = package.to_lower()
+  Builder{files: files, stutter: if p.starts_with("arm") { p[3..p.len()] } else { p }}
+}
+
+/// A schema name as a type name, without the package's stutter.
+fn (b: Builder) type_name(s: Str) -> Str {
+  let n = pascal(s)
+  let k = b.stutter.len()
+  if k > 0 && n.len() > k && n[0..k].to_lower() == b.stutter {
+    let rest = n[k..n.len()]
+    if rest[0..1] >= "A" && rest[0..1] <= "Z" {
+      return pascal(rest)
+    }
+  }
+  n
+}
+
+fn str_of(v: json.Value?) -> Str {
+  match v {
+    Some(json.Value.Str(s)) => s
+    _ => ""
+  }
+}
+
+fn bool_of(v: json.Value?) -> Bool {
+  match v {
+    Some(json.Value.Bool(b)) => b
+    _ => false
+  }
+}
+
+fn list_of(v: json.Value?) -> List[json.Value] {
+  match v {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+}
+
+fn fields_of(v: json.Value?) -> List[(Str, json.Value)] {
+  match v {
+    Some(json.Value.Object(fs)) => fs
+    _ => []
+  }
+}
+
+fn doc_of(v: json.Value) -> Str {
+  let d = str_of(v.get("description"))
+  if d != "" { d } else { str_of(v.get("title")) }
+}
+
+/// Follows `$ref`s to the schema itself: its file, pointer and value.
+fn (b: Builder) deref(file: Str, v: json.Value) -> (Str, Str, json.Value) {
+  var f = file
+  var p = ""
+  var x = v
+  var hops = 0
+  while hops < 20 {
+    let r = str_of(x.get("$ref"))
+    if r == "" {
+      break
+    }
+    let (nf, np) = spec.split_ref(f, r)
+    let doc = b.files.get(nf) ?? break
+    x = spec.at(doc, np) ?? break
+    f = nf
+    p = np
+    hops += 1
+  }
+  (f, p, x)
+}
+
+/// The Xo type of a schema; `hint` names an inline object.
+pub fn (var b: Builder) type_of(file: Str, v: json.Value, hint: Str) -> Str {
+  if str_of(v.get("$ref")) != "" {
+    let (f, p, x) = b.deref(file, v)
+    if p.starts_with("/definitions/") {
+      return b.named(f, spec.last(p), x)
+    }
+    return b.type_of(f, x, hint)
+  }
+  b.inline(file, v, hint)
+}
+
+fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
+  if v.get("x-ms-enum").is_some() && str_of(v.get("type")) == "string" {
+    let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
+    if name != "" {
+      return b.str_enum(b.type_name(name), v)
+    }
+  }
+  match str_of(v.get("type")) {
+    "string" => match str_of(v.get("format")) {
+      "date-time" | "date-time-rfc1123" => "Time"
+      "byte" => "Bytes"
+      _ => "Str"
+    }
+    "integer" => "Int"
+    "number" => "Float"
+    "boolean" => "Bool"
+    "array" => {
+      let items = v.get("items") ?? return "List[json.Value]"
+      "List[${b.type_of(file, items, "${hint}Item")}]"
+    }
+    _ => {
+      let props = fields_of(v.get("properties"))
+      if props.is_empty() && v.get("allOf").is_none() {
+        if let Some(ap) = v.get("additionalProperties") {
+          if let json.Value.Object(_) = ap {
+            return "Map[Str, ${b.type_of(file, ap, "${hint}Value")}]"
+          }
+        }
+        return "json.Value"
+      }
+      b.named(file, hint, v)
+    }
+  }
+}
+
+fn (var b: Builder) str_enum(name: Str, v: json.Value) -> Str {
+  if b.known.contains(name) {
+    return name
+  }
+  b.known[name] = name
+  var vals: List[(Str, Str, Str)] = []
+  let named = list_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("values") }))
+  if !named.is_empty() {
+    for x in named {
+      let value = match x.get("value") {
+        Some(json.Value.Str(s)) => s
+        Some(other) => other.encode()
+        None => ""
+      }
+      let n = str_of(x.get("name"))
+      vals.push((screaming(if n != "" { n } else { value }), value, str_of(x.get("description"))))
+    }
+  } else {
+    for x in list_of(v.get("enum")) {
+      let value = match x {
+        json.Value.Str(s) => s
+        other => other.encode()
+      }
+      vals.push((screaming(value), value, ""))
+    }
+  }
+  b.enums.push(StrEnum{name: name, values: vals, doc: doc_of(v)})
+  name
+}
+
+/// A definition: a struct, an enum, or the primitive it stands for.
+fn (var b: Builder) named(file: Str, def: Str, v: json.Value) -> Str {
+  let name = b.type_name(def)
+  if let Some(t) = b.known.get(name) {
+    return t
+  }
+  if !list_of(v.get("enum")).is_empty() {
+    let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
+    return b.str_enum(if en != "" { b.type_name(en) } else { name }, v)
+  }
+  let props = fields_of(v.get("properties"))
+  let t = str_of(v.get("type"))
+  if props.is_empty() && v.get("allOf").is_none() && (t != "object" && t != "") {
+    return b.inline(file, v, def)
+  }
+  if props.is_empty() && v.get("allOf").is_none() {
+    if let Some(ap) = v.get("additionalProperties") {
+      if let json.Value.Object(_) = ap {
+        let m = "Map[Str, ${b.type_of(file, ap, "${def}Value")}]"
+        b.known[name] = m
+        return m
+      }
+    }
+  }
+  if v.get("discriminator").is_some() || v.get("x-ms-discriminator-value").is_some() {
+    b.report.push("discriminator on ${def}: generated as its base type only")
+  }
+  // mark before the fields, for recursive types
+  b.known[name] = name
+  var fields: List[Field] = []
+  var seen: List[Str] = []
+  for (wire, prop, pf) in b.properties(file, v) {
+    if seen.contains(wire) {
+      continue
+    }
+    seen.push(wire)
+    let client = str_of(prop.get("x-ms-client-name"))
+    let typ = b.type_of(pf, prop, "${name}${pascal(wire)}")
+    fields.push(Field{name: snake(if client != "" { client } else { wire }), wire: wire, typ: typ, doc: doc_of(prop)})
+  }
+  b.models.push(Model{name: name, fields: fields, doc: doc_of(v)})
+  name
+}
+
+/// Every property of a schema, its allOf parents' first, with the file
+/// each is in.
+fn (b: Builder) properties(file: Str, v: json.Value) -> List[(Str, json.Value, Str)] {
+  var out: List[(Str, json.Value, Str)] = []
+  for parent in list_of(v.get("allOf")) {
+    let (f, _, x) = b.deref(file, parent)
+    out = out + b.properties(f, x)
+  }
+  for (k, p) in fields_of(v.get("properties")) {
+    out.push((k, p, file))
+  }
+  out
+}
+
+fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
+  let (f, _, p) = b.deref(file, raw)
+  let wire = str_of(p.get("name"))
+  let loc = str_of(p.get("in"))
+  let typ = if loc == "body" {
+    b.type_of(f, p.get("schema") ?? json.Value.Object([]), pascal(wire))
+  } else {
+    b.inline(f, p, pascal(wire))
+  }
+  let constant = if wire == "api-version" { Some("API_VERSION") } else { None }
+  let client = wire == "subscriptionId" || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
+  Param{
+    name: snake(if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { wire }),
+    wire: wire, loc: loc, required: bool_of(p.get("required")) || loc == "path", typ: typ,
+    skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")), client: client, constant: constant, doc: doc_of(p),
+  }
+}
+
+/// The package's operations from `files` (its input files).
+pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
+  var ops: List[Op] = []
+  var version = ""
+  // The error schemas (`default` responses): Go uses azcore's error for them.
+  var errors: List[Str] = []
+  for file in inputs {
+    let doc = b.files.get(file) ?? json.Value.Null
+    if version == "" {
+      version = str_of(doc.get("info").and_then(fn(i: json.Value) -> json.Value? { i.get("version") }))
+    }
+    for section in ["paths", "x-ms-paths"] {
+      for (path, item) in fields_of(doc.get(section)) {
+        let shared = list_of(item.get("parameters"))
+        for (method, o) in fields_of(Some(item)) {
+          if !["get", "put", "post", "delete", "patch", "head"].contains(method) {
+            continue
+          }
+          let id = str_of(o.get("operationId"))
+          let (group, name) = match id.find("_") {
+            Some(i) => (id[0..i], id[i + 1..id.len()])
+            None => ("", id)
+          }
+          var params: List[Param] = []
+          for raw in shared + list_of(o.get("parameters")) {
+            let p = b.param(file, raw)
+            params = params.filter(fn(q: Param) -> Bool { q.wire != p.wire || q.loc != p.loc })
+            params.push(p)
+          }
+          var okc: List[Int] = []
+          var resp: Str? = None
+          for (code, r) in fields_of(o.get("responses")) {
+            if code == "default" {
+              let (_, ep, _) = b.deref(file, b.deref(file, r).2.get("schema") ?? json.Value.Null)
+              if ep.starts_with("/definitions/") && !errors.contains(ep) {
+                errors.push(ep)
+              }
+            }
+            let n = Int.parse(code) ?? continue
+            if n >= 200 && n < 300 {
+              okc.push(n)
+              if resp.is_none() {
+                if let Some(s) = b.deref(file, r).2.get("schema") {
+                  resp = Some(b.type_of(file, s, "${group}${name}Response"))
+                }
+              }
+            }
+          }
+          let pg = o.get("x-ms-pageable")
+          let lro = bool_of(o.get("x-ms-long-running-operation"))
+          let next = match pg.and_then(fn(x: json.Value) -> json.Value? { x.get("nextLinkName") }) {
+            Some(json.Value.Str(s)) => Some(s)
+            _ => None
+          }
+          let item_name = str_of(pg.and_then(fn(x: json.Value) -> json.Value? { x.get("itemName") }))
+          let fsv = str_of(o.get("x-ms-long-running-operation-options").and_then(fn(x: json.Value) -> json.Value? { x.get("final-state-via") }))
+          for (k, _) in fields_of(Some(o)) {
+            if k.starts_with("x-ms-") && !["x-ms-pageable", "x-ms-long-running-operation", "x-ms-long-running-operation-options", "x-ms-examples", "x-ms-odata"].contains(k) {
+              b.report.push("${id}: extension ${k} not handled")
+            }
+          }
+          if pg.is_some() && lro {
+            b.report.push("${id}: a pageable long-running operation is generated as long-running only")
+          }
+          ops.push(Op{
+            group: group, name: name, method: method.to_upper(), path: path, params: params, ok: okc.sort(), resp: resp,
+            pageable: pg.is_some() && !lro, next_link: next, item_name: if item_name == "" { "value" } else { item_name },
+            lro: lro, final_state: fsv, doc: doc_of(o),
+          })
+        }
+      }
+    }
+  }
+  // Go emits every definition of the input files, used or not.
+  for file in inputs {
+    let doc = b.files.get(file) ?? json.Value.Null
+    for (def, v) in fields_of(doc.get("definitions")) {
+      if errors.contains("/definitions/${def}") {
+        continue
+      }
+      b.named(file, def, v)
+    }
+  }
+  Api{api_version: version, ops: ops, models: b.models, enums: b.enums, report: b.report}
+}
+
+/// The `$ref`ed files of `doc` (not examples), relative to `file`.
+pub fn refs_of(file: Str, doc: json.Value) -> List[Str] {
+  var out: List[Str] = []
+  var stack = [doc]
+  while let Some(v) = stack.pop() {
+    match v {
+      json.Value.Object(fs) => {
+        for (k, x) in fs {
+        if k == "x-ms-examples" {
+          continue
+        }
+        if k == "$ref" {
+          if let json.Value.Str(r) = x {
+            let (f, _) = spec.split_ref(file, r)
+            if f != file && !out.contains(f) {
+              out.push(f)
+            }
+          }
+        } else {
+          stack.push(x)
+        }
+        }
+      }
+      json.Value.List(xs) => {
+        for x in xs {
+          stack.push(x)
+        }
+      }
+      _ => {}
+    }
+  }
+  out
+}

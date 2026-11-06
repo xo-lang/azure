@@ -1,0 +1,120 @@
+// The generated ResourceGroups client against a fake Resource Manager:
+// paths, api-version, bodies, status handling, paging and the delete
+// long-running operation (with a resume token).
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const RG: Str = "${EP}/subscriptions/${SUB}/resourcegroups"
+
+/// A credential with an invented token.
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn groups(net: testing.FakeNet, clock: Clock, rand: Rand) -> ResourceGroupsClient ! Str {
+  new_resource_groups_client(net, clock, rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+test "create_or_update PUTs the group as JSON with the api-version and a token" {
+  let seen = capture(os.net, "PUT ${RG}/rg1", 201, "{\"id\":\"/subscriptions/${SUB}/resourceGroups/rg1\",\"name\":\"rg1\",\"location\":\"westus\",\"tags\":{\"env\":\"test\"},\"properties\":{\"provisioningState\":\"Succeeded\"}}")
+  let c = groups(os.net, os.clock, os.rand)?
+  let r = c.create_or_update("rg1", ResourceGroup{location: Some("westus"), tags: Some({"env": "test"})})?
+  expect(r.resource_group.name) == Some("rg1")
+  expect(r.resource_group.properties.and_then(fn(p: ResourceGroupProperties) -> Str? { p.provisioning_state })) == Some("Succeeded")
+  let req = all(seen)[0]
+  expect(req.url.query.get("api-version")) == Some(API_VERSION)
+  expect(req.header("Authorization")) == Some("Bearer tok-test")
+  expect(req.header("Content-Type")) == Some("application/json")
+  let sent = json.parse_value(req.body.to_str_lossy())?
+  expect(sent.get("location")) == Some(json.Value.Str("westus"))
+  expect(sent.get("id")) == None
+}
+
+test "get decodes the group; an ARM error keeps its code" {
+  capture(os.net, "GET ${RG}/rg1", 200, "{\"name\":\"rg1\",\"location\":\"westus\"}")
+  capture(os.net, "GET ${RG}/gone", 404, "{\"error\":{\"code\":\"ResourceGroupNotFound\",\"message\":\"Resource group 'gone' could not be found.\"}}")
+  let c = groups(os.net, os.clock, os.rand)?
+  expect(c.get("rg1")?.resource_group.location) == Some("westus")
+  match c.get("gone") {
+    Err(azcore.CallErr.Response(e)) => {
+      expect(e.status_code) == 404
+      expect(e.error_code) == "ResourceGroupNotFound"
+    }
+    other => expect("${other:?}") == "a ResourceGroupNotFound response error"
+  }
+}
+
+test "check_existence is true on 204 and false on 404, not an error" {
+  capture(os.net, "HEAD ${RG}/there", 204)
+  capture(os.net, "HEAD ${RG}/absent", 404)
+  let c = groups(os.net, os.clock, os.rand)?
+  expect(c.check_existence("there")?.success) == true
+  expect(c.check_existence("absent")?.success) == false
+}
+
+test "an empty resource group name is rejected before any request" {
+  let c = groups(os.net, os.clock, os.rand)?
+  match c.get("") {
+    Err(azcore.CallErr.InvalidInput(m)) => expect(m) == "parameter resourceGroupName cannot be empty"
+    other => expect("${other:?}") == "InvalidInput"
+  }
+}
+
+test "the list pager sends $top and follows nextLink" {
+  let seen = capture(os.net, "GET ${RG}", 200, "{\"value\":[{\"name\":\"a\"},{\"name\":\"b\"}],\"nextLink\":\"${EP}/subscriptions/${SUB}/resourcegroupspage2\"}")
+  capture(os.net, "GET ${EP}/subscriptions/${SUB}/resourcegroupspage2", 200, "{\"value\":[{\"name\":\"c\"}]}")
+  let c = groups(os.net, os.clock, os.rand)?
+  var p = c.new_list_pager(ResourceGroupsClientListOptions{top: Some(2)})?
+  var names: List[Str] = []
+  while p.more() {
+    let page = p.next_page()?
+    for g in page.resource_group_list_result.value ?? [] {
+      names.push(g.name ?? "")
+    }
+  }
+  expect(names) == ["a", "b", "c"]
+  expect(all(seen)[0].url.query.get("$top")) == Some("2")
+}
+
+test "begin_delete polls Location until done, and resumes from a token" {
+  let op = "${EP}/subscriptions/${SUB}/operationresults/del1"
+  capture(os.net, "DELETE ${RG}/rg1", 202, "", [("Location", op), ("Retry-After", "0")])
+  let polls = Atomic[Int].new(0)
+  os.net.handle("GET ${op}", fn(req: http.Request) -> http.Response {
+    if polls.add(1) < 2 { http.text(202, "").with_header("Location", op) } else { http.text(200, "") }
+  })
+  let c = groups(os.net, os.clock, os.rand)?
+  var p = c.begin_delete("rg1")?
+  expect(p.done()) == false
+  let tok = p.resume_token()?
+  expect(json.parse_value(tok)?.get("type")) == Some(json.Value.Str("armresources.ResourceGroupsClientDeleteResponse"))
+  var q = c.begin_delete("rg1", ResourceGroupsClientBeginDeleteOptions{resume_token: tok})?
+  q.poll_until_done(os.clock, frequency: 1s)?
+  expect(q.done()) == true
+  expect(polls.get()) == 2
+}

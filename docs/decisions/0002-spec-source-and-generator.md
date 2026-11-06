@@ -88,3 +88,27 @@ readme is gone at main).
   sometimes not one Go has released.
 - Per module spec commits (as Go pins them): exact, but the generator
   would fetch hundreds of commits; one commit is reproducible enough.
+
+## Amendment 1 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+
+What the first generated module (armresources) showed:
+
+- **Serializers come from `derive Json`**, not explicit emitted
+  functions. Xo's derive is compile time (no reflection at run time,
+  which was the point), field wire names and `omitempty` sit on the
+  field (`pub name as "name,omitempty": Str? = None`), and the emitted
+  code is a third of the size. A model whose wire format `derive Json`
+  cannot express (discriminated unions, `x-ms-client-flatten`) gets
+  emitted functions instead.
+- **Every definition of the input files is emitted**, used or not, as
+  Go does, except schemas used only as `default` (error) responses:
+  azcore's `ResponseError` covers those.
+- Names follow autorest.go: Go's initialisms (`ByID`, `SKU`), the
+  package name dropped from the front of type names
+  (`ResourcesMoveInfo` is `MoveInfo` in armresources), and `Client` for
+  the operation group named like the package. armresources' 95
+  methods, 82 models, 16 enums and 190 options and response types have
+  Go's names exactly.
+- Discriminators, `x-ms-client-flatten`, `x-ms-client-name` on models
+  and `x-ms-parameter-location` are next; the report lists every spec
+  feature not handled yet.

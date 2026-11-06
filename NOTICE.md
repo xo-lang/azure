@@ -5,7 +5,7 @@ xo-lang/azure, Copyright (c) 2026 Joseph Spurrier, MIT License (LICENSE).
 This project ports code, behavior and tests from the following works,
 each under the MIT License, Copyright (c) Microsoft Corporation:
 
-- github.com/Azure/azure-sdk-for-go: `sdk/azcore` (cloud, policy,
+- github.com/Azure/azure-sdk-for-go: `sdk/azcore` (cloud, policy, arm,
   runtime: the pipeline, retry, telemetry, request ID and bearer token
   policies, pagers, pollers, ResponseError, TokenCredential),
   `sdk/azidentity` (client secret, client certificate, workload
@@ -17,9 +17,14 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and
   `storage/azblob/sas/testdata`), and later the other data plane packages. Each ported file names its source in a header comment.
+  The generator (`codegen/`) follows the names and shapes of Go's
+  generated `sdk/resourcemanager` modules (autorest.go's naming:
+  initialisms, the package name dropped from type names, `Client` for
+  the package's own group), so the Xo modules match them.
 - github.com/Azure/azure-rest-api-specs: the service specifications
   the generator reads (decision 0002), at the commit in
-  `codegen/specs.lock`.
+  `codegen/specs.lock`. The generated modules under `resourcemanager/`
+  carry their descriptions as documentation comments.
 
 The MIT License of those works:
 

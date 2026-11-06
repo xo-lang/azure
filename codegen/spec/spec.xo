@@ -1,0 +1,94 @@
+// Reading azure-rest-api-specs (decision 0002): a readme's tag gives the
+// OpenAPI 2.0 files; `$ref`s are resolved across files, relative to the
+// file that holds them.
+
+use std/json
+
+/// The `input-file`s of `tag` in a readme. `tag` may be a flag
+/// (`package-resources`) whose `yaml $(flag)` block names the tag, as
+/// Go's readme.go.md flags do.
+pub fn input_files(readme: Str, tag: Str) -> List[Str] ! Str {
+  let lines = readme.split("\n")
+  var real = tag
+  // a flag block: ``` yaml $(package-resources)  then  tag: package-resources-2021-04
+  for (i, l) in lines.indexed() {
+    if l.trim() == "``` yaml $(${tag})" && i + 1 < lines.len() {
+      let next = lines[i + 1].trim()
+      if next.starts_with("tag:") {
+        real = next[4..next.len()].trim()
+      }
+    }
+  }
+  var files: List[Str] = []
+  var inside = false
+  var listing = false
+  for l in lines {
+    let t = l.trim()
+    if t.starts_with("``` yaml $(tag) == '") {
+      inside = t == "``` yaml $(tag) == '${real}'"
+      listing = false
+      continue
+    }
+    if t.starts_with("```") {
+      inside = false
+      listing = false
+      continue
+    }
+    if inside {
+      if t == "input-file:" {
+        listing = true
+      } else if listing && t.starts_with("- ") {
+        files.push(t[2..t.len()].trim())
+      } else if t != "" {
+        listing = false
+      }
+    }
+  }
+  if files.is_empty() {
+    return Err("the readme has no input files for tag ${real}")
+  }
+  Ok(files)
+}
+
+/// `rel` against the directory of `base`, with `.` and `..` removed.
+pub fn join(base: Str, rel: Str) -> Str {
+  var parts = base.split("/")
+  parts.pop()
+  for p in rel.split("/") {
+    match p {
+      "." | "" => {}
+      ".." => {
+        parts.pop()
+      }
+      _ => parts.push(p)
+    }
+  }
+  parts.join("/")
+}
+
+/// A `$ref` split into the file it points into and its JSON pointer.
+pub fn split_ref(file: Str, ref: Str) -> (Str, Str) {
+  match ref.find("#") {
+    Some(0) => (file, ref[1..ref.len()])
+    Some(i) => (join(file, ref[0..i]), ref[i + 1..ref.len()])
+    None => (join(file, ref), "")
+  }
+}
+
+/// The value at JSON pointer `ptr` (`/definitions/X`).
+pub fn at(doc: json.Value, ptr: Str) -> json.Value? {
+  var v = doc
+  for seg in ptr.split("/") {
+    if seg == "" {
+      continue
+    }
+    let key = seg.replace("~1", "/").replace("~0", "~")
+    v = v.get(key) ?? return None
+  }
+  Some(v)
+}
+
+/// The last segment of a pointer (a definition's or parameter's name).
+pub fn last(ptr: Str) -> Str {
+  ptr.split("/").last() ?? ptr
+}

@@ -1,0 +1,45 @@
+// Azure Resource Manager clients' shared setup, as azcore's arm package
+// (arm/client.go, arm/runtime/pipeline.go; MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): the endpoint and token audience come from the
+// cloud configuration, and requests carry a bearer token for
+// `<audience>/.default`, with auxiliary tenants when given.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// Options of every ARM client (arm.ClientOptions).
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Other tenants a cross-tenant request needs tokens from.
+  pub auxiliary_tenants: List[Str] = []
+  /// Send tokens over plain HTTP too (tests against a local fake only).
+  pub insecure_allow_http: Bool = false
+  /// Another endpoint than the cloud's (a test server).
+  pub endpoint: Str = ""
+}
+
+/// The pipeline of an ARM client of module `module` at `version`, and
+/// the endpoint its requests go to.
+pub struct Setup {
+  pub pipeline: runtime.Pipeline
+  pub endpoint: Str
+}
+
+/// The token scope for ARM in `c`: its audience with `.default`, keeping
+/// the audience's trailing slash as azcore does
+/// (`https://management.core.windows.net//.default`).
+pub fn scope_of(c: cloud.Configuration) -> Str ! Str {
+  let svc = c.services.get(cloud.RESOURCE_MANAGER) ?? return Err("the cloud configuration has no resourceManager service")
+  Ok("${svc.audience}/.default")
+}
+
+pub fn new_pipeline(module: Str, version: Str, net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential, opts: ClientOptions) -> Setup ! Str {
+  let svc = opts.client.cloud.services.get(cloud.RESOURCE_MANAGER) ?? return Err("the cloud configuration has no resourceManager service")
+  let scope = scope_of(opts.client.cloud)?
+  let bearer = runtime.bearer_token_policy(cred, [scope], clock, insecure_allow_http: opts.insecure_allow_http, auxiliary_tenants: opts.auxiliary_tenants)
+  let pl = runtime.new_pipeline(module, version, net, clock, rand, runtime.PipelineOptions{per_retry: [bearer]}, opts.client)
+  let endpoint = if opts.endpoint != "" { opts.endpoint } else { svc.endpoint }
+  Ok(Setup{pipeline: pl, endpoint: endpoint.trim_end_chars("/")})
+}

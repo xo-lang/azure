@@ -1,0 +1,52 @@
+// The generator's command, run from the repository root:
+//   xo run ./codegen/cmd/gen -- arm <spec folder> <readme tag> <module dir> <version>
+// reads codegen/.specs/<spec folder>/readme.md, the tag's input files and
+// every file they `$ref`, and writes the module into <module dir> (its
+// xo.mod, models.xo and one <group>_client.xo per operation group).
+// What the generator does not handle is printed, never dropped silently.
+
+use std/json
+use github.com/xo-lang/azure/codegen/gen
+use github.com/xo-lang/azure/codegen/spec
+
+fn main(os: Os) -> () ! Error {
+  let args = os.env.args()
+  if args.len() != 5 || args[0] != "arm" {
+    os.stdio.println("usage: gen arm <spec folder> <readme tag> <module dir> <version>")
+    return Ok(())
+  }
+  let root = "codegen/.specs/${args[1]}"
+  let readme = os.fs.read_text("${root}/readme.md")?
+  let inputs = spec.input_files(readme, args[2])?.map(fn(f: Str) -> Str { "${root}/${f}" })
+  var files: Map[Str, json.Value] = {}
+  var queue = inputs
+  while let Some(f) = queue.pop() {
+    if files.contains(f) {
+      continue
+    }
+    let doc = json.parse_value(os.fs.read_text(f)?)?
+    for r in gen.refs_of(f, doc) {
+      if !files.contains(r) {
+        queue.push(r)
+      }
+    }
+    files[f] = doc
+  }
+  let dir = args[3]
+  let name = dir.split("/").last() ?? dir
+  var b = gen.builder(files, name)
+  let api = b.build(inputs)
+  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: args[4], source: "${args[1]}, tag ${args[2]}"}
+  os.fs.create_dir_all(dir)?
+  os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n").bytes())?
+  let m = gen.emit_models(p, api)
+  os.fs.write("${dir}/${m.name}", (m.text).bytes())?
+  for f in gen.emit_clients(p, api) {
+    os.fs.write("${dir}/${f.name}", (f.text).bytes())?
+  }
+  os.stdio.println("${name}: ${api.ops.len()} operations, ${api.models.len()} models, ${api.enums.len()} enums, api-version ${api.api_version}")
+  for r in api.report {
+    os.stdio.println("  not handled: ${r}")
+  }
+  Ok(())
+}
