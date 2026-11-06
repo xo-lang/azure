@@ -40,6 +40,12 @@ What it does:
   link sends its metadata only with NFS properties; the link calls send
   no trailing dot header. Each response reads the headers Go's handler
   for that call reads.
+- The file's data: `upload_range` (with a transactional MD5 and a last
+  written mode), `clear_range`, `upload_range_from_url` (source
+  authorization and CRC64 checks), `get_range_list`, `download_stream`
+  and the chunked `download_buffer` and `upload_buffer`. Ranges format as
+  Go's (`bytes=10-14`, `bytes=3-` to the end), and a count of 0 from a
+  URL sends Go's empty destination range.
 - `ClientOptions.file_request_intent` (`backup`) on the share calls,
   not the service's, as Go's generated clients send it; the trailing dot
   options on directory calls.
@@ -67,4 +73,11 @@ Where it differs from Go v1.7.1:
   as `None`; Go's generated client returns an error.
 - Create has no optional body (Go's `OptionalBody` and `ContentLength`);
   data goes through the range calls.
-- Not ported yet: ranges, uploads and downloads, leases, SAS.
+- A download's body is read whole (Go returns a stream with a retry
+  reader); `download_buffer` returns the bytes instead of filling a
+  buffer, and it and `upload_buffer` send their chunks one at a time
+  (Go's run in parallel; each request is the same). `UploadFile`,
+  `UploadStream`, `DownloadFile` and progress callbacks are not ported:
+  `upload_buffer` and `download_buffer` cover them. Go's unused
+  `UploadRangeFromURLOptions.SourceContentCRC64` field is left out.
+- Not ported yet: leases, SAS.

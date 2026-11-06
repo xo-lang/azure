@@ -1,0 +1,281 @@
+// The file client's data calls: ranges, the range list, downloads and
+// the chunked buffer helpers, as azfile's file/client.go and
+// file/models.go (MIT, Copyright (c) Microsoft Corporation; NOTICE.md),
+// with the requests of its generated FileClient.
+
+use std/base64
+use std/binary
+use std/http
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+/// Go's MaxUpdateRangeBytes: the largest range one upload writes.
+pub const MAX_UPDATE_RANGE_BYTES: Int = 4 * 1024 * 1024
+/// Go's DefaultDownloadChunkSize.
+pub const DEFAULT_DOWNLOAD_CHUNK_SIZE: Int = 4 * 1024 * 1024
+/// Go's MaxFileSize: 4 TiB.
+pub const MAX_FILE_SIZE: Int = 4 * 1024 * 1024 * 1024 * 1024
+
+pub const LAST_WRITTEN_MODE_NOW: Str = "Now"
+pub const LAST_WRITTEN_MODE_PRESERVE: Str = "Preserve"
+
+/// A byte range: `count` 0 runs to the end, and offset and count both 0
+/// is the whole file (Go's HTTPRange).
+pub struct HttpRange {
+  pub offset: Int = 0
+  pub count: Int = 0
+}
+
+/// Go's FormatHTTPRange: `bytes=offset-end`, None for the whole file.
+fn format_range(r: HttpRange) -> Str? {
+  if r.offset == 0 && r.count == 0 {
+    return None
+  }
+  let end = if r.count > 0 { "${r.offset + r.count - 1}" } else { "" }
+  Some("bytes=${r.offset}-${end}")
+}
+
+fn range_header(name: Str, r: HttpRange) -> List[(Str, Str)] {
+  str_header(name, format_range(r))
+}
+
+fn b64_header(name: Str, b: Bytes?) -> List[(Str, Str)] {
+  match b {
+    Some(x) => [(name, base64.encode(x))]
+    None => []
+  }
+}
+
+/// What a range write returns.
+pub struct RangeResponse {
+  pub response: Response
+  pub content_md5: Bytes? = None
+  /// The CRC64 the service computed (uploads from a URL only).
+  pub content_crc64: Bytes? = None
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub file_last_write_time: Time? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+}
+
+fn range_response(resp: http.Response, crc64: Bool) -> RangeResponse {
+  RangeResponse{
+    response: response_of(resp), content_md5: header_md5(resp, "Content-MD5"), date: header_time(resp, "Date"), etag: header(resp, "ETag"),
+    file_last_write_time: header_iso(resp, "x-ms-file-last-write-time"), is_server_encrypted: header_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: header_time(resp, "Last-Modified"),
+    content_crc64: if crc64 { header_md5(resp, "x-ms-content-crc64") } else { None },
+  }
+}
+
+pub struct UploadRangeOptions {
+  /// The MD5 of `body`, sent as Content-MD5 for the service to check
+  /// (Go's TransferValidationTypeMD5).
+  pub transactional_md5: Bytes? = None
+  pub lease_id: Str? = None
+  /// `LAST_WRITTEN_MODE_NOW` or `_PRESERVE`.
+  pub last_written_mode: Str? = None
+}
+
+/// Writes `body` at `offset` (up to `MAX_UPDATE_RANGE_BYTES`).
+pub fn (f: FileClient) upload_range(offset: Int, body: Bytes, options: UploadRangeOptions = UploadRangeOptions{}) -> RangeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if offset < 0 {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: offset must be >= 0 and body must not be nil"))
+  }
+  if body.is_empty() {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: body must contain readable data whose size is > 0"))
+  }
+  let o = options
+  let hs = b64_header("Content-MD5", o.transactional_md5) + str_header("x-ms-file-last-write-time", o.last_written_mode) + lease_header(o.lease_id) + range_header("x-ms-range", HttpRange{offset: offset, count: body.len()}) + [("x-ms-write", "update")]
+  let resp = f.core.send(file_call(f.core, "PUT", [201], query: [("comp", "range")], headers: hs) with {body: Some(body), content_type: "application/octet-stream"})?
+  Ok(range_response(resp, false))
+}
+
+/// Clears `range` (an offset of 0 or more and a count above 0) and frees
+/// its space.
+pub fn (f: FileClient) clear_range(range: HttpRange, lease_id: Str? = None) -> RangeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let r = format_range(range)
+  if r.is_none() || range.offset < 0 || range.count <= 0 {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: either offset is < 0 or count <= 0"))
+  }
+  let hs = lease_header(lease_id) + str_header("x-ms-range", r) + [("x-ms-write", "clear")]
+  let resp = f.core.send(file_call(f.core, "PUT", [201], query: [("comp", "range")], headers: hs))?
+  Ok(range_response(resp, false))
+}
+
+pub struct UploadRangeFromUrlOptions {
+  /// An OAuth token for the source (`Bearer ...`).
+  pub copy_source_authorization: Str? = None
+  /// The CRC64 the source range must have (Go's
+  /// SourceContentValidationTypeCRC64), its 64 bits as an Int.
+  pub source_content_crc64: Int? = None
+  pub source_if_match_crc64: Bytes? = None
+  pub source_if_none_match_crc64: Bytes? = None
+  pub lease_id: Str? = None
+  /// `LAST_WRITTEN_MODE_NOW` or `_PRESERVE`.
+  pub last_written_mode: Str? = None
+}
+
+/// Writes `count` bytes of `copy_source` from `source_offset` at
+/// `destination_offset`. A count of 0 sends Go's open source range and
+/// an empty destination range.
+pub fn (f: FileClient) upload_range_from_url(copy_source: Str, source_offset: Int, destination_offset: Int, count: Int, options: UploadRangeFromUrlOptions = UploadRangeFromUrlOptions{}) -> RangeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if source_offset < 0 || destination_offset < 0 {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: source and destination offsets must be >= 0"))
+  }
+  let o = options
+  let crc = match o.source_content_crc64 {
+    Some(n) => [("x-ms-source-content-crc64", base64.encode(binary.u64_le(n)))]
+    None => []
+  }
+  let hs = f.core.dot_headers(source: true) + [("x-ms-copy-source", copy_source)] + str_header("x-ms-copy-source-authorization", o.copy_source_authorization) + str_header("x-ms-file-last-write-time", o.last_written_mode) + lease_header(o.lease_id) + [("x-ms-range", format_range(HttpRange{offset: destination_offset, count: count}) ?? "")] + crc + b64_header("x-ms-source-if-match-crc64", o.source_if_match_crc64) + b64_header("x-ms-source-if-none-match-crc64", o.source_if_none_match_crc64) + range_header("x-ms-source-range", HttpRange{offset: source_offset, count: count}) + [("x-ms-write", "update")]
+  let resp = f.core.send(file_call(f.core, "PUT", [201], query: [("comp", "range")], headers: hs, dots: false))?
+  Ok(range_response(resp, true))
+}
+
+// The range list.
+
+pub struct FileRange {
+  pub start: Int
+  pub end: Int
+}
+
+pub struct RangeListResponse {
+  pub response: Response
+  pub ranges: List[FileRange] = []
+  pub clear_ranges: List[FileRange] = []
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub file_content_length: Int? = None
+  pub last_modified: Time? = None
+}
+
+pub struct GetRangeListOptions {
+  /// Lists the ranges changed since this snapshot.
+  pub prev_share_snapshot: Str? = None
+  pub range: HttpRange = HttpRange{}
+  pub share_snapshot: Str? = None
+  pub lease_id: Str? = None
+  pub support_rename: Bool? = None
+}
+
+fn parse_ranges(text: Str) -> (List[FileRange], List[FileRange]) ! Str {
+  let d = xml.parse(text) ?? e => return Err("a range list that is not XML: ${e.display()}")
+  let of = fn(x: xml.Element) -> FileRange ! Str {
+    let s = child_int(x, "Start") ?? return Err("a range with no Start")
+    let e = child_int(x, "End") ?? return Err("a range with no End")
+    Ok(FileRange{start: s, end: e})
+  }
+  var rs: List[FileRange] = []
+  for x in d.children_named("Range") { rs.push(of(x)?) }
+  var cs: List[FileRange] = []
+  for x in d.children_named("ClearRange") { cs.push(of(x)?) }
+  Ok((rs, cs))
+}
+
+/// The file's valid ranges (and, since `prev_share_snapshot`, its cleared
+/// ones).
+pub fn (f: FileClient) get_range_list(options: GetRangeListOptions = GetRangeListOptions{}) -> RangeListResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let q = [("comp", "rangelist")] + str_query("prevsharesnapshot", o.prev_share_snapshot) + snapshot_query(o.share_snapshot)
+  let hs = bool_header("x-ms-file-support-rename", o.support_rename) + lease_header(o.lease_id) + range_header("x-ms-range", o.range)
+  let resp = f.core.send(file_call(f.core, "GET", [200], query: q, headers: hs))?
+  let (rs, cs) = decoded(resp, parse_ranges)?
+  Ok(RangeListResponse{response: response_of(resp), ranges: rs, clear_ranges: cs, date: header_time(resp, "Date"), etag: header(resp, "ETag"), file_content_length: header_int(resp, "x-ms-content-length"), last_modified: header_time(resp, "Last-Modified")})
+}
+
+// Downloads.
+
+/// A download: the bytes, and the file's properties as Go's
+/// DownloadResponse reads them (`properties`).
+pub struct DownloadResponse {
+  pub body: Bytes
+  pub properties: FileResponse
+  pub accept_ranges: Str? = None
+  pub content_range: Str? = None
+  /// The whole file's MD5 (`x-ms-content-md5`), set when the range is
+  /// not the whole file.
+  pub file_content_md5: Bytes? = None
+}
+
+pub struct DownloadStreamOptions {
+  pub range: HttpRange = HttpRange{}
+  /// Asks for the range's MD5 (ranges up to 4 MiB).
+  pub range_get_content_md5: Bool? = None
+  pub lease_id: Str? = None
+}
+
+/// Reads `range` of the file (the whole file by default); the body is
+/// read whole (Go returns a stream).
+pub fn (f: FileClient) download_stream(options: DownloadStreamOptions = DownloadStreamOptions{}) -> DownloadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = lease_header(o.lease_id) + range_header("x-ms-range", o.range) + bool_header("x-ms-range-get-content-md5", o.range_get_content_md5)
+  let resp = f.core.send(file_call(f.core, "GET", [200, 206], headers: hs))?
+  let props = file_response(resp, FileReads{smb: true, times: true, nfs: true, encrypted: "x-ms-server-encrypted", link_count: true, metadata: true, content: true, props: true})
+  Ok(DownloadResponse{body: resp.body, properties: props, accept_ranges: header(resp, "Accept-Ranges"), content_range: header(resp, "Content-Range"), file_content_md5: header_md5(resp, "x-ms-content-md5")})
+}
+
+pub struct DownloadBufferOptions {
+  pub range: HttpRange = HttpRange{}
+  /// The bytes each request reads.
+  pub chunk_size: Int = DEFAULT_DOWNLOAD_CHUNK_SIZE
+  pub lease_id: Str? = None
+}
+
+/// Reads `range` (the whole file by default, its length from
+/// `get_properties`) in chunks, one request at a time (Go runs them in
+/// parallel; the requests are the same).
+pub fn (f: FileClient) download_buffer(options: DownloadBufferOptions = DownloadBufferOptions{}) -> Bytes ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  if o.chunk_size <= 0 {
+    return Err(azcore.CallErr.InvalidInput("ChunkSize cannot be 0"))
+  }
+  var count = o.range.count
+  if count == 0 {
+    let p = f.get_properties(lease_id: o.lease_id)?
+    count = (p.content_length ?? 0) - o.range.offset
+  }
+  var out = BytesBuilder.new()
+  if count <= 0 {
+    return Ok(out.freeze())
+  }
+  var start = 0
+  while start < count {
+    let n = if count - start < o.chunk_size { count - start } else { o.chunk_size }
+    let d = f.download_stream(DownloadStreamOptions{range: HttpRange{offset: o.range.offset + start, count: n}, lease_id: o.lease_id})?
+    out.write(d.body)
+    start = start + n
+  }
+  Ok(out.freeze())
+}
+
+pub struct UploadBufferOptions {
+  /// The bytes each range write sends.
+  pub chunk_size: Int = MAX_UPDATE_RANGE_BYTES
+  pub lease_id: Str? = None
+}
+
+/// Writes `buffer` from offset 0 in chunks, one request at a time (Go
+/// runs them in parallel; the requests are the same). An empty buffer
+/// is an error, as in Go.
+pub fn (f: FileClient) upload_buffer(buffer: Bytes, options: UploadBufferOptions = UploadBufferOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  if buffer.len() > MAX_FILE_SIZE {
+    return Err(azcore.CallErr.InvalidInput("buffer is too large to upload to a file"))
+  }
+  if o.chunk_size <= 0 {
+    return Err(azcore.CallErr.InvalidInput("ChunkSize cannot be 0"))
+  }
+  let opts = UploadRangeOptions{lease_id: o.lease_id}
+  if buffer.is_empty() {
+    f.upload_range(0, buffer, opts)?
+    return Ok(())
+  }
+  var start = 0
+  while start < buffer.len() {
+    let n = if buffer.len() - start < o.chunk_size { buffer.len() - start } else { o.chunk_size }
+    f.upload_range(start, buffer[start..start + n], opts)?
+    start = start + n
+  }
+  Ok(())
+}

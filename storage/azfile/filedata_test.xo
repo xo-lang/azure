@@ -1,0 +1,211 @@
+// The file data calls against the Go program's fake holding a 10 byte
+// file (datavectors_test.xo): every request byte for byte, every field
+// read back as Go dumps it.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const DATA_GO_DATE: Str = "Fri, 06 Nov 2026 11:10:42 GMT"
+
+const CONTENT: Str = "0123456789"
+
+const RANGE_LIST: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Ranges><Range><Start>0</Start><End>511</End></Range><ClearRange><Start>512</Start><End>1023</End></ClearRange><Range><Start>1024</Start><End>2047</End></Range></Ranges>"
+
+struct DataFixed {}
+
+fn (p: DataFixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", DATA_GO_DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+const DOWNLOAD_HEADERS: List[(Str, Str)] = [
+  ("Accept-Ranges", "bytes"), ("Cache-Control", "no-cache"), ("Content-Disposition", "inline"), ("Content-Encoding", "identity"),
+  ("Content-Language", "en"), ("Content-MD5", "AQID"), ("Content-Type", "application/octet-stream"),
+  ("x-ms-copy-completion-time", "Thu, 05 Nov 2026 02:30:00 GMT"), ("x-ms-copy-id", "c-1"), ("x-ms-copy-progress", "10/10"),
+  ("x-ms-copy-source", "http://src.example.test/s/f"), ("x-ms-copy-status", "success"), ("x-ms-copy-status-description", "done"),
+  ("x-ms-content-md5", "BAU="), ("x-ms-file-attributes", "Archive"), ("x-ms-file-change-time", "2026-11-03T01:02:03.5000000Z"),
+  ("x-ms-file-creation-time", "2026-11-01T01:02:03.1234567Z"), ("x-ms-file-id", "11529285414812647424"),
+  ("x-ms-file-last-write-time", "2026-11-02T01:02:03.0000000Z"), ("x-ms-mode", "0644"), ("x-ms-file-parent-id", "0"),
+  ("x-ms-file-permission-key", "4066*123"), ("x-ms-group", "1001"), ("x-ms-server-encrypted", "true"),
+  ("x-ms-lease-duration", "fixed"), ("x-ms-lease-state", "available"), ("x-ms-lease-status", "unlocked"), ("x-ms-link-count", "1"),
+  ("x-ms-owner", "1000"), ("x-ms-meta-color", "blue"), ("x-ms-type", "File"), ("x-ms-file-file-type", "Regular"),
+]
+
+fn data_answer(req: http.Request) -> http.Response {
+  let q = req.url.query
+  let comp = q.get("comp") ?? ""
+  let tag = fn(r: http.Response) -> http.Response { r.with_header("ETag", "\"0x8E0\"").with_header("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT") }
+  if comp == "range" {
+    return tag(with_headers(http.empty(201), [("Content-MD5", "AQID"), ("x-ms-content-crc64", "AAECAwQFBgc="), ("x-ms-file-last-write-time", "2026-11-02T01:02:03.0000000Z"), ("x-ms-request-server-encrypted", "true")]))
+  }
+  if comp == "rangelist" {
+    return tag(xml_resp(200, RANGE_LIST).with_header("x-ms-content-length", "4096"))
+  }
+  if req.method == "HEAD" {
+    return tag(with_headers(http.empty(200), [("Content-Length", "${CONTENT.len()}"), ("x-ms-type", "File")]))
+  }
+  if req.method == "GET" {
+    var start = 0
+    var end = CONTENT.len() - 1
+    var status = 200
+    var extra: List[(Str, Str)] = []
+    if let Some(rg) = req.header("x-ms-range") {
+      let parts = rg.trim_start_chars("bytes=").split("-")
+      start = Int.parse(parts[0]) ?? 0
+      if parts[1] != "" { end = Int.parse(parts[1]) ?? end }
+      if end > CONTENT.len() - 1 { end = CONTENT.len() - 1 }
+      status = 206
+      extra = [("Content-Range", "bytes ${start}-${end}/${CONTENT.len()}")]
+    }
+    let data = CONTENT[start..end + 1]
+    return tag(with_headers(http.text(status, data), DOWNLOAD_HEADERS + extra + [("Content-Length", "${data.len()}")]))
+  }
+  http.empty(400)
+}
+
+fn range_dump(x: RangeResponse) -> Dump {
+  var d = Dump{}
+  if let Some(b) = x.content_md5 { d.lines.push("ContentMD5=${b.quote()}") }
+  d.t("Date", x.date)
+  d.s("ETag", x.etag)
+  d.t("FileLastWriteTime", x.file_last_write_time)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.r(x.response)
+  if let Some(b) = x.content_crc64 { d.lines.push("XMSContentCRC64=${b.quote()}") }
+  d
+}
+
+fn (var d: Dump) ranges(p: Str, rs: List[FileRange]) {
+  if rs.is_empty() {
+    return
+  }
+  d.lines.push("${p}.len=${rs.len()}")
+  for (i, r) in rs.indexed() {
+    d.i("${p}[${i}].End", Some(r.end))
+    d.i("${p}[${i}].Start", Some(r.start))
+  }
+}
+
+fn download_dump(x: DownloadResponse) -> Dump {
+  var d = file_dump(x.properties)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("ContentRange", x.content_range)
+  if let Some(b) = x.file_content_md5 { d.lines.push("FileContentMD5=${b.quote()}") }
+  d
+}
+
+test "the file data calls send what Go sends and read what Go reads" {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    record(req, log)
+    stamped(data_answer(req))
+  }
+  for m in ["GET", "PUT", "HEAD"] {
+    os.net.handle("${m} ${EP}/{a}/{b}", h)
+  }
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DataFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let f = sh.new_root_directory_client().new_file_client("f.bin")
+  var out: List[Str] = []
+  let take = fn() -> List[Str] {
+    log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+  }
+  let add = fn(lines: List[Str]) -> List[Str] { take() + lines }
+  let failed = fn(name: Str, e: azcore.CallErr) -> List[Str] {
+    match e {
+      azcore.CallErr.InvalidInput(m) => ["== ${name}", "  error ${m}"]
+      _ => err_lines(name, e)
+    }
+  }
+  let rr = fn(name: Str, r: Result[RangeResponse, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(x) => range_dump(x).show(name)
+      Err(e) => failed(name, e)
+    }
+  }
+  let retag = fn(name: Str, r: Result[RangeResponse, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(x) => one(name, x.etag)
+      Err(e) => failed(name, e)
+    }
+  }
+  let lease = Some("lease-1")
+
+  out = out + add(rr("r1 upload a range with an MD5, a lease and a write mode", f.upload_range(0, b"hello", UploadRangeOptions{transactional_md5: Some(b"\x09\x08\x07"), lease_id: lease, last_written_mode: Some(LAST_WRITTEN_MODE_PRESERVE)})))
+  out = out + add(retag("r2 upload a range, no options", f.upload_range(10, b"abc")))
+  out = out + add(rr("r3 upload a range at a negative offset", f.upload_range(-1, b"abc")))
+  out = out + add(rr("r3b upload an empty range", f.upload_range(0, b"")))
+  out = out + add(rr("r4 clear a range", f.clear_range(HttpRange{offset: 5, count: 10}, lease)))
+  out = out + add(rr("r4b clear a range with no count", f.clear_range(HttpRange{offset: 5})))
+  out = out + add(rr("r4c clear a range at a negative offset", f.clear_range(HttpRange{offset: -1, count: 3})))
+  out = out + add(rr("r5 upload a range from a URL with options", f.upload_range_from_url("http://src.example.test/s/f?sv=1", 0, 100, 50, UploadRangeFromUrlOptions{
+    copy_source_authorization: Some("Bearer x"), source_content_crc64: Some(0x0706050403020100), source_if_match_crc64: Some(b"\x01"), source_if_none_match_crc64: Some(b"\x02\x03"),
+    lease_id: lease, last_written_mode: Some(LAST_WRITTEN_MODE_NOW),
+  })))
+  out = out + add(retag("r6 upload a range from a URL, count 0", f.upload_range_from_url("http://src.example.test/s/f", 7, 0, 0)))
+  out = out + add(rr("r6b upload a range from a URL at a negative offset", f.upload_range_from_url("http://src.example.test/s/f", -1, 0, 5)))
+  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  out = out + add(retag("r6c upload a range from a URL with trailing dots", dots.new_root_directory_client().new_file_client("f.").upload_range_from_url("http://src.example.test/s/f.", 0, 0, 1)))
+  out = out + add(match f.get_range_list(GetRangeListOptions{prev_share_snapshot: Some("2026-11-04T01:00:00.0000000Z"), range: HttpRange{offset: 0, count: 4096}, share_snapshot: Some("2026-11-05T01:00:00.0000000Z"), lease_id: lease, support_rename: Some(true)}) {
+    Ok(x) => {
+      var d = Dump{}
+      d.ranges("ClearRanges", x.clear_ranges)
+      d.t("Date", x.date)
+      d.s("ETag", x.etag)
+      d.i("FileContentLength", x.file_content_length)
+      d.t("LastModified", x.last_modified)
+      d.ranges("Ranges", x.ranges)
+      d.r(x.response)
+      d.show("r7 range list")
+    }
+    Err(e) => failed("r7", e)
+  })
+  out = out + add(match f.get_range_list(GetRangeListOptions{range: HttpRange{offset: 100}}) {
+    Ok(x) => ["== r7b range list from an offset to the end", "  =${x.file_content_length ?? -1}"]
+    Err(e) => failed("r7b", e)
+  })
+  out = out + add(match f.get_range_list() {
+    Ok(x) => one("r7c range list, no options", x.etag)
+    Err(e) => failed("r7c", e)
+  })
+  out = out + add(match f.download_stream(DownloadStreamOptions{range: HttpRange{offset: 1, count: 3}, range_get_content_md5: Some(true), lease_id: lease}) {
+    Ok(x) => ["== r8 body", "  ${x.body.quote()}"] + download_dump(x).show("r8 download a range")
+    Err(e) => failed("r8", e)
+  })
+  out = out + add(match f.download_stream() {
+    Ok(x) => ["== r9 download, no options", "  ${x.body.quote()}"]
+    Err(e) => failed("r9", e)
+  })
+  let buf = fn(name: Str, r: Result[Bytes, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(b) => ["== ${name}", "  =${b.len()}", "  ${b.quote()}"]
+      Err(e) => failed(name, e)
+    }
+  }
+  out = out + add(buf("r10 download into a buffer in chunks of 4", f.download_buffer(DownloadBufferOptions{chunk_size: 4, lease_id: lease})))
+  out = out + add(buf("r11 download a range into a buffer", f.download_buffer(DownloadBufferOptions{range: HttpRange{offset: 2, count: 6}})))
+  let up = fn(name: Str, r: Result[(), azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(_) => ["== ${name}"]
+      Err(e) => failed(name, e)
+    }
+  }
+  out = out + add(up("r12 upload a buffer in chunks of 4", f.upload_buffer(b"abcdefghij", UploadBufferOptions{chunk_size: 4, lease_id: lease})))
+  out = out + add(up("r12b upload an empty buffer", f.upload_buffer(b"")))
+  out = out + add(up("r12c upload a buffer, no options", f.upload_buffer(b"12345")))
+  out = out + add(up("r13 upload a stream", f.upload_buffer(b"xyz")))
+  expect(out) == DATA_OUTPUT
+}
+
+test "a range formats as Go's FormatHTTPRange" {
+  expect(format_range(HttpRange{})) == None
+  expect(format_range(HttpRange{offset: 3})) == Some("bytes=3-")
+  expect(format_range(HttpRange{count: 1})) == Some("bytes=0-0")
+  expect(format_range(HttpRange{offset: 10, count: 5})) == Some("bytes=10-14")
+}
