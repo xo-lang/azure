@@ -99,12 +99,17 @@ pub struct ClientOptions {
   pub application_id: Str = ""
   /// How long a connect, a put-token or a management call may wait.
   pub timeout_ms: Int = 60000
+  /// How sends, receives, settlements and management calls are retried
+  /// after a recoverable failure.
+  pub retry_options: RetryOptions = RetryOptions{}
 }
 
-/// The open connection.
+/// The open connection and which one it is: links made on an earlier
+/// connection are attached again.
 struct Conn {
   c: amqp.Connection
   s: amqp.Session
+  gen: Int
 }
 
 pub struct Client {
@@ -117,6 +122,12 @@ pub struct Client {
   opts: ClientOptions
   conn: Mutex[Conn?]
   links: Atomic[Int]
+  gens: Atomic[Int]
+  closed: Atomic[Bool]
+}
+
+fn client(net: Net, clock: Clock, rand: Rand, namespace: Str, tls: Bool, auth: Auth, options: ClientOptions) -> Client {
+  Client{net: net, clock: clock, rand: rand, namespace: namespace, tls: tls, auth: auth, opts: options, conn: Mutex[Conn?].new(None), links: Atomic[Int].new(0), gens: Atomic[Int].new(0), closed: Atomic[Bool].new(false)}
 }
 
 /// A client for the namespace (`<name>.servicebus.windows.net`) with an
@@ -125,7 +136,7 @@ pub fn new_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace:
   if fully_qualified_namespace == "" {
     return Err("fullyQualifiedNamespace must not be empty")
   }
-  Ok(Client{net: net, clock: clock, rand: rand, namespace: fully_qualified_namespace, tls: true, auth: Auth.Credential(credential), opts: options, conn: Mutex[Conn?].new(None), links: Atomic[Int].new(0)})
+  Ok(client(net, clock, rand, fully_qualified_namespace, true, Auth.Credential(credential), options))
 }
 
 /// A client from a connection string with a key or a signature.
@@ -136,7 +147,7 @@ pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, con
     (None, Some(n), Some(k)) => Auth.Key(name: n, key: k)
     _ => return Err("key \"SharedAccessKey\" or \"SharedAccessSignature\" cannot both be empty")
   }
-  Ok(Client{net: net, clock: clock, rand: rand, namespace: p.fully_qualified_namespace, tls: !p.emulator, auth: auth, opts: options, conn: Mutex[Conn?].new(None), links: Atomic[Int].new(0)})
+  Ok(client(net, clock, rand, p.fully_qualified_namespace, !p.emulator, auth, options))
 }
 
 /// The CBS audience of an entity: `amqps://<namespace>/<entity>`.
@@ -144,12 +155,16 @@ fn (c: Client) audience(entity: Str) -> Str {
   "${if c.tls { "amqps" } else { "amqp" }}://${c.namespace}/${entity}"
 }
 
-/// The connection, opened on first use.
+/// The connection, opened on first use and after a reset.
 fn (c: Client) open() -> Conn ! ServiceBusErr uses (net.dial, clock) {
+  if c.closed.get() {
+    return Err(fatal("the client is closed", CODE_CLOSED))
+  }
   let addr = "${if c.tls { "amqps" } else { "amqp" }}://${c.namespace}"
   let net = c.net
   let clock = c.clock
   let opts = c.opts
+  let gens = c.gens
   let host = c.namespace.split(":")[0]
   c.conn.with(fn(var slot: Conn?) -> Conn ! ServiceBusErr uses (net.dial, clock) {
     if let Some(x) = slot {
@@ -157,11 +172,38 @@ fn (c: Client) open() -> Conn ! ServiceBusErr uses (net.dial, clock) {
     }
     let agent = if opts.application_id == "" { "azsdk-xo-azservicebus/v0.1.0" } else { "${opts.application_id} azsdk-xo-azservicebus/v0.1.0" }
     let conn = amqp.dial(net, addr, amqp.ConnOptions{hostname: host, clock: Some(clock), sasl: amqp.Sasl.Anonymous, timeout_ms: opts.timeout_ms, properties: [("user-agent", amqp.Value.Str(v: agent))]}) ?? e => return Err(from_amqp(e))
-    let s = conn.begin() ?? e => return Err(from_amqp(e))
-    let x = Conn{c: conn, s: s}
+    let s = conn.begin() ?? e => {
+      conn.abort()
+      return Err(from_amqp(e))
+    }
+    let x = Conn{c: conn, s: s, gen: gens.add(1)}
     slot = Some(x)
     Ok(x)
   })
+}
+
+/// The open connection's generation, 0 when none is open.
+fn (c: Client) current_gen() -> Int {
+  c.conn.with_read(fn(slot: Conn?) -> Int { slot.map(fn(x: Conn) -> Int { x.gen }) ?? 0 })
+}
+
+/// Drops connection `gen` (when it is still the open one), so the next
+/// operation dials again: Go's RecoveryKindConn.
+fn (c: Client) reset(gen: Int) {
+  let old = c.conn.with(fn(var slot: Conn?) -> Conn? {
+    match slot {
+      Some(x) => if x.gen == gen || gen == 0 {
+        slot = None
+        Some(x)
+      } else {
+        None
+      }
+      None => None
+    }
+  })
+  if let Some(x) = old {
+    x.c.abort()
+  }
 }
 
 /// Puts a token for the entity on the connection's `$cbs` node.
@@ -172,7 +214,8 @@ fn (c: Client) authorize(conn: Conn, entity: Str) -> () ! ServiceBusErr uses (ne
     Auth.Key(name: n, key: k) => (sign_sas(n, k, aud, now + 7200), "servicebus.windows.net:sastoken", (now + 7200) * 1000)
     Auth.Signature(sig) => (sig.reveal(), "servicebus.windows.net:sastoken", 0)
     Auth.Credential(cred) => {
-      let t = cred.get_token(azcore.TokenRequestOptions{scopes: ["https://servicebus.azure.net//.default"]}) ?? e => return Err(ServiceBusErr{code: CODE_UNAUTHORIZED_ACCESS, msg: e.display()})
+      // azidentity's errors are non-retriable in Go.
+      let t = cred.get_token(azcore.TokenRequestOptions{scopes: ["https://servicebus.azure.net//.default"]}) ?? e => return Err(fatal(e.display(), CODE_UNAUTHORIZED_ACCESS))
       (t.token.reveal(), "jwt", t.expires_on.unix_millis())
     }
   }
@@ -185,15 +228,17 @@ fn (c: Client) link_name(kind: Str, entity: Str) -> Str {
   "${kind}-${entity}-${c.links.add(1)}"
 }
 
-/// Closes the connection; links made from the client stop working.
+/// Closes the connection for good; senders and receivers made from the
+/// client fail with CODE_CLOSED after it.
 pub fn (c: Client) close() -> () ! ServiceBusErr uses (net.dial, clock) {
+  c.closed.set(true)
   let x = c.conn.with(fn(var slot: Conn?) -> Conn? {
     let was = slot
     slot = None
     was
   })
   match x {
-    Some(conn) => conn.c.close() ?? e => return Err(from_amqp(e))
+    Some(conn) => conn.c.close() ?? _ => conn.c.abort()
     None => {}
   }
   Ok(())

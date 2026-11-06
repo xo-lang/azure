@@ -207,7 +207,7 @@ test "errors keep Go's codes: an unknown entity is notfound, a rejected token un
     b.serve(s.group(), l)
     let c = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=sb://${l.addr()};SharedAccessSignature=sig-rejected;UseDevelopmentEmulator=true")?
     b.reject_token("sig-rejected")
-    match c.new_sender("q1") {
+    match c.new_sender("q1")?.send_message(Message{body: b"x"}) {
       Err(e) => expect(e.code) == CODE_UNAUTHORIZED_ACCESS
       Ok(_) => expect("ok") == "an unauthorized error"
     }
@@ -257,6 +257,157 @@ test "accept_session_for_queue receives only its session; state and lock renewal
       Ok(_) => expect("ok") == "a timeout"
     }
     c.close()?
+    s.cancel()
+  }
+}
+
+fn fast() -> ClientOptions {
+  ClientOptions{retry_options: RetryOptions{retry_delay: 10ms, max_retry_delay: 50ms}}
+}
+
+test "retry_delay follows Go's calcDelay: (2^n - 1) times the delay, jitter 0.8 to 1.3, capped" {
+  let o = RetryOptions{retry_delay: 1s, max_retry_delay: 10s}
+  expect(retry_delay(o, 1, 0.0)) == 800ms
+  expect(retry_delay(o, 2, 0.0)) == 2400ms
+  expect(retry_delay(o, 2, 1.0)) == 3900ms
+  expect(retry_delay(o, 5, 0.0)) == 10s
+  expect(retry_delay(RetryOptions{}, 1, 0.0)) == 3200ms
+}
+
+test "a busy server is retried; a missing entity is not" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), fast())?
+    let snd = c.new_sender("q1")?
+    b.fail_next("transfer", 0, "com.microsoft:server-busy", "busy")
+    snd.send_message(Message{body: b"after-busy"})?
+    expect(b.ready("q1").len()) == 1
+    b.fail("transfer", 0, "com.microsoft:server-busy", "busy")
+    match snd.send_message(Message{body: b"never"}) {
+      Err(e) => expect(e.condition) == "com.microsoft:server-busy"
+      Ok(_) => expect("ok") == "busy after the retries"
+    }
+    b.clear_failures()
+    let missing = c.new_sender("nope")?
+    let before = c.links.get()
+    match missing.send_message(Message{body: b"x"}) {
+      Err(e) => expect(e.code) == CODE_NOT_FOUND
+      Ok(_) => expect("ok") == "notfound"
+    }
+    // One attach, no retries: the link counter moved once.
+    expect(c.links.get() - before) == 1
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "a forced detach and a dropped connection are recovered: sends and receives go on" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), fast())?
+    let snd = c.new_sender("q1")?
+    snd.send_message(Message{body: b"one"})?
+    let gen1 = c.current_gen()
+    b.detach_links("q1", amqp.WireError{condition: "amqp:link:detach-forced", description: "forced"})
+    snd.send_message(Message{body: b"two"})?
+    expect(c.current_gen()) == gen1
+    b.disconnect_all()
+    snd.send_message(Message{body: b"three"})?
+    expect(c.current_gen() > gen1) == true
+    let r = c.new_receiver_for_queue("q1", ReceiverOptions{receive_mode: ReceiveMode.ReceiveAndDelete})?
+    expect(r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["one"]
+    b.disconnect_all()
+    expect(r.receive_messages(2, ReceiveMessagesOptions{timeout_ms: 2000})?.map(text)) == ["two", "three"]
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "a forced detach loses the link's locks: settling is locklost, the message comes back, and settles once" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1", amqptest.QueueOptions{lock_ms: 30000})
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), fast())?
+    c.new_sender("q1")?.send_message(Message{body: b"m"})?
+    let r = c.new_receiver_for_queue("q1")?
+    let m = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    b.detach_links("q1", amqp.WireError{condition: "amqp:link:detach-forced", description: "forced"})
+    until(os.clock, fn() -> Bool { b.locked("q1") == 0 })
+    // The link is gone, so it settles on $management by lock token,
+    // which the detach released.
+    r.recover(RecoveryKind.Link)
+    match r.complete_message(m) {
+      Err(e) => expect(e.code) == CODE_LOCK_LOST
+      Ok(_) => expect("ok") == "locklost"
+    }
+    // The receiver attaches again and gets the message back.
+    let again = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    expect(text(again)) == "m"
+    r.complete_message(again)?
+    until(os.clock, fn() -> Bool { b.locked("q1") == 0 })
+    expect(b.ready("q1").len()) == 0
+    match r.complete_message(again) {
+      Err(e) => expect(e.msg) == "the message was already settled"
+      Ok(_) => expect("ok") == "a second settle refused"
+    }
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "a lock that ran out is locklost and not retried" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1", amqptest.QueueOptions{lock_ms: 100})
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), fast())?
+    c.new_sender("q1")?.send_message(Message{body: b"slow"})?
+    let r = c.new_receiver_for_queue("q1")?
+    let m = r.receive_messages(1, ReceiveMessagesOptions{timeout_ms: 2000})?[0]
+    os.clock.sleep(200ms)
+    let before = c.links.get()
+    match r.renew_message_lock(m) {
+      Err(e) => {
+        expect(e.code) == CODE_LOCK_LOST
+        expect(e.recovery) == RecoveryKind.Fatal
+      }
+      Ok(_) => expect("ok") == "locklost"
+    }
+    // One management link pair (one link name), no retries.
+    expect(c.links.get() - before) == 1
+    // Settling on $management after the lock ran out is lock lost too.
+    r.recover(RecoveryKind.Link)
+    match r.complete_message(m) {
+      Err(e) => expect(e.code) == CODE_LOCK_LOST
+      Ok(_) => expect("ok") == "locklost"
+    }
+    c.close()?
+    s.cancel()
+  }
+}
+
+test "a closed client, sender or receiver fails with closed" {
+  let b = amqptest.new(os.clock)
+  b.queue("q1")
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), fast())?
+    let snd = c.new_sender("q1")?
+    snd.send_message(Message{body: b"x"})?
+    snd.close()?
+    expect(snd.send_message(Message{body: b"y"}).err().map(fn(e: ServiceBusErr) -> Code { e.code })) == Some(CODE_CLOSED)
+    c.close()?
+    expect(c.new_sender("q1").err().map(fn(e: ServiceBusErr) -> Code { e.code })) == Some(CODE_CLOSED)
     s.cancel()
   }
 }

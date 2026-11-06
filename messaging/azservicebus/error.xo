@@ -20,33 +20,51 @@ pub struct ServiceBusErr {
   /// The AMQP error condition (`com.microsoft:message-lock-lost`), when
   /// the service sent one.
   pub condition: Str = ""
+  /// What a retry would have to recover first; Fatal when retrying
+  /// cannot help.
+  pub recovery: RecoveryKind = RecoveryKind.Fatal
 }
 
 pub fn (e: ServiceBusErr) display() -> Str {
   "(${if e.code == "" { "unknown" } else { e.code }}): ${e.msg}"
 }
 
-/// The code of an AMQP condition, as Go's GetRecoveryKind and
-/// TransformError map them.
-fn code_of(condition: Str) -> Code {
+/// The code of an error, as Go's TransformError: lock lost, timeout,
+/// unauthorized and not found by condition, then connlost for anything
+/// a link or connection recovery would fix.
+fn code_for(condition: Str, recovery: RecoveryKind) -> Code {
   match condition {
-    "amqp:unauthorized-access" => CODE_UNAUTHORIZED_ACCESS
-    "amqp:not-found" | "com.microsoft:entity-disabled" => CODE_NOT_FOUND
     "com.microsoft:message-lock-lost" | "com.microsoft:session-lock-lost" => CODE_LOCK_LOST
-    "com.microsoft:timeout" | "com.microsoft:operation-timeout" => CODE_TIMEOUT
-    "amqp:connection:forced" | "amqp:connection:framing-error" | "amqp:link:detach-forced" => CODE_CONNECTION_LOST
-    _ => ""
+    "com.microsoft:timeout" => CODE_TIMEOUT
+    "amqp:unauthorized-access" => CODE_UNAUTHORIZED_ACCESS
+    "amqp:not-found" => CODE_NOT_FOUND
+    _ => match recovery {
+      RecoveryKind.Link | RecoveryKind.Conn => CODE_CONNECTION_LOST
+      RecoveryKind.None | RecoveryKind.Fatal => ""
+    }
   }
 }
 
+/// An error a peer sent: its condition's recovery, else a link one (the
+/// error came on a link, session or connection close; a dead connection
+/// then fails the new link and escalates).
 fn from_wire(w: amqp.WireError) -> ServiceBusErr {
-  ServiceBusErr{code: code_of(w.condition), msg: if w.description == "" { w.condition } else { "${w.condition}: ${w.description}" }, condition: w.condition}
+  let rk = recovery_of_condition(w.condition) ?? RecoveryKind.Link
+  ServiceBusErr{code: code_for(w.condition, rk), msg: if w.description == "" { w.condition } else { "${w.condition}: ${w.description}" }, condition: w.condition, recovery: rk}
 }
 
 fn from_amqp(e: amqp.AmqpErr) -> ServiceBusErr {
   match e {
     amqp.AmqpErr.Peer(w) => from_wire(w)
-    amqp.AmqpErr.Net(m) => ServiceBusErr{code: if m.contains("i/o timeout") { CODE_TIMEOUT } else { CODE_CONNECTION_LOST }, msg: m}
+    // Go: io.EOF and net errors reset the connection; a receive that
+    // timed out is not an error there (its context ends instead).
+    amqp.AmqpErr.Net(m) => ServiceBusErr{code: if m.contains("i/o timeout") { CODE_TIMEOUT } else { CODE_CONNECTION_LOST }, msg: m, recovery: RecoveryKind.Conn}
+    amqp.AmqpErr.Protocol(m) => ServiceBusErr{code: CODE_CONNECTION_LOST, msg: m, recovery: RecoveryKind.Conn}
     other => ServiceBusErr{msg: "${other:?}"}
   }
+}
+
+/// A client-side misuse or state that retrying cannot change.
+fn fatal(msg: Str, code: Code = "") -> ServiceBusErr {
+  ServiceBusErr{code: code, msg: msg, recovery: RecoveryKind.Fatal}
 }

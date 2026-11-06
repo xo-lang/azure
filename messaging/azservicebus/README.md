@@ -23,6 +23,16 @@ What it does:
 - Session receivers for a named session (`accept_session_for_queue`,
   `accept_session_for_subscription`) with their session state and lock
   renewal.
+- Retries and recovery as Go's: `ClientOptions.retry_options`
+  (`RetryOptions`: 3 retries, 4 s doubling with jitter, 120 s cap by
+  default). Each error carries its `RecoveryKind`: a busy server or a
+  timeout is retried as it is, a forced detach gets a new link (one
+  quick retry that does not count), a dropped connection gets a new
+  connection and new links, and not found, unauthorized and lock lost
+  are returned at once. Links attach lazily and again on the next
+  connection. A message settles on the link it came on while that link
+  is current, else on `$management` by its lock token; a settlement
+  that went through is refused a second time without a request.
 - Errors with Go's codes (`unauthorized`, `notfound`, `locklost`,
   `timeout`, `connlost`, `closed`) and the AMQP condition.
 
@@ -44,7 +54,7 @@ Not yet, with what each needs:
   receiver settle mode second does), so a lost lock shows on the next
   operation rather than in `complete_message`.
 - `properties_to_modify` on abandon and defer (needs annotations on
-  std/amqp's `modify`), the admin client, and retries and link recovery.
+  std/amqp's `modify`), and the admin client.
 
 Tests run against std/amqptest's in-process broker on the test world's
 network (`xo test .`).

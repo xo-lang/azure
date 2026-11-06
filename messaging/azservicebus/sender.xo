@@ -7,21 +7,77 @@ use std/uuid
 
 pub struct NewSenderOptions {}
 
+/// The sender's link and the connection it is on.
+struct SenderLink {
+  l: amqp.Sender
+  gen: Int
+}
+
 pub struct Sender {
   client: Client
   entity: Str
-  link: amqp.Sender
   name: Str
+  link: Mutex[SenderLink?]
+  closed: Atomic[Bool]
 }
 
-/// A sender to a queue or a topic. It attaches its link now (Go attaches
-/// on first send).
-pub fn (c: Client) new_sender(queue_or_topic: Str, options: NewSenderOptions = NewSenderOptions{}) -> Sender ! ServiceBusErr uses (net.dial, clock, rand) {
-  let conn = c.open()?
-  c.authorize(conn, queue_or_topic)?
-  let name = c.link_name("sender", queue_or_topic)
-  let l = conn.c.new_sender(conn.s, queue_or_topic, amqp.SenderOptions{name: name}) ?? e => return Err(from_amqp(e))
-  Ok(Sender{client: c, entity: queue_or_topic, link: l, name: name})
+/// A sender to a queue or a topic; its link attaches on first send, as
+/// Go's.
+pub fn (c: Client) new_sender(queue_or_topic: Str, options: NewSenderOptions = NewSenderOptions{}) -> Sender ! ServiceBusErr {
+  if c.closed.get() {
+    return Err(fatal("the client is closed", CODE_CLOSED))
+  }
+  Ok(Sender{client: c, entity: queue_or_topic, name: c.link_name("sender", queue_or_topic), link: Mutex[SenderLink?].new(None), closed: Atomic[Bool].new(false)})
+}
+
+/// The link, attached again when there is none or it is on a dropped
+/// connection.
+fn (s: Sender) get() -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand) {
+  if s.closed.get() {
+    return Err(fatal("the sender is closed", CODE_CLOSED))
+  }
+  let c = s.client
+  let entity = s.entity
+  let name = s.name
+  s.link.with(fn(var slot: SenderLink?) -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand) {
+    if let Some(x) = slot {
+      if x.gen == c.current_gen() {
+        return Ok(x)
+      }
+    }
+    let conn = c.open()?
+    c.authorize(conn, entity)?
+    let l = conn.c.new_sender(conn.s, entity, amqp.SenderOptions{name: "${name}-${c.links.add(1)}"}) ?? e => return Err(from_amqp(e))
+    let x = SenderLink{l: l, gen: conn.gen}
+    slot = Some(x)
+    Ok(x)
+  })
+}
+
+/// Recovery before a retry: a new link, or a new connection.
+fn (s: Sender) recover(k: RecoveryKind) uses (net.dial, clock) {
+  let old = s.link.with(fn(var slot: SenderLink?) -> SenderLink? {
+    let was = slot
+    if k == RecoveryKind.Link || k == RecoveryKind.Conn {
+      slot = None
+    }
+    was
+  })
+  if k == RecoveryKind.Conn {
+    s.client.reset(old.map(fn(x: SenderLink) -> Int { x.gen }) ?? 0)
+  }
+}
+
+/// Sends `m` on the link with retries.
+fn (s: Sender) send_amqp(m: amqp.Message) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.client.retry(s.client.opts.retry_options, fn(_: Int) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+    let x = s.get()?
+    let st = x.l.send(m) ?? e => return Err(from_amqp(e))
+    match outcome(st) {
+      Some(e) => Err(e)
+      None => Ok(())
+    }
+  }, fn(k: RecoveryKind) uses (net.dial, clock) { s.recover(k) })
 }
 
 /// The outcome of a send as an error, None when accepted.
@@ -29,19 +85,16 @@ fn outcome(s: amqp.DeliveryState?) -> ServiceBusErr? {
   match s {
     None | Some(amqp.DeliveryState.Accepted) => None
     Some(amqp.DeliveryState.Rejected(Some(w))) => Some(from_wire(w))
-    Some(other) => Some(ServiceBusErr{msg: "the message was not accepted: ${other:?}"})
+    Some(other) => Some(ServiceBusErr{msg: "the message was not accepted: ${other:?}", recovery: RecoveryKind.None})
   }
 }
 
 pub struct SendMessageOptions {}
 
-/// Sends one message and waits for the service to accept it.
-pub fn (s: Sender) send_message(message: Message, options: SendMessageOptions = SendMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock) {
-  let st = s.link.send(message.to_amqp()) ?? e => return Err(from_amqp(e))
-  if let Some(e) = outcome(st) {
-    return Err(e)
-  }
-  Ok(())
+/// Sends one message and waits for the service to accept it, retrying
+/// after a recoverable failure.
+pub fn (s: Sender) send_message(message: Message, options: SendMessageOptions = SendMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.send_amqp(message.to_amqp())
 }
 
 pub struct MessageBatchOptions {
@@ -93,13 +146,10 @@ pub struct SendMessageBatchOptions {}
 /// Sends the batch's messages. Go sends them in one transfer of message
 /// format 0x80013700; std/amqp's send has no message format yet, so each
 /// goes in its own transfer, in order, and the first refusal stops it.
-pub fn (s: Sender) send_message_batch(batch: MessageBatch, options: SendMessageBatchOptions = SendMessageBatchOptions{}) -> () ! ServiceBusErr uses (net.dial, clock) {
+pub fn (s: Sender) send_message_batch(batch: MessageBatch, options: SendMessageBatchOptions = SendMessageBatchOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
   for bs in batch.encoded {
     let m = amqp.decode_message(bs) ?? e => return Err(from_amqp(e))
-    let st = s.link.send(m) ?? e => return Err(from_amqp(e))
-    if let Some(e) = outcome(st) {
-      return Err(e)
-    }
+    s.send_amqp(m)?
   }
   Ok(())
 }
@@ -129,10 +179,7 @@ pub fn (s: Sender) schedule_messages(messages: List[Message], scheduled_enqueue_
     }
     entries.push(amqp.Value.Map(pairs: e))
   }
-  let mg = s.client.mgmt(s.entity, s.name)?
-  let r = mg.call(s.client.rand, "schedule-message", [("messages", amqp.Value.List(items: entries))], s.client.opts.timeout_ms)
-  mg.close()
-  let reply = r?
+  let reply = s.client.rpc(s.entity, s.name, "schedule-message", [("messages", amqp.Value.List(items: entries))])?
   Ok(items(field(reply.body, "sequence-numbers")).map(fn(v: amqp.Value) -> Int { val_int(v) ?? 0 }))
 }
 
@@ -140,15 +187,20 @@ pub struct CancelScheduledMessagesOptions {}
 
 /// Cancels scheduled messages by their sequence numbers.
 pub fn (s: Sender) cancel_scheduled_messages(sequence_numbers: List[Int], options: CancelScheduledMessagesOptions = CancelScheduledMessagesOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
-  let mg = s.client.mgmt(s.entity, s.name)?
-  let r = mg.call(s.client.rand, "cancel-scheduled-message", [("sequence-numbers", longs(sequence_numbers))], s.client.opts.timeout_ms)
-  mg.close()
-  r?
+  s.client.rpc(s.entity, s.name, "cancel-scheduled-message", [("sequence-numbers", longs(sequence_numbers))])?
   Ok(())
 }
 
-/// Detaches the sender's link.
+/// Detaches the sender's link; later sends fail with CODE_CLOSED.
 pub fn (s: Sender) close() -> () ! ServiceBusErr uses (net.dial, clock) {
-  s.link.close() ?? e => return Err(from_amqp(e))
+  s.closed.set(true)
+  let old = s.link.with(fn(var slot: SenderLink?) -> SenderLink? {
+    let was = slot
+    slot = None
+    was
+  })
+  if let Some(x) = old {
+    x.l.close() ?? e => return Err(from_amqp(e))
+  }
   Ok(())
 }

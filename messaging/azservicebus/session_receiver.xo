@@ -87,7 +87,7 @@ pub fn (r: SessionReceiver) get_session_state(options: GetSessionStateOptions = 
   match field(reply.body, "session-state") {
     Some(amqp.Value.Binary(bs)) => Ok(bs)
     Some(amqp.Value.Null) | None => Ok(b"")
-    Some(other) => Err(ServiceBusErr{msg: "session-state is not binary: ${other:?}"})
+    Some(other) => Err(fatal("session-state is not binary: ${other:?}"))
   }
 }
 
@@ -106,17 +106,13 @@ pub fn (r: SessionReceiver) renew_session_lock(options: RenewSessionLockOptions 
   let reply = r.session_call("renew-session-lock", [])?
   match field(reply.body, "expiration").and_then(val_time) {
     Some(t) => r.lock_expiry.set(t.unix_millis())
-    None => return Err(ServiceBusErr{msg: "the renew-session-lock reply has no expiration"})
+    None => return Err(fatal("the renew-session-lock reply has no expiration"))
   }
   Ok(())
 }
 
 fn (r: SessionReceiver) session_call(op: Str, extra: List[(Str, amqp.Value)]) -> Reply ! ServiceBusErr uses (net.dial, clock, rand) {
-  let c = r.inner.client
-  let mg = c.mgmt(r.inner.entity, r.inner.name)?
-  let res = mg.call(c.rand, op, [("session-id", amqp.Value.Str(v: r.session))] + extra, c.opts.timeout_ms)
-  mg.close()
-  res
+  r.inner.client.rpc(r.inner.entity, r.inner.name, op, [("session-id", amqp.Value.Str(v: r.session))] + extra)
 }
 
 pub fn (r: SessionReceiver) close() -> () ! ServiceBusErr uses (net.dial, clock) {
