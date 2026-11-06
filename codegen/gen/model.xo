@@ -24,6 +24,16 @@ pub struct StrEnum {
   pub name: Str
   pub values: List[(Str, Str, Str)]
   pub doc: Str = ""
+  /// The value type: Str, or Int for an integer enum (Go's int32).
+  pub base: Str = "Str"
+}
+
+/// A number's name, as autorest.go names an integer enum's values
+/// (`FirewallPolicyIDPSSignatureDirectionFive`).
+fn number_name(v: Str) -> Str {
+  let names = ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen", "Twenty"]
+  let n = Int.parse(v) ?? return v
+  if n >= 0 && n < names.len() { names[n] } else { v }
 }
 
 pub struct Param {
@@ -61,11 +71,25 @@ pub struct Op {
   pub doc: Str = ""
 }
 
+/// A polymorphic type (a definition with a `discriminator`): Go's
+/// `<Base>Classification` interface, here an enum of its subtypes and,
+/// for any other discriminator value, the base.
+pub struct Poly {
+  pub name: Str
+  pub base: Str
+  /// The discriminator's wire key (`ruleType`).
+  pub tag: Str
+  /// Each subtype and its discriminator value.
+  pub variants: List[(Str, Str)]
+  pub doc: Str = ""
+}
+
 pub struct Api {
   pub api_version: Str
   pub ops: List[Op]
   pub models: List[Model]
   pub enums: List[StrEnum]
+  pub polys: List[Poly] = []
   pub report: List[Str]
 }
 
@@ -93,6 +117,8 @@ pub struct Custom {
   /// enum with one value is that string (a required parameter, a
   /// constant), not a type.
   pub seal_single_value_enums: Bool = false
+  /// A data-plane module: operations without a group stay on its Client.
+  pub data_plane: Bool = false
   /// Emit only the types operations reach (TypeSpec's Go emitter), not
   /// every definition (autorest.go).
   pub reachable_only: Bool = false
@@ -103,6 +129,7 @@ pub struct Builder {
   files: Map[Str, json.Value]
   models: List[Model] = []
   enums: List[StrEnum] = []
+  polys: List[Poly] = []
   known: Map[Str, Str] = {}
   /// The package's api-version: the first input file with operations.
   api_version: Str = ""
@@ -232,11 +259,64 @@ pub fn (var b: Builder) type_of(file: Str, v: json.Value, hint: Str) -> Str {
   if str_of(v.get("$ref")) != "" {
     let (f, p, x) = b.deref(file, v)
     if p.starts_with("/definitions/") {
-      return b.named(f, spec.last(p), x)
+      let t = b.named(f, spec.last(p), x)
+      // A struct with a discriminator stands for its subtypes too.
+      if str_of(x.get("discriminator")) != "" && b.known.get(t) == Some(t) {
+        return b.poly(f, spec.last(p), x, t)
+      }
+      return t
     }
     return b.type_of(f, x, hint)
   }
   b.inline(file, v, hint)
+}
+
+/// Whether definition `v` (in `file`) has the definition `root_def` of
+/// `root_file` among its allOf ancestors.
+fn (b: Builder) descends(file: Str, v: json.Value, root_file: Str, root_def: Str, depth: Int) -> Bool {
+  if depth > 10 {
+    return false
+  }
+  for parent in list_of(v.get("allOf")) {
+    let r = str_of(parent.get("$ref"))
+    if r == "" {
+      continue
+    }
+    let (pf, pp, px) = b.deref(file, parent)
+    if pf == root_file && pp == "/definitions/${root_def}" {
+      return true
+    }
+    if b.descends(pf, px, root_file, root_def, depth + 1) {
+      return true
+    }
+  }
+  false
+}
+
+/// The polymorphic type of the definition `def` (type `base`): its
+/// subtypes are the definitions of every file that descend from it.
+fn (var b: Builder) poly(file: Str, def: Str, v: json.Value, base: Str) -> Str {
+  let name = "${base}Classification"
+  if b.known.contains(name) {
+    return name
+  }
+  b.known[name] = name
+  var variants: List[(Str, Str)] = []
+  for (f, doc) in b.files {
+    for (d, x) in fields_of(doc.get("definitions")) {
+      if (f == file && d == def) || !b.descends(f, x, file, def, 0) {
+        continue
+      }
+      let t = b.named(f, d, x)
+      if variants.any(fn(e: (Str, Str)) -> Bool { e.0 == t }) {
+        continue
+      }
+      let value = str_of(x.get("x-ms-discriminator-value"))
+      variants.push((t, if value != "" { value } else { d }))
+    }
+  }
+  b.polys.push(Poly{name: name, base: base, tag: str_of(v.get("discriminator")), variants: variants, doc: "${name}: a ${base} by its ${str_of(v.get("discriminator"))}, Go's ${name} interface."})
+  name
 }
 
 /// A schema's structure without its documentation, keys sorted and
@@ -295,6 +375,12 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   if b.sealed(v) {
     return "Str"
   }
+  if v.get("x-ms-enum").is_some() && str_of(v.get("type")) == "integer" {
+    let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
+    if name != "" {
+      return b.str_enum(b.enum_name(name), v, base: "Int")
+    }
+  }
   if v.get("x-ms-enum").is_some() && str_of(v.get("type")) == "string" {
     let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
     if name != "" {
@@ -331,7 +417,7 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   }
 }
 
-fn (var b: Builder) str_enum(name: Str, v: json.Value) -> Str {
+fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str {
   if b.known.contains(name) {
     return name
   }
@@ -354,10 +440,10 @@ fn (var b: Builder) str_enum(name: Str, v: json.Value) -> Str {
         json.Value.Str(s) => s
         other => other.encode()
       }
-      vals.push((screaming(value), value, ""))
+      vals.push((screaming(if base == "Int" { number_name(value) } else { value }), value, ""))
     }
   }
-  b.enums.push(StrEnum{name: name, values: vals, doc: doc_of(v)})
+  b.enums.push(StrEnum{name: name, values: vals, doc: doc_of(v), base: base})
   name
 }
 
@@ -379,6 +465,12 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value, inline: Bool = fal
   if b.sealed(v) {
     b.ids[id] = "Str"
     return "Str"
+  }
+  // An object with no properties, parent, or map values is any JSON, as
+  // modelerfour reads it (Go's `any`): NspAssociationReconcile.
+  if !inline && list_of(v.get("enum")).is_empty() && fields_of(v.get("properties")).is_empty() && v.get("allOf").is_none() && v.get("additionalProperties").is_none() && v.get("discriminator").is_none() && (str_of(v.get("type")) == "object" || str_of(v.get("type")) == "") {
+    b.ids[id] = "json.Value"
+    return "json.Value"
   }
   if let Some(r) = b.custom.replace_types.get(name) {
     b.ids[id] = r
@@ -438,9 +530,6 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
       }
     }
   }
-  if v.get("discriminator").is_some() || v.get("x-ms-discriminator-value").is_some() {
-    b.report.push("discriminator on ${def}: generated as its base type only")
-  }
   // mark before the fields, for recursive types
   b.known[name] = name
   if !b.firsts.contains(name) {
@@ -493,7 +582,11 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   let (f, _, p) = b.deref(file, raw)
   let wire = str_of(p.get("name"))
   let loc = str_of(p.get("in"))
-  let typ = if loc == "body" {
+  // The api-version is a constant: its enum (some files have one) is
+  // not a type, as in Go.
+  let typ = if wire == "api-version" {
+    "Str"
+  } else if loc == "body" {
     b.type_of(f, p.get("schema") ?? json.Value.Object([]), pascal(wire))
   } else {
     b.inline(f, p, pascal(wire))
@@ -526,6 +619,10 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
 pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
   var ops: List[Op] = []
   var version = ""
+  // The default group (operations without one) is named after the
+  // package's title, the first input file's (NetworkManagementClient is
+  // ManagementClient).
+  let title = str_of(b.files.get(inputs.get(0) ?? "").and_then(fn(d: json.Value) -> json.Value? { d.get("info") }).and_then(fn(i: json.Value) -> json.Value? { i.get("title") })).trim_suffix("Client")
   for file in inputs {
     let doc = b.files.get(file) ?? json.Value.Null
     if version == "" && (fields_of(doc.get("paths")).len() + fields_of(doc.get("x-ms-paths")).len()) > 0 {
@@ -547,7 +644,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           let name = b.custom.ops.get(id.to_lower()) ?? raw_name
           // Go drops the package name from a group too (StorageAccounts
           // is armstorage's Accounts), except a group named as the package.
-          let group = b.unstutter(raw_group)
+          // An operation without a group is in the default one, named after
+          // the file's title (NetworkManagementClient is ManagementClient);
+          // a data-plane module keeps them on its Client.
+          // Go's group names are case-folded (configurationPolicyGroups and
+          // ConfigurationPolicyGroups are one client).
+          let group = part(b.unstutter(if raw_group == "" && !b.custom.data_plane { title } else { raw_group }))
           var params: List[Param] = []
           for raw in shared + list_of(o.get("parameters")) {
             let p = b.param(file, raw)
@@ -612,7 +714,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
       b.named(file, def, v)
     }
   }
-  Api{api_version: version, ops: ops, models: b.models, enums: b.enums, report: b.report}
+  Api{api_version: version, ops: ops, models: b.models, enums: b.enums, polys: b.polys, report: b.report}
 }
 
 /// The `$ref`ed files of `doc` (not examples), relative to `file`.

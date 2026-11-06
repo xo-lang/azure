@@ -39,7 +39,7 @@ fn header(p: Package) -> Str {
 }
 
 fn is_model(api: Api, t: Str) -> Bool {
-  api.models.any(fn(m: Model) -> Bool { m.name == t })
+  api.models.any(fn(m: Model) -> Bool { m.name == t }) || api.polys.any(fn(p: Poly) -> Bool { p.name == t })
 }
 
 fn is_enum(api: Api, t: Str) -> Bool {
@@ -51,7 +51,7 @@ fn to_text(api: Api, t: Str, v: Str) -> Str {
   if t == "Str" {
     v
   } else if is_enum(api, t) {
-    "${v}.0"
+    if api.enums.any(fn(e: StrEnum) -> Bool { e.name == t && e.base == "Int" }) { "\"\${${v}.0}\"" } else { "${v}.0" }
   } else if t == "Int" || t == "Float" || t == "Bool" {
     "\"\${${v}}\""
   } else if t == "azcore.DateTime" {
@@ -76,11 +76,33 @@ pub fn emit_models(p: Package, api: Api) -> File {
   s = ""
   s = s + "pub const MODULE: Str = \"${p.name}\"\npub const VERSION: Str = \"${p.version}\"\n/// The REST API version these operations are generated for.\npub const API_VERSION: Str = \"${esc(api.api_version)}\"\n"
   for e in api.enums {
-    s = s + "\n" + doc("", e.doc) + "pub type ${e.name} struct(Str)\n"
+    s = s + "\n" + doc("", e.doc) + "pub type ${e.name} struct(${e.base})\n"
     for (n, v, d) in e.values {
-      s = s + doc("", d) + "pub const ${screaming(e.name)}_${n}: ${e.name} = ${e.name}(\"${esc(v)}\")\n"
+      let lit = if e.base == "Int" { v } else { "\"${esc(v)}\"" }
+      s = s + doc("", d) + "pub const ${screaming(e.name)}_${n}: ${e.name} = ${e.name}(${lit})\n"
     }
     s = s + "\n/// The values of ${e.name} this version knows; the service may send others.\npub fn possible_${snake(e.name)}_values() -> List[${e.name}] {\n  [${e.values.map(fn(v: (Str, Str, Str)) -> Str { "${screaming(e.name)}_${v.0}" }).join(", ")}]\n}\n"
+  }
+  for p in api.polys {
+    let sn = snake(p.name)
+    s = s + "\n" + doc("", p.doc) + "pub enum ${p.name} {\n"
+    for (t, v) in p.variants {
+      s = s + "  /// ${p.tag} \"${esc(v)}\"\n  ${t}(from ${t})\n"
+    }
+    s = s + "  /// Any other ${p.tag}, as the base type.\n  ${p.base}(from ${p.base})\n} derive Json(via: json.Value, to: ${sn}_json, from: parse_${sn})\n"
+    s = s + "\nfn ${sn}_json(c: ${p.name}) -> json.Value {\n  match c {\n"
+    for (t, v) in p.variants {
+      s = s + "    ${p.name}.${t}(x) => with_discriminator(json.to_value(x), \"${esc(p.tag)}\", \"${esc(v)}\")\n"
+    }
+    s = s + "    ${p.name}.${p.base}(x) => json.to_value(x)\n  }\n}\n"
+    s = s + "\nfn parse_${sn}(v: json.Value) -> ${p.name} ! json.DecodeErr {\n  match v.get(\"${esc(p.tag)}\") {\n"
+    for (t, v) in p.variants {
+      s = s + "    Some(json.Value.Str(\"${esc(v)}\")) => Ok(${p.name}.${t}(json.from_value[${t}](v)?))\n"
+    }
+    s = s + "    _ => Ok(${p.name}.${p.base}(json.from_value[${p.base}](v)?))\n  }\n}\n"
+  }
+  if !api.polys.is_empty() {
+    s = s + "\n/// `v` with its discriminator `key` set to `value`, as Go's\n/// MarshalJSON writes a subtype's.\nfn with_discriminator(v: json.Value, key: Str, value: Str) -> json.Value {\n  match v {\n    json.Value.Object(fs) => json.Value.Object(fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != key }) + [(key, json.Value.Str(value))])\n    other => other\n  }\n}\n"
   }
   for m in api.models {
     s = s + "\n" + doc("", m.doc) + "pub struct ${m.name} {\n"

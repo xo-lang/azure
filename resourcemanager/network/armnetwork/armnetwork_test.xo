@@ -1,0 +1,137 @@
+// The generated armnetwork clients against a fake Resource Manager
+// (invented hosts, documentation addresses): polymorphic rule
+// collections both ways, the default group's client, a long-running
+// create, the readme.go.md renames, and integer enums.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const RG: Str = "${EP}/subscriptions/${SUB}/resourceGroups/rg1/providers/Microsoft.Network"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+fn opts() -> arm.ClientOptions {
+  arm.ClientOptions{endpoint: EP}
+}
+
+const GROUP: Str = "{\"name\":\"g1\",\"properties\":{\"priority\":100,\"ruleCollections\":[{\"ruleCollectionType\":\"FirewallPolicyFilterRuleCollection\",\"name\":\"c1\",\"priority\":110,\"action\":{\"type\":\"Allow\"},\"rules\":[{\"ruleType\":\"ApplicationRule\",\"name\":\"web\",\"targetFqdns\":[\"www.example.test\"],\"protocols\":[{\"protocolType\":\"Https\",\"port\":443}]},{\"ruleType\":\"NetworkRule\",\"name\":\"dns\",\"destinationPorts\":[\"53\"]},{\"ruleType\":\"FutureRule\",\"name\":\"later\"}]},{\"ruleCollectionType\":\"FutureCollection\",\"name\":\"c2\",\"priority\":120}]}}"
+
+test "a rule collection group decodes each rule by its ruleType, an unknown one as the base" {
+  capture(os.net, "GET ${RG}/firewallPolicies/p1/ruleCollectionGroups/g1", 200, GROUP)
+  let c = new_firewall_policy_rule_collection_groups_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let g = c.get("rg1", "p1", "g1")?.firewall_policy_rule_collection_group
+  let cols = g.properties.and_then(fn(p: FirewallPolicyRuleCollectionGroupProperties) -> List[FirewallPolicyRuleCollectionClassification]? { p.rule_collections }) ?? []
+  expect(cols.len()) == 2
+  let rules = match cols[0] {
+    FirewallPolicyRuleCollectionClassification.FirewallPolicyFilterRuleCollection(f) => {
+      expect(f.name) == Some("c1")
+      f.rules ?? []
+    }
+    other => {
+      expect("${other:?}") == "a filter rule collection"
+      []
+    }
+  }
+  expect(rules.len()) == 3
+  match rules[0] {
+    FirewallPolicyRuleClassification.ApplicationRule(a) => {
+      expect(a.target_fqdns) == Some(["www.example.test"])
+      expect((a.protocols ?? [])[0].protocol_type) == Some(FIREWALL_POLICY_RULE_APPLICATION_PROTOCOL_TYPE_HTTPS)
+    }
+    other => expect("${other:?}") == "an ApplicationRule"
+  }
+  match rules[1] {
+    FirewallPolicyRuleClassification.Rule(n) => expect(n.destination_ports) == Some(["53"])
+    other => expect("${other:?}") == "a network Rule"
+  }
+  match rules[2] {
+    FirewallPolicyRuleClassification.FirewallPolicyRule(b) => {
+      expect(b.name) == Some("later")
+      expect(b.rule_type) == Some(FirewallPolicyRuleType("FutureRule"))
+    }
+    other => expect("${other:?}") == "the base FirewallPolicyRule"
+  }
+  match cols[1] {
+    FirewallPolicyRuleCollectionClassification.FirewallPolicyRuleCollection(b) => expect(b.priority) == Some(120)
+    other => expect("${other:?}") == "the base rule collection"
+  }
+}
+
+test "begin_create_or_update writes each subtype's discriminator without being told" {
+  let put = capture(os.net, "PUT ${RG}/firewallPolicies/p1/ruleCollectionGroups/g1", 200, GROUP)
+  let c = new_firewall_policy_rule_collection_groups_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let rule = FirewallPolicyRuleClassification.ApplicationRule(ApplicationRule{name: Some("web"), target_fqdns: Some(["www.example.test"])})
+  let col = FirewallPolicyRuleCollectionClassification.FirewallPolicyFilterRuleCollection(FirewallPolicyFilterRuleCollection{name: Some("c1"), priority: Some(110), rules: Some([rule])})
+  var p = c.begin_create_or_update("rg1", "p1", "g1", FirewallPolicyRuleCollectionGroup{properties: Some(FirewallPolicyRuleCollectionGroupProperties{priority: Some(100), rule_collections: Some([col])})})?
+  p.poll_until_done(os.clock, frequency: 1s)?
+  let sent = json.parse_value(all(put)[0].body.to_str_lossy())?
+  let c0 = match sent.get("properties").and_then(fn(v: json.Value) -> json.Value? { v.get("ruleCollections") }) {
+    Some(json.Value.List(xs)) => xs[0]
+    _ => json.Value.Null
+  }
+  expect(c0.get("ruleCollectionType")) == Some(json.Value.Str("FirewallPolicyFilterRuleCollection"))
+  let r0 = match c0.get("rules") {
+    Some(json.Value.List(xs)) => xs[0]
+    _ => json.Value.Null
+  }
+  expect(r0.get("ruleType")) == Some(json.Value.Str("ApplicationRule"))
+  expect(r0.get("name")) == Some(json.Value.Str("web"))
+}
+
+test "operations without a group are on ManagementClient, as Go names it" {
+  let seen = capture(os.net, "GET ${EP}/subscriptions/${SUB}/providers/Microsoft.Network/locations/westus/CheckDnsNameAvailability", 200, "{\"available\":true}")
+  let c = new_management_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  expect(c.check_dns_name_availability("westus", "app1")?.dns_name_availability_result.available) == Some(true)
+  expect(all(seen)[0].url.query.get("domainNameLabel")) == Some("app1")
+}
+
+test "a virtual network is created through Azure-AsyncOperation" {
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.Network/locations/westus/operations/op1"
+  let vnet = "{\"name\":\"vn1\",\"location\":\"westus\",\"properties\":{\"addressSpace\":{\"addressPrefixes\":[\"192.0.2.0/24\"]},\"provisioningState\":\"Succeeded\"}}"
+  let put = capture(os.net, "PUT ${RG}/virtualNetworks/vn1", 201, vnet.replace("Succeeded", "Updating"), [("Azure-AsyncOperation", op), ("Retry-After", "0")])
+  capture(os.net, "GET ${op}", 200, "{\"status\":\"Succeeded\"}")
+  capture(os.net, "GET ${RG}/virtualNetworks/vn1", 200, vnet)
+  let c = new_virtual_networks_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  var p = c.begin_create_or_update("rg1", "vn1", VirtualNetwork{location: Some("westus"), properties: Some(VirtualNetworkPropertiesFormat{address_space: Some(AddressSpace{address_prefixes: Some(["192.0.2.0/24"])})})})?
+  let r = p.poll_until_done(os.clock, frequency: 1s)?
+  expect(r.virtual_network.properties.and_then(fn(v: VirtualNetworkPropertiesFormat) -> ProvisioningState? { v.provisioning_state })) == Some(PROVISIONING_STATE_SUCCEEDED)
+  expect(all(put)[0].url.query.get("api-version")) == Some(API_VERSION)
+}
+
+test "readme.go.md's renames: ExplicitProxySettings, and explicitProxySettings on the wire" {
+  let f = json.decode_str[FirewallPolicyPropertiesFormat]("{\"explicitProxySettings\":{\"enableExplicitProxy\":true}}")?
+  expect(f.explicit_proxy_settings.and_then(fn(e: ExplicitProxySettings) -> Bool? { e.enable_explicit_proxy })) == Some(true)
+}
+
+test "an integer enum travels as a number" {
+  let s = json.decode_str[SingleQueryResult]("{\"signatureId\":2024897,\"severity\":1,\"direction\":2}")?
+  expect(s.severity) == Some(FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE)
+  expect(s.direction) == Some(FIREWALL_POLICY_IDPS_SIGNATURE_DIRECTION_TWO)
+  expect(json.encode_str(SingleQueryResult{severity: Some(FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_THREE)})) == "{\"severity\":3}"
+}

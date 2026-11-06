@@ -23,9 +23,12 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   generated `sdk/resourcemanager` modules (autorest.go's naming:
   initialisms, the package name dropped from type names, `Client` for
   the package's own group), so the Xo modules match them.
+- github.com/Azure/autorest.go: the acronym list of
+  `packages/naming.go/src/mappings.ts` (CommonAcronyms), ported to
+  `codegen/gen/names.xo` so generated names are cased as Go's.
 - github.com/Azure/azure-rest-api-specs: the service specifications
   the generator reads (decision 0002), at the commit in
-  `codegen/specs.lock`. The generated modules under `resourcemanager/`
+  `codegen/specs.lock` or a module's own row in `codegen/services.toml`. The generated modules under `resourcemanager/`
   carry their descriptions as documentation comments.
 
 The MIT License of those works:

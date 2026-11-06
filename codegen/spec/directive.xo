@@ -1,7 +1,8 @@
 // The directives of a readme.go.md (autorest's swagger-document
 // transforms) that are plain assignments: `where: $.definitions.X` (or
 // `$.definitions["X"]`) with `transform: $['a']['b'] = 'v'` statements,
-// or `set:` on such a path. They rename enums and fields for Go
+// or `set:` on such a path, and autorest's `rename-model` and
+// `where-model` + `rename-property`. They rename types and fields for Go
 // (decision 0002, amendment 2). Any other directive is reported, not
 // applied.
 
@@ -19,8 +20,18 @@ pub struct Assign {
   pub value: json.Value
 }
 
+/// `rename-model`, or with a `model`, `where-model` + `rename-property`
+/// (which renames the property's wire key too, as Go's generated
+/// serializers show).
+pub struct Rename {
+  pub model: Str = ""
+  pub from: Str
+  pub to: Str
+}
+
 pub struct Directives {
   pub assigns: List[Assign] = []
+  pub renames: List[Rename] = []
   /// Directives not applied, as their `where` text.
   pub skipped: List[Str] = []
 }
@@ -28,6 +39,18 @@ pub struct Directives {
 /// The Go directives in `readme_go`: every yaml block without a
 /// condition or whose condition names `$(go)`.
 pub fn go_directives(readme_go: Str) -> Directives ! Str {
+  directives(readme_go, "", true)
+}
+
+/// The directives of readme.md for `tag`: every yaml block without a
+/// condition or with `$(tag) == '<tag>'` (Network's renames of the
+/// common types). Those it cannot apply (suppressions, other languages'
+/// transforms) are not reported.
+pub fn tag_directives(readme: Str, tag: Str) -> Directives ! Str {
+  directives(readme, tag, false)
+}
+
+fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
   let where_re = regexp.compile("^\\$\\.definitions(?:\\.([A-Za-z0-9_]+)|\\[['\"]([^'\"]+)['\"]\\])$") ?? e => return Err(e.display())
   let stmt = regexp.compile("\\$((?:\\[['\"][^'\"]+['\"]\\])+)\\s*=\\s*(?:'([^']*)'|\"([^\"]*)\"|(true|false))") ?? e => return Err(e.display())
   let key = regexp.compile("\\[['\"]([^'\"]+)['\"]\\]") ?? e => return Err(e.display())
@@ -63,6 +86,25 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
             _ => ""
           }
           var n = 0
+          let str_at = fn(x: json.Value?, k: Str) -> Str {
+            match x.and_then(fn(o: json.Value) -> json.Value? { o.get(k) }) {
+              Some(json.Value.Str(v)) => v
+              _ => ""
+            }
+          }
+          if let Some(rm) = d.get("rename-model") {
+            if str_at(Some(rm), "from") != "" && str_at(Some(rm), "to") != "" {
+              out.renames.push(Rename{from: str_at(Some(rm), "from"), to: str_at(Some(rm), "to")})
+              n += 1
+            }
+          }
+          let wm = str_at(Some(d), "where-model")
+          if let Some(rp) = d.get("rename-property") {
+            if wm != "" && str_at(Some(rp), "from") != "" && str_at(Some(rp), "to") != "" {
+              out.renames.push(Rename{model: wm, from: str_at(Some(rp), "from"), to: str_at(Some(rp), "to")})
+              n += 1
+            }
+          }
           if def != "" && tr != "" {
             for whole in stmt.find_all(tr) {
               let m = stmt.captures(whole) ?? continue
@@ -75,8 +117,8 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
               n += 1
             }
           }
-          if n == 0 {
-            out.skipped.push(if w != "" { w } else { "a directive without where" })
+          if n == 0 && go {
+            out.skipped.push(if w != "" { w } else if wm != "" { "where-model: ${wm}" } else { "a directive without where" })
           }
         }
         block = ""
@@ -84,7 +126,8 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
         // A block applies to Go when it has no condition or names $(go).
         let cond = t[3..t.len()].trim().trim_prefix("yaml").trim()
         // ...and is not for track 1 (`$(go) && !$(track2)`).
-        inside = t[3..t.len()].trim().starts_with("yaml") && (cond == "" || cond.contains("$(go)")) && !cond.contains("!$(track2)")
+        let for_tag = tag != "" && (cond == "$(tag) == '${tag}'" || cond == "$(tag) == \"${tag}\"")
+        inside = t[3..t.len()].trim().starts_with("yaml") && (cond == "" || (go && cond.contains("$(go)")) || for_tag) && !cond.contains("!$(track2)")
       }
       continue
     }
@@ -134,6 +177,56 @@ pub fn apply(doc: json.Value, file: Str, assigns: List[Assign]) -> (json.Value, 
     if d.get("definitions").and_then(fn(x: json.Value) -> json.Value? { x.get(a.definition) }).is_some() {
       d = set_at(d, ["definitions", a.definition] + a.keys, a.value)
       n += 1
+    }
+  }
+  (d, n)
+}
+
+/// A key of an object renamed, its place kept.
+fn rename_key(v: json.Value, from: Str, to: Str) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { if f.0 == from { (to, f.1) } else { f } }))
+    other => other
+  }
+}
+
+/// Every `$ref` to definition `from` (in any file) pointed at `to`.
+fn rewrite_refs(v: json.Value, from: Str, to: Str) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) {
+      match f {
+        ("$ref", json.Value.Str(r)) => if r.ends_with("#/definitions/${from}") { ("$ref", json.Value.Str("${r.trim_suffix(from)}${to}")) } else { f }
+        (k, x) => (k, rewrite_refs(x, from, to))
+      }
+    }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { rewrite_refs(x, from, to) }))
+    other => other
+  }
+}
+
+/// `doc` with the renames applied, and how many changed it.
+pub fn apply_renames(doc: json.Value, renames: List[Rename]) -> (json.Value, Int) {
+  var d = doc
+  var n = 0
+  for r in renames {
+    let defs = d.get("definitions") ?? json.Value.Object([])
+    if r.model == "" {
+      if defs.get(r.from).is_some() {
+        d = set_at(d, ["definitions"], rename_key(defs, r.from, r.to))
+        n += 1
+      }
+      d = rewrite_refs(d, r.from, r.to)
+    } else if let Some(m) = defs.get(r.model) {
+      if let Some(props) = m.get("properties") {
+        if props.get(r.from).is_some() {
+          var m2 = set_at(m, ["properties"], rename_key(props, r.from, r.to))
+          if let Some(json.Value.List(req)) = m.get("required") {
+            m2 = set_at(m2, ["required"], json.Value.List(req.map(fn(x: json.Value) -> json.Value { if x == json.Value.Str(r.from) { json.Value.Str(r.to) } else { x } })))
+          }
+          d = set_at(d, ["definitions", r.model], m2)
+          n += 1
+        }
+      }
     }
   }
   (d, n)

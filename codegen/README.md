@@ -9,10 +9,35 @@ every module and fails on any difference.
 ## Go's names, as autorest.go and TypeSpec's Go emitter make them
 
 Each rule below was found by diffing a generated module's names with
-Go's (armresources v1.2.0, armstorage v1.8.1, azsecrets v1.4.0: every
-method, model, enum, options and response type equal).
+Go's (armresources v1.2.0, armstorage v1.8.1, armcompute v6.4.0,
+armnetwork v8.0.0, azsecrets v1.4.0: every method, model, enum,
+interface, options and response type equal, except armnetwork's
+`Error`, which is `ErrorModel` by the last rule).
 
-- Initialisms in capitals, plurals too: `ByID`, `SKUName`, `SKUs`.
+- Acronyms in capitals as autorest.go's CommonAcronyms list writes them
+  (`ByID`, `SKUs`, `VPN`, `SSL`, `AAD`, `IPSec`, `IPv6`), per word.
+- modelerfour's word splitting for type names: a letter after digits
+  starts a word (`VirtualHubRouteTableV2s` is `...V2S`, `P2sVpn` is
+  `P2SVPN`), and a word repeated back to back is said once
+  (`RoleInstanceInstanceView` is `RoleInstanceView`).
+- Operations without a group are on the package's default group, named
+  after the first input file's title (`NetworkManagementClient` is
+  `ManagementClient`); a data-plane module keeps them on `Client`.
+  Group names are case-folded (`configurationPolicyGroups` and
+  `ConfigurationPolicyGroups` are one client).
+- A definition-level `x-ms-client-name` renames the type; on an inline
+  schema it only names the property.
+- A definition with a `discriminator` is Go's `<Base>Classification`
+  interface wherever it is referenced: an enum with a variant per
+  subtype (every definition that descends from it, by its
+  `x-ms-discriminator-value`) and the base for any other value, with
+  `derive Json(via: json.Value)`; encoding writes the subtype's value.
+- An integer x-ms-enum is a newtype of Int whose constants are named in
+  words (`FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE`), as Go's int32.
+- An object definition with no properties, parent or map values is
+  `json.Value` (Go's `any`).
+- Each operation's api-version is its own file's (`API_VERSION` when it
+  is the package's); an api-version enum is not a type.
 - The package name dropped from the front of model and group names
   (`ResourcesMoveInfo` is `MoveInfo`, `StorageAccounts` is `Accounts`),
   but not from x-ms-enum names (`StorageAccountExpand`), and `Client`
@@ -24,13 +49,19 @@ method, model, enum, options and response type equal).
   `x-ms-external` definitions are not; autorest modules emit every
   definition of their input files, TypeSpec ones only what operations
   reach (`custom/<module>.toml: reachable_only`).
-- `seal_single_value_enums` (a row's autorest.md
-  `seal-single-value-enum-by-default`): an enum of one value that is
-  not `modelAsString: true` is a plain string, and a required parameter
+- An enum of one value with `modelAsString: false` is a plain string;
+  `seal_single_value_enums` (a row's autorest.md
+  `seal-single-value-enum-by-default`) adds those that leave it unset, and a required parameter
   of that kind is a constant (`blobServices/default`).
 - readme.go.md directives that assign values under `$.definitions.X`
-  are applied (armstorage's `CorsRuleAllowedMethodsItem`); others are
-  printed as not applied.
+  are applied (armstorage's `CorsRuleAllowedMethodsItem`), scoped by
+  `from:`, and so are `rename-model` and `where-model` +
+  `rename-property` (which renames the wire key too); others are printed
+  as not applied. readme.md's directives in blocks without a condition
+  or for the row's tag apply first (armnetwork's
+  `SecurityPerimeterResource`), unreported when they cannot.
+- `custom/<module>.toml: models` gives modelerfour's path-hashed names
+  for inline schemas (`Components1Jq1T4I...`).
 - TypeSpec modules take Go's `@@clientName`/`@clientName` renames from
   the .tsp files, and `custom/<module>.toml` mirrors Go's own
   post-generation transforms.

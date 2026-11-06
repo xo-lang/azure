@@ -39,6 +39,9 @@ struct CustomFile {
   pub reachable_only: Bool = false
   pub field_types: Map[Str, Str] = {}
   pub replace_types: Map[Str, Str] = {}
+  /// Type names Go's modelerfour gives an inline schema from its JSON
+  /// path (Components1Jq1T4I...), keyed by the name this generator gives.
+  pub models: Map[Str, Str] = {}
   pub drop_params: List[Str] = []
   pub allow_empty: List[Str] = []
   /// Other modules of this repository the hand written files use.
@@ -66,7 +69,7 @@ fn main(os: Os) -> () ! Error {
   let name = dir.split("/").last() ?? dir
   let custom_path = "codegen/custom/${name}.toml"
   let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
-  var custom = gen.Custom{field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only, seal_single_value_enums: svc.seal_single_value_enums}
+  var custom = gen.Custom{models: cf.models, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only, seal_single_value_enums: svc.seal_single_value_enums, data_plane: cf.data_plane}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -106,9 +109,14 @@ fn main(os: Os) -> () ! Error {
     let go_md = "${base}/${svc.spec}/readme.go.md"
     if os.fs.exists(go_md)? {
       let ds = spec.go_directives(os.fs.read_text(go_md)?)?
+      // readme.md's own for the tag first (every language's), then Go's.
+      let ts = spec.tag_directives(os.fs.read_text("${base}/${svc.spec}/readme.md")?, svc.readme_tag)?
       for (f, doc) in files {
-        let (d, _) = spec.apply(doc, f, ds.assigns)
-        files[f] = d
+        let (d0, _) = spec.apply(doc, f, ts.assigns)
+        let (d1, _) = spec.apply_renames(d0, ts.renames)
+        let (d, _) = spec.apply(d1, f, ds.assigns)
+        let (d2, _) = spec.apply_renames(d, ds.renames)
+        files[f] = d2
       }
       skipped = ds.skipped
     }
