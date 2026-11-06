@@ -1,0 +1,93 @@
+// The generated armkeyvault clients against a fake Resource Manager
+// (invented hosts and IDs): a vault's long-running create, the
+// subscription-wide list with $top, a secret's unix-time attributes,
+// and a POST with a body.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const TENANT: Str = "00000000-0000-0000-0000-000000000000"
+const RG: Str = "${EP}/subscriptions/${SUB}/resourceGroups/rg1/providers/Microsoft.KeyVault"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+fn opts() -> arm.ClientOptions {
+  arm.ClientOptions{endpoint: EP}
+}
+
+test "begin_create_or_update PUTs the vault and polls until it is provisioned" {
+  let vault = "{\"name\":\"kv1\",\"location\":\"westus\",\"properties\":{\"tenantId\":\"${TENANT}\",\"sku\":{\"family\":\"A\",\"name\":\"standard\"},\"vaultUri\":\"https://kv1.vault.example.test/\",\"provisioningState\":\"Succeeded\"}}"
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.KeyVault/locations/westus/operationResults/op1"
+  let put = capture(os.net, "PUT ${RG}/vaults/kv1", 201, vault.replace("Succeeded", "RegisteringDns"), [("Azure-AsyncOperation", op), ("Retry-After", "0")])
+  capture(os.net, "GET ${op}", 200, "{\"status\":\"Succeeded\"}")
+  capture(os.net, "GET ${RG}/vaults/kv1", 200, vault)
+  let c = new_vaults_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let params = VaultCreateOrUpdateParameters{location: Some("westus"), properties: Some(VaultProperties{tenant_id: Some(TENANT), sku: Some(SKU{family: Some(SKU_FAMILY_A), name: Some(SKU_NAME_STANDARD)})})}
+  var p = c.begin_create_or_update("rg1", "kv1", params)?
+  let r = p.poll_until_done(os.clock, frequency: 1s)?
+  expect(r.vault.properties.and_then(fn(v: VaultProperties) -> Str? { v.vault_uri })) == Some("https://kv1.vault.example.test/")
+  let req = all(put)[0]
+  expect(req.url.query.get("api-version")) == Some(API_VERSION)
+  let sku = json.parse_value(req.body.to_str_lossy())?.get("properties").and_then(fn(v: json.Value) -> json.Value? { v.get("sku") })
+  expect(sku.and_then(fn(v: json.Value) -> json.Value? { v.get("name") })) == Some(json.Value.Str("standard"))
+}
+
+test "the subscription's vault list sends $top and follows nextLink" {
+  let first = capture(os.net, "GET ${EP}/subscriptions/${SUB}/resources", 200, "{\"value\":[{\"name\":\"a\"}],\"nextLink\":\"${EP}/subscriptions/${SUB}/resourcespage2\"}")
+  capture(os.net, "GET ${EP}/subscriptions/${SUB}/resourcespage2", 200, "{\"value\":[{\"name\":\"b\"}]}")
+  let c = new_vaults_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  var p = c.new_list_pager(VaultsClientListOptions{top: Some(5)})?
+  var names: List[Str] = []
+  while p.more() {
+    for v in p.next_page()?.resource_list_result.value ?? [] {
+      names.push(v.name ?? "")
+    }
+  }
+  expect(names) == ["a", "b"]
+  let q = all(first)[0].url.query
+  expect(q.get("$top")) == Some("5")
+  expect(q.get("$filter")) == Some("resourceType eq 'Microsoft.KeyVault/vaults'")
+}
+
+test "a secret's attributes are unix times" {
+  let seen = capture(os.net, "PUT ${RG}/vaults/kv1/secrets/s1", 200, "{\"name\":\"s1\",\"properties\":{\"secretUri\":\"https://kv1.vault.example.test/secrets/s1\",\"attributes\":{\"enabled\":true,\"created\":1793847845}}}")
+  let c = new_secrets_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let r = c.create_or_update("rg1", "kv1", "s1", SecretCreateOrUpdateParameters{properties: Some(SecretProperties{value: Some("invented-value")})})?
+  let at = r.secret.properties.and_then(fn(p: SecretProperties) -> SecretAttributes? { p.attributes }) ?? SecretAttributes{}
+  expect(at.created.map(fn(t: azcore.UnixTime) -> Int { t.0.unix() })) == Some(1793847845)
+  expect(json.parse_value(all(seen)[0].body.to_str_lossy())?.get("properties").and_then(fn(v: json.Value) -> json.Value? { v.get("value") })) == Some(json.Value.Str("invented-value"))
+}
+
+test "check_name_availability POSTs its body" {
+  let seen = capture(os.net, "POST ${EP}/subscriptions/${SUB}/providers/Microsoft.KeyVault/checkNameAvailability", 200, "{\"nameAvailable\":false,\"reason\":\"AlreadyExists\"}")
+  let c = new_vaults_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let r = c.check_name_availability(VaultCheckNameAvailabilityParameters{name: Some("kv1"), type_: "Microsoft.KeyVault/vaults"})?
+  expect(r.check_name_availability_result.name_available) == Some(false)
+  expect(json.parse_value(all(seen)[0].body.to_str_lossy())?.get("type")) == Some(json.Value.Str("Microsoft.KeyVault/vaults"))
+}

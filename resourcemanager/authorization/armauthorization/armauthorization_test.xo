@@ -1,0 +1,71 @@
+// The generated armauthorization clients against a fake Resource
+// Manager (invented IDs): a scope in the path as it is
+// (x-ms-skip-url-encoding), each operation's own api-version, and $filter.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const SCOPE: Str = "subscriptions/sub-test/resourceGroups/rg1"
+const PRINCIPAL: Str = "principal-test"
+const ROLE: Str = "/subscriptions/sub-test/providers/Microsoft.Authorization/roleDefinitions/role-reader-test"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "") -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(status, body)
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+fn opts() -> arm.ClientOptions {
+  arm.ClientOptions{endpoint: EP}
+}
+
+test "create PUTs a role assignment under its scope, the scope's slashes kept" {
+  let name = "assignment-test"
+  let seen = capture(os.net, "PUT ${EP}/${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${name}", 201, "{\"name\":\"${name}\",\"properties\":{\"roleDefinitionId\":\"${ROLE}\",\"principalId\":\"${PRINCIPAL}\",\"principalType\":\"User\"}}")
+  let c = new_role_assignments_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  let r = c.create(SCOPE, name, RoleAssignmentCreateParameters{properties: Some(RoleAssignmentProperties{role_definition_id: Some(ROLE), principal_id: Some(PRINCIPAL), principal_type: Some(PRINCIPAL_TYPE_USER)})})?
+  expect(r.role_assignment.properties.and_then(fn(p: RoleAssignmentProperties) -> PrincipalType? { p.principal_type })) == Some(PRINCIPAL_TYPE_USER)
+  let req = all(seen)[0]
+  expect(req.url.path) == "/${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${name}"
+  expect(req.url.query.get("api-version")) == Some("2022-04-01")
+  expect(json.parse_value(req.body.to_str_lossy())?.get("properties").and_then(fn(v: json.Value) -> json.Value? { v.get("principalType") })) == Some(json.Value.Str("User"))
+}
+
+test "the role definition pager sends $filter and decodes the properties' type as role_type" {
+  let seen = capture(os.net, "GET ${EP}/${SCOPE}/providers/Microsoft.Authorization/roleDefinitions", 200, "{\"value\":[{\"name\":\"r1\",\"properties\":{\"roleName\":\"Reader\",\"type\":\"BuiltInRole\",\"assignableScopes\":[\"/\"]}}]}")
+  let c = new_role_definitions_client(os.net, os.clock, os.rand, Fixed{}, opts())?
+  var p = c.new_list_pager(SCOPE, RoleDefinitionsClientListOptions{filter: Some("type eq 'BuiltInRole'")})?
+  let page = p.next_page()?
+  let d = (page.role_definition_list_result.value ?? [])[0]
+  let props = d.properties ?? RoleDefinitionProperties{}
+  expect(props.role_name) == Some("Reader")
+  expect(props.role_type) == Some("BuiltInRole")
+  expect(all(seen)[0].url.query.get("$filter")) == Some("type eq 'BuiltInRole'")
+}
+
+test "an authorization failure keeps ARM's code" {
+  capture(os.net, "GET ${EP}/${SCOPE}/providers/Microsoft.Authorization/roleAssignments/gone", 403, "{\"error\":{\"code\":\"AuthorizationFailed\",\"message\":\"The client does not have authorization.\"}}")
+  let c = new_role_assignments_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  match c.get(SCOPE, "gone") {
+    Err(azcore.CallErr.Response(e)) => expect(e.error_code) == "AuthorizationFailed"
+    other => expect("${other:?}") == "an AuthorizationFailed response error"
+  }
+}
