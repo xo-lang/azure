@@ -63,3 +63,37 @@ Azure 1, 2026-11-05)
   `possible_<x>_values()`, closed ones too. A closed enum in the spec
   still gains values over api-versions; Go's types are strings for
   both, so this keeps code that compares against a new value working.
+
+## Amendment 2
+
+Status: Proposed (Xo Azure 1, 2026-11-05, for the owner through the Xo
+Lead)
+
+- **Explicit null in PATCH bodies is typed.** A model that only PATCH
+  bodies reach (Go's update models: `VirtualMachineUpdate`,
+  `TagsObject`) has `json.Patch[T]` fields: `Absent` (the default)
+  leaves the key out, `Null` sends `null`, which JSON merge patch reads
+  as "remove", and `Value(v)` sends the value (azure 2e0bba5).
+- **Patch twins** carry nulls below the top level. A shared model that
+  such a model, or another twin, holds directly (not in a list or a
+  map, which merge patch replaces whole; not a polymorphic type's
+  member) gets a twin `<Name>Patch` with `json.Patch` fields, and the
+  model gains `patch()`, which makes its twin (set fields become
+  values, the rest `Absent`). So
+  `VirtualMachineUpdate{properties: Value(VirtualMachinePropertiesPatch{diagnostics_profile: Null})}`
+  sends `{"properties":{"diagnosticsProfile":null}}` (azure e22f4c9).
+  This is API surface Go does not have.
+- **Why not Go's way.** Go's `azcore.NullValue[T]()` returns a sentinel
+  pointer of the field's own type (one per type, kept in a map), and the
+  JSON encoder compares pointers to write `null`. Xo has no pointer
+  identity for values: a `T?` is `None` or `Some(v)`, and a sentinel
+  `Some(v)` cannot be told apart from a real `v`. Patch[T] spells the
+  third state in the type instead, so a null is checked at compile time
+  and found by `xo doc`. A list of JSON paths to null (an option on
+  each PATCH method) was the other choice, rejected: paths are strings,
+  a typo silently sends nothing, and agents cannot discover them.
+- **Counts** at e22f4c9: twins in armcompute 149 (VirtualMachineUpdate's
+  properties reach the whole VM tree), armstorage 18, azcertificates
+  10, azkeys 3, armkeyvault 3, armresources 2, azsecrets 1, armnetwork
+  0, armauthorization 0; `<Name>Patch` clashes with no spec name.
+  Models that a response reaches keep `T?`, so reading is unchanged.
