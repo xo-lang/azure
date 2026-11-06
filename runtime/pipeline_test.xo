@@ -24,7 +24,32 @@ test "the pipeline sets api-version, the User-Agent and a request ID" {
   expect((r.header("x-ms-client-request-id") ?? "").len()) == 36
 }
 
-test "a client option overrides the api-version" {
+test "the api-version policy writes the query as azcore's does" {
+  // Go's apiVersionPolicy does nothing without a version; Xo adds no
+  // policy then (new_pipeline), so only the set versions are replayed
+  var n = 0
+  for (version, u, sent) in API_VERSION_VECTORS {
+    if version != "" {
+      expect(set_query_sorted(u, "api-version", version)) == sent
+      n = n + 1
+    }
+  }
+  expect(n) == 24
+  expect(set_query_sorted("https://h/p?b=1#frag", "api-version", "2")) == "https://h/p?api-version=2&b=1#frag"
+}
+
+test "a client option overrides the api-version, the query sorted as Go's" {
+  let seen = Mutex[List[Str]].new([])
+  os.net.handle("GET https://example.management.test/subscriptions/x/resourceGroups", fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[Str]) { xs.push(req.raw_query()) })
+    http.text(200, "{}")
+  })
+  let p = pipeline(os.net, os.clock, os.rand, policy.ClientOptions{api_version: "2025-02-02"})
+  p.send(policy.Request{method: "GET", url: "https://example.management.test/subscriptions/x/resourceGroups?z=1&api-version=2020-01-01&a=x+y"})?
+  expect(seen.with_read(fn(xs: List[Str]) -> Str { xs[0] })) == "a=x+y&api-version=2025-02-02&z=1"
+}
+
+test "set_query keeps the other parameters in their order" {
   expect(set_query("https://h/p?api-version=1&a=b", "api-version", "2")) == "https://h/p?a=b&api-version=2"
   expect(set_query("https://h/p", "api-version", "2")) == "https://h/p?api-version=2"
 }

@@ -70,14 +70,47 @@ fn os_name() -> Str {
   }
 }
 
-/// Sets the api-version query parameter, replacing one already there.
+/// Sets the api-version query parameter as azcore's apiVersionPolicy
+/// does: the query parsed as Go's `URL.Query()`, the parameter set, and
+/// the query encoded again, sorted (`url.Values.Encode`).
 pub struct ApiVersionPolicy {
   pub name: Str
   pub version: Str
 }
 
 fn (p: ApiVersionPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
-  next.send(req with {url: set_query(req.url, p.name, p.version)})
+  next.send(req with {url: set_query_sorted(req.url, p.name, p.version)})
+}
+
+/// `u` with query parameter `name` set to `value`, as Go's
+/// `q := u.Query(); q.Set(name, value); u.RawQuery = q.Encode()`: the
+/// whole query encoded again, keys sorted, each value query-escaped.
+pub fn set_query_sorted(u: Str, name: Str, value: Str) -> Str {
+  let (rest, fragment) = match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+  let (base, raw) = rest.cut("?") ?? (rest, "")
+  var q = go_query(raw)
+  q.set(name, value)
+  "${base}?${q.encode()}${fragment}"
+}
+
+/// A raw query as Go's `URL.Query()` reads it (url.ParseQuery with its
+/// error dropped): a pair with a `;` or a bad escape is skipped and the
+/// others kept, where `url.parse_query` fails the whole query.
+fn go_query(raw: Str) -> url.Values {
+  var q = url.values()
+  for pair in raw.split("&") {
+    if pair == "" || pair.contains(";") {
+      continue
+    }
+    let (k, v) = pair.cut("=") ?? (pair, "")
+    let key = url.query_unescape(k) ?? _ => continue
+    let val = url.query_unescape(v) ?? _ => continue
+    q.add(key, val)
+  }
+  q
 }
 
 /// `u` with query parameter `name` set to `value` (others kept in order).

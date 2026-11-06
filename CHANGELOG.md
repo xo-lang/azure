@@ -8,6 +8,27 @@ version has been tagged since.
 
 ## Unreleased
 
+The api-version policy writes the query as azcore's apiVersionPolicy
+does (behavior fix; URLs change). With `ClientOptions.api_version` set,
+`runtime.ApiVersionPolicy` now parses the query as Go's `URL.Query()`,
+sets `api-version`, and encodes the whole query again, sorted by key
+with each value query-escaped (`url.Values.Encode`). Before, it removed
+an `api-version` pair and appended the new one, leaving the others as
+they were, so `?z=1&api-version=old&a=x+y` went out as
+`?z=1&a=x+y&api-version=new` where Go sends
+`?a=x+y&api-version=new&z=1`. As Go's, a pair with a `;` or a bad
+escape is dropped. Every client that takes the option is affected
+(ARM, Key Vault, azmetrics and the others); without the option nothing
+changes.
+
+- `runtime`: `set_query_sorted`, checked against azcore v1.18.1 on 36
+  URLs and versions (`apiversion_vectors_test.xo`): existing
+  parameters, a repeated key, escapes, empty values, a bad escape, a
+  `;`, and a version that needs escaping. `set_query` (used by the
+  marker pager) is unchanged.
+- `monitor/query/azmetrics` drops its own copy of this rule and uses
+  the policy; its requests are unchanged.
+
 Response headers that repeat are read as azcore reads them (behavior
 fix, azure 0742aaa):
 
