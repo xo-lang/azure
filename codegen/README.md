@@ -103,6 +103,15 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   and names a quoted TypeSpec parameter (`setting-name`) as Go does
   (`settingName`). A poller's resume token type is the Go type's name,
   or `*Pager[<Go import path>.<name>]` for a paged operation.
+- Requests follow autorest.go and TypeSpec's emitter: paths joined by
+  `runtime.join_paths`, a reserved query parameter appended raw, a path
+  parameter checked for empty only when Go checks it (a string it
+  escapes) and named as Go names it (`client.subscriptionID`,
+  `vmName`), `Accept` only when a response has a schema
+  (`custom/<module>.toml: accept_always` for an emitter that always
+  sends it), and a path's disambiguating query dropped. An enum of one
+  value is a constant when `modelAsString` is false, or unset in a
+  module that seals them.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
 - A Go name whose snake_case form is an Xo keyword or predeclared value

@@ -24,6 +24,8 @@ pub struct Package {
   /// The Go package's import path, for a paged operation's resume token
   /// type (`*Pager[<path>.<Response>]`, as reflect names it).
   pub go_package: Str = ""
+  /// Accept on every data plane operation (custom/<module>.toml).
+  pub accept_always: Bool = false
 }
 
 /// A string literal's contents.
@@ -207,7 +209,10 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let args = req.map(fn(x: Param) -> Str { "${x.name}: ${x.typ}" }).join(", ")
   let sep = if args == "" { "" } else { ", " }
   s = s + "\nfn (c: ${cn}) ${snake_op}_create_request(${args}${sep}options: ${on}) -> policy.Request ! azcore.CallErr {\n"
-  s = s + "  var path = \"${esc(op.path)}\"\n"
+  // a path that carries a query to tell two operations apart
+  // (`/{roleId}?disambiguation_dummy`) is Go's urlPath without it
+  let tmpl = op.path.cut("?").map(fn(t: (Str, Str)) -> Str { t.0 }) ?? op.path
+  s = s + "  var path = \"${esc(tmpl)}\"\n"
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "path" }) {
     let v = if x.client {
       "c.${x.name}"
@@ -217,17 +222,29 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
         None => to_text(api, x.typ, x.name)
       }
     }
-    // TypeSpec's Go emitter checks no reserved (unescaped) parameter
-    let reserved = p.data_plane && x.skip_encoding
-    if !p.allow_empty.contains(x.wire) && x.constant.is_none() && !reserved {
-      s = s + "  if ${v} == \"\" {\n    return Err(azcore.CallErr.InvalidInput(\"parameter ${esc(if x.go_name != "" { x.go_name } else { x.wire })} cannot be empty\"))\n  }\n"
+    // Go checks a string parameter that it escapes: not a reserved
+    // (x-ms-skip-url-encoding) one, nor a number
+    let stringy = x.typ == "Str" || is_enum(api, x.typ)
+    if !p.allow_empty.contains(x.wire) && x.constant.is_none() && !x.skip_encoding && stringy {
+      s = s + "  if ${v} == \"\" {\n    return Err(azcore.CallErr.InvalidInput(\"parameter ${esc(go_param_name(p, x))} cannot be empty\"))\n  }\n"
     }
     let enc = if x.skip_encoding { v } else { "url.path_escape(${v})" }
     s = s + "  path = path.replace(\"{${esc(x.wire)}}\", ${enc})\n"
   }
-  s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [(\"Accept\", \"application/json\")]\n"
+  // autorest.go: Accept when any response, the error one too, has a
+  // schema; TypeSpec's emitter: when the success response has a body
+  let accept = if p.data_plane { op.resp.is_some() || p.accept_always } else { op.accept }
+  let accept_h = if accept { "(\"Accept\", \"application/json\")" } else { "" }
+  s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [${accept_h}]\n"
+  // a reserved (x-ms-skip-url-encoding) query parameter goes after the
+  // encoded query as it is, as Go's unencodedParams
+  let has_raw = op.params.any(fn(x: Param) -> Bool { x.loc == "query" && x.skip_encoding })
+  if has_raw {
+    s = s + "  var raw_q: List[Str] = []\n"
+  }
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "query" || x.loc == "header" }) {
-    let target = if x.loc == "query" { "q.add(\"${esc(x.wire)}\", " } else { "headers.push((\"${esc(x.wire)}\", " }
+    let raw = x.loc == "query" && x.skip_encoding
+    let target = if raw { "raw_q.push(\"${esc(x.wire)}=\" + " } else if x.loc == "query" { "q.add(\"${esc(x.wire)}\", " } else { "headers.push((\"${esc(x.wire)}\", " }
     let close = if x.loc == "query" { ")" } else { "))" }
     if let Some(k) = x.constant {
       s = s + "  ${target}${k}${close}\n"
@@ -247,11 +264,11 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       body = "body"
     }
   }
-  // a data plane module joins as Go's TypeSpec code does
-  // (runtime.JoinPaths, which cleans the path: `/{scope}/...` with scope
-  // `/keys` is `/keys/...`)
-  let base = if p.data_plane { "\${runtime.join_paths(c.setup.endpoint, path)}" } else { "\${c.setup.endpoint}\${path}" }
-  s = s + "  let qs = q.encode()\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
+  // joined as Go's code does (runtime.JoinPaths, which cleans the path:
+  // `/{scope}/...` with scope `/keys` is `/keys/...`)
+  let base = "\${runtime.join_paths(c.setup.endpoint, path)}"
+  let qs_expr = if has_raw { "([q.encode()] + raw_q).join(\"&\")" } else { "q.encode()" }
+  s = s + "  let qs = ${qs_expr}\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
   let ok_list = if op.method == "HEAD" { "[${ok}, 404]" } else { "[${ok}]" }
   let call_args = req.map(fn(x: Param) -> Str { x.name }).join(", ")
@@ -344,4 +361,35 @@ pub fn emit_clients(p: Package, api: Api) -> List[File] {
     out.push(File{name: "${snake(g)}_client.xo", text: s})
   }
   out
+}
+
+const GO_KEYWORDS: List[Str] = ["break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var"]
+
+/// The name Go's generated code gives a parameter in its empty-value
+/// error: autorest.go's Go casing with the first letter lowered
+/// (`instanceID`, `publicIPAddressName`), `Param` after a Go keyword
+/// (`typeParam`), and `client.<field>` for a client parameter
+/// (`client.subscriptionID`). A data plane module's are TypeSpec's
+/// (`settingName`).
+fn go_param_name(p: Package, x: Param) -> Str {
+  let n = if x.go_name != "" { x.go_name } else { x.wire }
+  if p.data_plane {
+    return n
+  }
+  var g = uncap_go(n)
+  if GO_KEYWORDS.contains(g) {
+    g = g + "Param"
+  }
+  if x.client { "client.${g}" } else { g }
+}
+
+/// autorest.go's parameter casing: the first word as written, its first
+/// letter lowered (`vmName`, `skus`, `p2SVPNGatewayName`), each other
+/// word in Go's casing (`instanceID`, `publicIPAddressName`).
+fn uncap_go(n: Str) -> Str {
+  let ws = type_words(n)
+  if ws.is_empty() {
+    return n
+  }
+  ws[0][0..1].to_lower() + ws[0][1..] + ws[1..].map(fn(w: Str) -> Str { cap(w) }).join("")
 }

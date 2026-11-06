@@ -74,6 +74,8 @@ pub struct Op {
   pub next_link: Str? = None
   pub item_name: Str = "value"
   pub lro: Bool = false
+  /// Whether a response has a body schema (Go sends Accept then).
+  pub accept: Bool = true
   /// A pageable long-running operation: its result is a pager whose
   /// first page is the operation's final response (Go's
   /// `Poller[*Pager[T]]`).
@@ -629,7 +631,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     // API_VERSION when it is the package's.
     let fv = str_of(b.files.get(file).and_then(fn(d: json.Value) -> json.Value? { d.get("info") }).and_then(fn(i: json.Value) -> json.Value? { i.get("version") }))
     if fv == "" || fv == b.api_version { Some("API_VERSION") } else { Some("\"${fv}\"") }
-  } else if b.custom.seal_single_value_enums && required && one.len() == 1 {
+  } else if required && one.len() == 1 && (model_as_string(p) == Some(false) || b.custom.seal_single_value_enums && model_as_string(p) != Some(true)) {
     match one[0] {
       json.Value.Str(c) => Some("\"${c.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
       _ => None
@@ -698,7 +700,13 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           }
           var okc: List[Int] = []
           var resp: Str? = None
+          // autorest.go sends Accept when any response, the error one
+          // too, has a schema
+          var accept = false
           for (code, r) in fields_of(o.get("responses")) {
+            if b.deref(file, r).2.get("schema").is_some() {
+              accept = true
+            }
             if code == "default" {
               // Go emits the error schema as a type too.
               if let Some(es) = if b.custom.reachable_only { None } else { b.deref(file, r).2.get("schema") } {
@@ -731,7 +739,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           ops.push(Op{
             group: group, name: name, method: method.to_upper(), path: path, params: params, ok: okc.sort(), resp: resp,
             pageable: pg.is_some() && !lro, next_link: next, item_name: if item_name == "" { "value" } else { item_name },
-            lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, status_poller: lro && b.custom.status_pollers.contains(id.to_lower()), doc: doc_of(o),
+            lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, accept: accept, status_poller: lro && b.custom.status_pollers.contains(id.to_lower()), doc: doc_of(o),
           })
         }
       }
@@ -927,4 +935,15 @@ fn dash_camel(s: Str) -> Str {
     out = out + (if w == "" { "" } else { w[0..1].to_upper() + w[1..] })
   }
   out
+}
+
+/// An enum's `modelAsString`, when it says. An enum of one value is a
+/// constant when it is false (armnetwork's `singletonResource`), or
+/// unset in a module that seals them; Go keeps one that says true a
+/// parameter of its type (armstorage's `blobInventoryPolicyName`).
+fn model_as_string(p: json.Value) -> Bool? {
+  match p.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("modelAsString") }) {
+    Some(json.Value.Bool(t)) => Some(t)
+    _ => None
+  }
 }

@@ -1,0 +1,152 @@
+// The clients against the Go program's fake Resource Manager: each
+// request and result must be Go's (govectors_test.xo). It answers each
+// `method path` with the next reply queued for it, else 200 `{}`.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+struct Reply {
+  status: Int
+  body: Str = "{}"
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  queue: Mutex[List[(Str, Reply)]]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), queue: Mutex[List[(Str, Reply)]].new([])}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+    net.handle("${m} ${EP}/{rest...}", h)
+  }
+  f
+}
+
+fn add(f: Fake, method: Str, path: Str, r: Reply) {
+  f.queue.with(fn(var q: List[(Str, Reply)]) { q.push(("${method} ${path}", r)) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  if !req.body.is_empty() {
+    hs.push("content-length=${req.body.len()}")
+  }
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  note(f, "REQ ${req.method} ${EP}${uri}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}")
+  let key = "${req.method} ${req.escaped_path()}"
+  let found = f.queue.with(fn(var q: List[(Str, Reply)]) -> Reply? {
+    for i in 0..q.len() {
+      if q[i].0 == key {
+        let r = q[i].1
+        q.remove_at(i)
+        return Some(r)
+      }
+    }
+    None
+  })
+  let r = found ?? Reply{status: 200}
+  http.text(r.status, r.body).with_header("Content-Type", "application/json")
+}
+
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer()
+  w.value(sorted(v)) ?? e => return "unencodable: ${e.display()}"
+  w.finish().to_str_lossy()
+}
+
+fn sorted(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { sorted(x) }))
+    other => other
+  }
+}
+
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+/// The Go program's line for a result: the value as Go marshals it, or
+/// `null` where Go printed a nil.
+fn show[T](f: Fake, label: Str, r: Result[T, azcore.CallErr], out: fn(T) -> Str) {
+  match r {
+    Ok(v) => note(f, "OUT ${label}: ${out(v)}")
+    Err(e) => note(f, "ERR ${label}: ${err_text(e)}")
+  }
+}
+
+fn check(f: Fake) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.join("\n").split("\n") })
+  for i in 0..got.len() {
+    if i >= GO_OUT.len() {
+      expect(got[i]) == "(Go has no more lines)"
+      return
+    }
+    if got[i] != GO_OUT[i] {
+      expect("${i}: ${got[i]}") == "${i}: ${GO_OUT[i]}"
+      return
+    }
+  }
+  expect(got.len()) == GO_OUT.len()
+}
+
+const ASG: Str = "{\"id\":\"/subscriptions/sub-test/providers/Microsoft.Authorization/roleAssignments/a1\",\"name\":\"a1\",\"type\":\"Microsoft.Authorization/roleAssignments\",\"properties\":{\"scope\":\"/subscriptions/sub-test\",\"roleDefinitionId\":\"/subscriptions/sub-test/providers/Microsoft.Authorization/roleDefinitions/d1\",\"principalId\":\"p&1\",\"principalType\":\"User\",\"createdOn\":\"2026-01-02T03:04:05.1234567Z\"}}"
+const RA: Str = "/providers/Microsoft.Authorization/roleAssignments"
+
+test "role assignments, definitions, deny assignments and policies send Go's requests" {
+  let f = serve(os.net)
+  let ra = new_role_assignments_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  add(f, "PUT", "/subscriptions/sub-test/resourceGroups/rg1${RA}/a1", Reply{status: 201, body: ASG})
+  let props = RoleAssignmentProperties{role_definition_id: Some("/subscriptions/sub-test/providers/Microsoft.Authorization/roleDefinitions/d1"), principal_id: Some("p&1"), principal_type: Some(PRINCIPAL_TYPE_USER), description: Some("<ops>")}
+  show(f, "create", ra.create("subscriptions/sub-test/resourceGroups/rg1", "a1", RoleAssignmentCreateParameters{properties: Some(props)}), fn(r: RoleAssignmentsClientCreateResponse) -> Str { go_json(json.to_value(r.role_assignment)) })
+  show(f, "get_by_id", ra.get_by_id("/subscriptions/sub-test${RA}/a1", RoleAssignmentsClientGetByIDOptions{tenant_id: Some("t 1")}), fn(r: RoleAssignmentsClientGetByIDResponse) -> Str { go_json(json.to_value(r.role_assignment)) })
+  show(f, "delete_empty_name", ra.delete("/subscriptions/sub-test", ""), fn(r: RoleAssignmentsClientDeleteResponse) -> Str { "null" })
+  add(f, "GET", "/subscriptions/sub-test${RA}", Reply{status: 200, body: "{\"value\":[${ASG}],\"nextLink\":\"${EP}/subscriptions/sub-test${RA}?\$skipToken=p2&api-version=2022-04-01&\$filter=atScope()\"}"})
+  add(f, "GET", "/subscriptions/sub-test${RA}", Reply{status: 200, body: "{\"value\":[]}"})
+  var p = ra.new_list_for_scope_pager("/subscriptions/sub-test", RoleAssignmentsClientListForScopeOptions{filter: Some("atScope()"), skip_token: Some("s1")})?
+  while p.more() {
+    let pg = p.next_page()
+    show(f, "list_for_scope_page", pg, fn(r: RoleAssignmentsClientListForScopeResponse) -> Str { "${(r.role_assignment_list_result.value ?? []).len()}" })
+    if pg.is_err() {
+      break
+    }
+  }
+  var p2 = ra.new_list_for_subscription_pager(RoleAssignmentsClientListForSubscriptionOptions{filter: Some("principalId eq 'p&1'"), tenant_id: Some("t1")})?
+  show(f, "list_for_subscription", p2.next_page(), fn(r: RoleAssignmentsClientListForSubscriptionResponse) -> Str { "${(r.role_assignment_list_result.value ?? []).len()}" })
+  let empty = new_role_assignments_client(os.net, os.clock, os.rand, "", Fixed{}, opts())?
+  match empty.new_list_for_subscription_pager() {
+    Ok(pe0) => {
+      var pe = pe0
+      show(f, "list_empty_sub", pe.next_page(), fn(r: RoleAssignmentsClientListForSubscriptionResponse) -> Str { "null" })
+    }
+    Err(e) => note(f, "ERR list_empty_sub: ${err_text(e)}")
+  }
+  let rd = new_role_definitions_client(os.net, os.clock, os.rand, Fixed{}, opts())?
+  show(f, "role_definition_get_by_id", rd.get_by_id("/subscriptions/sub-test/providers/Microsoft.Authorization/roleDefinitions/d1"), fn(r: RoleDefinitionsClientGetByIDResponse) -> Str { "null" })
+  let da = new_deny_assignments_client(os.net, os.clock, os.rand, SUB, Fixed{}, opts())?
+  show(f, "deny_get_empty", da.get("subscriptions/sub-test", ""), fn(r: DenyAssignmentsClientGetResponse) -> Str { "null" })
+  let rmp = new_role_management_policies_client(os.net, os.clock, os.rand, Fixed{}, opts())?
+  show(f, "policy_delete", rmp.delete("subscriptions/sub-test", "pol1"), fn(r: RoleManagementPoliciesClientDeleteResponse) -> Str { "null" })
+  check(f)
+}

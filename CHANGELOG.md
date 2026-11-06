@@ -8,8 +8,46 @@ version has been tagged since.
 
 ## Unreleased
 
-Poller resume tokens are azcore's byte for byte (behavior fix; tokens
-change). Checked against tokens a Go program made with azcore v1.21.0
+Every generated operation builds its request as Go's code does
+(behavior fix; requests and some errors change). Checked statically
+against each `*CreateRequest` of the pinned Go modules (1415
+operations, ARM and Key Vault: method, path, which path parameters are
+checked and escaped, query keys, headers, body, path joining), and by
+a Go program's requests for armauthorization v2.2.0
+(`govectors_test.xo`, 34 lines: scopes with and without a leading
+slash, a raw `$filter`, nextLink pages, empty-parameter errors):
+
+- ARM paths are joined with `runtime.join_paths` (azcore's JoinPaths)
+  too: a scope or ID with a leading slash (`/subscriptions/...`) no
+  longer makes `//` in the URL.
+- A reserved (`x-ms-skip-url-encoding`) query parameter goes after the
+  encoded query as it is, as Go's unencodedParams: `$filter=principalId
+  eq 'x'` is sent raw, where it was escaped and sorted in.
+- A path parameter is checked for empty only where Go checks it: a
+  string it escapes, not a reserved one (`scope`, `roleAssignmentName`)
+  or a number (`updateDomain`). The error names Go's parameter
+  (`parameter client.subscriptionID cannot be empty`, `vmName`,
+  `instanceID`, `typeParam`), where it named the wire name.
+- `Accept` is sent when a response (the error one too) has a schema,
+  as autorest.go does; an operation without one (armstorage's
+  `AccountsClient.Delete`) sends none. TypeSpec modules send it when the
+  success response has a body (azsecrets v1.4.0 on every operation).
+- A path that carries a query to tell operations apart
+  (`/{roleId}?disambiguation_dummy`, armcompute's `?$expand=Properties`)
+  is Go's path without it.
+- An enum of one value with `modelAsString: true` stays a parameter of
+  its type, as in Go (armstorage's `blob_inventory_policy_name`,
+  `management_policy_name`, `migration_name`: **breaking**, the methods
+  take the parameter again); one with `modelAsString: false` is a
+  constant in every module (armnetwork's `singletonResource`, now
+  `swap`, and no longer a parameter: **breaking**).
+- azkeys and azcertificates drop `maxresults` from their List options,
+  as Go's do (**breaking** for a caller that set it).
+
+Poller resume tokens are azcore's byte for byte. **Breaking:** a
+resume token written by an earlier Xo version no longer resumes (its
+`type` names the package); start the operation again or take a new
+token. Checked against tokens a Go program made with azcore v1.21.0
 for each poller kind (`tokenvectors_test.xo`) and against azadmin's:
 
 - The token's `type` is the Go type's name, without its package
