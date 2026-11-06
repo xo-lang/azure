@@ -34,6 +34,18 @@ What it does:
   AMQP message; an annotation of the wrong type is an error, as Go's.
 - The hub's and a partition's properties from the namespace's
   `$management` node (a READ with the entity's token).
+- The Processor (`new_processor`, `run`, `next_partition_client`):
+  partitions claimed in a `CheckpointStore` and balanced among the
+  consumer group's Processors (balanced, one partition per round, or
+  greedy), renewed every update interval with Go's jitter, expired or
+  given up ownerships taken over, and a partition client per owned
+  partition at owner level 0, starting after its checkpoint (or its own
+  or the default start position). `update_checkpoint` records the last
+  event processed; a stopped Processor closes its clients and gives its
+  partitions up.
+- `InMemoryCheckpointStore` (`new_in_memory_checkpoint_store`), with
+  etag checked claims, `expire_ownership` and `relinquish_ownership`
+  (Go has it only in its tests).
 - Retries and recovery as Go's (`retry_options`: 3 retries, 4 s
   doubling with jitter, 120 s cap by default): a busy server or a
   timeout is retried as it is, a forced detach gets a new link (one
@@ -55,9 +67,16 @@ Where it differs from Go v1.4.0:
   batch with no limit; Go would refuse every event.
 - The management link pair is opened for each request and closed
   after (Go keeps one).
+- `Processor.run` runs until the calling task is cancelled (Go: until
+  its context ends), and `next_partition_client` waits until its task
+  is cancelled or the Processor stops. New partitions get their clients
+  one after another within a round (Go: concurrently).
+- The in-memory store's errors are errors (Go's test store panics), and
+  its lists hold only the asked hub and group.
 
-Not yet: the Processor and checkpoint stores, `AMQPAnnotatedMessage`
-(`add_amqp_annotated_message`), web sockets and custom endpoints.
+Not yet: the Blob checkpoint store (`checkpoints` package, over
+azblob), `AMQPAnnotatedMessage` (`add_amqp_annotated_message`), web
+sockets and custom endpoints.
 
 Tests run against std/amqptest's in-process broker in its event hub
 mode on the test world's network (`xo test .`).

@@ -1,0 +1,155 @@
+// Checkpoint stores, as azeventhubs's CheckpointStore, Ownership and
+// Checkpoint (checkpoint_store.go), and an in-memory store ported from
+// its tests' testCheckpointStore (inmemory_checkpoint_store_test.go)
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md).
+
+use std/uuid
+
+/// Where a Processor keeps who owns each partition and how far each was
+/// processed. A claim succeeds only for an ownership whose etag still
+/// matches (or that does not exist yet).
+pub interface CheckpointStore {
+  /// Claims the ownerships and returns the ones that were claimed, each
+  /// with its new etag and modification time.
+  fn claim_ownership(self, partition_ownership: List[Ownership], options: ClaimOwnershipOptions) -> List[Ownership] ! EventHubsErr uses (net.dial, clock, rand)
+  fn list_checkpoints(self, fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: ListCheckpointsOptions) -> List[Checkpoint] ! EventHubsErr uses (net.dial, clock, rand)
+  fn list_ownership(self, fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: ListOwnershipOptions) -> List[Ownership] ! EventHubsErr uses (net.dial, clock, rand)
+  fn set_checkpoint(self, checkpoint: Checkpoint, options: SetCheckpointOptions) -> () ! EventHubsErr uses (net.dial, clock, rand)
+}
+
+/// Which Processor owns a partition.
+pub struct Ownership {
+  pub consumer_group: Str
+  pub event_hub_name: Str
+  pub fully_qualified_namespace: Str
+  pub partition_id: Str
+  /// The owning Processor's id; "" when given up.
+  pub owner_id: Str = ""
+  /// When it was last claimed; an ownership not renewed within the
+  /// Processor's partition expiration is free to take.
+  pub last_modified_time: Time? = None
+  /// The store's version of it, to claim it with.
+  pub etag: Str? = None
+}
+
+/// How far a partition was processed.
+pub struct Checkpoint {
+  pub consumer_group: Str
+  pub event_hub_name: Str
+  pub fully_qualified_namespace: Str
+  pub partition_id: Str
+  /// The last processed event's offset.
+  pub offset: Int? = None
+  /// The last processed event's sequence number.
+  pub sequence_number: Int? = None
+}
+
+pub struct ClaimOwnershipOptions {}
+pub struct ListCheckpointsOptions {}
+pub struct ListOwnershipOptions {}
+pub struct SetCheckpointOptions {}
+
+fn store_key(ns: Str, hub: Str, cg: Str, partition: Str) -> Str {
+  "${ns}/${hub}/${cg}/${partition}"
+}
+
+/// A CheckpointStore in memory, for tests and single-process use: what
+/// it holds is lost with it. (Go has it only in its tests; its panics
+/// for missing fields or an etag-less claim are errors here.)
+pub struct InMemoryCheckpointStore {
+  clock: Clock
+  rand: Rand
+  checkpoints: Mutex[Map[Str, Checkpoint]]
+  ownerships: Mutex[Map[Str, Ownership]]
+}
+
+pub fn new_in_memory_checkpoint_store(clock: Clock, rand: Rand) -> InMemoryCheckpointStore {
+  InMemoryCheckpointStore{clock: clock, rand: rand, checkpoints: Mutex[Map[Str, Checkpoint]].new({}), ownerships: Mutex[Map[Str, Ownership]].new({})}
+}
+
+pub fn (s: InMemoryCheckpointStore) claim_ownership(partition_ownership: List[Ownership], options: ClaimOwnershipOptions = ClaimOwnershipOptions{}) -> List[Ownership] ! EventHubsErr uses (net.dial, clock, rand) {
+  var owned: List[Ownership] = []
+  for po in partition_ownership {
+    if po.consumer_group == "" || po.event_hub_name == "" || po.fully_qualified_namespace == "" || po.partition_id == "" {
+      return Err(fatal("not all required fields were filled out for ownership data"))
+    }
+    let key = store_key(po.fully_qualified_namespace, po.event_hub_name, po.consumer_group, po.partition_id)
+    let etag = uuid.v4(s.rand).display()
+    let now = s.clock.now()
+    let r = s.ownerships.with(fn(var m: Map[Str, Ownership]) -> Ownership? ! EventHubsErr {
+      if let Some(current) = m.get(key) {
+        let want = po.etag ?? return Err(fatal("the ownership of partition ${po.partition_id} exists; claim it with its etag"))
+        if Some(want) != current.etag {
+          return Ok(None)
+        }
+      }
+      let o = po with {etag: Some(etag), last_modified_time: Some(now)}
+      m[key] = o
+      Ok(Some(o))
+    })?
+    if let Some(o) = r {
+      owned.push(o)
+    }
+  }
+  Ok(owned)
+}
+
+pub fn (s: InMemoryCheckpointStore) list_checkpoints(fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: ListCheckpointsOptions = ListCheckpointsOptions{}) -> List[Checkpoint] ! EventHubsErr uses (net.dial, clock, rand) {
+  let prefix = store_key(fully_qualified_namespace, event_hub_name, consumer_group, "")
+  Ok(s.checkpoints.with_read(fn(m: Map[Str, Checkpoint]) -> List[Checkpoint] {
+    var out: List[Checkpoint] = []
+    for (k, v) in m {
+      if k.starts_with(prefix) {
+        out.push(v)
+      }
+    }
+    out
+  }))
+}
+
+/// The ownerships of the hub's consumer group, by partition id.
+pub fn (s: InMemoryCheckpointStore) list_ownership(fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: ListOwnershipOptions = ListOwnershipOptions{}) -> List[Ownership] ! EventHubsErr uses (net.dial, clock, rand) {
+  let prefix = store_key(fully_qualified_namespace, event_hub_name, consumer_group, "")
+  let all = s.ownerships.with_read(fn(m: Map[Str, Ownership]) -> List[Ownership] {
+    var out: List[Ownership] = []
+    for (k, v) in m {
+      if k.starts_with(prefix) {
+        out.push(v)
+      }
+    }
+    out
+  })
+  Ok(all.sort_by(fn(o: Ownership) -> Str { o.partition_id }))
+}
+
+pub fn (s: InMemoryCheckpointStore) set_checkpoint(checkpoint: Checkpoint, options: SetCheckpointOptions = SetCheckpointOptions{}) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+  if checkpoint.consumer_group == "" || checkpoint.event_hub_name == "" || checkpoint.fully_qualified_namespace == "" || checkpoint.partition_id == "" {
+    return Err(fatal("not all required fields were filled out for checkpoint data"))
+  }
+  let key = store_key(checkpoint.fully_qualified_namespace, checkpoint.event_hub_name, checkpoint.consumer_group, checkpoint.partition_id)
+  s.checkpoints.with(fn(var m: Map[Str, Checkpoint]) { m[key] = checkpoint })
+  Ok(())
+}
+
+/// Ages an ownership past any expiration (two hours back), as Go's test
+/// store's ExpireOwnership.
+pub fn (s: InMemoryCheckpointStore) expire_ownership(o: Ownership) uses clock {
+  let key = store_key(o.fully_qualified_namespace, o.event_hub_name, o.consumer_group, o.partition_id)
+  let old = Time.from_unix_millis(s.clock.now().unix_millis() - 2 * 3600 * 1000)
+  s.ownerships.with(fn(var m: Map[Str, Ownership]) {
+    if let Some(cur) = m.get(key) {
+      m[key] = cur with {last_modified_time: Some(old)}
+    }
+  })
+}
+
+/// Gives an ownership up (owner id ""), as Go's test store's
+/// ReqlinquishOwnership.
+pub fn (s: InMemoryCheckpointStore) relinquish_ownership(o: Ownership) {
+  let key = store_key(o.fully_qualified_namespace, o.event_hub_name, o.consumer_group, o.partition_id)
+  s.ownerships.with(fn(var m: Map[Str, Ownership]) {
+    if let Some(cur) = m.get(key) {
+      m[key] = cur with {owner_id: ""}
+    }
+  })
+}

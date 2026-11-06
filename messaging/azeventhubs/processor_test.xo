@@ -1,0 +1,142 @@
+// The load balancer on the in-memory checkpoint store, and the Processor
+// end to end on std/amqptest's event hub mode.
+
+use std/amqptest
+
+const NS: Str = "ns1.servicebus.example.test"
+
+fn balancer(store: InMemoryCheckpointStore, id: Str, strategy: ProcessorStrategy, clock: Clock, rand: Rand) -> LoadBalancer {
+  LoadBalancer{store: store, details: Details{fully_qualified_namespace: NS, consumer_group: "$Default", event_hub_name: "eh1", client_id: id}, strategy: strategy, expiration: 60s, clock: clock, rand: rand}
+}
+
+fn owned_by(store: InMemoryCheckpointStore, id: Str, ns: Str = NS) -> List[Str] ! EventHubsErr uses (net.dial, clock, rand) {
+  Ok(store.list_ownership(ns, "eh1", "$Default")?.filter(fn(o: Ownership) -> Bool { o.owner_id == id }).map(fn(o: Ownership) -> Str { o.partition_id }))
+}
+
+const PARTS: List[Str] = ["0", "1", "2", "3"]
+
+test "balanced: one partition per round until a lone processor has them all; greedy: all at once" {
+  let store = new_in_memory_checkpoint_store(os.clock, os.rand)
+  let a = balancer(store, "a", PROCESSOR_STRATEGY_BALANCED, os.clock, os.rand)
+  for n in 1..5 {
+    expect(a.load_balance(PARTS)?.len()) == n
+  }
+  expect(owned_by(store, "a")?) == PARTS
+  // A fifth round renews the four (new etags) and takes nothing more.
+  expect(a.load_balance(PARTS)?.len()) == 4
+  let g = new_in_memory_checkpoint_store(os.clock, os.rand)
+  let b = balancer(g, "b", PROCESSOR_STRATEGY_GREEDY, os.clock, os.rand)
+  expect(b.load_balance(PARTS)?.len()) == 4
+}
+
+test "two balanced processors end with two partitions each; a newcomer takes from the one above its share" {
+  let store = new_in_memory_checkpoint_store(os.clock, os.rand)
+  let a = balancer(store, "a", PROCESSOR_STRATEGY_GREEDY, os.clock, os.rand)
+  expect(a.load_balance(PARTS)?.len()) == 4
+  let b = balancer(store, "b", PROCESSOR_STRATEGY_BALANCED, os.clock, os.rand)
+  // b's share is 2; a holds 4, above it, so b takes one of a's each round.
+  expect(b.load_balance(PARTS)?.len()) == 1
+  expect(b.load_balance(PARTS)?.len()) == 2
+  expect(b.load_balance(PARTS)?.len()) == 2
+  // a renews what it still holds (its etags for the two b took are stale).
+  expect(a.load_balance(PARTS)?.len()) == 2
+  expect(owned_by(store, "a")?.len()) == 2
+  expect(owned_by(store, "b")?.len()) == 2
+}
+
+test "expired and given up ownerships are free to take; a stale etag claims nothing" {
+  let store = new_in_memory_checkpoint_store(os.clock, os.rand)
+  let a = balancer(store, "a", PROCESSOR_STRATEGY_GREEDY, os.clock, os.rand)
+  let mine = a.load_balance(["0", "1"])?
+  store.expire_ownership(mine[0])
+  store.relinquish_ownership(mine[1])
+  let c = balancer(store, "c", PROCESSOR_STRATEGY_GREEDY, os.clock, os.rand)
+  expect(c.load_balance(["0", "1"])?.len()) == 2
+  expect(owned_by(store, "c")?) == ["0", "1"]
+  // a's old etags no longer match.
+  expect(store.claim_ownership(mine)?.len()) == 0
+  expect(store.claim_ownership([mine[0] with {etag: None}]).is_err()) == true
+}
+
+test "start positions: after the checkpoint's offset, else the sequence number, else the partition's or the default" {
+  let store = new_in_memory_checkpoint_store(os.clock, os.rand)
+  let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=sb://${NS}/;SharedAccessKeyName=k;SharedAccessKey=s", "eh1", DEFAULT_CONSUMER_GROUP)?
+  let p = new_processor(cc, store, ProcessorOptions{start_positions: StartPositions{per_partition: {"2": StartPosition{sequence_number: Some(9)}}, default: StartPosition{earliest: true}}})?
+  let cps: Map[Str, Checkpoint] = {
+    "0": Checkpoint{consumer_group: "$Default", event_hub_name: "eh1", fully_qualified_namespace: NS, partition_id: "0", offset: Some(192), sequence_number: Some(1)},
+    "1": Checkpoint{consumer_group: "$Default", event_hub_name: "eh1", fully_qualified_namespace: NS, partition_id: "1", sequence_number: Some(4)},
+    "3": Checkpoint{consumer_group: "$Default", event_hub_name: "eh1", fully_qualified_namespace: NS, partition_id: "3"},
+  }
+  expect(p.start_position("0", cps)) == Ok(StartPosition{offset: Some(192)})
+  expect(p.start_position("1", cps)) == Ok(StartPosition{sequence_number: Some(4)})
+  expect(p.start_position("2", cps)) == Ok(StartPosition{sequence_number: Some(9)})
+  expect(p.start_position("4", cps)) == Ok(StartPosition{earliest: true})
+  expect(p.start_position("3", cps).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("invalid checkpoint for 3, no offset or sequence number")
+  expect(new_processor(cc, store, ProcessorOptions{load_balancing_strategy: "random"}).err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("invalid load balancing strategy 'random'")
+}
+
+fn send_to(pc: ProducerClient, partition: Str, bodies: List[Str]) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+  var b = pc.new_event_data_batch(EventDataBatchOptions{partition_id: Some(partition)})?
+  for t in bodies {
+    b.add_event_data(EventData{body: t.bytes()})?
+  }
+  pc.send_event_data_batch(b)
+}
+
+test "a processor hands out a client per partition, checkpoints, gives its partitions up when stopped, and the next one resumes" {
+  let b = amqptest.new(os.clock)
+  b.event_hub("eh1", 2)
+  b.require_token(true)
+  let l = os.net.listen("eh1.servicebus.example.test:5672").or_fault("listen")
+  let store = new_in_memory_checkpoint_store(os.clock, os.rand)
+  scope s {
+    b.serve(s.group(), l)
+    let pc = new_producer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1")?
+    send_to(pc, "0", ["a0", "b0"])?
+    send_to(pc, "1", ["a1"])?
+    let opts = ProcessorOptions{load_balancing_strategy: PROCESSOR_STRATEGY_GREEDY, update_interval: 50ms, start_positions: StartPositions{default: StartPosition{earliest: true}}}
+    let cc = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP, ConsumerClientOptions{instance_id: "proc-1"})?
+    let p = new_processor(cc, store, opts)?
+    scope run {
+      run.group().spawn(fn() -> () ! EventHubsErr uses (net.dial, clock, rand) { p.run() })
+      var seen: List[Str] = []
+      for _ in 0..2 {
+        let c = p.next_partition_client() ?? return Err(fatal("no partition client"))
+        let want = if c.partition_id() == "0" { 2 } else { 1 }
+        let evs = c.receive_events(want, ReceiveEventsOptions{timeout_ms: 2000})?
+        seen = seen + evs.map(body_text)
+        c.update_checkpoint(evs.last() ?? return Err(fatal("no events")))?
+      }
+      expect(seen.sort_by(fn(x: Str) -> Str { x })) == ["a0", "a1", "b0"]
+      expect(owned_by(store, "proc-1", l.addr())?.len()) == 2
+      expect(p.run().err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("the Processor is currently running. Concurrent calls to Run() are not allowed.")
+      run.cancel()
+    }
+    // Stopped: its partitions were given up (owner id "").
+    expect(owned_by(store, "", l.addr())?.len()) == 2
+    expect(p.next_partition_client().is_none()) == true
+    expect(p.run().err().map(fn(e: EventHubsErr) -> Str { e.msg })) == Some("the Processor has been stopped. Create a new instance to start processing again")
+    let cps = store.list_checkpoints(cc.ns.fqdn, "eh1", "$Default")?.sort_by(fn(c: Checkpoint) -> Str { c.partition_id })
+    expect(cps.map(fn(c: Checkpoint) -> Int? { c.sequence_number })) == [Some(1), Some(0)]
+    send_to(pc, "0", ["c0"])?
+    let cc2 = new_consumer_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()), "eh1", DEFAULT_CONSUMER_GROUP, ConsumerClientOptions{instance_id: "proc-2"})?
+    let p2 = new_processor(cc2, store, opts)?
+    scope run2 {
+      run2.group().spawn(fn() -> () ! EventHubsErr uses (net.dial, clock, rand) { p2.run() })
+      var got: List[Str] = []
+      for _ in 0..2 {
+        let c = p2.next_partition_client() ?? return Err(fatal("no partition client"))
+        if c.partition_id() == "0" {
+          got = c.receive_events(1, ReceiveEventsOptions{timeout_ms: 2000})?.map(body_text)
+        }
+      }
+      // Partition 0 resumes after its checkpoint (b0), so only c0 comes.
+      expect(got) == ["c0"]
+      run2.cancel()
+    }
+    cc.close()?
+    cc2.close()?
+    pc.close()?
+    s.cancel()
+  }
+}
