@@ -1,5 +1,13 @@
 # azdatalake changes
 
+## v0.4.0
+
+Leases, at Go azdatalake v1.7.1 parity on captured vectors.
+
+- `FileSystemLeaseClient` and `PathLeaseClient` (a directory's or a
+  file's): acquire, break, change, release and renew, with Go's
+  condition mapping and DFS error codes.
+
 ## v0.3.0
 
 File data, at Go azdatalake v1.7.1 parity on captured vectors.

@@ -3,8 +3,8 @@
 Azure Data Lake Storage Gen2 for Xo, a port of Go's
 `sdk/storage/azdatalake` v1.7.1 (over azblob v1.8.3, REST API version
 2026-12-06). In progress: the service, file system, directory and file
-clients' path, ACL and file data calls are ported; leases and SAS
-follow.
+clients' path, ACL and file data calls and the lease clients are
+ported; SAS follows.
 
 What it does:
 
@@ -55,6 +55,12 @@ What it does:
   append fails), and `download_stream` and `download_buffer`, azblob's
   on the blob URL, with a download's encryption context and ACL read
   from the same response.
+- Leases: `FileSystemLeaseClient` (`new_file_system_lease_client`) and
+  `PathLeaseClient` (`new_directory_lease_client`,
+  `new_file_lease_client`), azblob's container and blob lease clients
+  on the blob URL. As in Go, a file system lease call sends only the two
+  date conditions, a path lease call all four, and `change_lease` keeps
+  the new ID only when it succeeds.
 - A dfs response header that does not parse (a bool, a number, a date)
   fails the call, as Go's generated handlers do, with Go's error text.
 - Every error code as Go's `ConvertToDFSError` renames it (`blob` to
@@ -111,7 +117,12 @@ Where it differs from Go v1.7.1:
 - A flush leaves out `HTTPHeaders.content_language`, as Go's does (its
   TODO for Azure/azure-sdk-for-go#27522). Go's `CPKScopeInfo` on a
   download is left out: its blob download drops it.
-- Not ported yet: leases, `GetUserDelegationCredential`, `GetSASURL`,
+- Go's lease package's one `NewPathClient` (generic over a directory
+  or a file) is `new_directory_lease_client` and `new_file_lease_client`,
+  and its per-call option structs are a `conditions` argument (and
+  `break_period` for a break). Every lease response is azblob's
+  `LeaseResponse`.
+- Not ported yet: `GetUserDelegationCredential`, `GetSASURL`,
   `ParseURL` and `datalakeerror`.
 - Go names that are Xo keywords: a failed ACL entry's `Type` is
   `entry_type`.

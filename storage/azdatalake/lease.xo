@@ -1,0 +1,121 @@
+// File system and path leases, as azdatalake v1.7.1's lease package (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): azblob's container and
+// blob lease clients on the file system's or path's blob URL, with Go's
+// option mapping and its DFS error code rename.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+
+/// What a lease call returns (Go's FileSystem* and Path* lease responses,
+/// azblob's).
+pub type LeaseResponse = azblob.LeaseResponse
+
+/// A break period that lets the lease end on its own: none is sent.
+pub const BREAK_NATURALLY: Int = azblob.BREAK_NATURALLY
+
+/// The conditions on a lease call (Go's ModifiedAccessConditions: the
+/// four it passes on, no tags).
+pub struct ModifiedAccessConditions {
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+}
+
+fn blob_modified(m: ModifiedAccessConditions) -> azblob.ModifiedConditions {
+  azblob.ModifiedConditions{if_match: m.if_match, if_none_match: m.if_none_match, if_modified_since: m.if_modified_since, if_unmodified_since: m.if_unmodified_since}
+}
+
+/// The two dates, all a container lease call sends.
+fn container_modified(m: ModifiedAccessConditions) -> azblob.ContainerConditions {
+  azblob.ContainerConditions{if_modified_since: m.if_modified_since, if_unmodified_since: m.if_unmodified_since}
+}
+
+fn dfs_lease(r: Result[LeaseResponse, azcore.CallErr]) -> LeaseResponse ! azcore.CallErr {
+  r.map_err(to_dfs_error)
+}
+
+/// A lease on a file system (lease.FileSystemClient); `lease_id` is the
+/// one it proposes when acquiring and holds after `change_lease`.
+pub struct FileSystemLeaseClient {
+  pub lease_id: Str
+  inner: azblob.ContainerLeaseClient
+}
+
+/// A file system lease client (lease.NewFileSystemClient); with no
+/// `lease_id` it makes a random one.
+pub fn new_file_system_lease_client(rand: Rand, file_system: FileSystemClient, lease_id: Str? = None) -> FileSystemLeaseClient uses rand {
+  let inner = azblob.new_container_lease_client(rand, file_system.container, lease_id)
+  FileSystemLeaseClient{lease_id: inner.lease_id, inner: inner}
+}
+
+/// Acquires the lease for `duration` seconds (15 to 60, or -1 for an
+/// infinite lease).
+pub fn (l: FileSystemLeaseClient) acquire_lease(duration: Int, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.acquire_lease(duration, container_modified(conditions)))
+}
+
+/// Breaks the lease, after `break_period` seconds when given.
+pub fn (l: FileSystemLeaseClient) break_lease(break_period: Int? = None, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.break_lease(break_period, container_modified(conditions)))
+}
+
+/// Changes the lease's ID; the client holds the new one once the call
+/// succeeds.
+pub fn (var l: FileSystemLeaseClient) change_lease(proposed_lease_id: Str, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let r = dfs_lease(l.inner.change_lease(proposed_lease_id, container_modified(conditions)))?
+  l.lease_id = l.inner.lease_id
+  Ok(r)
+}
+
+pub fn (l: FileSystemLeaseClient) release_lease(conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.release_lease(container_modified(conditions)))
+}
+
+pub fn (l: FileSystemLeaseClient) renew_lease(conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.renew_lease(container_modified(conditions)))
+}
+
+/// A lease on a directory or file (lease.PathClient).
+pub struct PathLeaseClient {
+  pub lease_id: Str
+  inner: azblob.BlobLeaseClient
+}
+
+fn path_lease_of(rand: Rand, c: PathCore, lease_id: Str?) -> PathLeaseClient uses rand {
+  let inner = azblob.new_blob_lease_client(rand, c.blob, lease_id)
+  PathLeaseClient{lease_id: inner.lease_id, inner: inner}
+}
+
+/// A lease client of a directory (lease.NewPathClient); with no
+/// `lease_id` it makes a random one.
+pub fn new_directory_lease_client(rand: Rand, directory: DirectoryClient, lease_id: Str? = None) -> PathLeaseClient uses rand {
+  path_lease_of(rand, directory.core, lease_id)
+}
+
+/// A lease client of a file (lease.NewPathClient).
+pub fn new_file_lease_client(rand: Rand, file: FileClient, lease_id: Str? = None) -> PathLeaseClient uses rand {
+  path_lease_of(rand, file.core, lease_id)
+}
+
+pub fn (l: PathLeaseClient) acquire_lease(duration: Int, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.acquire_lease(duration, blob_modified(conditions)))
+}
+
+pub fn (l: PathLeaseClient) break_lease(break_period: Int? = None, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.break_lease(break_period, blob_modified(conditions)))
+}
+
+pub fn (var l: PathLeaseClient) change_lease(proposed_lease_id: Str, conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let r = dfs_lease(l.inner.change_lease(proposed_lease_id, blob_modified(conditions)))?
+  l.lease_id = l.inner.lease_id
+  Ok(r)
+}
+
+pub fn (l: PathLeaseClient) release_lease(conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.release_lease(blob_modified(conditions)))
+}
+
+pub fn (l: PathLeaseClient) renew_lease(conditions: ModifiedAccessConditions = ModifiedAccessConditions{}) -> LeaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  dfs_lease(l.inner.renew_lease(blob_modified(conditions)))
+}

@@ -1,0 +1,103 @@
+// The file system and path lease clients against a fake that answers as
+// the Go program's fake does (leasevectors_test.xo).
+
+use std/http
+
+const LEASE_GO_DATE: Str = "Fri, 06 Nov 2026 15:37:11 GMT"
+
+fn dl_lease_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let h = fn(k: Str) -> Str { req.header(k) ?? "" }
+  let p = req.url.path
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  if p.contains("missing") {
+    return empty(404, [("x-ms-error-code", if q("restype") == "container" { "ContainerNotFound" } else { "BlobNotFound" })])
+  }
+  if p.contains("busy") {
+    return empty(409, [("x-ms-error-code", "LeaseIdMismatchWithLeaseOperation")])
+  }
+  if req.method != "PUT" || q("comp") != "lease" {
+    return empty(400, [])
+  }
+  let stamp = [("ETag", "\"0x8D9\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let a = h("x-ms-lease-action")
+  if a == "acquire" { return empty(201, stamp + [("x-ms-lease-id", h("x-ms-proposed-lease-id"))]) }
+  if a == "break" { return empty(202, stamp + [("x-ms-lease-time", "7")]) }
+  if a == "change" { return empty(200, stamp + [("x-ms-lease-id", h("x-ms-proposed-lease-id"))]) }
+  if a == "renew" { return empty(200, stamp + [("x-ms-lease-id", h("x-ms-lease-id"))]) }
+  if a == "release" { return empty(200, stamp) }
+  empty(400, [])
+}
+
+fn dl_lease_dump(x: LeaseResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseID", x.lease_id)
+  d.i("LeaseTime", x.lease_time)
+  d
+}
+
+test "the lease clients send what Go sends and read what Go reads" {
+  let log = serve(os.net, dl_lease_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(LEASE_GO_DATE)
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let t1 = at("2026-11-01T02:03:04Z")
+  let t2 = at("2026-11-02T02:03:04Z")
+  let mac = ModifiedAccessConditions{if_match: Some("e1"), if_none_match: Some("e2"), if_modified_since: Some(t1), if_unmodified_since: Some(t2)}
+  let fs_of = fn(name: Str) -> FileSystemClient { new_file_system_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/${name}", cred, opts) }
+  let fsc = fs_of("fs1")
+
+  var fl = new_file_system_lease_client(os.rand, fsc, Some("l1"))
+  out = out + one_str("fs LeaseID", Some(fl.lease_id))
+  out = out + add(shown("fs Acquire nil", fl.acquire_lease(15), dl_lease_dump))
+  out = out + add(shown("fs Acquire conditions", fl.acquire_lease(-1, mac), dl_lease_dump))
+  out = out + add(shown("fs Break nil", fl.break_lease(), dl_lease_dump))
+  out = out + add(shown("fs Break period", fl.break_lease(Some(5)), dl_lease_dump))
+  out = out + add(shown("fs Break naturally conditions", fl.break_lease(Some(BREAK_NATURALLY), mac), dl_lease_dump))
+  out = out + add(shown("fs Change", fl.change_lease("l2", mac), dl_lease_dump))
+  out = out + one_str("fs LeaseID after change", Some(fl.lease_id))
+  out = out + add(shown("fs Renew", fl.renew_lease(), dl_lease_dump))
+  out = out + add(shown("fs Renew conditions", fl.renew_lease(mac), dl_lease_dump))
+  out = out + add(shown("fs Release", fl.release_lease(mac), dl_lease_dump))
+  let ml = new_file_system_lease_client(os.rand, fs_of("missing"), Some("l1"))
+  out = out + add(shown("fs Acquire missing", ml.acquire_lease(15), dl_lease_dump))
+  var bl = new_file_system_lease_client(os.rand, fs_of("busy"), Some("l1"))
+  out = out + add(shown("fs Change busy", bl.change_lease("l9"), dl_lease_dump))
+  out = out + one_str("fs LeaseID after failed change", Some(bl.lease_id))
+
+  let dir = new_directory_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d1", cred, opts)
+  var dl = new_directory_lease_client(os.rand, dir, Some("p1"))
+  out = out + one_str("dir LeaseID", Some(dl.lease_id))
+  out = out + add(shown("dir Acquire conditions", dl.acquire_lease(30, mac), dl_lease_dump))
+  out = out + add(shown("dir Break 0 conditions", dl.break_lease(Some(0), mac), dl_lease_dump))
+  out = out + add(shown("dir Break naturally", dl.break_lease(Some(-1)), dl_lease_dump))
+  out = out + add(shown("dir Change", dl.change_lease("p2"), dl_lease_dump))
+  out = out + one_str("dir LeaseID after change", Some(dl.lease_id))
+  out = out + add(shown("dir Renew conditions", dl.renew_lease(mac), dl_lease_dump))
+  out = out + add(shown("dir Release", dl.release_lease(), dl_lease_dump))
+
+  let fl2 = new_file_lease_client(os.rand, fsc.new_file_client("a b/c.txt"), Some("q1"))
+  out = out + add(shown("fs file Acquire", fl2.acquire_lease(15), dl_lease_dump))
+  out = out + add(shown("fs file Release conditions", fl2.release_lease(mac), dl_lease_dump))
+  out = out + add(shown("fs file Break nil", fl2.break_lease(), dl_lease_dump))
+  let fm = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/missing.txt", cred, opts)
+  out = out + add(shown("file Renew missing", new_file_lease_client(os.rand, fm, Some("q1")).renew_lease(), dl_lease_dump))
+  let fb = new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/busy.txt", cred, opts)
+  var fbl = new_file_lease_client(os.rand, fb, Some("q1"))
+  out = out + add(shown("file Change busy", fbl.change_lease("q9", mac), dl_lease_dump))
+  out = out + one_str("file LeaseID after failed change", Some(fbl.lease_id))
+  out = out + drain(log)
+  expect(out) == LEASE_OUTPUT
+}
+
+test "a lease client with no lease ID makes a random UUID" {
+  let f = new_file_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/f.txt", go_options(""))
+  let l = new_file_lease_client(os.rand, f)
+  expect(l.lease_id.len()) == 36
+  expect(l.lease_id[14..15]) == "4"
+}

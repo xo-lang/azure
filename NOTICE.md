@@ -32,8 +32,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   options and responses, the dfs and blob URL mapping and the DFS error
   code rename, over azblob's clients; its generated list, path and
   access control calls and models, its sas.URLParts rebuild of a
-  rename's URL, and a file's append, flush, chunked upload and
-  downloads; requests checked against its own),
+  rename's URL, a file's append, flush, chunked upload and downloads,
+  and the lease package; requests checked against its own),
   `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,
   SAS, connection strings, XML models and error codes, hand written;
