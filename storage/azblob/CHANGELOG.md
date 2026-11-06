@@ -1,5 +1,24 @@
 # azblob changes
 
+## v0.11.0
+
+Behavior fix (URLs change): the `Client` calls and the list pagers
+write the query as Go's generated request code does. The client URL's
+query (a SAS) is parsed, the operation's parameters are set over it,
+and the whole query is encoded sorted by key with a space as `%20`.
+Before, the operation's parameters went first in their own order with
+the SAS appended as written, and the next list page appended `marker`
+to the end, so `?comp=block&blockid=YQ%3D%3D&sv=...&sig=...` went out
+where Go sends `?blockid=YQ%3D%3D&comp=block&sig=...&sv=...`, and a
+marker with a space was `+` where Go writes `%20`.
+
+- Checked against azblob v1.8.3: both pages of the container and flat
+  blob list pagers and a StageBlock, without and with a SAS
+  (`listvectors_test.xo`). The calls built on `core.xo` already wrote
+  the query this way.
+- azqueue already did (its two list pages with a SAS checked against
+  azqueue v1.0.1 in its `client_test.xo`).
+
 ## v0.10.0
 
 Behavior fix: a response header that repeats is read as Go's

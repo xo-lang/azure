@@ -1,6 +1,7 @@
 use std/http
 use std/testing
 use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/storage/azblob/exported
 
 const EP: Str = "http://127.0.0.1:10000/devstoreaccount1"
@@ -57,10 +58,45 @@ test "blob names are path escaped as azblob escapes them, a slash too" {
   expect(blob_path("photos", "dir/my file ü.txt")) == "/photos/dir%2Fmy%20file%20%C3%BC.txt"
 }
 
-test "a SAS client keeps its SAS after the operation's query" {
+test "a SAS client's query is the SAS with the operation's parameters set over it, sorted" {
   let c = new_client_with_no_credential(os.net, os.clock, os.rand, "${EP}?sv=2025-05-05&sig=x")
-  expect(c.url_for("/c/b", [("comp", "block"), ("blockid", "a+b=")])) == "${EP}/c/b?comp=block&blockid=a%2Bb%3D&sv=2025-05-05&sig=x"
-  expect(c.url_for("/")) == "${EP}/?sv=2025-05-05&sig=x"
+  expect(c.url_for("/c/b", [("comp", "block"), ("blockid", "a+b=")])) == "${EP}/c/b?blockid=a%2Bb%3D&comp=block&sig=x&sv=2025-05-05"
+  expect(c.url_for("/")) == "${EP}/?sig=x&sv=2025-05-05"
+  expect(c.url_for("/c", [("prefix", "a b")])) == "${EP}/c?prefix=a%20b&sig=x&sv=2025-05-05"
+}
+
+test "the list pagers and stage_block send Go's URLs, page by page, with and without a SAS" {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    let qs = req.raw_query()
+    log.with(fn(var l: List[Str]) { l.push("REQ ${req.method} https://${req.url.host}${req.escaped_path()}${if qs == "" { "" } else { "?${qs}" }}") })
+    let first = req.url.query.get("marker").is_none()
+    if req.method == "PUT" {
+      return http.text(201, "")
+    }
+    if req.path == "/c1" {
+      return http.text(200, if first { "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"c1\"><Blobs><Blob><Name>a</Name><Properties><BlobType>BlockBlob</BlobType></Properties></Blob></Blobs><NextMarker>m 2/x</NextMarker></EnumerationResults>" } else { "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"c1\"><Blobs></Blobs><NextMarker></NextMarker></EnumerationResults>" })
+    }
+    http.text(200, if first { "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults><Containers><Container><Name>c1</Name><Properties></Properties></Container></Containers><NextMarker>m 2/x</NextMarker></EnumerationResults>" } else { "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults><Containers></Containers><NextMarker></NextMarker></EnumerationResults>" })
+  }
+  for m in ["GET", "PUT"] {
+    for p in ["/", "/{a}", "/{a}/{b}"] {
+      os.net.handle("${m} https://acct1.blob.example.test${p}", h)
+    }
+  }
+  for ep in ["https://acct1.blob.example.test/", "https://acct1.blob.example.test/?sv=2025-05-05&sp=rl&sig=a%2Bb%3D"] {
+    let c = new_client_with_no_credential(os.net, os.clock, os.rand, ep, ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}})
+    var cp = c.new_list_containers_pager(prefix: "c", max_results: 2, include_metadata: true)
+    while cp.more() {
+      cp.next_page()?
+    }
+    var bp = c.new_list_blobs_flat_pager("c1", prefix: "d/", max_results: 5, include_metadata: true)
+    while bp.more() {
+      bp.next_page()?
+    }
+    c.stage_block("c1", "b", "YQ==", "abc".bytes())?
+  }
+  expect(log.with(fn(var l: List[Str]) -> List[Str] { l })) == GO_LIST_REQUESTS
 }
 
 test "the blob list pager decodes pages and follows NextMarker" {

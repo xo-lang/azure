@@ -79,12 +79,22 @@ pub fn (c: Client) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
     Some(i) => (c.url[0..i], c.url[i + 1..c.url.len()])
     None => (c.url, "")
   }
-  var parts = query.map(fn(kv: (Str, Str)) -> Str { "${url.query_escape(kv.0)}=${url.query_escape(kv.1)}" })
-  if sas != "" {
-    parts.push(sas)
-  }
-  let q = if parts.is_empty() { "" } else { "?${parts.join("&")}" }
-  "${base.trim_end_chars("/")}${path}${q}"
+  // Go's generated request code: the SAS parsed with the operation's
+  // parameters set over it, encoded sorted with spaces as %20
+  let joined = "${base.trim_end_chars("/")}${path}"
+  with_query(if sas == "" { joined } else { "${joined}?${sas}" }, query)
+}
+
+/// A list pager that asks for the next page with `marker` set in the
+/// first request's query, re-encoded as Go's generated code encodes it.
+fn marker_pager[T](c: Client, first: policy.Request, decode: fn(http.Response) -> T ! Str, marker: fn(T) -> Str?) -> runtime.Pager[T] {
+  runtime.new_pager_with(c.pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
+    let m = marker(page) ?? return None
+    if m == "" {
+      return None
+    }
+    Some(prev with {url: with_query(prev.url, [("marker", m)])})
+  })
 }
 
 fn container_path(container: Str) -> Str {
@@ -394,7 +404,7 @@ pub fn (c: Client) new_list_containers_pager(prefix: Str = "", max_results: Int 
   if prefix != "" { q.push(("prefix", prefix)) }
   if max_results > 0 { q.push(("maxresults", "${max_results}")) }
   if include_metadata { q.push(("include", "metadata")) }
-  runtime.new_marker_pager(c.pipeline, policy.Request{method: "GET", url: c.url_for("/", q)}, fn(r: http.Response) -> ListContainersPage ! Str { parse_containers(r.body.to_str_lossy()) }, "marker", fn(p: ListContainersPage) -> Str? { Some(p.next_marker) })
+  marker_pager(c, policy.Request{method: "GET", url: c.url_for("/", q)}, fn(r: http.Response) -> ListContainersPage ! Str { parse_containers(r.body.to_str_lossy()) }, fn(p: ListContainersPage) -> Str? { Some(p.next_marker) })
 }
 
 /// A container's blobs, flat (azblob.Client.NewListBlobsFlatPager).
@@ -403,5 +413,5 @@ pub fn (c: Client) new_list_blobs_flat_pager(container: Str, prefix: Str = "", m
   if prefix != "" { q.push(("prefix", prefix)) }
   if max_results > 0 { q.push(("maxresults", "${max_results}")) }
   if include_metadata { q.push(("include", "metadata")) }
-  runtime.new_marker_pager(c.pipeline, policy.Request{method: "GET", url: c.url_for(container_path(container), q)}, fn(r: http.Response) -> ListBlobsFlatPage ! Str { parse_blobs(r.body.to_str_lossy()) }, "marker", fn(p: ListBlobsFlatPage) -> Str? { Some(p.next_marker) })
+  marker_pager(c, policy.Request{method: "GET", url: c.url_for(container_path(container), q)}, fn(r: http.Response) -> ListBlobsFlatPage ! Str { parse_blobs(r.body.to_str_lossy()) }, fn(p: ListBlobsFlatPage) -> Str? { Some(p.next_marker) })
 }
