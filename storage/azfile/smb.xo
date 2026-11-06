@@ -1,0 +1,131 @@
+// SMB and NFS properties and permissions of directories and files, as
+// azfile's internal/exported smb_property.go, nfs_property.go and
+// file_permissions.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): what the create, set properties and rename calls send, and
+// the times the service writes back.
+
+use std/http
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+pub const FILE_PROPERTY_SEMANTICS_NEW: Str = "New"
+pub const FILE_PROPERTY_SEMANTICS_RESTORE: Str = "Restore"
+
+pub const NFS_FILE_TYPE_DIRECTORY: Str = "Directory"
+pub const NFS_FILE_TYPE_REGULAR: Str = "Regular"
+pub const NFS_FILE_TYPE_SYM_LINK: Str = "SymLink"
+
+/// NTFS attributes (Go's NTFSFileAttributes).
+pub struct NtfsFileAttributes {
+  pub read_only: Bool = false
+  pub hidden: Bool = false
+  pub system: Bool = false
+  pub directory: Bool = false
+  pub archive: Bool = false
+  pub none: Bool = false
+  pub temporary: Bool = false
+  pub offline: Bool = false
+  pub not_content_indexed: Bool = false
+  pub no_scrub_data: Bool = false
+}
+
+/// `ReadOnly|Hidden|...` in Go's order.
+pub fn (f: NtfsFileAttributes) to_str() -> Str {
+  var parts: List[Str] = []
+  for (on, name) in [(f.read_only, "ReadOnly"), (f.hidden, "Hidden"), (f.system, "System"), (f.directory, "Directory"), (f.archive, "Archive"), (f.none, "None"), (f.temporary, "Temporary"), (f.offline, "Offline"), (f.not_content_indexed, "NotContentIndexed"), (f.no_scrub_data, "NoScrubData")] {
+    if on { parts.push(name) }
+  }
+  parts.join("|")
+}
+
+/// Go's ParseNTFSFileAttributes: names separated by `|`, any case.
+pub fn parse_ntfs_file_attributes(attributes: Str) -> NtfsFileAttributes ! Str {
+  var a = NtfsFileAttributes{}
+  for raw in attributes.split("|") {
+    let p = raw.trim().to_lower()
+    a = match p {
+      "readonly" => a with {read_only: true}
+      "hidden" => a with {hidden: true}
+      "system" => a with {system: true}
+      "directory" => a with {directory: true}
+      "archive" => a with {archive: true}
+      "none" => a with {none: true}
+      "temporary" => a with {temporary: true}
+      "offline" => a with {offline: true}
+      "notcontentindexed" => a with {not_content_indexed: true}
+      "noscrubdata" => a with {no_scrub_data: true}
+      _ => return Err("unknown file attribute ${p}")
+    }
+  }
+  Ok(a)
+}
+
+pub struct SmbProperties {
+  pub attributes: NtfsFileAttributes? = None
+  pub creation_time: Time? = None
+  pub last_write_time: Time? = None
+  pub change_time: Time? = None
+}
+
+pub struct NfsProperties {
+  pub creation_time: Time? = None
+  pub last_write_time: Time? = None
+  /// Octal, `0755`.
+  pub file_mode: Str? = None
+  pub owner: Str? = None
+  pub group: Str? = None
+}
+
+/// A security descriptor, or the key of one stored with
+/// `ShareClient.create_permission` (or `inherit`, `preserve`).
+pub struct Permissions {
+  pub permission: Str? = None
+  pub permission_key: Str? = None
+}
+
+/// Go's ISO8601 layout: UTC with 7 fraction digits.
+fn iso8601(t: Time) -> Str {
+  blobsas.format_snapshot(t)
+}
+
+fn time_header(name: Str, t: Time?) -> List[(Str, Str)] {
+  match t {
+    Some(x) => [(name, iso8601(x))]
+    None => []
+  }
+}
+
+/// Go's FormatSMBProperties: a directory's attributes get `|Directory`
+/// unless they are `None` (so `Directory` is written twice when set).
+fn smb_headers(sp: SmbProperties?, is_dir: Bool) -> List[(Str, Str)] {
+  let p = sp ?? return []
+  var hs: List[(Str, Str)] = []
+  if let Some(a) = p.attributes {
+    var s = a.to_str()
+    if is_dir && s.to_lower() != "none" {
+      s = s + "|Directory"
+    }
+    hs.push(("x-ms-file-attributes", s.trim_start_chars("|").trim_end_chars("|")))
+  }
+  hs + time_header("x-ms-file-change-time", p.change_time) + time_header("x-ms-file-creation-time", p.creation_time) + time_header("x-ms-file-last-write-time", p.last_write_time)
+}
+
+fn nfs_headers(np: NfsProperties) -> List[(Str, Str)] {
+  time_header("x-ms-file-creation-time", np.creation_time) + time_header("x-ms-file-last-write-time", np.last_write_time) + str_header("x-ms-group", np.group) + str_header("x-ms-mode", np.file_mode) + str_header("x-ms-owner", np.owner)
+}
+
+/// The permission headers, the format forced to Sddl when a key other
+/// than `keep` is sent (Go's create keeps `inherit`, set properties and
+/// rename keep `preserve`).
+fn permission_headers(p: Permissions?, format: Str?, keep: Str) -> List[(Str, Str)] {
+  let (perm, key) = match p {
+    Some(x) => (x.permission, x.permission_key)
+    None => (None, None)
+  }
+  let f = if key.is_some() && key != Some(keep) { Some(FILE_PERMISSION_FORMAT_SDDL) } else { format }
+  str_header("x-ms-file-permission", perm) + str_header("x-ms-file-permission-format", f) + str_header("x-ms-file-permission-key", key)
+}
+
+/// An ISO 8601 header time (`2026-11-05T01:02:03.1234567Z`).
+fn header_iso(resp: http.Response, name: Str) -> Time? {
+  resp.header(name).and_then(fn(v: Str) -> Time? { rfc3339(v) })
+}

@@ -1,0 +1,341 @@
+// The directory client, as azfile's directory/client.go and
+// directory/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md), with the requests of its generated DirectoryClient.
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// A client of one directory (a share's root directory is the share URL).
+pub struct DirectoryClient {
+  pub url: Str
+  core: Core
+}
+
+fn directory(c: Core) -> DirectoryClient {
+  DirectoryClient{url: c.url, core: c}
+}
+
+pub fn new_directory_client(net: Net, clock: Clock, rand: Rand, directory_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory(core_with_token(net, clock, rand, directory_url, cred, options))
+}
+
+pub fn new_directory_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, directory_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory(core_with_shared_key(net, clock, rand, directory_url, cred, options))
+}
+
+pub fn new_directory_client_with_no_credential(net: Net, clock: Clock, rand: Rand, directory_url: Str, options: ClientOptions = ClientOptions{}) -> DirectoryClient {
+  directory(core_with_no_credential(net, clock, rand, directory_url, options))
+}
+
+/// A directory client from a connection string; backslashes in
+/// `directory_path` become slashes, and the path is joined unescaped, as
+/// Go's runtime.JoinPaths joins it.
+pub fn new_directory_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, share_name: Str, directory_path: Str, options: ClientOptions = ClientOptions{}) -> DirectoryClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, share_name), directory_path.replace("\\", "/"))
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_directory_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_directory_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The directory `directory_name` in the share (Go's NewDirectoryClient:
+/// the name trimmed of trailing slashes and escaped as one segment, its
+/// slashes too).
+pub fn (s: ShareClient) new_directory_client(directory_name: Str) -> DirectoryClient {
+  directory(s.core with {url: s.directory_url(directory_name)})
+}
+
+pub fn (s: ShareClient) new_root_directory_client() -> DirectoryClient {
+  directory(s.core with {url: s.root_directory_url()})
+}
+
+pub fn (d: DirectoryClient) new_subdirectory_client(subdirectory_name: Str) -> DirectoryClient {
+  directory(d.core with {url: join_paths(d.url, url.path_escape(subdirectory_name.trim_end_chars("/")))})
+}
+
+/// The URL of a file in the directory, the name escaped as one segment.
+fn (d: DirectoryClient) file_url(file_name: Str) -> Str {
+  join_paths(d.url, url.path_escape(file_name))
+}
+
+/// The headers every directory and file call carries from the options.
+fn (c: Core) dot_headers(source: Bool = false) -> List[(Str, Str)] {
+  var hs = bool_header("x-ms-allow-trailing-dot", c.options.allow_trailing_dot)
+  if source {
+    hs = hs + bool_header("x-ms-source-allow-trailing-dot", c.options.allow_source_trailing_dot)
+  }
+  hs
+}
+
+fn dir_call(c: Core, method: Str, comp: Str?, ok: List[Int], query: List[(Str, Str)] = [], headers: List[(Str, Str)] = [], restype: Bool = true) -> Call {
+  var q: List[(Str, Str)] = if restype { [("restype", "directory")] } else { [] }
+  if let Some(x) = comp { q.push(("comp", x)) }
+  Call{method: method, query: q + query, ok: ok, headers: c.dot_headers() + headers}
+}
+
+/// What a directory call returns; each call fills the fields Go's
+/// handler for it reads.
+pub struct DirectoryResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub file_attributes: Str? = None
+  pub file_change_time: Time? = None
+  pub file_creation_time: Time? = None
+  pub id: Str? = None
+  pub file_last_write_time: Time? = None
+  pub file_mode: Str? = None
+  pub parent_id: Str? = None
+  pub file_permission_key: Str? = None
+  pub group: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub metadata: Map[Str, Str] = {}
+  pub nfs_file_type: Str? = None
+  pub owner: Str? = None
+}
+
+struct Reads {
+  smb: Bool = true
+  nfs: Bool = true
+  last_modified: Bool = true
+  file_type: Bool = false
+  metadata: Bool = false
+  /// `x-ms-request-server-encrypted` on writes, `x-ms-server-encrypted`
+  /// on reads.
+  encrypted: Str = "x-ms-request-server-encrypted"
+}
+
+fn dir_response(resp: http.Response, r: Reads) -> DirectoryResponse {
+  var d = DirectoryResponse{response: response_of(resp), date: header_time(resp, "Date"), etag: header(resp, "ETag"), is_server_encrypted: header_bool(resp, r.encrypted)}
+  if r.smb {
+    d = d with {file_attributes: header(resp, "x-ms-file-attributes"), file_change_time: header_iso(resp, "x-ms-file-change-time"), file_creation_time: header_iso(resp, "x-ms-file-creation-time"), id: header(resp, "x-ms-file-id"), file_last_write_time: header_iso(resp, "x-ms-file-last-write-time"), parent_id: header(resp, "x-ms-file-parent-id"), file_permission_key: header(resp, "x-ms-file-permission-key")}
+  }
+  if r.nfs {
+    d = d with {file_mode: header(resp, "x-ms-mode"), group: header(resp, "x-ms-group"), owner: header(resp, "x-ms-owner")}
+  }
+  if r.last_modified { d = d with {last_modified: header_time(resp, "Last-Modified")} }
+  if r.file_type { d = d with {nfs_file_type: header(resp, "x-ms-file-file-type")} }
+  if r.metadata { d = d with {metadata: metadata_of(resp)} }
+  d
+}
+
+/// The SMB or NFS properties a create or set properties call sends: NFS
+/// ones when given (the SMB ones and permissions then left out, as Go
+/// does).
+fn props_headers(smb: SmbProperties?, nfs: NfsProperties?, permissions: Permissions?, format: Str?, keep: Str, is_dir: Bool) -> List[(Str, Str)] {
+  match nfs {
+    Some(n) => nfs_headers(n)
+    None => smb_headers(smb, is_dir) + permission_headers(permissions, format, keep)
+  }
+}
+
+pub struct CreateDirectoryOptions {
+  pub smb_properties: SmbProperties? = None
+  pub nfs_properties: NfsProperties? = None
+  pub permissions: Permissions? = None
+  pub metadata: Map[Str, Str]? = None
+  pub file_permission_format: Str? = None
+  /// `FILE_PROPERTY_SEMANTICS_NEW` or `_RESTORE` (SMB only).
+  pub file_property_semantics: Str? = None
+}
+
+pub fn (d: DirectoryClient) create(options: CreateDirectoryOptions = CreateDirectoryOptions{}) -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var hs = props_headers(o.smb_properties, o.nfs_properties, o.permissions, o.file_permission_format, "inherit", true) + meta_headers(o.metadata ?? {})
+  if o.nfs_properties.is_none() {
+    hs = hs + str_header("x-ms-file-property-semantics", o.file_property_semantics)
+  }
+  let resp = d.core.send(dir_call(d.core, "PUT", None, [201], headers: hs))?
+  Ok(dir_response(resp, Reads{file_type: true}))
+}
+
+pub fn (d: DirectoryClient) delete() -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = d.core.send(dir_call(d.core, "DELETE", None, [202]))?
+  Ok(dir_response(resp, Reads{smb: false, nfs: false, last_modified: false, encrypted: ""}) with {etag: None})
+}
+
+pub fn (d: DirectoryClient) get_properties(share_snapshot: Str? = None) -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = d.core.send(dir_call(d.core, "GET", None, [200], query: snapshot_query(share_snapshot)))?
+  Ok(dir_response(resp, Reads{file_type: true, metadata: true, encrypted: "x-ms-server-encrypted"}))
+}
+
+pub struct SetDirectoryPropertiesOptions {
+  pub smb_properties: SmbProperties? = None
+  pub nfs_properties: NfsProperties? = None
+  pub permissions: Permissions? = None
+  pub file_permission_format: Str? = None
+}
+
+pub fn (d: DirectoryClient) set_properties(options: SetDirectoryPropertiesOptions = SetDirectoryPropertiesOptions{}) -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = props_headers(o.smb_properties, o.nfs_properties, o.permissions, o.file_permission_format, "preserve", true)
+  let resp = d.core.send(dir_call(d.core, "PUT", Some("properties"), [200], headers: hs))?
+  Ok(dir_response(resp, Reads{}))
+}
+
+pub fn (d: DirectoryClient) set_metadata(metadata: Map[Str, Str]? = None) -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = d.core.send(dir_call(d.core, "PUT", Some("metadata"), [200], headers: meta_headers(metadata ?? {})))?
+  Ok(dir_response(resp, Reads{smb: false, nfs: false, last_modified: false}))
+}
+
+pub struct RenameDirectoryOptions {
+  pub smb_properties: SmbProperties? = None
+  pub permissions: Permissions? = None
+  pub file_permission_format: Str? = None
+  pub ignore_read_only: Bool? = None
+  pub metadata: Map[Str, Str]? = None
+  pub replace_if_exists: Bool? = None
+  pub destination_lease_id: Str? = None
+}
+
+/// The URL `destination_path` names in this client's share (Go's Rename):
+/// trimmed of spaces and slashes, a `?query` after it replacing the
+/// source's.
+fn dest_url(source: Str, destination_path: Str) -> Str ! Str {
+  let dest = destination_path.trim().trim_start_chars("/").trim_end_chars("/")
+  if dest == "" {
+    return Err("destination path must not be empty")
+  }
+  let parts = dest.split("?")
+  let p = parse_url(source)?
+  let u = (p with {directory_or_file_path: parts[0]}).to_url()
+  if parts.len() == 2 && parts[1] != "" {
+    return Ok("${u.split("?")[0]}?${parts[1]}")
+  }
+  Ok(u)
+}
+
+fn rename_headers(c: Core, source: Str, smb: SmbProperties?, permissions: Permissions?, format: Str?, ignore_read_only: Bool?, replace_if_exists: Bool?, metadata: Map[Str, Str]?, destination_lease_id: Str?, is_dir: Bool) -> List[(Str, Str)] {
+  str_header("x-ms-destination-lease-id", destination_lease_id) + smb_headers(smb, is_dir) + permission_headers(permissions, format, "preserve") + bool_header("x-ms-file-rename-ignore-readonly", ignore_read_only) + bool_header("x-ms-file-rename-replace-if-exists", replace_if_exists) + [("x-ms-file-rename-source", source)] + meta_headers(metadata ?? {}) + bool_header("x-ms-source-allow-trailing-dot", c.options.allow_source_trailing_dot)
+}
+
+/// Renames the directory to `destination_path` in the same share; the
+/// call goes to the destination, naming this one as its source.
+pub fn (d: DirectoryClient) rename(destination_path: Str, options: RenameDirectoryOptions = RenameDirectoryOptions{}) -> DirectoryResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let to = dest_url(d.url, destination_path) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let dest = d.core with {url: to}
+  let hs = rename_headers(d.core, d.url, o.smb_properties, o.permissions, o.file_permission_format, o.ignore_read_only, o.replace_if_exists, o.metadata, o.destination_lease_id, true)
+  let resp = dest.send(dir_call(dest, "PUT", Some("rename"), [200], headers: hs))?
+  Ok(dir_response(resp, Reads{nfs: false}))
+}
+
+// Listing.
+
+pub const LIST_FILES_INCLUDE_TIMESTAMPS: Str = "Timestamps"
+pub const LIST_FILES_INCLUDE_ETAG: Str = "Etag"
+pub const LIST_FILES_INCLUDE_ATTRIBUTES: Str = "Attributes"
+pub const LIST_FILES_INCLUDE_PERMISSION_KEY: Str = "PermissionKey"
+
+pub struct ListFilesAndDirectoriesOptions {
+  pub include_timestamps: Bool = false
+  pub include_etag: Bool = false
+  pub include_attributes: Bool = false
+  pub include_permission_key: Bool = false
+  pub include_extended_info: Bool? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+  pub share_snapshot: Str? = None
+}
+
+fn list_files_query(o: ListFilesAndDirectoriesOptions, marker: Str?) -> List[(Str, Str)] {
+  var q = [("comp", "list"), ("restype", "directory")]
+  var inc: List[Str] = []
+  if o.include_timestamps { inc.push(LIST_FILES_INCLUDE_TIMESTAMPS) }
+  if o.include_etag { inc.push(LIST_FILES_INCLUDE_ETAG) }
+  if o.include_attributes { inc.push(LIST_FILES_INCLUDE_ATTRIBUTES) }
+  if o.include_permission_key { inc.push(LIST_FILES_INCLUDE_PERMISSION_KEY) }
+  if !inc.is_empty() { q.push(("include", inc.join(","))) }
+  if let Some(m) = marker { q.push(("marker", m)) }
+  if let Some(n) = o.max_results { q.push(("maxresults", "${n}")) }
+  if let Some(p) = o.prefix { q.push(("prefix", p)) }
+  q + snapshot_query(o.share_snapshot)
+}
+
+fn (c: Core) page_request(query: List[(Str, Str)], headers: List[(Str, Str)]) -> policy.Request {
+  var hs = c.dot_headers() + headers + [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]
+  if let Some(i) = c.options.file_request_intent { hs.push(("x-ms-file-request-intent", i)) }
+  policy.Request{method: "GET", url: with_query(c.url, query), headers: hs}
+}
+
+/// The directory's entries, a page a call (Go's
+/// NewListFilesAndDirectoriesPager).
+pub fn (d: DirectoryClient) new_list_files_and_directories_pager(options: ListFilesAndDirectoriesOptions = ListFilesAndDirectoriesOptions{}) -> runtime.Pager[ListFilesAndDirectoriesResponse] {
+  let c = d.core
+  let hs = bool_header("x-ms-file-extended-info", options.include_extended_info)
+  runtime.new_pager_with(c.pipeline, c.page_request(list_files_query(options, options.marker), hs), fn(r: http.Response) -> ListFilesAndDirectoriesResponse ! Str {
+    let page = parse_files(r.body.to_str_lossy())?
+    Ok(page with {response: response_of(r), content_type: header(r, "Content-Type"), date: header_time(r, "Date")})
+  }, fn(prev: policy.Request, page: ListFilesAndDirectoriesResponse) -> policy.Request? {
+    let m = page.next_marker ?? return None
+    if m == "" {
+      return None
+    }
+    Some(c.page_request(list_files_query(options, Some(m)), hs))
+  })
+}
+
+// Handles.
+
+pub struct ListHandlesOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub recursive: Bool? = None
+  pub share_snapshot: Str? = None
+}
+
+fn list_handles(c: Core, restype: Bool, options: ListHandlesOptions) -> ListHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var q = str_query("marker", options.marker) + int_query("maxresults", options.max_results) + snapshot_query(options.share_snapshot)
+  let resp = c.send(dir_call(c, "GET", Some("listhandles"), [200], query: q, headers: bool_header("x-ms-recursive", options.recursive), restype: false))?
+  let page = decoded(resp, parse_handles)?
+  Ok(page with {response: response_of(resp), content_type: header(resp, "Content-Type"), date: header_time(resp, "Date")})
+}
+
+pub fn (d: DirectoryClient) list_handles(options: ListHandlesOptions = ListHandlesOptions{}) -> ListHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  list_handles(d.core, false, options)
+}
+
+pub struct ForceCloseHandlesOptions {
+  pub marker: Str? = None
+  pub recursive: Bool? = None
+  pub share_snapshot: Str? = None
+}
+
+pub struct ForceCloseHandlesResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub marker: Str? = None
+  pub number_of_handles_closed: Int? = None
+  pub number_of_handles_failed_to_close: Int? = None
+}
+
+fn force_close(c: Core, handle_id: Str, marker: Str?, recursive: Bool?, share_snapshot: Str?) -> ForceCloseHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let q = str_query("marker", marker) + snapshot_query(share_snapshot)
+  let resp = c.send(dir_call(c, "PUT", Some("forceclosehandles"), [200], query: q, headers: [("x-ms-handle-id", handle_id)] + bool_header("x-ms-recursive", recursive), restype: false))?
+  Ok(ForceCloseHandlesResponse{response: response_of(resp), date: header_time(resp, "Date"), marker: header(resp, "x-ms-marker"), number_of_handles_closed: header_int(resp, "x-ms-number-of-handles-closed"), number_of_handles_failed_to_close: header_int(resp, "x-ms-number-of-handles-failed")})
+}
+
+/// Closes the handle `handle_id` (`*` for all) open on the directory.
+pub fn (d: DirectoryClient) force_close_handles(handle_id: Str, options: ForceCloseHandlesOptions = ForceCloseHandlesOptions{}) -> ForceCloseHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  force_close(d.core, handle_id, options.marker, options.recursive, options.share_snapshot)
+}
+
+fn str_query(name: Str, v: Str?) -> List[(Str, Str)] {
+  match v {
+    Some(x) => [(name, x)]
+    None => []
+  }
+}
+
+fn int_query(name: Str, v: Int?) -> List[(Str, Str)] {
+  match v {
+    Some(n) => [(name, "${n}")]
+    None => []
+  }
+}

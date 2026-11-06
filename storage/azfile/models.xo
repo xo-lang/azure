@@ -5,6 +5,7 @@
 // order (a field the serde overrides goes last), an unset field left out.
 
 use std/json
+use std/url
 use std/xml
 use github.com/xo-lang/azure/storage/azblob/exported
 use github.com/xo-lang/azure/storage/azblob/sas as blobsas
@@ -330,4 +331,110 @@ fn parse_user_delegation_key(text: Str) -> exported.UserDelegationKey ! Str {
   let d = parse_xml(text, "user delegation key")?
   let s = fn(n: Str) -> Str { child_text(d, n) ?? "" }
   Ok(exported.UserDelegationKey{signed_oid: s("SignedOid"), signed_tid: s("SignedTid"), signed_start: child_3339(d, "SignedStart") ?? Time.UNIX_EPOCH, signed_expiry: child_3339(d, "SignedExpiry") ?? Time.UNIX_EPOCH, signed_service: s("SignedService"), signed_version: s("SignedVersion"), value: Secret.new(s("Value"))})
+}
+
+// Directory listings and handles.
+
+/// An entry's properties: times in ISO 8601, Last-Modified an HTTP date.
+pub struct FileProperty {
+  pub content_length: Int? = None
+  pub change_time: Time? = None
+  pub creation_time: Time? = None
+  pub etag: Str? = None
+  pub last_access_time: Time? = None
+  pub last_modified: Time? = None
+  pub last_write_time: Time? = None
+}
+
+/// A listed directory or file (Go's Directory and File, one shape).
+pub struct ListEntry {
+  pub name: Str? = None
+  pub attributes: Str? = None
+  pub id: Str? = None
+  pub permission_key: Str? = None
+  pub properties: FileProperty? = None
+}
+
+/// One page of a directory's entries.
+pub struct ListFilesAndDirectoriesResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub date: Time? = None
+  pub directory_path: Str? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+  pub directories: List[ListEntry] = []
+  pub files: List[ListEntry] = []
+  /// Whether the listing had an Entries element (Go's Segment).
+  pub has_segment: Bool = false
+  pub service_endpoint: Str? = None
+  pub share_name: Str? = None
+  pub directory_id: Str? = None
+  pub encoded: Bool? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub share_snapshot: Str? = None
+}
+
+pub struct Handle {
+  pub client_ip: Str? = None
+  pub client_name: Str? = None
+  pub file_id: Str? = None
+  pub id: Str? = None
+  pub open_time: Time? = None
+  /// Decoded when the service sent it percent-encoded.
+  pub path: Str? = None
+  pub session_id: Str? = None
+  /// `Read`, `Write`, `Delete`.
+  pub access_right_list: List[Str]? = None
+  pub last_reconnect_time: Time? = None
+  pub parent_id: Str? = None
+}
+
+pub struct ListHandlesResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub date: Time? = None
+  pub next_marker: Str? = None
+  pub handles: List[Handle] = []
+}
+
+/// Go's StringEncoded: the text, query-unescaped when `Encoded="true"`.
+fn encoded_text(e: xml.Element, name: Str) -> Str? ! Str {
+  let x = e.child(name) ?? return Ok(None)
+  if x.attr("Encoded").and_then(fn(v: Str) -> Bool? { parse_bool(v) }) ?? false {
+    return Ok(Some(url.query_unescape(x.text()) ?? e => return Err("an encoded ${name} is not escaped text: ${e.display()}")))
+  }
+  Ok(Some(x.text()))
+}
+
+fn file_property_of(p: xml.Element) -> FileProperty {
+  FileProperty{content_length: child_int(p, "Content-Length"), change_time: child_3339(p, "ChangeTime"), creation_time: child_3339(p, "CreationTime"), etag: child_text(p, "Etag"), last_access_time: child_3339(p, "LastAccessTime"), last_modified: child_1123(p, "Last-Modified"), last_write_time: child_3339(p, "LastWriteTime")}
+}
+
+fn entry_of(e: xml.Element) -> ListEntry ! Str {
+  Ok(ListEntry{name: encoded_text(e, "Name")?, attributes: child_text(e, "Attributes"), id: child_text(e, "FileId"), permission_key: child_text(e, "PermissionKey"), properties: e.child("Properties").map(file_property_of)})
+}
+
+fn parse_files(text: Str) -> ListFilesAndDirectoriesResponse ! Str {
+  let d = parse_xml(text, "directory listing")?
+  var dirs: List[ListEntry] = []
+  var files: List[ListEntry] = []
+  let seg = d.child("Entries")
+  if let Some(s) = seg {
+    for x in s.children_named("Directory") { dirs.push(entry_of(x)?) }
+    for x in s.children_named("File") { files.push(entry_of(x)?) }
+  }
+  Ok(ListFilesAndDirectoriesResponse{response: Response{}, directory_path: d.attr("DirectoryPath"), next_marker: child_text(d, "NextMarker"), prefix: encoded_text(d, "Prefix")?, directories: dirs, files: files, has_segment: seg.is_some(), service_endpoint: d.attr("ServiceEndpoint"), share_name: d.attr("ShareName"), directory_id: child_text(d, "DirectoryId"), encoded: d.attr("Encoded").and_then(fn(v: Str) -> Bool? { parse_bool(v) }), marker: child_text(d, "Marker"), max_results: child_int(d, "MaxResults"), share_snapshot: d.attr("ShareSnapshot")})
+}
+
+fn parse_handles(text: Str) -> ListHandlesResponse ! Str {
+  let d = parse_xml(text, "handle list")?
+  var hs: List[Handle] = []
+  if let Some(es) = d.child("Entries") {
+    for h in es.children_named("Handle") {
+      hs.push(Handle{client_ip: child_text(h, "ClientIp"), client_name: child_text(h, "ClientName"), file_id: child_text(h, "FileId"), id: child_text(h, "HandleId"), open_time: child_1123(h, "OpenTime"), path: encoded_text(h, "Path")?, session_id: child_text(h, "SessionId"), access_right_list: h.child("AccessRightList").map(fn(a: xml.Element) -> List[Str] { a.children_named("AccessRight").map(fn(x: xml.Element) -> Str { x.text() }) }), last_reconnect_time: child_1123(h, "LastReconnectTime"), parent_id: child_text(h, "ParentId")})
+    }
+  }
+  Ok(ListHandlesResponse{response: Response{}, next_marker: child_text(d, "NextMarker"), handles: hs})
 }

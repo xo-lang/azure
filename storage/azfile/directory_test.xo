@@ -1,0 +1,286 @@
+// The directory client against the Go program's fake (dvectors_test.xo):
+// every request byte for byte, every field read back as Go dumps it.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const DLIST1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.file.example.test/\" ShareName=\"s1\" ShareSnapshot=\"2026-11-05T01:00:00.0000000Z\" DirectoryPath=\"d1\"><Marker>m0</Marker><Prefix Encoded=\"true\">p%20x</Prefix><MaxResults>2</MaxResults><DirectoryId>13835128424026341376</DirectoryId><Entries><Directory><Name>sub</Name><FileId>13835093239654252544</FileId><Attributes>Directory</Attributes><PermissionKey>4066*123</PermissionKey><Properties><CreationTime>2026-11-01T01:02:03.1234567Z</CreationTime><LastAccessTime>2026-11-02T01:02:03.0000000Z</LastAccessTime><LastWriteTime>2026-11-03T01:02:03.5000000Z</LastWriteTime><ChangeTime>2026-11-04T01:02:03.0000001Z</ChangeTime><Last-Modified>Thu, 05 Nov 2026 01:02:03 GMT</Last-Modified><Etag>\"0x8D3\"</Etag></Properties></Directory><File><Name Encoded=\"true\">a%2Bb%26c.txt</Name><FileId>11529285414812647424</FileId><Properties><Content-Length>1024</Content-Length></Properties><Attributes>Archive|ReadOnly</Attributes></File><File><Name>plain.txt</Name><Properties><Content-Length>0</Content-Length></Properties></File></Entries><NextMarker>m1</NextMarker></EnumerationResults>"
+
+const DLIST2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.file.example.test/\" ShareName=\"s1\" DirectoryPath=\"d1\"><Marker>m1</Marker><MaxResults>2</MaxResults><Entries /><NextMarker /></EnumerationResults>"
+
+const HANDLES: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults><Entries><Handle><HandleId>h1</HandleId><Path Encoded=\"true\">d1%2Fa%20b.txt</Path><FileId>11529285414812647424</FileId><ParentId>13835128424026341376</ParentId><SessionId>s-1</SessionId><ClientIp>192.0.2.10:445</ClientIp><ClientName>host-a</ClientName><OpenTime>Thu, 05 Nov 2026 01:00:00 GMT</OpenTime><LastReconnectTime>Thu, 05 Nov 2026 02:00:00 GMT</LastReconnectTime><AccessRightList><AccessRight>Read</AccessRight><AccessRight>Write</AccessRight></AccessRightList></Handle><Handle><HandleId>h2</HandleId><Path>d1</Path><FileId>0</FileId><SessionId>s-2</SessionId><ClientIp>192.0.2.11:445</ClientIp><OpenTime>Thu, 05 Nov 2026 01:30:00 GMT</OpenTime></Handle></Entries><NextMarker>hm1</NextMarker></EnumerationResults>"
+
+const DIR_GO_DATE: Str = "Fri, 06 Nov 2026 10:31:11 GMT"
+
+struct DirFixed {}
+
+fn (p: DirFixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", DIR_GO_DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+fn with_headers(r: http.Response, hs: List[(Str, Str)]) -> http.Response {
+  var out = r
+  for (k, v) in hs {
+    out = out.with_header(k, v)
+  }
+  out
+}
+
+const SMB_REPLY: List[(Str, Str)] = [
+  ("x-ms-file-attributes", "ReadOnly|Directory"), ("x-ms-file-creation-time", "2026-11-01T01:02:03.1234567Z"),
+  ("x-ms-file-last-write-time", "2026-11-02T01:02:03.0000000Z"), ("x-ms-file-change-time", "2026-11-03T01:02:03.5000000Z"),
+  ("x-ms-file-id", "13835128424026341376"), ("x-ms-file-parent-id", "0"), ("x-ms-file-permission-key", "4066*123"),
+]
+
+fn dir_answer(req: http.Request) -> http.Response {
+  let q = req.url.query
+  let comp = q.get("comp") ?? ""
+  let m = req.method
+  if comp == "list" {
+    return xml_resp(200, if (q.get("marker") ?? "") == "m1" { DLIST2 } else { DLIST1 })
+  }
+  if comp == "listhandles" { return xml_resp(200, HANDLES) }
+  if comp == "forceclosehandles" {
+    return with_headers(http.text(200, ""), [("x-ms-marker", "fm1"), ("x-ms-number-of-handles-closed", "3"), ("x-ms-number-of-handles-failed", "1")])
+  }
+  // SMB headers on a metadata reply, an ETag on a delete reply: Go reads
+  // neither.
+  if comp == "metadata" { return with_headers(tagged(http.text(200, "")), SMB_REPLY + [("x-ms-request-server-encrypted", "true"), ("x-ms-mode", "0755")]) }
+  let nfs = fn(mode: Str, owner: Str, group: Str) -> List[(Str, Str)] { [("x-ms-mode", mode), ("x-ms-owner", owner), ("x-ms-group", group)] }
+  if comp == "rename" || comp == "properties" {
+    return with_headers(tagged(http.text(200, "")), SMB_REPLY + [("x-ms-request-server-encrypted", "true")] + nfs("0755", "1000", "1001"))
+  }
+  if m == "PUT" {
+    return with_headers(tagged(http.text(201, "")), SMB_REPLY + [("x-ms-request-server-encrypted", "false"), ("x-ms-file-file-type", "Directory")] + nfs("0755", "1000", "1001"))
+  }
+  if m == "DELETE" { return tagged(http.text(202, "")) }
+  if m == "GET" {
+    return with_headers(tagged(http.text(200, "")), SMB_REPLY + [("x-ms-server-encrypted", "true"), ("x-ms-file-file-type", "Directory"), ("x-ms-meta-color", "blue"), ("x-ms-meta-two-words", "x")] + nfs("0700", "0", "0"))
+  }
+  http.text(400, "")
+}
+
+fn dir_dump(x: DirectoryResponse) -> Dump {
+  var d = Dump{}
+  d.t("Date", x.date)
+  d.s("ETag", x.etag)
+  d.s("FileAttributes", x.file_attributes)
+  d.t("FileChangeTime", x.file_change_time)
+  d.t("FileCreationTime", x.file_creation_time)
+  d.t("FileLastWriteTime", x.file_last_write_time)
+  d.s("FileMode", x.file_mode)
+  d.s("FilePermissionKey", x.file_permission_key)
+  d.s("Group", x.group)
+  d.s("ID", x.id)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.m("Metadata", if x.metadata.is_empty() { None } else { Some(x.metadata) })
+  d.s("NFSFileType", x.nfs_file_type)
+  d.s("Owner", x.owner)
+  d.s("ParentID", x.parent_id)
+  d.r(x.response)
+  d
+}
+
+fn (var d: Dump) entries(p: Str, es: List[ListEntry]) {
+  if es.is_empty() {
+    return
+  }
+  d.lines.push("${p}.len=${es.len()}")
+  for (i, e) in es.indexed() {
+    let q = "${p}[${i}]"
+    d.s("${q}.Attributes", e.attributes)
+    d.s("${q}.ID", e.id)
+    d.s("${q}.Name", e.name)
+    d.s("${q}.PermissionKey", e.permission_key)
+    if let Some(f) = e.properties {
+      d.t("${q}.Properties.ChangeTime", f.change_time)
+      d.i("${q}.Properties.ContentLength", f.content_length)
+      d.t("${q}.Properties.CreationTime", f.creation_time)
+      d.s("${q}.Properties.ETag", f.etag)
+      d.t("${q}.Properties.LastAccessTime", f.last_access_time)
+      d.t("${q}.Properties.LastModified", f.last_modified)
+      d.t("${q}.Properties.LastWriteTime", f.last_write_time)
+    }
+  }
+}
+
+fn files_dump(page: ListFilesAndDirectoriesResponse) -> Dump {
+  var d = Dump{}
+  d.s("ContentType", page.content_type)
+  d.t("Date", page.date)
+  d.s("DirectoryID", page.directory_id)
+  d.s("DirectoryPath", page.directory_path)
+  d.b("Encoded", page.encoded)
+  d.s("Marker", page.marker)
+  d.i("MaxResults", page.max_results)
+  d.s("NextMarker", page.next_marker)
+  d.s("Prefix", page.prefix)
+  d.entries("Segment.Directories", page.directories)
+  d.entries("Segment.Files", page.files)
+  d.s("ServiceEndpoint", page.service_endpoint)
+  d.s("ShareName", page.share_name)
+  d.s("ShareSnapshot", page.share_snapshot)
+  d.r(page.response)
+  d
+}
+
+fn handles_dump(page: ListHandlesResponse) -> Dump {
+  var d = Dump{}
+  d.s("ContentType", page.content_type)
+  d.t("Date", page.date)
+  d.lines.push("Handles.len=${page.handles.len()}")
+  for (i, h) in page.handles.indexed() {
+    let p = "Handles[${i}]"
+    if let Some(rs) = h.access_right_list {
+      d.lines.push("${p}.AccessRightList.len=${rs.len()}")
+      for (j, r) in rs.indexed() { d.s("${p}.AccessRightList[${j}]", Some(r)) }
+    }
+    d.s("${p}.ClientIP", h.client_ip)
+    d.s("${p}.ClientName", h.client_name)
+    d.s("${p}.FileID", h.file_id)
+    d.s("${p}.ID", h.id)
+    d.t("${p}.LastReconnectTime", h.last_reconnect_time)
+    d.t("${p}.OpenTime", h.open_time)
+    d.s("${p}.ParentID", h.parent_id)
+    d.s("${p}.Path", h.path)
+    d.s("${p}.SessionID", h.session_id)
+  }
+  d.s("NextMarker", page.next_marker)
+  d.r(page.response)
+  d
+}
+
+fn one(name: Str, v: Str?) -> List[Str] {
+  var d = Dump{}
+  d.s("", v)
+  d.show(name)
+}
+
+test "the directory client sends what Go sends and reads what Go reads" {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    record(req, log)
+    stamped(dir_answer(req))
+  }
+  for m in ["GET", "PUT", "DELETE"] {
+    for path in ["/{a}/{b}", "/{a}/{b}/{c}"] {
+      os.net.handle("${m} ${EP}${path}", h)
+    }
+  }
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [DirFixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts)
+  let d = sh.new_directory_client("d1")
+  var out: List[Str] = []
+  let take = fn() -> List[Str] {
+    log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+  }
+  let add = fn(lines: List[Str]) -> List[Str] { take() + lines }
+  let res = fn(name: Str, r: Result[DirectoryResponse, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(x) => dir_dump(x).show(name)
+      Err(e) => err_lines(name, e)
+    }
+  }
+  let etag = fn(name: Str, r: Result[DirectoryResponse, azcore.CallErr]) -> List[Str] {
+    match r {
+      Ok(x) => one(name, x.etag)
+      Err(e) => err_lines(name, e)
+    }
+  }
+  // The times the Go program sends (all UTC).
+  let t1 = Time.from_unix(1793494923) + Duration.from_nanos(123456700)
+  let t2 = Time.from_unix(1793581323)
+  let t3 = Time.from_unix(1793667723) + Duration.from_millis(500)
+  out = out + add(res("d1 create with SMB properties and a permission key", d.create(CreateDirectoryOptions{
+    smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{read_only: true, hidden: true}), creation_time: Some(t1), last_write_time: Some(t2), change_time: Some(t3)}),
+    permissions: Some(Permissions{permission_key: Some("4066*123")}), file_permission_format: Some(FILE_PERMISSION_FORMAT_BINARY),
+    metadata: Some({"color": "blue"}), file_property_semantics: Some(FILE_PROPERTY_SEMANTICS_NEW),
+  })))
+  out = out + add(res("d2 create with NFS properties (SMB ones ignored)", d.create(CreateDirectoryOptions{
+    nfs_properties: Some(NfsProperties{creation_time: Some(t1), last_write_time: Some(t2), file_mode: Some("0755"), owner: Some("1000"), group: Some("1001")}),
+    smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{read_only: true})}), metadata: Some({"k": "v"}), file_property_semantics: Some(FILE_PROPERTY_SEMANTICS_RESTORE),
+  })))
+  out = out + add(res("d3 create with a permission and a format", d.create(CreateDirectoryOptions{permissions: Some(Permissions{permission: Some("O:BAG:SYD:(A;;FA;;;SY)")}), file_permission_format: Some(FILE_PERMISSION_FORMAT_BINARY)})))
+  for (i, a) in [NtfsFileAttributes{}, NtfsFileAttributes{none: true}, NtfsFileAttributes{directory: true}, NtfsFileAttributes{archive: true, no_scrub_data: true, offline: true}].indexed() {
+    out = out + add(etag("d4.${i} create with attributes", d.create(CreateDirectoryOptions{smb_properties: Some(SmbProperties{attributes: Some(a)}), permissions: Some(Permissions{permission_key: Some("inherit")})})))
+  }
+  out = out + add(etag("d5 create, no options", d.create()))
+  out = out + add(res("d6 delete", d.delete()))
+  out = out + add(res("d7 properties", d.get_properties(Some("2026-11-05T01:00:00.0000000Z"))))
+  out = out + add(res("d8 set SMB properties, permission preserved", d.set_properties(SetDirectoryPropertiesOptions{smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{system: true}), change_time: Some(t3)}), permissions: Some(Permissions{permission_key: Some("preserve")}), file_permission_format: Some(FILE_PERMISSION_FORMAT_BINARY)})))
+  out = out + add(etag("d9 set a permission key", d.set_properties(SetDirectoryPropertiesOptions{permissions: Some(Permissions{permission_key: Some("4066*123")})})))
+  out = out + add(etag("d10 set NFS properties", d.set_properties(SetDirectoryPropertiesOptions{nfs_properties: Some(NfsProperties{last_write_time: Some(t2), file_mode: Some("0700"), owner: Some("0"), group: Some("0")})})))
+  out = out + add(etag("d11 set properties, no options", d.set_properties()))
+  out = out + add(res("d12 set metadata", d.set_metadata(Some({"a": "1"}))))
+  var pager = d.new_list_files_and_directories_pager(ListFilesAndDirectoriesOptions{include_timestamps: true, include_etag: true, include_attributes: true, include_permission_key: true, include_extended_info: Some(true), max_results: Some(2), prefix: Some("p x"), share_snapshot: Some("2026-11-05T01:00:00.0000000Z")})
+  for i in 1..10 {
+    if !pager.more() {
+      break
+    }
+    let name = "d13 list page ${i}"
+    out = out + add(match pager.next_page() {
+      Ok(page) => files_dump(page).show(name)
+      Err(e) => err_lines(name, e)
+    })
+  }
+  var p2 = d.new_list_files_and_directories_pager(ListFilesAndDirectoriesOptions{include_etag: true})
+  out = out + add(match p2.next_page() {
+    Ok(page) => one("d14 list with one include", page.next_marker)
+    Err(e) => err_lines("d14", e)
+  })
+  out = out + add(match d.list_handles(ListHandlesOptions{marker: Some("hm0"), max_results: Some(5), recursive: Some(true), share_snapshot: Some("2026-11-05T01:00:00.0000000Z")}) {
+    Ok(page) => handles_dump(page).show("d15 list handles")
+    Err(e) => err_lines("d15", e)
+  })
+  out = out + add(match d.list_handles() {
+    Ok(page) => one("d16 list handles, no options", page.next_marker)
+    Err(e) => err_lines("d16", e)
+  })
+  out = out + add(match d.force_close_handles("*", ForceCloseHandlesOptions{marker: Some("fm0"), recursive: Some(false), share_snapshot: Some("2026-11-05T01:00:00.0000000Z")}) {
+    Ok(x) => {
+      var dd = Dump{}
+      dd.t("Date", x.date)
+      dd.s("Marker", x.marker)
+      dd.i("NumberOfHandlesClosed", x.number_of_handles_closed)
+      dd.i("NumberOfHandlesFailedToClose", x.number_of_handles_failed_to_close)
+      dd.r(x.response)
+      dd.show("d17 force close handles")
+    }
+    Err(e) => err_lines("d17", e)
+  })
+  let dots = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/s1", cred, opts with {allow_trailing_dot: Some(true), allow_source_trailing_dot: Some(false), file_request_intent: Some(TOKEN_INTENT_BACKUP)})
+  let src = dots.new_directory_client("d1/old.")
+  out = out + add(res("d18 rename with options, trailing dots and an intent", src.rename("  /new dir/x.?sv=1&sig=a%2Bb  ", RenameDirectoryOptions{
+    smb_properties: Some(SmbProperties{attributes: Some(NtfsFileAttributes{hidden: true}), creation_time: Some(t1), last_write_time: Some(t2)}),
+    permissions: Some(Permissions{permission: Some("O:BAG:SYD:(A;;FA;;;SY)")}), ignore_read_only: Some(true), metadata: Some({"m": "1"}), replace_if_exists: Some(false), destination_lease_id: Some("lease-d"),
+  })))
+  out = out + add(etag("d19 rename with a permission key", d.rename("d2", RenameDirectoryOptions{permissions: Some(Permissions{permission_key: Some("4066*123")}), file_permission_format: Some(FILE_PERMISSION_FORMAT_BINARY)})))
+  out = out + add(etag("d20 rename, no options", d.rename("d2")))
+  out = out + add(etag("d20b rename to a trailing slash", d.rename(" d3/ ")))
+  out = out + add(match d.rename(" / ") {
+    Ok(_) => ["== d21 rename to nothing", "  no error"]
+    Err(azcore.CallErr.InvalidInput(m)) => ["== d21 rename to nothing", "  error ${m}"]
+    Err(e) => err_lines("d21 rename to nothing", e)
+  })
+  let cs = new_directory_client_from_connection_string(os.net, os.clock, os.rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${KEY};FileEndpoint=${EP}/", "s1", "d1\\d2", opts)?
+  out = out + ["== d22 urls", "  ${d.new_subdirectory_client("a b/c/").url}", "  ${d.file_url("x y/z%.txt")}", "  ${sh.new_root_directory_client().file_url("top")}", "  ${cs.url}"]
+  out = out + add(match cs.delete() {
+    Ok(x) => one("d23 delete from a connection string client", x.response.request_id)
+    Err(e) => err_lines("d23", e)
+  })
+  expect(out) == DIRECTORY_OUTPUT
+}
+
+test "NTFS attributes print and parse as Go's" {
+  expect(NtfsFileAttributes{read_only: true, no_scrub_data: true, archive: true}.to_str()) == "ReadOnly|Archive|NoScrubData"
+  let a = parse_ntfs_file_attributes(" readonly| Hidden |NOSCRUBDATA")?
+  expect(a.read_only && a.hidden && a.no_scrub_data && !a.archive) == true
+  expect(parse_ntfs_file_attributes("Sparse").is_err()) == true
+}

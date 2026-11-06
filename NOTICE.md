@@ -20,8 +20,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   ServiceClient and QueueClient, their options, responses and XML
   models, connection strings, URL parts, the `sas` package and
   `queueerror`, hand written over azblob's Shared Key; requests checked
-  against its own), `sdk/storage/azfile` v1.7.1 (the ServiceClient and
-  ShareClient, their options, responses and XML models, connection
+  against its own), `sdk/storage/azfile` v1.7.1 (the ServiceClient,
+  ShareClient and DirectoryClient, SMB and NFS properties, their options, responses and XML models, connection
   strings, URL parts and `fileerror`, hand written over azblob's Shared
   Key; requests checked against its own), `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,

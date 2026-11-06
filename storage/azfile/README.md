@@ -19,8 +19,19 @@ What it does:
   provisioned IOPS and bandwidth), delete (with snapshots, leased ones
   too), properties, snapshots, metadata, statistics, stored access
   policies and share-level permissions (SDDL); `with_snapshot`.
+- `DirectoryClient` (from a share, a parent, a URL or a connection
+  string): create, delete, properties, metadata, rename (to a path in
+  the same share, a `?query` after it replacing the SAS), the files and
+  directories pager (timestamps, ETags, attributes, permission keys,
+  extended info) and handles (list, force close). SMB properties (NTFS
+  attributes, times), NFS properties (mode, owner, group; sent instead
+  of SMB ones and permissions when set) and permissions (SDDL or a key)
+  as Go formats them: a directory's attributes get `|Directory`, and a
+  permission key other than `inherit` or `preserve` sends the format
+  as `Sddl`.
 - `ClientOptions.file_request_intent` (`backup`) on the share calls,
-  not the service's, as Go's generated clients send it.
+  not the service's, as Go's generated clients send it; the trailing dot
+  options on directory calls.
 - `fileerror`: the error codes and `has_code`.
 - `parse_url` splits a file service URL (an IP host's first segment is
   the account, as Azurite's) and `to_url` writes it back.
@@ -41,4 +52,6 @@ Where it differs from Go v1.7.1:
   `.response`.
 - A path is escaped segment by segment when `to_url` writes it; Go's
   url.URL also leaves `$&+,;=:@` unescaped.
-- Not ported yet: directories, files, leases, SAS.
+- A response header that does not parse (a time, a number, a bool) reads
+  as `None`; Go's generated client returns an error.
+- Not ported yet: files, leases, SAS.
