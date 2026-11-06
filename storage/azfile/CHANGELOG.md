@@ -9,7 +9,7 @@ parts from a Go program on azfile v1.7.1 (`urlvectors_test.xo`).
 - An IP host is the one Go's shared.IsIPEndpointStyle sees (the
   host, its port removed, parsed as net.ParseIP). Before, any host
   with a `:` (such as `a:b:c`) or four dotted numbers (such as
-  `300.1.1.1`) was taken as an IP, so its first path segment was read
+  `192.0.2.300`) was taken as an IP, so its first path segment was read
   as the account name.
 - A URL is read as Go's url.Parse reads it, errors included: ports
   must be digits, a bracketed host must be IPv6, a host's bytes and
