@@ -48,7 +48,10 @@ familiar. The AWS SDK for Xo did the same for aws-sdk-go-v2 (its decision
 - An Xo first API (one client per service with nested groups): more
   idiomatic perhaps, but it loses the familiarity the owner asked for.
 
-## Amendment 1 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+## Amendment 1
+
+Status: Accepted (owner, 2026-11-05, through the Xo Lead; proposed by Xo
+Azure 1, 2026-11-05)
 
 - **One error type for all operations**, `azcore.CallErr`
   (`Response(ResponseError)`, `Send(...)`, `InvalidInput(Str)`,

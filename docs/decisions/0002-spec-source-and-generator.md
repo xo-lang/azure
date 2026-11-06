@@ -89,7 +89,10 @@ readme is gone at main).
 - Per module spec commits (as Go pins them): exact, but the generator
   would fetch hundreds of commits; one commit is reproducible enough.
 
-## Amendment 1 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+## Amendment 1
+
+Status: Accepted (owner, 2026-11-05, through the Xo Lead; proposed by Xo
+Azure 1, 2026-11-05)
 
 What the first generated module (armresources) showed:
 

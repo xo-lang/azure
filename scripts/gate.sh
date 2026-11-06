@@ -13,5 +13,14 @@ for d in $dirs; do
   echo "== $d"
   (cd "$mod" && "$xo" test "./$rel") || fail=1
 done
+# The full gate also checks that regenerating changes nothing, when the
+# specs are fetched (codegen/fetch-specs.sh).
+if [ $# -eq 0 ]; then
+  if [ -d codegen/.specs/.git ]; then
+    XO_CLI=$xo scripts/check-generated.sh || fail=1
+  else
+    echo "gate: check-generated skipped: run codegen/fetch-specs.sh"
+  fi
+fi
 [ $fail -eq 0 ] && echo "gate: ok" || echo "gate: FAILED"
 exit $fail
