@@ -37,6 +37,13 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   words (`FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE`), as Go's int32.
 - An object definition with no properties, parent or map values is
   `json.Value` (Go's `any`).
+- A model that only PATCH bodies reach (no response, no other body:
+  `VirtualMachineUpdate`, `TagsObject`) has `json.Patch[T]` fields, so
+  `json.Patch.Null` sends an explicit `null`, Go's `azcore.NullValue`;
+  `json.Patch.Absent` (the default) leaves the key out. A model a
+  response also reaches (`VirtualMachineProperties` under
+  `VirtualMachineUpdate.properties`) keeps `T?`, so it cannot carry a
+  null yet; members of a polymorphic type keep `T?` too.
 - Each operation's api-version is its own file's (`API_VERSION` when it
   is the package's); an api-version enum is not a type.
 - The package name dropped from the front of model and group names

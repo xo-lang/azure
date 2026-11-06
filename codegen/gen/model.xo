@@ -17,6 +17,10 @@ pub struct Model {
   pub name: Str
   pub fields: List[Field]
   pub doc: Str = ""
+  /// Only ever sent as (part of) a PATCH body: its fields are
+  /// json.Patch[T], so a caller can send an explicit null (Go's
+  /// azcore.NullValue), which JSON merge patch reads as "remove".
+  pub patch: Bool = false
 }
 
 /// An extensible string enum (x-ms-enum): a newtype with constants.
@@ -720,7 +724,84 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
       b.named(file, def, v)
     }
   }
-  Api{api_version: version, ops: ops, models: b.models, enums: b.enums, polys: b.polys, report: b.report}
+  let patched = patch_only(ops, b.models, b.polys)
+  let models = b.models.map(fn(m: Model) -> Model { Model{name: m.name, fields: m.fields, doc: m.doc, patch: patched.contains(m.name)} })
+  Api{api_version: version, ops: ops, models: models, enums: b.enums, polys: b.polys, report: b.report}
+}
+
+/// The type names in a type (`Map[Str, List[Foo]]` has Map, Str, List
+/// and Foo).
+fn idents(t: Str) -> List[Str] {
+  var u = t
+  for c in ["[", "]", ",", "?", "(", ")"] {
+    u = u.replace(c, " ")
+  }
+  u.split(" ").filter(fn(x: Str) -> Bool { x != "" })
+}
+
+/// The models and polymorphic types `roots` reach through fields.
+fn reach(roots: List[Str], models: Map[Str, Model], polys: Map[Str, Poly]) -> Set[Str] {
+  var seen: Set[Str] = #{}
+  var stack = roots
+  while let Some(n) = stack.pop() {
+    if seen.contains(n) {
+      continue
+    }
+    if let Some(m) = models.get(n) {
+      seen.add(n)
+      for f in m.fields {
+        stack = stack + idents(f.typ)
+      }
+    } else if let Some(p) = polys.get(n) {
+      seen.add(n)
+      stack.push(p.base)
+      for (t, _) in p.variants {
+        stack.push(t)
+      }
+    }
+  }
+  seen
+}
+
+/// The models reached from a PATCH operation's body and from nothing
+/// else (no response, no other body): Go's update models
+/// (`VirtualMachineUpdate`, `TagsObject`). A model a response also
+/// reaches keeps `T?`, so reading it stays as it was.
+fn patch_only(ops: List[Op], models: List[Model], polys: List[Poly]) -> Set[Str] {
+  var ms: Map[Str, Model] = {}
+  for m in models {
+    ms[m.name] = m
+  }
+  var ps: Map[Str, Poly] = {}
+  for p in polys {
+    ps[p.name] = p
+  }
+  var mine: List[Str] = []
+  var other: List[Str] = []
+  for op in ops {
+    for p in op.params {
+      if p.loc == "body" {
+        if op.method == "PATCH" {
+          mine = mine + idents(p.typ)
+        } else {
+          other = other + idents(p.typ)
+        }
+      }
+    }
+    if let Some(r) = op.resp {
+      other = other + idents(r)
+    }
+  }
+  let shared = reach(other, ms, ps)
+  // A polymorphic type's members encode through json.to_value: keep them.
+  var poly_members = reach(ps.keys(), ms, ps)
+  var out: Set[Str] = #{}
+  for n in reach(mine, ms, ps) {
+    if ms.contains(n) && !shared.contains(n) && !poly_members.contains(n) {
+      out.add(n)
+    }
+  }
+  out
 }
 
 /// The `$ref`ed files of `doc` (not examples), relative to `file`.
