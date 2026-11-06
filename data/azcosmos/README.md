@@ -47,6 +47,13 @@ What it does:
   ranges again and retries, three times at most. Query documents, here
   and in the query pager, are Go's json.Marshal of each one (compact,
   HTML escaped).
+- The change feed: `read_change_feed` drains a feed range (or a
+  continuation token) one physical partition at a time with Go's
+  composite continuation token: each range's etag kept, a range with
+  changes returned at once, a gone or split range replaced by its
+  children (clamped, inheriting the etag), max item count, start time,
+  partition key, priority and throughput bucket. Changes are the
+  service's JSON text, as Go keeps them.
 - Feed ranges: `read_feed_ranges` lists a container's partition key
   ranges, read through the pkranges change feed (each page's etag sent
   back until 304 Not Modified, a 429 page retried with Go's backoff)
@@ -61,7 +68,8 @@ query as sent, the headers with the master key signature (activity ids
 normalized), and the body, and what is read back. Feed ranges replay
 15 cases of Go's requests and results against scripted feeds, and
 ReadMany 16 cases of Go's full requests (a 1000 item query body compared
-by SHA-256).
+by SHA-256), and the change feed 13 cases of Go's full requests, tokens
+and responses.
 
 Where it differs from Go v1.5.0:
 
@@ -104,7 +112,17 @@ Where it differs from Go v1.5.0:
 - A hierarchical key's prefix in ReadMany is queried as Go queries it:
   the missing levels as `IS_NULL(...)`, so only items whose lower levels
   are JSON null match (an unfiled upstream draft).
-- Not ported yet: the change feed, throughput read and
-  replace (offers), and vector or full text policies.
+- When a change feed range stays gone after three refreshes, Go
+  returns the pages read so far together with the error; a Result holds
+  one of them, so here the call returns the error. A feed range that no
+  range overlaps is `azcore.CallErr.InvalidInput` starting with
+  `FEED_RANGE_UNRESOLVED` (`is_feed_range_unresolved`), where Go has
+  `ErrFeedRangeUnresolved`. Continuation token keys are matched exactly;
+  Go's json.Unmarshal also takes them in another case.
+- A change feed range inside one physical partition is read as Go reads
+  it: as the whole partition, with that partition's bounds in the token
+  (an unfiled upstream draft).
+- Not ported yet: throughput read and replace (offers), and vector or
+  full text policies.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.

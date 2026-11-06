@@ -1,0 +1,290 @@
+// The change feed, as azcosmos's cosmos_container_change_feed.go,
+// cosmos_change_feed_composite_continuation_token.go,
+// cosmos_change_feed_range.go, cosmos_change_feed_request_options.go and
+// cosmos_change_feed_response.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): a feed range drained one physical partition
+// at a time, each partition's etag kept in a composite continuation
+// token, and a split partition replaced by its children.
+
+use std/http
+use std/json
+use std/time
+use github.com/xo-lang/azure/azcore
+
+pub struct ChangeFeedOptions {
+  /// The most items a page (x-ms-max-item-count); 0 leaves it to the
+  /// service.
+  pub max_item_count: Int = 0
+  /// Changes since this time (If-Modified-Since); None is from now.
+  pub start_from: Time? = None
+  pub partition_key: PartitionKey? = None
+  /// The range to read; required unless `continuation` is set.
+  pub feed_range: FeedRange? = None
+  /// A response's `continuation_token`, to read on from there.
+  pub continuation: Str? = None
+  pub priority_level: Str? = None
+  pub throughput_bucket: Int? = None
+}
+
+pub struct ChangeFeedResponse {
+  /// The last page's response; its request charge is the whole call's.
+  pub response: Response
+  pub resource_id: Str = ""
+  /// Each change's JSON as the service sent it.
+  pub items: List[Str] = []
+  pub count: Int = 0
+  /// Where to read on, for `ChangeFeedOptions.continuation`.
+  pub continuation_token: Str = ""
+  /// The range the last page was read from.
+  pub feed_range: FeedRange? = None
+}
+
+/// The last page's etag.
+pub fn (r: ChangeFeedResponse) get_continuation() -> Str {
+  r.response.etag
+}
+
+/// A token for the last page's range alone, from its etag ("" when the
+/// response has no range or etag).
+pub fn (r: ChangeFeedResponse) get_composite_continuation_token() -> Str {
+  let fr = r.feed_range ?? return ""
+  if r.response.etag == "" {
+    return ""
+  }
+  token_json(CompositeToken{version: 1, resource_id: r.resource_id, ranges: [CfRange{min_inclusive: fr.min_inclusive, max_exclusive: fr.max_exclusive, etag: Some(r.response.etag)}]})
+}
+
+/// The message of the error for a feed range that no partition key range
+/// overlaps (Go's ErrFeedRangeUnresolved).
+pub const FEED_RANGE_UNRESOLVED: Str = "feed range did not overlap any current partition key range"
+
+/// Whether `e` is the error for a feed range no range overlaps.
+pub fn is_feed_range_unresolved(e: azcore.CallErr) -> Bool {
+  match e {
+    InvalidInput(m) => m.starts_with(FEED_RANGE_UNRESOLVED)
+    _ => false
+  }
+}
+
+fn unresolved(fr: CfRange) -> azcore.CallErr {
+  azcore.CallErr.InvalidInput("${FEED_RANGE_UNRESOLVED}: [${fr.min_inclusive}, ${fr.max_exclusive})")
+}
+
+// The composite continuation token.
+
+const COMPOSITE_TOKEN_VERSION: Int = 1
+
+struct CfRange {
+  min_inclusive: Str
+  max_exclusive: Str
+  etag: Str? = None
+}
+
+struct CompositeToken {
+  version: Int = 0
+  resource_id: Str = ""
+  ranges: List[CfRange] = []
+}
+
+fn token_json(t: CompositeToken) -> Str {
+  let v = if t.version != 0 { "\"version\":${t.version}," } else { "" }
+  let rs = t.ranges.map(fn(r: CfRange) -> Str {
+    let e = match r.etag {
+      Some(x) => ",\"continuationToken\":${jstr(x)}"
+      None => ""
+    }
+    "{\"minInclusive\":${jstr(r.min_inclusive)},\"maxExclusive\":${jstr(r.max_exclusive)}${e}}"
+  })
+  "{${v}\"resourceId\":${jstr(t.resource_id)},\"continuation\":[${rs.join(",")}]}"
+}
+
+/// The token in `text`; None when it is not one with ranges (Go then
+/// falls back to the feed range).
+fn parse_token(text: Str) -> CompositeToken? {
+  let v = json.parse_value(text).ok() ?? return None
+  let list = match v.get("continuation") {
+    Some(json.Value.List(xs)) => xs
+    _ => return None
+  }
+  var ranges: List[CfRange] = []
+  for x in list {
+    let etag = match x.get("continuationToken") {
+      Some(json.Value.Str(s)) => Some(s)
+      _ => None
+    }
+    ranges.push(CfRange{min_inclusive: str_of(x, "minInclusive"), max_exclusive: str_of(x, "maxExclusive"), etag: etag})
+  }
+  if ranges.is_empty() {
+    return None
+  }
+  Some(CompositeToken{version: int_of(v, "version") ?? 0, resource_id: str_of(v, "resourceId"), ranges: ranges})
+}
+
+fn (t: CompositeToken) advance(etag: Str) -> CompositeToken {
+  let head = t.ranges[0]
+  let moved = if etag != "" { head with {etag: Some(etag)} } else { head }
+  t with {ranges: t.ranges[1..t.ranges.len()] + [moved]}
+}
+
+fn (t: CompositeToken) replace_head(children: List[CfRange]) -> CompositeToken {
+  t with {ranges: children + t.ranges[1..t.ranges.len()]}
+}
+
+fn child_entries(children: List[PkRange], etag: Str?) -> List[CfRange] {
+  children.map(fn(c: PkRange) -> CfRange { CfRange{min_inclusive: c.min_inclusive, max_exclusive: c.max_exclusive, etag: etag} })
+}
+
+/// The children cut to the parent's bounds (Go's clampChildrenToParent).
+fn clamp_to_parent(children: List[PkRange], parent: CfRange) -> List[PkRange] {
+  let pmin = parent.min_inclusive
+  let pmax = normalize_max(parent.max_exclusive)
+  var out: List[PkRange] = []
+  for c in children {
+    let cmax = normalize_max(c.max_exclusive)
+    let lo = if compare_epk(pmin, c.min_inclusive) > 0 { pmin } else { c.min_inclusive }
+    let hi = if compare_epk(pmax, cmax) < 0 { pmax } else { cmax }
+    if compare_epk(lo, hi) < 0 {
+      out.push(c with {min_inclusive: lo, max_exclusive: hi})
+    }
+  }
+  out
+}
+
+// Reading.
+
+fn (c: ContainerClient) current_ranges() -> List[PkRange] ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(c.routing_map()?.ordered)
+}
+
+/// Go's buildChangeFeedInitialQueue: the token's ranges, else the
+/// partition key ranges the feed range overlaps.
+fn (c: ContainerClient) initial_queue(options: ChangeFeedOptions) -> (CompositeToken, List[PkRange]) ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(t) = parse_token(options.continuation ?? "") {
+    let rid = c.container_rid()?
+    if t.resource_id != "" && rid != "" && t.resource_id != rid {
+      return Err(azcore.CallErr.InvalidInput("continuation token ResourceID ${jstr(t.resource_id)} does not match the current container's ResourceID ${jstr(rid)}; the token was issued for a different container"))
+    }
+    let token = if t.resource_id == "" { t with {resource_id: rid} } else { t }
+    return Ok((token, c.current_ranges()?))
+  }
+  let fr = options.feed_range ?? return Err(azcore.CallErr.InvalidInput("ReadChangeFeed requires a FeedRange to be set in the options, or a continuation token that contains a composite continuation token"))
+  var rs = c.current_ranges()?
+  var over = overlapping_ranges(fr, rs)
+  if over.is_empty() {
+    c.refresh_ranges()?
+    rs = c.current_ranges()?
+    over = overlapping_ranges(fr, rs)
+    if over.is_empty() {
+      return Err(unresolved(CfRange{min_inclusive: fr.min_inclusive, max_exclusive: fr.max_exclusive}))
+    }
+  }
+  let rid = c.container_rid()?
+  Ok((CompositeToken{version: COMPOSITE_TOKEN_VERSION, resource_id: rid, ranges: child_entries(over, None)}, rs))
+}
+
+fn (o: ChangeFeedOptions) headers(head: CfRange, range_id: Str) -> List[(Str, Str)] {
+  var hs = [("A-IM", "Incremental Feed")]
+  if o.max_item_count > 0 { hs.push(("x-ms-max-item-count", "${o.max_item_count}")) }
+  if let Some(t) = o.start_from { hs.push(("If-Modified-Since", time.format(t, time.utc(), time.RFC1123))) }
+  if let Some(pk) = o.partition_key { hs.push(("x-ms-documentdb-partitionkey", pk.to_json_string())) }
+  if let Some(e) = head.etag {
+    if e != "" { hs.push(("If-None-Match", e)) }
+  }
+  if range_id != "" { hs.push(("x-ms-documentdb-partitionkeyrangeid", range_id)) }
+  hs
+}
+
+fn change_page(resp: http.Response) -> ChangeFeedResponse ! azcore.CallErr {
+  let base = ChangeFeedResponse{response: response_of(resp)}
+  if resp.status == 304 {
+    return Ok(base)
+  }
+  let text = resp.body.to_str_lossy()
+  let v = parse_json(text) ?? e => return Err(azcore.CallErr.Decode(e))
+  let items = raw_elements(text, "Documents") ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(base with {resource_id: str_of(v, "_rid"), count: int_of(v, "_count") ?? 0, items: items})
+}
+
+/// Reads the next changes: each range of the feed in turn until one has
+/// changes, or every range has been read once. Read on from the
+/// response's `continuation_token`.
+pub fn (c: ContainerClient) read_change_feed(options: ChangeFeedOptions = ChangeFeedOptions{}) -> ChangeFeedResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let (t0, rs0) = c.initial_queue(options)?
+  var token = t0
+  var ranges = rs0
+  var queue_len = token.ranges.len()
+  let max_queue_len = 4 * (queue_len + 1)
+  var rotations = 0
+  var gone_attempts = 0
+  var last: ChangeFeedResponse? = None
+  var charge = 0.0
+  let finish = fn(r: ChangeFeedResponse, t: CompositeToken, total: Float) -> ChangeFeedResponse {
+    let tok = if t.ranges.is_empty() { "" } else { token_json(if t.version == 0 { t with {version: COMPOSITE_TOKEN_VERSION} } else { t }) }
+    r with {continuation_token: tok, response: r.response with {request_charge: total}}
+  }
+  while rotations < queue_len {
+    let head = token.ranges[0]
+    let head_fr = FeedRange{min_inclusive: head.min_inclusive, max_exclusive: head.max_exclusive}
+    var over = overlapping_ranges(head_fr, ranges)
+    if over.is_empty() {
+      c.refresh_ranges()?
+      ranges = c.current_ranges()?
+      over = overlapping_ranges(head_fr, ranges)
+      if over.is_empty() {
+        return Err(unresolved(head))
+      }
+    }
+    if over.len() > 1 {
+      let clamped = clamp_to_parent(over, head)
+      if clamped.is_empty() {
+        return Err(unresolved(head))
+      }
+      let children = child_entries(clamped, head.etag)
+      token = token.replace_head(children)
+      queue_len += children.len() - 1
+      if queue_len > max_queue_len {
+        if let Some(l) = last {
+          return Ok(finish(l, token, charge))
+        }
+        return Err(azcore.CallErr.InvalidInput("ReadChangeFeed: drain queue exceeded safety cap of ${max_queue_len} entries; suspected overlap-resolution bug"))
+      }
+      gone_attempts = 0
+      continue
+    }
+    let call = Call{method: "GET", path: "${c.link}/docs", headers: options.headers(head, over[0].id), priority_level: options.priority_level, throughput_bucket: options.throughput_bucket}
+    let resp = match c.core.send(call) {
+      Ok(r) => r
+      Err(e) => {
+        if is_pk_range_gone(e) {
+          if gone_attempts >= MAX_PK_RANGE_GONE_RETRIES {
+            // Go returns the pages so far with the error; a Result
+            // carries one of them, so the port returns the error.
+            return Err(e)
+          }
+          gone_attempts += 1
+          c.refresh_ranges()?
+          ranges = c.current_ranges()?
+          continue
+        }
+        return Err(e)
+      }
+    }
+    let page = change_page(resp)?
+    charge = charge + page.response.request_charge
+    if token.resource_id == "" && page.resource_id != "" {
+      token = token with {resource_id: page.resource_id}
+    }
+    token = token.advance(page.response.etag)
+    rotations += 1
+    gone_attempts = 0
+    let p = page with {feed_range: Some(head_fr)}
+    last = Some(p)
+    if p.response.status == 200 && (p.count > 0 || !p.items.is_empty()) {
+      return Ok(finish(p, token, charge))
+    }
+  }
+  match last {
+    Some(l) => Ok(finish(l, token, charge))
+    None => Ok(ChangeFeedResponse{response: Response{}})
+  }
+}

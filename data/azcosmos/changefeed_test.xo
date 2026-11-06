@@ -1,0 +1,184 @@
+// ReadChangeFeed compared with Go's azcosmos v1.5.0 on the same fake
+// account (cfvectors_test.xo): every request in full and what the caller
+// gets.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+struct CfFake {
+  log: Mutex[List[Str]]
+  feed_reads: Mutex[Map[Str, Int]]
+  gone: Mutex[Map[Str, Int]]
+}
+
+fn (f: CfFake) record(req: http.Request) {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "user-agent" || lk == "accept-encoding" || lk == "x-ms-client-request-id" {
+      continue
+    }
+    hs.push("${lk}=${if lk == "x-ms-activity-id" { "ACTIVITY" } else { v }}")
+  }
+  let lines = ["  REQ ${req.method} ${req.escaped_path()}"] + hs.sort().map(fn(h: Str) -> Str { "    ${h}" })
+  f.log.with(fn(var l: List[Str]) { l = l + lines })
+}
+
+fn cf_resp(status: Int, body: Str, etag: Str = "") -> http.Response {
+  let r = (if status == 304 { http.text(304, "") } else { js_resp(status, body) }).with_header("x-ms-request-charge", "1.5")
+  if etag != "" { r.with_header("etag", etag) } else { r }
+}
+
+fn (f: CfFake) answer(req: http.Request) -> http.Response {
+  let p = req.escaped_path()
+  if p == "/" {
+    return js_resp(200, "{\"id\":\"acct1\",\"writableLocations\":[],\"readableLocations\":[]}")
+  }
+  f.record(req)
+  let c = p.split("/")[4]
+  let inm = req.header("If-None-Match") ?? ""
+  if p.ends_with("/pkranges") {
+    if inm != "" {
+      return cf_resp(304, "")
+    }
+    let n = f.feed_reads.with(fn(var m: Map[Str, Int]) -> Int {
+      let k = (m.get(c) ?? 0) + 1
+      m[c] = k
+      k
+    })
+    let split = c == "s1" || c == "s2"
+    let body = if split && n > 1 {
+      "{\"PartitionKeyRanges\":[${rm_rng("0", "", "FF")},${rm_rng("1", "", "20", ["0"])},${rm_rng("2", "20", "FF", ["0"])}]}"
+    } else if split {
+      "{\"PartitionKeyRanges\":[${rm_rng("0", "", "FF")}]}"
+    } else {
+      "{\"PartitionKeyRanges\":[${rm_rng("0", "", "20")},${rm_rng("1", "20", "FF")}]}"
+    }
+    return cf_resp(200, body, "\"p1\"")
+  }
+  if p.ends_with("/docs") {
+    let rid = req.header("x-ms-documentdb-partitionkeyrangeid") ?? ""
+    let first_gone = f.gone.with(fn(var m: Map[Str, Int]) -> Bool {
+      if (c == "s1" || c == "s2") && rid == "0" && (m.get(c) ?? 0) == 0 {
+        m[c] = 1
+        return true
+      }
+      false
+    })
+    if first_gone {
+      return cf_resp(410, "{\"code\":\"Gone\",\"message\":\"x\"}").with_header("x-ms-substatus", "1002")
+    }
+    let key = "${rid}|${inm}"
+    return if key == "0|" {
+      cf_resp(200, "{\"_rid\":\"rid-${c}\",\"Documents\":[{\"id\":\"a\", \"v\": \"<1>\"},{\"id\":\"b\"}],\"_count\":2}", "\"0-1\"")
+    } else if key == "0|\"0-1\"" {
+      cf_resp(304, "", "\"0-1\"")
+    } else if key == "1|" {
+      cf_resp(304, "", "\"1-0\"")
+    } else if key == "1|\"1-0\"" {
+      cf_resp(200, "{\"_rid\":\"rid-${c}\",\"Documents\":[{\"id\":\"c\"}],\"_count\":1}", "\"1-1\"")
+    } else if key == "2|" {
+      cf_resp(304, "", "\"2-0\"")
+    } else {
+      cf_resp(304, "", inm)
+    }
+  }
+  js_resp(200, "{\"id\":\"${c}\",\"_rid\":\"rid-${c}\",\"partitionKey\":{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}}").with_header("x-ms-request-charge", "1.5")
+}
+
+fn cf_serve(net: testing.FakeNet) -> CfFake {
+  let f = CfFake{log: Mutex[List[Str]].new([]), feed_reads: Mutex[Map[Str, Int]].new({}), gone: Mutex[Map[Str, Int]].new({})}
+  let h = fn(req: http.Request) -> http.Response { f.answer(req) }
+  for path in ["/", "/{a}/{b}/{c}/{d}", "/{a}/{b}/{c}/{d}/{e}"] {
+    net.handle("GET ${EP}${path}", h)
+  }
+  f
+}
+
+test "ReadChangeFeed sends what Go sends and gives the caller what Go gives" {
+  let f = cf_serve(os.net)
+  let cred = new_key_credential(KEY)?
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}})
+  var out: List[Str] = []
+  let run = fn(name: Str, ct: Str, o: ChangeFeedOptions) -> (List[Str], ChangeFeedResponse) uses (net.dial, clock, rand) {
+    var add = ["== ${name}"]
+    let x = c.new_container("db1", ct) ?? e => fault("container: ${e.display()}")
+    let r = x.read_change_feed(o)
+    add = add + f.log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+    var resp = ChangeFeedResponse{response: Response{}}
+    match r {
+      Ok(cf) => {
+        resp = cf
+        for it in cf.items { add.push("  item ${it}") }
+        let fr = match cf.feed_range {
+          Some(x) => "[${x.min_inclusive}, ${x.max_exclusive})"
+          None => "none"
+        }
+        add.push("  ok status=${cf.response.status} count=${cf.count} rid=${cf.resource_id} etag=${cf.response.etag} range=${fr} charge=${two_dp(cf.response.request_charge)}")
+        add.push("  token ${cf.continuation_token}")
+        add.push("  composite ${cf.get_composite_continuation_token()} <nil>")
+      }
+      Err(azcore.CallErr.Response(e)) => add.push("  error status ${e.status_code}")
+      Err(azcore.CallErr.InvalidInput(m)) => add.push("  error ${m}")
+      Err(e) => add.push("  error ${e.display()}")
+    }
+    (add, resp)
+  }
+  let all = Some(FeedRange{min_inclusive: "", max_exclusive: "FF"})
+  let (o1, r1) = run("cf1 the whole container: the first range with changes", "f1", ChangeFeedOptions{feed_range: all})
+  let (o2, r2) = run("cf2 from its token: no more changes anywhere", "f1", ChangeFeedOptions{continuation: Some(r1.continuation_token)})
+  let (o3, _) = run("cf3 from that token: the second range has a change now", "f1", ChangeFeedOptions{continuation: Some(r2.continuation_token)})
+  out = o1 + o2 + o3
+  let opts4 = ChangeFeedOptions{feed_range: Some(FeedRange{min_inclusive: "", max_exclusive: "20"}), max_item_count: 5, start_from: Some(Time.from_unix(1793494984)), partition_key: Some(new_partition_key_string("pa")), priority_level: Some(PRIORITY_LEVEL_HIGH), throughput_bucket: Some(2)}
+  let rest = [
+    ("cf4 options", "f1", opts4),
+    ("cf5 neither a feed range nor a token", "f1", ChangeFeedOptions{}),
+    ("cf6 a token for another container", "f1", ChangeFeedOptions{continuation: Some("{\"version\":1,\"resourceId\":\"rid-other\",\"continuation\":[{\"minInclusive\":\"\",\"maxExclusive\":\"FF\"}]}")}),
+    ("cf7 a gone range splits the queue", "s1", ChangeFeedOptions{feed_range: all}),
+    ("cf8 a feed range that overlaps nothing", "f2", ChangeFeedOptions{feed_range: Some(FeedRange{min_inclusive: "30", max_exclusive: "30"})}),
+    ("cf9 a token that is not JSON", "f1", ChangeFeedOptions{continuation: Some("nope")}),
+    ("cf10 a token without a resource id or version", "f1", ChangeFeedOptions{continuation: Some("{\"continuation\":[{\"minInclusive\":\"20\",\"maxExclusive\":\"FF\",\"continuationToken\":\"\\\"1-0\\\"\"}]}")}),
+    ("cf12 a split range's children inherit its etag", "s2", ChangeFeedOptions{continuation: Some("{\"version\":1,\"resourceId\":\"rid-s2\",\"continuation\":[{\"minInclusive\":\"\",\"maxExclusive\":\"FF\",\"continuationToken\":\"\\\"0-1\\\"\"}]}")}),
+    ("cf13 a token without a resource id takes the container's", "f1", ChangeFeedOptions{continuation: Some("{\"continuation\":[{\"minInclusive\":\"\",\"maxExclusive\":\"20\",\"continuationToken\":\"\\\"0-1\\\"\"}]}")}),
+    ("cf11 one sub-range of a range", "f1", ChangeFeedOptions{feed_range: Some(FeedRange{min_inclusive: "05", max_exclusive: "10"})}),
+  ]
+  for (name, ct, o) in rest {
+    let (lines, _) = run(name, ct, o)
+    out = out + lines
+  }
+  expect(out) == CHANGE_FEED_OUTPUT
+}
+
+test "an unresolved feed range is recognizable" {
+  expect(is_feed_range_unresolved(unresolved(CfRange{min_inclusive: "30", max_exclusive: "30"}))) == true
+  expect(is_feed_range_unresolved(azcore.CallErr.InvalidInput("other"))) == false
+}
+
+test "children are clamped to the parent's bounds" {
+  let parent = CfRange{min_inclusive: "10", max_exclusive: "30"}
+  let got = clamp_to_parent([pr("1", "", "20"), pr("2", "20", "FF"), pr("3", "30", "FF")], parent)
+  expect(got.map(fn(r: PkRange) -> Str { "${r.id}:${r.min_inclusive}-${r.max_exclusive}" })) == ["1:10-20", "2:20-30"]
+  // An empty parent max is the end.
+  let all = clamp_to_parent([pr("1", "", "20"), pr("2", "20", "")], CfRange{min_inclusive: "", max_exclusive: ""})
+  expect(all.map(fn(r: PkRange) -> Str { r.max_exclusive })) == ["20", "FF"]
+}
+
+test "a token round-trips and keeps each range's etag" {
+  let t = CompositeToken{version: 1, resource_id: "r<1>", ranges: [CfRange{min_inclusive: "", max_exclusive: "20", etag: Some("\"e\"")}, CfRange{min_inclusive: "20", max_exclusive: "FF"}]}
+  let text = token_json(t)
+  expect(text) == "{\"version\":1,\"resourceId\":\"r\\u003c1\\u003e\",\"continuation\":[{\"minInclusive\":\"\",\"maxExclusive\":\"20\",\"continuationToken\":\"\\\"e\\\"\"},{\"minInclusive\":\"20\",\"maxExclusive\":\"FF\"}]}"
+  let back = parse_token(text) ?? fault("no token")
+  expect(back.resource_id) == "r<1>"
+  expect(back.ranges.len()) == 2
+  expect(back.ranges[0].etag) == Some("\"e\"")
+  expect(parse_token("{\"continuation\":[]}").is_none()) == true
+  let moved = t.advance("\"f\"")
+  expect(moved.ranges.map(fn(r: CfRange) -> Str { r.min_inclusive })) == ["20", ""]
+  expect(moved.ranges[1].etag) == Some("\"f\"")
+  expect(t.advance("").ranges[1].etag) == Some("\"e\"")
+}
