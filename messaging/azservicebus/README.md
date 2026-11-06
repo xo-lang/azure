@@ -20,13 +20,19 @@ What it does:
   defer and dead letter (on the link, or on `$management` for deferred
   messages); receiving deferred messages by sequence number; peeking;
   renewing a message's lock.
+- Session receivers for a named session (`accept_session_for_queue`,
+  `accept_session_for_subscription`) with their session state and lock
+  renewal.
 - Errors with Go's codes (`unauthorized`, `notfound`, `locklost`,
   `timeout`, `connlost`, `closed`) and the AMQP condition.
 
 Not yet, with what each needs:
 
-- Session receivers (`accept_session_for_queue`,
-  `accept_next_session_for_queue`, session state and lock renewal): next.
+- `accept_next_session_for_queue` and `_for_subscription`: the broker
+  names the session it picked in its attach reply, which std/amqp does
+  not show yet (asked of Xo). For the same reason a session
+  receiver's first `locked_until` comes from a renew-session-lock.
+- `new_list_sessions_for_queue_pager`.
 - A batch is one transfer in Go (message format 0x80013700); here each
   message is its own transfer, since std/amqp's `send` takes no message
   format.

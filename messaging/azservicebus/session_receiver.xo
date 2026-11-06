@@ -1,0 +1,124 @@
+// Session receivers, as azservicebus's SessionReceiver
+// (session_receiver.go) and the session requests of internal/mgmt.go
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md).
+
+use std/amqp
+
+pub struct SessionReceiverOptions {
+  pub receive_mode: ReceiveMode = ReceiveMode.PeekLock
+}
+
+/// A receiver locked to one session of a session enabled queue or
+/// subscription.
+pub struct SessionReceiver {
+  inner: Receiver
+  session: Str
+  lock_expiry: Atomic[Int]
+}
+
+const SESSION_FILTER: Str = "com.microsoft:session-filter"
+const SESSION_FILTER_CODE: Int = 0x137000000C
+
+fn (c: Client) accept_session(entity: Str, session_id: Str, options: SessionReceiverOptions) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  let filter = amqp.Value.Described(descriptor: amqp.Value.ULong(v: UInt64(SESSION_FILTER_CODE)), value: amqp.Value.Str(v: session_id))
+  let r = c.receiver(entity, ReceiverOptions{receive_mode: options.receive_mode}, [(SESSION_FILTER, filter)])?
+  // Go attaches now and fails when the session is locked elsewhere.
+  r.attached()?
+  var sr = SessionReceiver{inner: r, session: session_id, lock_expiry: Atomic[Int].new(0)}
+  // Go reads the lock's expiry from the attach reply's
+  // com.microsoft:locked-until-utc; std/amqp does not show the reply
+  // yet, so it comes from a renew-session-lock.
+  sr.renew_session_lock()?
+  Ok(sr)
+}
+
+/// Locks session `session_id` of a queue.
+pub fn (c: Client) accept_session_for_queue(queue_name: Str, session_id: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  c.accept_session(queue_name, session_id, options)
+}
+
+/// Locks session `session_id` of a topic's subscription.
+pub fn (c: Client) accept_session_for_subscription(topic_name: Str, subscription_name: Str, session_id: Str, options: SessionReceiverOptions = SessionReceiverOptions{}) -> SessionReceiver ! ServiceBusErr uses (net.dial, clock, rand) {
+  c.accept_session("${topic_name}/Subscriptions/${subscription_name}", session_id, options)
+}
+
+pub fn (r: SessionReceiver) session_id() -> Str {
+  r.session
+}
+
+/// When the session's lock runs out unless renewed.
+pub fn (r: SessionReceiver) locked_until() -> Time {
+  Time.from_unix_millis(r.lock_expiry.get())
+}
+
+pub fn (r: SessionReceiver) receive_messages(max_messages: Int, options: ReceiveMessagesOptions = ReceiveMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.receive_messages(max_messages, options)
+}
+
+pub fn (r: SessionReceiver) receive_deferred_messages(sequence_numbers: List[Int], options: ReceiveDeferredMessagesOptions = ReceiveDeferredMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.receive_deferred_messages(sequence_numbers, options)
+}
+
+pub fn (r: SessionReceiver) peek_messages(max_message_count: Int, options: PeekMessagesOptions = PeekMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.peek_messages(max_message_count, options)
+}
+
+pub fn (r: SessionReceiver) complete_message(message: ReceivedMessage, options: CompleteMessageOptions = CompleteMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.complete_message(message, options)
+}
+
+pub fn (r: SessionReceiver) abandon_message(message: ReceivedMessage, options: AbandonMessageOptions = AbandonMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.abandon_message(message, options)
+}
+
+pub fn (r: SessionReceiver) defer_message(message: ReceivedMessage, options: DeferMessageOptions = DeferMessageOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.defer_message(message, options)
+}
+
+pub fn (r: SessionReceiver) dead_letter_message(message: ReceivedMessage, options: DeadLetterOptions = DeadLetterOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.inner.dead_letter_message(message, options)
+}
+
+pub struct GetSessionStateOptions {}
+
+/// The session's state, empty when none was set.
+pub fn (r: SessionReceiver) get_session_state(options: GetSessionStateOptions = GetSessionStateOptions{}) -> Bytes ! ServiceBusErr uses (net.dial, clock, rand) {
+  let reply = r.session_call("get-session-state", [])?
+  match field(reply.body, "session-state") {
+    Some(amqp.Value.Binary(bs)) => Ok(bs)
+    Some(amqp.Value.Null) | None => Ok(b"")
+    Some(other) => Err(ServiceBusErr{msg: "session-state is not binary: ${other:?}"})
+  }
+}
+
+pub struct SetSessionStateOptions {}
+
+/// Sets the session's state.
+pub fn (r: SessionReceiver) set_session_state(state: Bytes, options: SetSessionStateOptions = SetSessionStateOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.session_call("set-session-state", [("session-state", amqp.Value.Binary(v: state))])?
+  Ok(())
+}
+
+pub struct RenewSessionLockOptions {}
+
+/// Renews the session's lock; locked_until() then gives the new expiry.
+pub fn (r: SessionReceiver) renew_session_lock(options: RenewSessionLockOptions = RenewSessionLockOptions{}) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+  let reply = r.session_call("renew-session-lock", [])?
+  match field(reply.body, "expiration").and_then(val_time) {
+    Some(t) => r.lock_expiry.set(t.unix_millis())
+    None => return Err(ServiceBusErr{msg: "the renew-session-lock reply has no expiration"})
+  }
+  Ok(())
+}
+
+fn (r: SessionReceiver) session_call(op: Str, extra: List[(Str, amqp.Value)]) -> Reply ! ServiceBusErr uses (net.dial, clock, rand) {
+  let c = r.inner.client
+  let mg = c.mgmt(r.inner.entity, r.inner.name)?
+  let res = mg.call(c.rand, op, [("session-id", amqp.Value.Str(v: r.session))] + extra, c.opts.timeout_ms)
+  mg.close()
+  res
+}
+
+pub fn (r: SessionReceiver) close() -> () ! ServiceBusErr uses (net.dial, clock) {
+  r.inner.close()
+}

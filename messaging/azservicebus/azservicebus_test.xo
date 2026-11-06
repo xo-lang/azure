@@ -220,3 +220,43 @@ test "errors keep Go's codes: an unknown entity is notfound, a rejected token un
     s.cancel()
   }
 }
+
+test "accept_session_for_queue receives only its session; state and lock renewal on $management" {
+  let b = amqptest.new(os.clock)
+  b.queue("sq", amqptest.QueueOptions{sessions: true, lock_ms: 30000})
+  let l = os.net.listen("sb1.servicebus.example.test:5672").or_fault("listen")
+  scope s {
+    b.serve(s.group(), l)
+    let c = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    let snd = c.new_sender("sq")?
+    snd.send_message(Message{body: b"a1", session_id: Some("s-a")})?
+    snd.send_message(Message{body: b"b1", session_id: Some("s-b")})?
+    snd.send_message(Message{body: b"b2", session_id: Some("s-b")})?
+    expect(snd.send_message(Message{body: b"none"}).is_err()) == true
+    let r = c.accept_session_for_queue("sq", "s-b")?
+    expect(r.session_id()) == "s-b"
+    let first = r.locked_until()
+    expect(first.unix_millis() > os.clock.now().unix_millis()) == true
+    let got = r.receive_messages(2, ReceiveMessagesOptions{timeout_ms: 2000})?
+    expect(got.map(text)) == ["b1", "b2"]
+    expect(got[0].session_id) == Some("s-b")
+    for m in got {
+      r.complete_message(m)?
+    }
+    expect(r.get_session_state()?) == b""
+    r.set_session_state(b"step-2")?
+    expect(r.get_session_state()?) == b"step-2"
+    expect(b.session_state("sq", "s-b")) == b"step-2"
+    os.clock.sleep(20ms)
+    r.renew_session_lock()?
+    expect(r.locked_until().unix_millis() > first.unix_millis()) == true
+    // Another connection cannot take the locked session.
+    let c2 = new_client_from_connection_string(os.net, os.clock, os.rand, conn_str(l.addr()))?
+    match c2.accept_session_for_queue("sq", "s-b") {
+      Err(e) => expect(e.code) == CODE_TIMEOUT
+      Ok(_) => expect("ok") == "a timeout"
+    }
+    c.close()?
+    s.cancel()
+  }
+}
