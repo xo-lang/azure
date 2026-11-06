@@ -1,0 +1,225 @@
+// Azure Queue Storage, as azqueue v1.0.1 (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): the ServiceClient and QueueClient over the
+// REST API version 2024-08-04, their options and responses, connection
+// strings and URL parts. The Shared Key credential and policy are
+// azblob's (`exported`), signing with azqueue's byte-order header sort.
+
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob
+use github.com/xo-lang/azure/storage/azblob/exported
+
+pub const VERSION: Str = "v0.1.0"
+
+/// The REST API version the calls are written for (azqueue v1.0.1's).
+pub const SERVICE_VERSION: Str = "2024-08-04"
+
+/// The scope of a token for Storage.
+pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
+
+pub type SharedKeyCredential = exported.SharedKeyCredential
+
+/// The credential of `account_name` with `account_key` (base64).
+pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedKeyCredential ! Str {
+  exported.new_shared_key_credential(account_name, account_key)
+}
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// What both clients share: the pipeline, and the key for SAS URLs.
+struct Core {
+  url: Str
+  pipeline: runtime.Pipeline
+  cred: SharedKeyCredential?
+}
+
+fn pipeline(net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy], opts: ClientOptions) -> runtime.Pipeline {
+  runtime.new_pipeline("azqueue", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [azblob.VersionPolicy{version: SERVICE_VERSION}], per_retry: auth}, opts.client)
+}
+
+fn shared_key(cred: SharedKeyCredential, clock: Clock) -> policy.Policy {
+  exported.SharedKeyPolicy{credential: cred, clock: clock, plain_header_order: true}
+}
+
+fn core_with_shared_key(net: Net, clock: Clock, rand: Rand, u: Str, cred: SharedKeyCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [shared_key(cred, clock)], opts), cred: Some(cred)}
+}
+
+fn core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [runtime.bearer_token_policy(cred, [TOKEN_SCOPE], clock)], opts), cred: None}
+}
+
+fn core_with_no_credential(net: Net, clock: Clock, rand: Rand, u: Str, opts: ClientOptions) -> Core {
+  Core{url: u, pipeline: pipeline(net, clock, rand, [], opts), cred: None}
+}
+
+/// `base` with `segment` joined to its path, its query kept
+/// (runtime.JoinPaths).
+fn join_paths(base: Str, segment: Str) -> Str {
+  let (path, query) = match base.find("?") {
+    Some(i) => (base[0..i], base[i..base.len()])
+    None => (base, "")
+  }
+  "${path.trim_end_chars("/")}/${segment}${query}"
+}
+
+/// `u` with `query` merged into the query it has, the keys sorted as Go's
+/// url.Values.Encode sorts them.
+fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
+  let (base, raw) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var v = url.parse_query(raw).ok() ?? url.values()
+  for (k, x) in query {
+    v.set(k, x)
+  }
+  let q = v.encode()
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+fn (c: Core) call(method: Str, u: Str, ok: List[Int], headers: List[(Str, Str)] = [], body: Str? = None) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = headers + [("Accept", "application/xml")]
+  var b = b""
+  if let Some(x) = body {
+    hs.push(("Content-Type", "application/xml"))
+    b = x.bytes()
+  }
+  let req = policy.Request{method: method, url: u, headers: hs, body: b}
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !ok.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(method, u, resp)))
+  }
+  Ok(resp)
+}
+
+fn meta_headers(metadata: Map[Str, Str]) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  for k in metadata.keys().sort() {
+    hs.push(("x-ms-meta-${k}", metadata.get(k) ?? ""))
+  }
+  hs
+}
+
+/// `x-ms-meta-*` response headers, prefix removed, names as they came.
+fn metadata_of(resp: http.Response) -> Map[Str, Str] {
+  var m: Map[Str, Str] = {}
+  for (k, v) in resp.headers {
+    if k.to_lower().starts_with("x-ms-meta-") {
+      m[k[10..k.len()]] = v
+    }
+  }
+  m
+}
+
+/// An HTTP date (`Thu, 05 Nov 2026 03:04:05 GMT`) as a Time.
+fn rfc1123(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
+}
+
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time.
+fn rfc3339(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.to_upper(), time.RFC3339, time.utc()).ok()
+}
+
+/// What every call returns: the service's request ID, version and date.
+pub struct Response {
+  pub request_id: Str = ""
+  pub version: Str = ""
+  pub date: Time? = None
+}
+
+fn response_of(resp: http.Response) -> Response {
+  Response{request_id: resp.header("x-ms-request-id") ?? "", version: resp.header("x-ms-version") ?? "", date: rfc1123(resp.header("Date") ?? "")}
+}
+
+/// A parsed connection string: the service URL (with the SAS when it
+/// has one) and the account key.
+pub struct ParsedConnectionString {
+  pub service_url: Str
+  pub account_name: Str = ""
+  pub account_key: Str = ""
+}
+
+/// Parses a storage connection string as azqueue does: `QueueEndpoint`
+/// or `AccountName` (with `DefaultEndpointsProtocol` and
+/// `EndpointSuffix`), and `AccountKey` or `SharedAccessSignature`.
+pub fn parse_connection_string(connection_string: Str) -> ParsedConnectionString ! Str {
+  let malformed = "connection string is either blank or malformed. The expected connection string should contain key value pairs separated by semicolons. For example 'DefaultEndpointsProtocol=https;AccountName=<accountName>;AccountKey=<accountKey>;EndpointSuffix=core.windows.net'"
+  var m: Map[Str, Str] = {}
+  for part in connection_string.trim_end_chars(";").split(";") {
+    let i = part.find("=") ?? return Err(malformed)
+    m[part[0..i]] = part[i + 1..part.len()]
+  }
+  let protocol = m.get("DefaultEndpointsProtocol") ?? "https"
+  let suffix = m.get("EndpointSuffix") ?? "core.windows.net"
+  var service_url = match (m.get("QueueEndpoint"), m.get("AccountName")) {
+    (Some(e), _) => e
+    (None, Some(a)) => "${protocol}://${a}.queue.${suffix}"
+    _ => return Err("connection string needs either AccountName or QueueEndpoint")
+  }
+  if !service_url.ends_with("/") {
+    service_url = service_url + "/"
+  }
+  match (m.get("AccountName"), m.get("AccountKey"), m.get("SharedAccessSignature")) {
+    (Some(a), Some(k), _) => Ok(ParsedConnectionString{service_url: service_url, account_name: a, account_key: k})
+    (_, _, Some(s)) => Ok(ParsedConnectionString{service_url: "${service_url}?${s}"})
+    _ => Err("connection string needs either AccountKey or SharedAccessSignature")
+  }
+}
+
+/// A queue URL's parts (sas.URLParts): with an IP host (Azurite's
+/// `127.0.0.1:10001/devstoreaccount1/q1`) the first path segment is the
+/// account.
+pub struct URLParts {
+  pub scheme: Str
+  pub host: Str
+  pub ip_account_name: Str = ""
+  pub queue_name: Str = ""
+  /// The query, SAS included.
+  pub query: Str = ""
+}
+
+pub fn parse_url(u: Str) -> URLParts ! Str {
+  let p = http.parse_url(u) ?? e => return Err(e.display())
+  let host = match p.port {
+    Some(n) => "${p.host}:${n}"
+    None => p.host
+  }
+  let query = match u.find("?") {
+    Some(i) => u[i + 1..u.len()]
+    None => ""
+  }
+  var path = p.path.trim_start_chars("/")
+  var account = ""
+  if is_ip(p.host) && path != "" {
+    match path.find("/") {
+      Some(i) => {
+        account = path[0..i]
+        path = path[i + 1..path.len()]
+      }
+      None => {
+        account = path
+        path = ""
+      }
+    }
+  }
+  Ok(URLParts{scheme: p.scheme, host: host, ip_account_name: account, queue_name: path, query: query})
+}
+
+fn is_ip(host: Str) -> Bool {
+  let h = host.trim_start_chars("[").trim_end_chars("]")
+  h.contains(":") || (h.split(".").len() == 4 && h.split(".").all(fn(x: Str) -> Bool { Int.parse(x).is_some() }))
+}

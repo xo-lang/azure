@@ -1,0 +1,289 @@
+// The ServiceClient and QueueClient against a fake queue service that
+// answers as the Go program's fake does: every request must be Go's,
+// byte for byte (Authorization included, so the signer's byte-order
+// header sort is checked), and what is read back must print as Go
+// printed it.
+
+use std/crypto
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+use github.com/xo-lang/azure/storage/azqueue/queueerror
+use github.com/xo-lang/azure/storage/azqueue/sas
+
+const EP: Str = "http://acct1.queue.example.test"
+const KEY: Str = "aW52ZW50ZWQta2V5"
+/// The date of the Go run: Go's signer always sets its own clock's
+/// date, so the test sends that one.
+const GO_DATE: Str = "Fri, 06 Nov 2026 06:40:08 GMT"
+const DATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+struct Fixed {}
+
+fn (p: Fixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", GO_DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+const MSGS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList><QueueMessage><MessageId>m1</MessageId><InsertionTime>Thu, 05 Nov 2026 03:04:05 GMT</InsertionTime><ExpirationTime>Thu, 12 Nov 2026 03:04:05 GMT</ExpirationTime><PopReceipt>p1</PopReceipt><TimeNextVisible>Thu, 05 Nov 2026 03:04:35 GMT</TimeNextVisible><DequeueCount>2</DequeueCount><MessageText>hello &amp; bye</MessageText></QueueMessage></QueueMessagesList>"
+
+fn xml_resp(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/xml")
+}
+
+/// The Go program's fake, answer for answer; each request logged in its
+/// format.
+fn answer(req: http.Request, log: Mutex[List[Str]]) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  var qv = url.values()
+  for k in req.url.query.keys().sort() {
+    qv.add(k, req.url.query.get(k) ?? "")
+  }
+  let qs = qv.encode()
+  let uri = if qs == "" { req.path } else { "${req.path}?${qs}" }
+  let line = (["REQ ${req.method} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  log.with(fn(var l: List[Str]) { l.push(line) })
+  let r = answer_for(req)
+  r.with_header("x-ms-request-id", "r1").with_header("x-ms-version", "2024-08-04").with_header("Date", DATE)
+}
+
+fn answer_for(req: http.Request) -> http.Response {
+  let comp = req.url.query.get("comp") ?? ""
+  let p = req.path
+  if p.ends_with("/missing") {
+    return xml_resp(404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>QueueNotFound</Code><Message>The specified queue does not exist.</Message></Error>").with_header("x-ms-error-code", "QueueNotFound")
+  }
+  if comp == "properties" && req.method == "GET" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><Write>false</Write><Delete>true</Delete><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><HourMetrics><Version>1.0</Version><Enabled>true</Enabled><IncludeAPIs>false</IncludeAPIs><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></HourMetrics><MinuteMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></MinuteMetrics><Cors><CorsRule><AllowedOrigins>https://app.example.test</AllowedOrigins><AllowedMethods>GET,PUT</AllowedMethods><MaxAgeInSeconds>60</MaxAgeInSeconds><ExposedHeaders>x-ms-*</ExposedHeaders><AllowedHeaders></AllowedHeaders></CorsRule></Cors></StorageServiceProperties>")
+  }
+  if comp == "properties" {
+    return http.text(202, "")
+  }
+  if comp == "stats" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats><GeoReplication><Status>live</Status><LastSyncTime>Thu, 05 Nov 2026 02:00:00 GMT</LastSyncTime></GeoReplication></StorageServiceStats>")
+  }
+  if comp == "list" {
+    if (req.url.query.get("marker") ?? "") == "" {
+      return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.queue.example.test/\"><Prefix>q</Prefix><MaxResults>2</MaxResults><Queues><Queue><Name>q1</Name><Metadata><color>blue</color></Metadata></Queue><Queue><Name>q2</Name><Metadata /></Queue></Queues><NextMarker>/acct1/q3</NextMarker></EnumerationResults>")
+    }
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ServiceEndpoint=\"http://acct1.queue.example.test/\"><Prefix>q</Prefix><Marker>/acct1/q3</Marker><MaxResults>2</MaxResults><Queues><Queue><Name>q3</Name></Queue></Queues><NextMarker /></EnumerationResults>")
+  }
+  if comp == "metadata" && req.method == "GET" {
+    return http.text(200, "").with_header("x-ms-meta-color", "blue").with_header("x-ms-approximate-messages-count", "17")
+  }
+  if comp == "metadata" || comp == "acl" && req.method == "PUT" {
+    return http.text(204, "")
+  }
+  if comp == "acl" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>pol1</Id><AccessPolicy><Start>2026-11-05T00:00:00.0000000Z</Start><Expiry>2026-11-06T00:00:00.0000000Z</Expiry><Permission>raup</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if req.method == "PUT" && (req.url.query.get("popreceipt") ?? "") != "" {
+    return http.text(204, "").with_header("x-ms-popreceipt", "p2").with_header("x-ms-time-next-visible", "Thu, 05 Nov 2026 03:05:05 GMT")
+  }
+  if req.method == "PUT" {
+    return http.text(201, "")
+  }
+  if req.method == "DELETE" {
+    return http.text(204, "")
+  }
+  if req.method == "POST" {
+    return xml_resp(201, "<?xml version=\"1.0\" encoding=\"utf-8\"?><QueueMessagesList><QueueMessage><MessageId>m1</MessageId><InsertionTime>Thu, 05 Nov 2026 03:04:05 GMT</InsertionTime><ExpirationTime>Thu, 12 Nov 2026 03:04:05 GMT</ExpirationTime><PopReceipt>p1</PopReceipt><TimeNextVisible>Thu, 05 Nov 2026 03:04:35 GMT</TimeNextVisible></QueueMessage></QueueMessagesList>")
+  }
+  if req.method == "GET" && p.ends_with("/messages") {
+    return xml_resp(200, MSGS)
+  }
+  http.text(400, "")
+}
+
+fn serve(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response { answer(req, log) }
+  for m in ["GET", "PUT", "POST", "DELETE"] {
+    net.handle("${m} ${EP}/", h)
+    net.handle("${m} ${EP}/{q}", h)
+    net.handle("${m} ${EP}/{q}/messages", h)
+    net.handle("${m} ${EP}/{q}/messages/{id}", h)
+  }
+  log
+}
+
+fn short_hash(v: Str) -> Str {
+  "sha256:${crypto.sha256(v.bytes()).to_hex()[0..16]}"
+}
+
+/// Every signature replaced by a short hash of it, as the vectors keep
+/// them: a `sig=` value (to `&`, a space, a quote or the end) and a
+/// Shared Key signature (to the end of the line).
+fn hide(t: Str) -> Str {
+  var out = ""
+  var rest = t
+  while {
+    let a = rest.find("sig=")
+    let b = rest.find("SharedKey acct1:")
+    let (at, skip, stop) = match (a, b) {
+      (Some(i), Some(j)) => if i < j { (i, 4, "& \"\n") } else { (j, 16, " \n") }
+      (Some(i), None) => (i, 4, "& \"\n")
+      (None, Some(j)) => (j, 16, " \n")
+      (None, None) => break
+    }
+    out = out + rest[0..at + skip]
+    rest = rest[at + skip..rest.len()]
+    let end = rest.find_any(stop) ?? rest.len()
+    out = out + short_hash(rest[0..end])
+    rest = rest[end..rest.len()]
+  }
+  out + rest
+}
+
+fn ts(t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { blobsas.format_time(x) }) ?? "nil"
+}
+
+fn q(s: Str?) -> Str {
+  "\"${s ?? ""}\""
+}
+
+fn at(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()).or_fault("time")
+}
+
+test "every call sends Go's request, byte for byte, and reads back what Go reads" {
+  let log = serve(os.net)
+  var out: List[Str] = []
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+
+  out.push("== get properties")
+  let gp = svc.get_service_properties()?.properties
+  let lg = gp.logging ?? return Err("no logging")
+  let cors = (gp.cors ?? [])[0]
+  out.push("logging read=${lg.read ?? false} write=${lg.write ?? false} delete=${lg.delete ?? false} days=${lg.retention_policy.and_then(fn(r: RetentionPolicy) -> Int? { r.days }) ?? 0} hour=${gp.hour_metrics.and_then(fn(m: Metrics) -> Bool? { m.enabled }) ?? false} cors=${cors.allowed_origins ?? ""} ${cors.allowed_methods ?? ""} age=${cors.max_age_in_seconds ?? 0} exposed=${cors.exposed_headers ?? ""} allowed=${q(cors.allowed_headers)}")
+
+  out.push("== set properties")
+  svc.set_properties(StorageServiceProperties{
+    cors: Some([CorsRule{allowed_origins: Some("https://app.example.test"), allowed_methods: Some("GET")}]),
+    logging: Some(Logging{read: Some(true), write: Some(true), delete: Some(false), retention_policy: Some(RetentionPolicy{enabled: Some(true), days: Some(3)})}),
+    hour_metrics: Some(Metrics{enabled: Some(true), include_apis: Some(true), retention_policy: Some(RetentionPolicy{enabled: Some(false)})}),
+  })?
+
+  out.push("== stats")
+  let geo = svc.get_statistics()?.stats.geo_replication ?? return Err("no geo")
+  out.push("geo status=${geo.status ?? ""} last=${ts(geo.last_sync_time)}")
+
+  out.push("== list")
+  var pager = svc.new_list_queues_pager(ListQueuesOptions{include_metadata: true, prefix: Some("q"), max_results: Some(2)})
+  while pager.more() {
+    let pg = pager.next_page()?
+    let names = pg.queues.map(fn(x: Queue) -> Str {
+      "${x.name ?? ""}{${x.metadata.keys().map(fn(k: Str) -> Str { "${k}:${x.metadata.get(k) ?? ""}" }).join("")}}"
+    })
+    out.push("page [${names.join(" ")}] next=${q(pg.next_marker)}")
+  }
+
+  out.push("== create, delete queue")
+  svc.create_queue("q9", CreateOptions{metadata: {"color": "blue", "a-b": "1", "a_b": "2", "ab": "3", "a1": "4"}})?
+  svc.delete_queue("q9")?
+
+  let qc = svc.new_queue_client("q1")
+  out.push("== queue ops")
+  qc.create()?
+  qc.set_metadata({"color": "red"})?
+  let pr = qc.get_properties()?
+  out.push("count=${pr.approximate_messages_count ?? 0} meta=${pr.metadata.get("Color") ?? pr.metadata.get("color") ?? ""}")
+  let ap = qc.get_access_policy()?.signed_identifiers[0]
+  let pol = ap.access_policy ?? return Err("no policy")
+  out.push("acl ${ap.id ?? ""} ${ts(pol.start)} ${ts(pol.expiry)} ${pol.permission ?? ""}")
+  let start = at("2026-11-05T00:02:03.456Z")
+  let exp = at("2026-11-07T00:00:00Z")
+  qc.set_access_policy([SignedIdentifier{id: Some("pol1"), access_policy: Some(AccessPolicy{start: Some(start), expiry: Some(exp), permission: Some("ra")})}, SignedIdentifier{id: Some("pol2")}])?
+  let en = qc.enqueue_message("hello <&> bye", EnqueueMessageOptions{time_to_live: Some(-1), visibility_timeout: Some(5)})?.messages[0]
+  out.push("enqueued ${en.message_id ?? ""} ${en.pop_receipt ?? ""} ins=${ts(en.insertion_time)} exp=${ts(en.expiration_time)} next=${ts(en.time_next_visible)}")
+  qc.enqueue_message("plain")?
+  let dq = qc.dequeue_message()?.messages[0]
+  out.push("dequeued ${dq.message_id ?? ""} ${q(dq.message_text)} count=${dq.dequeue_count ?? 0} pop=${dq.pop_receipt ?? ""} next=${ts(dq.time_next_visible)}")
+  qc.dequeue_messages(DequeueMessagesOptions{number_of_messages: Some(5), visibility_timeout: Some(30)})?
+  qc.dequeue_messages()?
+  let up = qc.update_message("m1", "p1/+=", "new text")?
+  out.push("updated pop=${up.pop_receipt ?? ""} next=${ts(up.time_next_visible)}")
+  qc.update_message("m1", "p2", "again", visibility_timeout: 10)?
+  qc.delete_message("m1", "p2")?
+  let pk = qc.peek_message()?.messages[0]
+  out.push("peeked ${pk.message_id ?? ""} ${q(pk.message_text)}")
+  qc.peek_messages(Some(3))?
+  qc.clear_messages()?
+  qc.delete()?
+
+  out.push("== error")
+  let err = svc.new_queue_client("missing").get_properties().err() ?? return Err("no error")
+  let status = match err {
+    Response(r) => r.status_code
+    _ => 0
+  }
+  let code = match err {
+    Response(r) => r.error_code == "QueueNotFound"
+    _ => false
+  }
+  out.push("err code=${code} has=${queueerror.has_code(err, [queueerror.QUEUE_NOT_FOUND])} status=${status}")
+
+  out.push("== sas")
+  let svc2 = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.queue.example.test/", cred)
+  out.push("account ${svc2.get_sas_url("sco", "rwlap", exp, start: Some(start))?}")
+  out.push("queue ${svc2.new_queue_client("q1").get_sas_url("rp", exp)?}")
+  out.push("values ${sas.QueueSignatureValues{protocol: sas.PROTOCOL_HTTPS_AND_HTTP, start: Some(start), expiry: Some(exp), permissions: "prau", queue_name: "q1", ip_range: "192.0.2.1-192.0.2.9"}.sign_with_shared_key(cred)?.encode()}")
+  out.push("account values ${sas.AccountSignatureValues{start: Some(start), expiry: Some(exp), permissions: "lwr", resource_types: "os", ip_range: "192.0.2.1"}.sign_with_shared_key(cred)?.encode()}")
+  out.push("identifier ${sas.QueueSignatureValues{identifier: "pol1", queue_name: "q1"}.sign_with_shared_key(cred)?.encode()}")
+  out.push("missing: ${sas.QueueSignatureValues{queue_name: "q1"}.sign_with_shared_key(cred).err() ?? ""}")
+  out.push("bad perm: ${sas.QueueSignatureValues{expiry: Some(exp), permissions: "rx", queue_name: "q1"}.sign_with_shared_key(cred).err() ?? ""}")
+
+  out.push("== connection strings")
+  for cs in [
+    "DefaultEndpointsProtocol=https;AccountName=acct1;AccountKey=aW52ZW50ZWQta2V5;EndpointSuffix=core.example.test",
+    "AccountName=acct1;AccountKey=aW52ZW50ZWQta2V5",
+    "QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;AccountName=devstoreaccount1;AccountKey=aW52ZW50ZWQta2V5;",
+    "QueueEndpoint=https://acct1.queue.example.test/;SharedAccessSignature=sv=2024-08-04&sig=abc",
+    "QueueEndpoint=https://acct1.queue.example.test/",
+    "AccountKey=aW52ZW50ZWQta2V5",
+    "nonsense",
+  ] {
+    match new_service_client_from_connection_string(os.net, os.clock, os.rand, cs) {
+      Ok(c) => {
+        let qcs = new_queue_client_from_connection_string(os.net, os.clock, os.rand, cs, "q1")?
+        out.push("cs ${c.url} ${qcs.url}")
+      }
+      Err(e) => out.push("cs err: ${e}")
+    }
+  }
+  let pu = parse_url("https://acct1.queue.example.test/q1?sv=2024-08-04&sig=abc")?
+  out.push("parse host=${pu.host} queue=${pu.queue_name}")
+
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  expect(got.len()) == GO_REQUESTS.len()
+  // Go's transport adds Content-Length on the wire; FakeNet hands the
+  // request over in process, so there is none to compare. (The signature
+  // covers the length either way, and it matches.)
+  for (i, want) in GO_REQUESTS.indexed() {
+    let w = want.split("\n").filter(fn(l: Str) -> Bool { !l.starts_with("  content-length=") }).join("\n")
+    expect(hide(got.get(i) ?? "")) == w
+  }
+  expect(out.map(hide)) == GO_OUTPUT
+}
+
+test "Go's SAS formats a zoned time in its zone with a Z; Xo's times are instants, so they sign UTC" {
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let v = sas.QueueSignatureValues{protocol: sas.PROTOCOL_HTTPS_AND_HTTP, start: Some(at("2026-11-05T00:02:03Z")), expiry: Some(at("2026-11-07T00:00:00Z")), permissions: "raup", queue_name: "q1", ip_range: "192.0.2.1-192.0.2.9"}
+  expect(v.sign_with_shared_key(cred)?.encode().contains("st=2026-11-05T00%3A02%3A03Z")) == true
+}
+
+test "a client without the account key cannot sign a SAS; a queue client keeps the service URL's SAS" {
+  let svc = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${EP}/?sv=x&sig=y")
+  expect(svc.get_sas_url("s", "r", at("2026-11-07T00:00:00Z")).err()) == Some(queueerror.MISSING_SHARED_KEY_CREDENTIAL)
+  expect(svc.new_queue_client("q1").url) == "${EP}/q1?sv=x&sig=y"
+}

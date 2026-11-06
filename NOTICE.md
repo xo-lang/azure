@@ -16,7 +16,11 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   credential, and the `sas` package:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and
-  `storage/azblob/sas/testdata`), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
+  `storage/azblob/sas/testdata`), `sdk/storage/azqueue` v1.0.1 (the
+  ServiceClient and QueueClient, their options, responses and XML
+  models, connection strings, URL parts, the `sas` package and
+  `queueerror`, hand written over azblob's Shared Key; requests checked
+  against its own), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
   its tests, ParseID), `sdk/security/keyvault/azsecrets`, `azkeys` and `azcertificates`
   (their hand written clients, options and ID types, and
   azcertificates' ErrorInfo; the rest is generated), `sdk/messaging/azservicebus`

@@ -1,0 +1,124 @@
+// Shared access signatures for Queue Storage, as azqueue's sas package
+// (account.go, service.go, query_params.go, url_parts.go; MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): account SAS for the
+// Queue service and queue SAS, signed with the account key. The key,
+// the time format and the permission normalizing are azblob's.
+
+use std/url
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+/// The service version signed into a SAS when none is given (azqueue's
+/// sas.Version, older than the REST version its calls send).
+pub const VERSION: Str = "2020-02-10"
+
+pub const PROTOCOL_HTTPS: Str = "https"
+pub const PROTOCOL_HTTPS_AND_HTTP: Str = "https,http"
+
+/// Permission letters in the order each SAS kind writes them.
+pub const ACCOUNT_PERMISSIONS: Str = "rwdxylacuptfi"
+pub const QUEUE_PERMISSIONS: Str = "raup"
+pub const ACCOUNT_RESOURCE_TYPES: Str = "sco"
+
+fn opt_time(t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { blobsas.format_time(x) }) ?? ""
+}
+
+/// The letters of `s` in `order`, each once; an unknown one is Go's
+/// error, its rune printed as a number (`invalid permission: '120'`
+/// for `x`, as Go's `%v` of a rune prints it).
+fn normalize(s: Str, order: Str, what: Str) -> Str ! Str {
+  for c in s.runes() {
+    if !order.contains("${c}") {
+      return Err("invalid ${what}: '${Int(c)}'")
+    }
+  }
+  var out = ""
+  for c in order.runes() {
+    if s.contains("${c}") {
+      out = out + "${c}"
+    }
+  }
+  Ok(out)
+}
+
+/// An account SAS for the Queue service.
+pub struct AccountSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Letters of `rwdxylacuptfi`.
+  pub permissions: Str = ""
+  /// `start` or `start-end` (IP addresses).
+  pub ip_range: Str = ""
+  /// Letters of `sco`.
+  pub resource_types: Str = ""
+}
+
+pub fn (v: AccountSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  let expiry = v.expiry ?? return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  if v.permissions == "" || v.resource_types == "" {
+    return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  }
+  let version = if v.version == "" { VERSION } else { v.version }
+  let perms = normalize(v.permissions, ACCOUNT_PERMISSIONS, "permission")?
+  let rt = normalize(v.resource_types, ACCOUNT_RESOURCE_TYPES, "resource type")?
+  let sts = [cred.account_name, perms, "q", rt, opt_time(v.start), blobsas.format_time(expiry), v.ip_range, v.protocol, version, ""].join("\n")
+  Ok(QueryParameters{version: version, protocol: v.protocol, start: v.start, expiry: Some(expiry), permissions: perms, ip_range: v.ip_range, services: "q", resource_types: rt, signature: Secret.new(cred.compute_hmac_sha256(sts))})
+}
+
+/// A service SAS for one queue: an expiry and permissions, or a stored
+/// access policy's `identifier`.
+pub struct QueueSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Letters of `raup`.
+  pub permissions: Str = ""
+  pub ip_range: Str = ""
+  pub identifier: Str = ""
+  pub queue_name: Str = ""
+}
+
+pub fn (v: QueueSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  if v.identifier == "" && (v.expiry.is_none() || v.permissions == "") {
+    return Err("service SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let perms = normalize(v.permissions, QUEUE_PERMISSIONS, "permission")?
+  let version = if v.version == "" { VERSION } else { v.version }
+  let sts = [perms, opt_time(v.start), opt_time(v.expiry), "/queue/${cred.account_name}/${v.queue_name}", v.identifier, v.ip_range, v.protocol, version].join("\n")
+  Ok(QueryParameters{version: version, protocol: v.protocol, start: v.start, expiry: v.expiry, permissions: perms, ip_range: v.ip_range, identifier: v.identifier, signature: Secret.new(cred.compute_hmac_sha256(sts))})
+}
+
+/// A signed SAS; `encode` gives the query string. The signature is a
+/// Secret: it never shows in logs or Debug output.
+pub struct QueryParameters {
+  pub version: Str = ""
+  pub services: Str = ""
+  pub resource_types: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub ip_range: Str = ""
+  pub identifier: Str = ""
+  pub permissions: Str = ""
+  pub signature: Secret[Str]
+}
+
+/// The query string, keys sorted, as azqueue's QueryParameters.Encode.
+pub fn (p: QueryParameters) encode() -> Str {
+  let pairs: List[(Str, Str)] = [
+    ("sv", p.version), ("ss", p.services), ("srt", p.resource_types), ("spr", p.protocol),
+    ("st", opt_time(p.start)), ("se", opt_time(p.expiry)), ("sip", p.ip_range), ("si", p.identifier),
+    ("sp", p.permissions), ("sig", p.signature.reveal()),
+  ]
+  var v = url.values()
+  for (k, x) in pairs {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
+  v.encode()
+}

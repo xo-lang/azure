@@ -36,8 +36,10 @@ pub fn (c: SharedKeyCredential) compute_hmac_sha256(message: Str) -> Str {
   base64.encode(crypto.hmac_sha256(c.key.reveal(), message.bytes()))
 }
 
-/// The string the signature covers.
-pub fn (c: SharedKeyCredential) string_to_sign(req: policy.Request) -> Str ! Str {
+/// The string the signature covers. `plain_order` sorts the `x-ms-`
+/// headers byte by byte, as azqueue's copy of this code does (azblob
+/// uses the service's culture-aware order).
+pub fn (c: SharedKeyCredential) string_to_sign(req: policy.Request, plain_order: Bool = false) -> Str ! Str {
   let h = fn(name: Str) -> Str { req.header(name) ?? "" }
   let len = match req.header("Content-Length") {
     Some(n) => n
@@ -57,14 +59,15 @@ pub fn (c: SharedKeyCredential) string_to_sign(req: policy.Request) -> Str ! Str
     h("If-None-Match"),
     h("If-Unmodified-Since"),
     h("Range"),
-    canonicalized_headers(req.headers),
+    canonicalized_headers(req.headers, plain_order),
     resource,
   ].join("\n"))
 }
 
-/// The `x-ms-` headers, lowercased, in the service's order, as
-/// `name:value` lines (values of a repeated header joined by `,`).
-pub fn canonicalized_headers(headers: List[(Str, Str)]) -> Str {
+/// The `x-ms-` headers, lowercased, in the service's order (byte order
+/// with `plain_order`), as `name:value` lines (values of a repeated
+/// header joined by `,`).
+pub fn canonicalized_headers(headers: List[(Str, Str)], plain_order: Bool = false) -> Str {
   var names: List[Str] = []
   var values: Map[Str, List[Str]] = {}
   for (k, v) in headers {
@@ -77,7 +80,7 @@ pub fn canonicalized_headers(headers: List[(Str, Str)]) -> Str {
       values[n] = (values.get(n) ?? []) + [v]
     }
   }
-  names = sort_headers(names)
+  names = if plain_order { names.sort() } else { sort_headers(names) }
   names.map(fn(n: Str) -> Str { "${n}:${(values.get(n) ?? []).join(",")}" }).join("\n")
 }
 
@@ -198,6 +201,8 @@ pub fn compare_headers(lhs: Str, rhs: Str) -> Int {
 pub struct SharedKeyPolicy {
   pub credential: SharedKeyCredential
   pub clock: Clock
+  /// Sort the `x-ms-` headers byte by byte (azqueue's signer).
+  pub plain_header_order: Bool = false
 }
 
 pub fn shared_key_policy(credential: SharedKeyCredential, clock: Clock) -> SharedKeyPolicy {
@@ -211,6 +216,6 @@ pub fn http_date(t: Time) -> Str {
 
 fn (p: SharedKeyPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", http_date(p.clock.now())) } else { req }
-  let sts = p.credential.string_to_sign(dated) ?? e => return Err(policy.SendErr.Auth("Shared Key: ${e}"))
+  let sts = p.credential.string_to_sign(dated, p.plain_header_order) ?? e => return Err(policy.SendErr.Auth("Shared Key: ${e}"))
   next.send(dated.with_header("Authorization", "SharedKey ${p.credential.account_name}:${p.credential.compute_hmac_sha256(sts)}"))
 }
