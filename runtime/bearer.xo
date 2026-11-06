@@ -10,6 +10,56 @@ use std/regexp
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
+/// A token for one set of scopes, shared by every copy of the cache:
+/// fetched on first use and refreshed at its refresh time (or 5 minutes
+/// before it expires) by one call while the others wait, as azcore's
+/// internal temporal.Resource. BearerTokenPolicy keeps one; a policy
+/// that writes the token in its own header shape (Cosmos DB's
+/// `type=aad&ver=1.0&sig=<token>`) keeps another instead of its own
+/// cache.
+pub struct TokenCache {
+  pub credential: azcore.TokenCredential
+  pub scopes: List[Str]
+  pub clock: Clock
+  /// Ask for Continuous Access Evaluation tokens (`enable_cae`), as
+  /// BearerTokenPolicy does; Cosmos DB's policy does not.
+  pub enable_cae: Bool = true
+  token: Mutex[azcore.AccessToken?]
+}
+
+pub fn token_cache(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, enable_cae: Bool = true) -> TokenCache {
+  TokenCache{credential: credential, scopes: scopes, clock: clock, enable_cae: enable_cae, token: Mutex.new(None)}
+}
+
+/// The cached token, or a new one when there is none or it needs a
+/// refresh.
+pub fn (c: TokenCache) get() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    if let Some(have) = t {
+      if !azcore.needs_refresh(have, c.clock.now()) {
+        return Ok(have)
+      }
+    }
+    let fresh = c.credential.get_token(azcore.TokenRequestOptions{scopes: c.scopes, enable_cae: c.enable_cae})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+/// A new token for a claims challenge; it replaces the cached one.
+pub fn (c: TokenCache) get_for_claims(claims: Str) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    let fresh = c.credential.get_token(azcore.TokenRequestOptions{scopes: c.scopes, claims: claims, enable_cae: c.enable_cae})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+/// Drops the cached token, so the next `get` fetches one.
+pub fn (c: TokenCache) reset() {
+  c.token.reset(None)
+}
+
 pub struct BearerTokenPolicy {
   pub credential: azcore.TokenCredential
   pub scopes: List[Str]
@@ -18,33 +68,11 @@ pub struct BearerTokenPolicy {
   pub insecure_allow_http: Bool = false
   /// Extra tenants whose tokens go in `x-ms-authorization-auxiliary`.
   pub auxiliary_tenants: List[Str] = []
-  token: Mutex[azcore.AccessToken?]
+  cache: TokenCache
 }
 
 pub fn bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, insecure_allow_http: Bool = false, auxiliary_tenants: List[Str] = []) -> BearerTokenPolicy {
-  BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: insecure_allow_http, auxiliary_tenants: auxiliary_tenants, token: Mutex.new(None)}
-}
-
-fn (p: BearerTokenPolicy) current() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-    if let Some(have) = t {
-      if !azcore.needs_refresh(have, p.clock.now()) {
-        return Ok(have)
-      }
-    }
-    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, enable_cae: true})?
-    t = Some(fresh)
-    Ok(fresh)
-  })
-}
-
-/// A fresh token for a claims challenge; it replaces the cached one.
-fn (p: BearerTokenPolicy) for_claims(claims: Str) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, claims: claims, enable_cae: true})?
-    t = Some(fresh)
-    Ok(fresh)
-  })
+  BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: insecure_allow_http, auxiliary_tenants: auxiliary_tenants, cache: token_cache(credential, scopes, clock)}
 }
 
 fn (p: BearerTokenPolicy) authorize(req: policy.Request, t: azcore.AccessToken) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
@@ -67,18 +95,18 @@ fn (p: BearerTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.R
   if !req.url.starts_with("https://") && !p.insecure_allow_http {
     return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
   }
-  let t = p.current() ?? e => return Err(policy.SendErr.Auth(e.display()))
+  let t = p.cache.get() ?? e => return Err(policy.SendErr.Auth(e.display()))
   let resp = next.send(p.authorize(req, t)?)?
   if resp.status != 401 {
     return Ok(resp)
   }
-  p.token.reset(None)
+  p.cache.reset()
   let claims = match cae_claims(resp) {
     Ok(Some(c)) => c
     Ok(None) => return Ok(resp)
     Err(e) => return Err(policy.SendErr.Auth(e))
   }
-  let fresh = p.for_claims(claims) ?? e => return Err(policy.SendErr.Auth(e.display()))
+  let fresh = p.cache.get_for_claims(claims) ?? e => return Err(policy.SendErr.Auth(e.display()))
   next.send(p.authorize(req, fresh)?)
 }
 

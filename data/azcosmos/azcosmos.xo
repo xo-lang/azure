@@ -96,29 +96,14 @@ fn (p: KeyCredentialPolicy) send(req: policy.Request, next: policy.Next) -> http
 }
 
 /// Entra ID authorization: `type=aad&ver=1.0&sig=<token>`, the token
-/// cached until it needs a refresh.
+/// from azcore's shared cache (without CAE, as Go's
+/// cosmosBearerTokenPolicy asks for none).
 pub struct AadTokenPolicy {
-  pub credential: azcore.TokenCredential
-  pub scopes: List[Str]
-  pub clock: Clock
-  token: Mutex[azcore.AccessToken?]
-}
-
-fn (p: AadTokenPolicy) current() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-    if let Some(have) = t {
-      if !azcore.needs_refresh(have, p.clock.now()) {
-        return Ok(have)
-      }
-    }
-    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes})?
-    t = Some(fresh)
-    Ok(fresh)
-  })
+  pub cache: runtime.TokenCache
 }
 
 fn (p: AadTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
-  let tok = p.current() ?? e => return Err(policy.SendErr.Auth(e.display()))
+  let tok = p.cache.get() ?? e => return Err(policy.SendErr.Auth(e.display()))
   next.send(req.with_header("Authorization", "type=aad&ver=1.0&sig=${tok.token.reveal()}"))
 }
 
@@ -176,7 +161,7 @@ pub fn new_client_with_key(net: Net, clock: Clock, rand: Rand, endpoint: Str, cr
 pub fn new_client(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
   let u = http.parse_url(endpoint) ?? e => return Err(e.display())
   let scope = "${u.scheme}://${u.host}/.default"
-  Ok(Client{core: new_core(net, clock, rand, endpoint, AadTokenPolicy{credential: cred, scopes: [scope], clock: clock, token: Mutex[azcore.AccessToken?].new(None)}, options)})
+  Ok(Client{core: new_core(net, clock, rand, endpoint, AadTokenPolicy{cache: runtime.token_cache(cred, [scope], clock, enable_cae: false)}, options)})
 }
 
 /// A client from `AccountEndpoint=...;AccountKey=...` (keys compared

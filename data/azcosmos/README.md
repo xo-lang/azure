@@ -30,7 +30,7 @@ What it does:
 - Priority-based execution and throughput buckets, for the client and
   for each item operation or batch.
 
-Each request is Go's byte for byte: the test replays Go programs' 33
+Each request is Go's byte for byte: the test replays Go programs' 36
 requests against the same fake account and compares the host, path and
 query as sent, the headers with the master key signature (activity ids
 normalized), and the body, and what is read back.
@@ -51,6 +51,9 @@ Where it differs from Go v1.5.0:
   them and ignores them. `TransactionalBatchOptions` with
   `enable_content_response_on_write` left None keeps the client's
   option; Go's options struct always overrides it (false when unset).
+- With a token credential, one token cache serves the account read and
+  the operations. Go's endpoint manager has its own pipeline and asks
+  for a second token.
 - The pipeline sends `x-ms-client-request-id` (decision 0003); Go's
   Cosmos pipeline has no request ID policy.
 - Not ported yet: cross-region failover and Go's Cosmos retry policy

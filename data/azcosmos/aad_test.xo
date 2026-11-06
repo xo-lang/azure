@@ -1,0 +1,37 @@
+// Entra ID authorization against the same fake, compared with what Go's
+// azcosmos v1.5.0 sent with a token credential (aadvectors_test.xo).
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// A credential that counts its calls and records what each asked for.
+struct Counting {
+  calls: Mutex[List[Str]]
+  clock: Clock
+}
+
+fn (c: Counting) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.calls.with(fn(var xs: List[Str]) -> Int {
+    xs.push("get_token ${xs.len() + 1} scopes [${opts.scopes.join(" ")}] cae ${opts.enable_cae}")
+    xs.len()
+  })
+  Ok(azcore.AccessToken{token: Secret.new("tok-${n}"), expires_on: Time.from_unix_millis(c.clock.now().unix_millis() + 3600 * 1000)})
+}
+
+test "a token credential signs as Go does, type=aad with the account's scope, without CAE" {
+  let log = serve(os.net)
+  let cred = Counting{calls: Mutex[List[Str]].new([]), clock: os.clock}
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let c = new_client(os.net, os.clock, os.rand, "${EP}/", cred, opts)?
+  let ct = c.new_container("db1", "c1")?
+  ct.read_item(new_partition_key_string("a"), "i1")?
+  ct.read_item(new_partition_key_string("a"), "i1")?
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  // Go's endpoint manager has its own pipeline and so its own token
+  // cache: it asks for a second token (tok-2) for the operations. Here
+  // one cache serves the account read and the operations.
+  let want = AAD_REQUESTS.map(fn(r: Str) -> Str { r.replace("sig=tok-2", "sig=tok-1") })
+  expect(got) == want
+  let calls = cred.calls.with_read(fn(xs: List[Str]) -> List[Str] { xs })
+  expect(calls) == [AAD_OUTPUT[0]]
+}
