@@ -1,8 +1,10 @@
 // Shared access signatures for Queue Storage, as azqueue's sas package
 // (account.go, service.go, query_params.go, url_parts.go; MIT,
 // Copyright (c) Microsoft Corporation; NOTICE.md): account SAS for the
-// Queue service and queue SAS, signed with the account key. The key,
-// the time format and the permission normalizing are azblob's.
+// Queue service and queue SAS, signed with the account key, the reading
+// of a SAS out of a query (NewQueryParameters), and URLParts. The key,
+// the time formats and parsing, the IP range and the Go URL handling
+// are azblob's.
 
 use std/url
 use github.com/xo-lang/azure/storage/azblob/exported
@@ -92,8 +94,10 @@ pub fn (v: QueueSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCr
   Ok(QueryParameters{version: version, protocol: v.protocol, start: v.start, expiry: v.expiry, permissions: perms, ip_range: v.ip_range, identifier: v.identifier, signature: Secret.new(cred.compute_hmac_sha256(sts))})
 }
 
-/// A signed SAS; `encode` gives the query string. The signature is a
-/// Secret: it never shows in logs or Debug output.
+/// A SAS, signed or read from a URL (Go's sas.QueryParameters); `encode`
+/// gives the query string. The signature is a Secret: it never shows in
+/// logs or Debug output. Go's SnapshotTime is never set or encoded, so
+/// it is left out.
 pub struct QueryParameters {
   pub version: Str = ""
   pub services: Str = ""
@@ -101,18 +105,43 @@ pub struct QueryParameters {
   pub protocol: Str = ""
   pub start: Time? = None
   pub expiry: Time? = None
+  /// `start` or `start-end`, as Go's IPRange.String writes it.
   pub ip_range: Str = ""
   pub identifier: Str = ""
+  pub resource: Str = ""
   pub permissions: Str = ""
-  pub signature: Secret[Str]
+  pub signature: Secret[Str] = Secret.new("")
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  pub signed_oid: Str = ""
+  pub signed_tid: Str = ""
+  pub signed_start: Time? = None
+  pub signed_expiry: Time? = None
+  pub signed_service: Str = ""
+  pub signed_version: Str = ""
+  pub signed_directory_depth: Str = ""
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  /// The layouts `st` and `se` were read in ("" is TIME_FORMAT), so
+  /// `encode` writes them back the same way.
+  pub start_format: Str = ""
+  pub expiry_format: Str = ""
 }
 
-/// The query string, keys sorted, as azqueue's QueryParameters.Encode.
+/// The query string, keys sorted, as azqueue's QueryParameters.Encode:
+/// `st` and `se` in the layouts they were read in; with `skoid` set, the
+/// other key fields are written even when empty (a missing key time as
+/// Go's zero time).
 pub fn (p: QueryParameters) encode() -> Str {
   let pairs: List[(Str, Str)] = [
     ("sv", p.version), ("ss", p.services), ("srt", p.resource_types), ("spr", p.protocol),
-    ("st", opt_time(p.start)), ("se", opt_time(p.expiry)), ("sip", p.ip_range), ("si", p.identifier),
-    ("sp", p.permissions), ("sig", p.signature.reveal()),
+    ("st", if p.start.is_none() { "" } else { blobsas.format_time_layout(p.start, p.start_format) }),
+    ("se", if p.expiry.is_none() { "" } else { blobsas.format_time_layout(p.expiry, p.expiry_format) }),
+    ("sip", p.ip_range), ("si", p.identifier), ("sr", p.resource), ("sp", p.permissions),
   ]
   var v = url.values()
   for (k, x) in pairs {
@@ -120,5 +149,133 @@ pub fn (p: QueryParameters) encode() -> Str {
       v.add(k, x)
     }
   }
+  if p.signed_oid != "" {
+    v.add("skoid", p.signed_oid)
+    v.add("sktid", p.signed_tid)
+    v.add("skt", blobsas.format_time_layout(p.signed_start))
+    v.add("ske", blobsas.format_time_layout(p.signed_expiry))
+    v.add("sks", p.signed_service)
+    v.add("skv", p.signed_version)
+  }
+  let more: List[(Str, Str)] = [
+    ("sig", p.signature.reveal()), ("rscc", p.cache_control), ("rscd", p.content_disposition),
+    ("rsce", p.content_encoding), ("rscl", p.content_language), ("rsct", p.content_type),
+    ("sdd", p.signed_directory_depth), ("saoid", p.authorized_object_id),
+    ("suoid", p.unauthorized_object_id), ("scid", p.correlation_id),
+  ]
+  for (k, x) in more {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
   v.encode()
+}
+
+/// The SAS in `values` (Go's NewQueryParameters: keys matched without
+/// case, the first value of each), and `values` without its SAS keys
+/// (newQueryParameters with deleteSASParametersFromValues). A time no
+/// layout reads is no time; an address that is not one is "".
+pub fn new_query_parameters(values: url.Values) -> (QueryParameters, url.Values) {
+  var p = QueryParameters{}
+  var rest = values
+  for k in values.keys() {
+    let val = values.get(k) ?? ""
+    var known = true
+    match k.to_lower() {
+      "sv" => { p.version = val }
+      "ss" => { p.services = val }
+      "srt" => { p.resource_types = val }
+      "spr" => { p.protocol = val }
+      "st" => {
+        let (t, f) = blobsas.parse_time(val)
+        p.start = t
+        p.start_format = f
+      }
+      "se" => {
+        let (t, f) = blobsas.parse_time(val)
+        p.expiry = t
+        p.expiry_format = f
+      }
+      "sip" => { p.ip_range = blobsas.ip_range(val) }
+      "si" => { p.identifier = val }
+      "sr" => { p.resource = val }
+      "sp" => { p.permissions = val }
+      "sig" => { p.signature = Secret.new(val) }
+      "rscc" => { p.cache_control = val }
+      "rscd" => { p.content_disposition = val }
+      "rsce" => { p.content_encoding = val }
+      "rscl" => { p.content_language = val }
+      "rsct" => { p.content_type = val }
+      "skoid" => { p.signed_oid = val }
+      "sktid" => { p.signed_tid = val }
+      // Go reads the key times in TIME_FORMAT only.
+      "skt" => { p.signed_start = blobsas.parse_layout(val, blobsas.TIME_FORMAT) }
+      "ske" => { p.signed_expiry = blobsas.parse_layout(val, blobsas.TIME_FORMAT) }
+      "sks" => { p.signed_service = val }
+      "skv" => { p.signed_version = val }
+      "sdd" => { p.signed_directory_depth = val }
+      "saoid" => { p.authorized_object_id = val }
+      "suoid" => { p.unauthorized_object_id = val }
+      "scid" => { p.correlation_id = val }
+      _ => { known = false }
+    }
+    if known {
+      rest.remove(k)
+    }
+  }
+  (p, rest)
+}
+
+/// A queue URL's parts (Go's sas.URLParts): with an IP host (Azurite's
+/// `127.0.0.1:10001/devstoreaccount1/q1`) the first path segment is the
+/// account. `queue_name` is the rest of the path, unescaped
+/// (`q1/messages` for a messages URL, as in Go).
+pub struct URLParts {
+  pub scheme: Str = ""
+  pub host: Str = ""
+  pub ip_account_name: Str = ""
+  pub queue_name: Str = ""
+  pub sas: QueryParameters = QueryParameters{}
+  /// The rest of the query, encoded as Go's url.Values.Encode writes it.
+  pub unparsed_params: Str = ""
+}
+
+/// The parts of `u` (Go's sas.ParseURL), with url.Parse's error text.
+pub fn parse_url(u: Str) -> URLParts ! Str {
+  let g = exported.parse_go_url(u)?
+  var path = g.path.trim_prefix("/")
+  var account = ""
+  if exported.is_ip_endpoint(g.host) {
+    match path.find("/") {
+      Some(i) => {
+        account = path[0..i]
+        path = path[i + 1..path.len()]
+      }
+      None => {
+        account = path
+        path = ""
+      }
+    }
+  }
+  let q = url.parse_query(g.raw_query).ok() ?? url.values()
+  let (qp, unparsed) = new_query_parameters(q)
+  Ok(URLParts{scheme: g.scheme, host: g.host, ip_account_name: account, queue_name: path, sas: qp, unparsed_params: unparsed.encode()})
+}
+
+/// The URL again (Go's URLParts.String): the account of an IP host, the
+/// queue, then the other parameters and the SAS.
+pub fn (up: URLParts) to_url() -> Str {
+  var path = ""
+  if exported.is_ip_endpoint(up.host) && up.ip_account_name != "" {
+    path = "/${up.ip_account_name}"
+  }
+  if up.queue_name != "" {
+    path = "${path}/${up.queue_name}"
+  }
+  var query = up.unparsed_params
+  let encoded = up.sas.encode()
+  if encoded != "" {
+    query = "${if query == "" { "" } else { query + "&" }}${encoded}"
+  }
+  exported.GoUrl{scheme: up.scheme, host: up.host, path: path, raw_query: query}.to_str()
 }

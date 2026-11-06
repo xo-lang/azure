@@ -17,8 +17,13 @@ What it does:
 - Messages: enqueue (time to live, visibility timeout), dequeue one or
   many, update, delete, peek one or many, clear.
 - `sas`: account SAS for the Queue service and queue SAS, and
-  `get_sas_url` on both clients. `parse_url` splits a queue URL (an IP
-  host's first segment is the account, as Azurite's).
+  `get_sas_url` on both clients. `sas.new_query_parameters` reads a SAS
+  out of a query as Go's NewQueryParameters (times kept in the layout
+  they came in), and `parse_url` (sas.ParseURL; `URLParts` is an alias
+  of `sas.URLParts`, as in Go) splits a queue URL into its parts, SAS
+  and other parameters; `to_url` is Go's String. An IP host's first
+  segment is the account, as Azurite's. Go's `SnapshotTime` getter is
+  left out: Go never sets it.
 - `queueerror`: the error codes and `has_code`.
 
 Each request is Go's byte for byte: the test replays a Go program's

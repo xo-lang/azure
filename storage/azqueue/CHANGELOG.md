@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+SAS and URLs, at Go azqueue v1.0.1 parity on captured vectors.
+
+- `sas.QueryParameters` has every field of Go's (resource, response
+  headers, user delegation keys, sdd, saoid, suoid, scid) and encodes
+  as Go's Encode; `sas.new_query_parameters` reads one from a query.
+- `sas.URLParts`, `sas.parse_url` and `URLParts.to_url` (Go's
+  ParseURL and String, with url.Parse's errors); the root
+  `URLParts` is now an alias of it, with the SAS and the other
+  parameters apart.
+
 The storage challenge policy, at Go azqueue v1.0.1 parity on captured
 vectors.
 

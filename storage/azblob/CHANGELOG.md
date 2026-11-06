@@ -1,5 +1,14 @@
 # azblob changes
 
+## v0.7.0
+
+- `sas`: the SAS time layouts (`TIME_FORMAT*`), `parse_time`,
+  `parse_layout`, `format_time_layout`, `ip` and `ip_range`, as Go's
+  storage sas packages read and write a SAS, shared by azqueue.
+- `exported.parse_go_url`, `GoUrl.to_str`, `go_escape_path`,
+  `is_ip_endpoint` and `go_quote`: URLs read and written as Go's
+  net/url does for storage URLs, shared by azqueue.
+
 ## v0.6.0
 
 - `exported.new_storage_challenge_policy` and

@@ -1,0 +1,113 @@
+// sas.new_query_parameters, QueryParameters.encode, sas.parse_url and
+// URLParts.to_url on the Go program's inputs, printed as it prints Go's
+// getters (sasvectors_test.xo).
+
+use std/time
+use std/url
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azqueue/sas
+
+/// Go's time.RFC3339Nano of a UTC time; no time is Go's zero time.
+fn sts(t: Time?) -> Str {
+  let x = t ?? return "0001-01-01T00:00:00Z"
+  let base = time.format(x, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}")
+  let n = (x - Time.UNIX_EPOCH).nanos() % 1000000000
+  if n == 0 {
+    return "${base}Z"
+  }
+  "${base}.${n.to_str_width(9, zero: true).trim_end_chars("0")}Z"
+}
+
+fn sq(s: Str) -> Str {
+  exported.go_quote(s)
+}
+
+fn sas_dump(p: sas.QueryParameters) -> List[Str] {
+  [
+    "  sv=${sq(p.version)} ss=${sq(p.services)} srt=${sq(p.resource_types)} spr=${sq(p.protocol)}",
+    "  st=${sts(p.start)} se=${sts(p.expiry)} snapshot=${sts(None)}",
+    "  sip=${sq(p.ip_range)} si=${sq(p.identifier)} sr=${sq(p.resource)} sp=${sq(p.permissions)} sig=${sq(p.signature.reveal())}",
+    "  rscc=${sq(p.cache_control)} rscd=${sq(p.content_disposition)} rsce=${sq(p.content_encoding)} rscl=${sq(p.content_language)} rsct=${sq(p.content_type)}",
+    "  skoid=${sq(p.signed_oid)} sktid=${sq(p.signed_tid)} skt=${sts(p.signed_start)} ske=${sts(p.signed_expiry)} sks=${sq(p.signed_service)} skv=${sq(p.signed_version)} sdd=${sq(p.signed_directory_depth)}",
+    "  saoid=${sq(p.authorized_object_id)} suoid=${sq(p.unauthorized_object_id)} scid=${sq(p.correlation_id)}",
+    "  encode=${sq(p.encode())}",
+  ]
+}
+
+fn sas_query(name: Str, raw: Str) -> List[Str] {
+  let v = url.parse_query(raw) ?? e => return ["== query ${name}", "  error ${e.display()}"]
+  ["== query ${name}"] + sas_dump(sas.new_query_parameters(v).0)
+}
+
+fn sas_parts(name: Str, u: Str) -> List[Str] {
+  let up = parse_url(u) ?? e => return ["== url ${name}", "  error ${e}"]
+  ["== url ${name}", "  scheme=${sq(up.scheme)} host=${sq(up.host)} ip_account=${sq(up.ip_account_name)} queue=${sq(up.queue_name)} unparsed=${sq(up.unparsed_params)}"] + sas_dump(up.sas) + ["  string=${sq(up.to_url())}"]
+}
+
+test "SAS query parameters and URL parts read and write as Go's" {
+  var out: List[Str] = []
+  out = out + sas_query("empty", "")
+  out = out + sas_query("signed account", "sv=2020-02-10&ss=q&srt=sco&sp=rwdl&se=2026-11-06T00:00:00Z&st=2026-11-05T01:02:03Z&spr=https&sip=192.0.2.1-192.0.2.9&sig=abc%2Bdef%3D")
+  out = out + sas_query("signed queue", "sv=2020-02-10&sp=raup&se=2026-11-06T00:00:00Z&si=pol1&sig=x")
+  out = out + sas_query("time fraction", "st=2026-11-05T01:02:03.1234567Z&se=2026-11-06T00:00:00.0000000Z")
+  out = out + sas_query("time minutes", "st=2026-11-05T01:02Z&se=2026-11-06T23:59Z")
+  out = out + sas_query("time date", "st=2026-11-05&se=2026-11-06")
+  out = out + sas_query("time bad", "st=yesterday&se=2026-13-01T00:00:00Z")
+  out = out + sas_query("time short fraction", "st=2026-11-05T01:02:03.12Z")
+  out = out + sas_query("time one-digit hour", "st=2026-11-05T1:02:03Z")
+  out = out + sas_query("time offset", "st=2026-11-05T01:02:03+01:00")
+  out = out + sas_query("ip single", "sip=192.0.2.7")
+  out = out + sas_query("ip bad", "sip=not-an-ip")
+  out = out + sas_query("ip bad end", "sip=192.0.2.1-bad")
+  out = out + sas_query("ip bad start", "sip=bad-192.0.2.1")
+  out = out + sas_query("ip mapped", "sip=::ffff:192.0.2.1")
+  out = out + sas_query("upper keys", "SV=2020-02-10&SP=r&SIG=s&Se=2026-11-06T00:00:00Z")
+  out = out + sas_query("first value", "sp=r&sp=w")
+  out = out + sas_query("response headers", "rscc=no-cache&rscd=attachment&rsce=gzip&rscl=en&rsct=text%2Fplain&sr=q")
+  out = out + sas_query("user delegation", "skoid=o1&sktid=t1&skt=2026-11-05T00:00:00Z&ske=2026-11-06T00:00:00Z&sks=q&skv=2020-02-10&saoid=a1&suoid=u1&scid=c1&sdd=3")
+  out = out + sas_query("user delegation bad times", "skoid=o1&skt=bad&ske=2026-11-06T00:00Z")
+  out = out + sas_query("delegation without oid", "sktid=t1&skt=2026-11-05T00:00:00Z&sks=q")
+  out = out + sas_query("unknown and snapshot", "comp=list&snapshot=2026-11-05T00:00:00.0000000Z&foo=bar")
+  out = out + sas_query("escapes", "sig=a+b%20c&si=p%2F1&scid=%C3%A9")
+  out = out + sas_query("empty values", "sv=&sp=&sig=")
+  out = out + sas_query("delegation with date times", "skoid=o1&st=2026-11-05&se=2026-11-06T01:02Z&skt=2026-11-05&ske=2026-11-06T00:00:00.1234567Z")
+  out = out + sas_parts("queue with SAS", "https://acct1.queue.example.test/q1?sv=2020-02-10&sp=r&sig=abc%2B&foo=bar&se=2026-11-06T00:00:00Z")
+  out = out + sas_parts("service", "https://acct1.queue.example.test")
+  out = out + sas_parts("service slash", "https://acct1.queue.example.test/")
+  out = out + sas_parts("messages path", "https://acct1.queue.example.test/q1/messages?visibilitytimeout=30")
+  out = out + sas_parts("IP queue", "http://127.0.0.1:10001/devstoreaccount1/q1?comp=metadata&SP=r")
+  out = out + sas_parts("IP account only", "http://192.0.2.1/acct1")
+  out = out + sas_parts("IP no path", "http://192.0.2.1:10001")
+  out = out + sas_parts("localhost", "http://localhost:10001/devstoreaccount1/q1")
+  out = out + sas_parts("escaped name", "https://acct1.queue.example.test/q%201?si=a%2Fb")
+  out = out + sas_parts("fragment", "https://acct1.queue.example.test/q1?sp=r#frag")
+  out = out + sas_parts("bad", "http://[::1")
+  out = out + sas_parts("no scheme", "acct1.queue.example.test/q1")
+  out = out + sas_parts("upper scheme", "HTTPS://Acct1.Queue.Example.Test/Q1")
+  out = out + sas_parts("times kept", "https://acct1.queue.example.test/q1?st=2026-11-05&se=2026-11-06T01:02Z&sip=192.0.2.1-192.0.2.5")
+  out = out + sas_parts("only unparsed", "https://acct1.queue.example.test/q1?b=2&a=1&a=0")
+  out = out + sas_parts("scheme only", "https://")
+  out = out + sas_parts("IPv6 loopback", "http://[::1]:10001/devstoreaccount1/q1")
+  out = out + sas_parts("IPv6 zone", "http://[::1%25lo0]:10001/devstoreaccount1/q1")
+  out = out + sas_parts("escaped host", "https://acct1%2Equeue.example.test/q1")
+  out = out + sas_parts("bad escape", "https://acct1.queue.example.test/q%zz")
+  out = out + sas_parts("colon path", "a:b/c")
+  out = out + sas_parts("colon first segment", "1a:b")
+  out = out + sas_parts("missing scheme", ":foo")
+  out = out + sas_parts("non-ascii host escape", "https://acct%C3%A9.example.test/q1")
+  out = out + sas_parts("zone escapes", "http://[::1%25lo%2F0]/a/q")
+  out = out + sas_parts("percent outside brackets", "https://a%25b%41.example.test/q")
+  out = out + ["== built"] + [
+    sas.URLParts{scheme: "https", host: "acct1.queue.example.test", ip_account_name: "acct9", queue_name: "q1"},
+    sas.URLParts{host: "acct1.queue.example.test", queue_name: "q1"},
+    sas.URLParts{queue_name: "a:b"},
+    sas.URLParts{scheme: "https"},
+    sas.URLParts{scheme: "https", host: "192.0.2.1", ip_account_name: "a b", queue_name: "q!*()'"},
+  ].map(fn(p: sas.URLParts) -> Str { "  ${sq(p.to_url())}" })
+  out = out + ["== url.URL"] + [
+    exported.GoUrl{host: "h", path: "p"}, exported.GoUrl{scheme: "s", path: "p"}, exported.GoUrl{path: "a:b/c"},
+    exported.GoUrl{path: "*"}, exported.GoUrl{scheme: "s"}, exported.GoUrl{host: "h"}, exported.GoUrl{path: "/x y", raw_query: "a=1"},
+    exported.GoUrl{host: "a%b@c d/é!$&'()*+,;=:[]<>\"~_"},
+  ].map(fn(g: exported.GoUrl) -> Str { "  ${sq(g.to_str())}" })
+  expect(out) == SAS_OUTPUT
+}

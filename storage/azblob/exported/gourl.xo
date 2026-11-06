@@ -1,0 +1,236 @@
+// URLs read and written the way Go's net/url reads and writes the ones
+// storage clients take (url.Parse, URL.String, host and path escaping)
+// and the storage shared.IsIPEndpointStyle host test, for the storage
+// modules' URLParts. Written to Go's behavior and checked against Go's
+// output (azqueue's sasvectors_test.xo), not copied from it. User info
+// is not read; an opaque URL keeps only its scheme and query, as
+// ParseURL sees it.
+
+use std/netip
+use std/url
+
+/// Go's strconv.Quote of ASCII text.
+pub fn go_quote(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else if c == '\n' { "\\n" } else if c == '\t' { "\\t" } else if c == '\r' { "\\r" } else { "${c}" })
+  }
+  out + "\""
+}
+
+fn all_bytes(s: Str, f: fn(UInt8) -> Bool) -> Bool {
+  let bs = s.bytes()
+  for i in 0..bs.len() {
+    if !f(bs[i]) {
+      return false
+    }
+  }
+  true
+}
+
+fn has_byte(set: Str, b: UInt8) -> Bool {
+  !all_bytes(set, fn(c: UInt8) -> Bool { c != b })
+}
+
+fn is_unreserved(b: UInt8) -> Bool {
+  (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39) || b == 0x2d || b == 0x5f || b == 0x2e || b == 0x7e
+}
+
+/// A path escaped as Go's url.URL writes one (escape with encodePath):
+/// `$&+,/:;=@` and the unreserved bytes kept, the rest `%XX`.
+pub fn go_escape_path(s: Str) -> Str {
+  var out = ""
+  let bs = s.bytes()
+  for i in 0..bs.len() {
+    let b = bs[i]
+    if is_unreserved(b) || has_byte("$&+,/:;=@", b) {
+      out = out + bs[i..i + 1].to_str_lossy()
+    } else {
+      out = out + "%" + Int(b).to_str_width(2, base: 16, zero: true).to_upper()
+    }
+  }
+  out
+}
+
+/// shared.IsIPEndpointStyle: the host, its port removed, is an IP address
+/// (Go's net.ParseIP, which takes no zone).
+pub fn is_ip_endpoint(host: Str) -> Bool {
+  if host == "" {
+    return false
+  }
+  var h = host
+  if h.starts_with("[") {
+    if let Some(j) = h.find("]") { h = h[1..j] }
+  } else if let Some(j) = h.rfind(":") {
+    if !h[0..j].contains(":") { h = h[0..j] }
+  }
+  match netip.parse_addr(h) {
+    Ok(a) => a.zone == ""
+    Err(_) => false
+  }
+}
+
+/// A URL as Go's url.Parse splits it: the scheme lower-cased, the host as
+/// written, the path unescaped and the raw query. The fragment is
+/// dropped.
+pub struct GoUrl {
+  pub scheme: Str = ""
+  pub host: Str = ""
+  pub path: Str = ""
+  pub raw_query: Str = ""
+}
+
+/// The scheme and the rest, as Go's getScheme: a letter, then letters,
+/// digits, `+`, `-` or `.`, up to a `:`; anything else first means no
+/// scheme.
+fn split_scheme(raw: Str, whole: Str) -> (Str, Str) ! Str {
+  var i = 0
+  for c in raw.runes() {
+    let letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    let more = (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+    if letter || (more && i > 0) {
+      i = i + 1
+      continue
+    }
+    if c == ':' {
+      if i == 0 {
+        return Err("parse ${go_quote(whole)}: missing protocol scheme")
+      }
+      return Ok((raw[0..i].to_lower(), raw[i + 1..raw.len()]))
+    }
+    return Ok(("", raw))
+  }
+  Ok(("", raw))
+}
+
+fn hex_val(c: UInt8) -> Int? {
+  if c >= 0x30 && c <= 0x39 { Some(Int(c) - 0x30) } else if c >= 0x61 && c <= 0x66 { Some(Int(c) - 0x61 + 10) } else if c >= 0x41 && c <= 0x46 { Some(Int(c) - 0x41 + 10) } else { None }
+}
+
+/// Whether Go's shouldEscape(c, encodeHost) escapes `c`.
+fn host_escapes(c: UInt8) -> Bool {
+  !(is_unreserved(c) || has_byte("!$&'()*+,;=:[]<>\"", c))
+}
+
+/// A host unescaped as Go's url.Parse unescapes one (unescape with
+/// encodeHost, and encodeZone after a bracketed `%25`): `%25` and bytes
+/// from 0x80 decode; any other ASCII escape is an error, except in a
+/// zone, which takes a space and the bytes a host keeps.
+fn unescape_host(h: Str) -> Str ! Str {
+  let bs = h.bytes()
+  var out = BytesBuilder.new()
+  var zone = false
+  var i = 0
+  while i < bs.len() {
+    let b = bs[i]
+    if b != 0x25 {
+      out.write_byte(b)
+      i = i + 1
+      continue
+    }
+    let bad = bs[i..(if i + 3 < bs.len() { i + 3 } else { bs.len() })].to_str_lossy()
+    if i + 2 >= bs.len() {
+      return Err("invalid URL escape ${go_quote(bad)}")
+    }
+    let hi = hex_val(bs[i + 1]) ?? return Err("invalid URL escape ${go_quote(bad)}")
+    let lo = hex_val(bs[i + 2]) ?? return Err("invalid URL escape ${go_quote(bad)}")
+    let v = UInt8(hi * 16 + lo)
+    let is25 = hi == 2 && lo == 5
+    if zone {
+      if !is25 && v != 0x20 && host_escapes(v) {
+        return Err("invalid URL escape ${go_quote(bad)}")
+      }
+    } else if hi < 8 && !is25 {
+      return Err("invalid URL escape ${go_quote(bad)}")
+    }
+    if is25 && h.starts_with("[") {
+      zone = true
+    }
+    out.write_byte(v)
+    i = i + 3
+  }
+  Ok(out.freeze().to_str_lossy())
+}
+
+/// A host escaped as Go's URL.String writes one (escape with encodeHost).
+fn escape_host(h: Str) -> Str {
+  var out = ""
+  let bs = h.bytes()
+  for i in 0..bs.len() {
+    let b = bs[i]
+    if host_escapes(b) {
+      out = out + "%" + Int(b).to_str_width(2, base: 16, zero: true).to_upper()
+    } else {
+      out = out + bs[i..i + 1].to_str_lossy()
+    }
+  }
+  out
+}
+
+/// `u` read as Go's url.Parse reads it, with its error text.
+pub fn parse_go_url(u: Str) -> GoUrl ! Str {
+  let raw = match u.find("#") {
+    Some(i) => u[0..i]
+    None => u
+  }
+  let (scheme, after) = split_scheme(raw, u)?
+  let (rest, query) = match after.find("?") {
+    Some(i) => (after[0..i], after[i + 1..after.len()])
+    None => (after, "")
+  }
+  var host = ""
+  var path = rest
+  if !rest.starts_with("/") {
+    // Go: after a scheme it is opaque (no path); without one a colon in
+    // the first segment is an error.
+    if scheme != "" {
+      return Ok(GoUrl{scheme: scheme, raw_query: query})
+    }
+    if (rest.split("/")[0]).contains(":") {
+      return Err("parse ${go_quote(u)}: first path segment in URL cannot contain colon")
+    }
+  }
+  if rest.starts_with("//") {
+    let auth_path = rest[2..rest.len()]
+    let (auth, p) = match auth_path.find("/") {
+      Some(i) => (auth_path[0..i], auth_path[i..auth_path.len()])
+      None => (auth_path, "")
+    }
+    if auth.starts_with("[") && !auth.contains("]") {
+      return Err("parse ${go_quote(u)}: missing ']' in host")
+    }
+    host = unescape_host(auth) ?? e => return Err("parse ${go_quote(u)}: ${e}")
+    path = p
+  }
+  let unescaped = url.path_unescape(path) ?? e => return Err("parse ${go_quote(u)}: ${e.display()}")
+  Ok(GoUrl{scheme: scheme, host: host, path: unescaped, raw_query: query})
+}
+
+/// The URL as Go's URL.String writes one with these fields: `//` before
+/// a host (or before a path when there is a scheme), the path escaped, a
+/// `/` added between a host and a relative path, `./` before a relative
+/// path whose first segment has a `:`, and the query.
+pub fn (g: GoUrl) to_str() -> Str {
+  var out = ""
+  if g.scheme != "" {
+    out = "${g.scheme}:"
+  }
+  if g.scheme != "" || g.host != "" {
+    if g.host != "" || g.path != "" {
+      out = out + "//"
+    }
+    out = out + escape_host(g.host)
+  }
+  let p = if g.path == "*" { "*" } else { go_escape_path(g.path) }
+  if p != "" && !p.starts_with("/") && g.host != "" {
+    out = out + "/"
+  }
+  if out == "" && (p.split("/")[0]).contains(":") {
+    out = "./"
+  }
+  out = out + p
+  if g.raw_query != "" {
+    out = "${out}?${g.raw_query}"
+  }
+  out
+}
