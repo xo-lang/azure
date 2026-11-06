@@ -8,7 +8,9 @@ azdatalake needs. `Client` and its calls are unchanged.
 - `ServiceClient`, `ContainerClient`, `BlobClient`, `BlobLeaseClient`
   and `ContainerLeaseClient`, with Go's constructors (token, Shared Key,
   no credential, connection string).
-- `ClientOptions.audience` (default `""`: the storage scope).
+- `ClientOptions.audience` (default `""`: the storage scope) and
+  `insecure_allow_credential_with_http` (Go's azcore option, default
+  false), read by the Go-shaped clients.
 - Blob `download_stream` (ranges, conditions, a customer key, 304 as a
   response) and `download_buffer` (Go's ETag lock across blocks).
 - Each call's request and response match Go's on captured vectors.

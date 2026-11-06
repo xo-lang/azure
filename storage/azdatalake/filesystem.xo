@@ -1,0 +1,158 @@
+// The file system client, as azdatalake v1.7.1's filesystem/client.go
+// and filesystem/models.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md). Its calls are azblob's container calls on the blob URL,
+// with Go's options mapping: a delete or an access policy sends the lease
+// and the two date conditions, set_metadata the lease and
+// If-Modified-Since; an ETag condition is not sent.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+
+pub type Response = azblob.Response
+pub type ETagResponse = azblob.ETagResponse
+pub type SignedIdentifier = azblob.SignedIdentifier
+pub type AccessPolicy = azblob.AccessPolicy
+
+/// A client of one file system.
+pub struct FileSystemClient {
+  /// The file system's dfs URL.
+  pub dfs_url: Str
+  /// The file system's blob URL.
+  pub blob_url: Str
+  container: azblob.ContainerClient
+}
+
+/// The options the blob client gets: Go passes the pipeline options on
+/// and not the audience.
+fn blob_options(options: ClientOptions) -> ClientOptions {
+  options with {audience: ""}
+}
+
+fn file_system_of(file_system_url: Str, container: fn(Str) -> azblob.ContainerClient) -> FileSystemClient {
+  let (blob_url, dfs_url) = get_urls(file_system_url)
+  FileSystemClient{dfs_url: dfs_url, blob_url: blob_url, container: container(blob_url)}
+}
+
+/// A file system client with Entra ID tokens (filesystem.NewClient);
+/// `file_system_url` may be the dfs or the blob URL.
+pub fn new_file_system_client(net: Net, clock: Clock, rand: Rand, file_system_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client(net, clock, rand, u, cred, blob_options(options)) })
+}
+
+pub fn new_file_system_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, file_system_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_shared_key_credential(net, clock, rand, u, cred, blob_options(options)) })
+}
+
+/// A file system client with no credential: a SAS in `file_system_url`,
+/// or public access.
+pub fn new_file_system_client_with_no_credential(net: Net, clock: Clock, rand: Rand, file_system_url: Str, options: ClientOptions = ClientOptions{}) -> FileSystemClient {
+  file_system_of(file_system_url, fn(u: Str) -> azblob.ContainerClient { azblob.new_container_client_with_no_credential(net, clock, rand, u, blob_options(options)) })
+}
+
+/// A file system client from a connection string and the file system's
+/// name (filesystem.NewClientFromConnectionString).
+pub fn new_file_system_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, file_system_name: Str, options: ClientOptions = ClientOptions{}) -> FileSystemClient ! Str {
+  let p = azblob.parse_connection_string(connection_string)?
+  let u = join_paths(p.service_url, file_system_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_file_system_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_file_system_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The file system's default encryption scope (Go's CPKScopeInfo).
+pub struct CPKScopeInfo {
+  pub default_encryption_scope: Str? = None
+  pub prevent_encryption_scope_override: Bool? = None
+}
+
+pub struct CreateFileSystemOptions {
+  /// `PUBLIC_ACCESS_FILE` or `PUBLIC_ACCESS_FILE_SYSTEM`; unset is private.
+  pub access: Str? = None
+  pub metadata: Map[Str, Str]? = None
+  pub cpk_scope_info: CPKScopeInfo? = None
+}
+
+pub fn (fs: FileSystemClient) create(options: CreateFileSystemOptions = CreateFileSystemOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let scope = o.cpk_scope_info ?? CPKScopeInfo{}
+  fs.container.create(azblob.CreateContainerOptions{access: o.access, metadata: o.metadata, default_encryption_scope: scope.default_encryption_scope, prevent_encryption_scope_override: scope.prevent_encryption_scope_override}).map_err(to_dfs_error)
+}
+
+pub struct DeleteFileSystemOptions {
+  pub access_conditions: AccessConditions = AccessConditions{}
+}
+
+pub fn (fs: FileSystemClient) delete(options: DeleteFileSystemOptions = DeleteFileSystemOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let a = options.access_conditions
+  fs.container.delete(azblob.DeleteContainerOptions{lease_id: a.lease_id, conditions: container_conditions(a)}).map_err(to_dfs_error)
+}
+
+/// A file system's properties (Go's filesystem.GetPropertiesResponse:
+/// the container's, with `blob_public_access` named `public_access`).
+pub struct FileSystemPropertiesResponse {
+  pub response: Response
+  pub public_access: Str? = None
+  pub default_encryption_scope: Str? = None
+  pub deny_encryption_scope_override: Bool? = None
+  pub etag: Str? = None
+  pub has_immutability_policy: Bool? = None
+  pub has_legal_hold: Bool? = None
+  pub is_immutable_storage_with_versioning_enabled: Bool? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  /// Names as Go's http.Header canonicalizes them (`Color`).
+  pub metadata: Map[Str, Str]? = None
+}
+
+pub fn (fs: FileSystemClient) get_properties(lease_id: Str? = None) -> FileSystemPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let p = fs.container.get_properties(lease_id).map_err(to_dfs_error)?
+  Ok(FileSystemPropertiesResponse{
+    response: p.response, public_access: p.blob_public_access, default_encryption_scope: p.default_encryption_scope,
+    deny_encryption_scope_override: p.deny_encryption_scope_override, etag: p.etag, has_immutability_policy: p.has_immutability_policy,
+    has_legal_hold: p.has_legal_hold, is_immutable_storage_with_versioning_enabled: p.is_immutable_storage_with_versioning_enabled,
+    last_modified: p.last_modified, lease_duration: p.lease_duration, lease_state: p.lease_state, lease_status: p.lease_status, metadata: p.metadata,
+  })
+}
+
+pub struct SetFileSystemMetadataOptions {
+  pub metadata: Map[Str, Str]? = None
+  /// The lease and If-Modified-Since are sent (Go's container format
+  /// drops the rest).
+  pub access_conditions: AccessConditions = AccessConditions{}
+}
+
+pub fn (fs: FileSystemClient) set_metadata(options: SetFileSystemMetadataOptions = SetFileSystemMetadataOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let a = options.access_conditions
+  fs.container.set_metadata(azblob.SetContainerMetadataOptions{metadata: options.metadata, lease_id: a.lease_id, conditions: container_conditions(a)}).map_err(to_dfs_error)
+}
+
+/// A file system's access policy (Go's filesystem.GetAccessPolicyResponse:
+/// no content type).
+pub struct FileSystemAccessPolicyResponse {
+  pub response: Response
+  pub public_access: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub signed_identifiers: List[SignedIdentifier] = []
+}
+
+pub fn (fs: FileSystemClient) get_access_policy(lease_id: Str? = None) -> FileSystemAccessPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let p = fs.container.get_access_policy(lease_id).map_err(to_dfs_error)?
+  Ok(FileSystemAccessPolicyResponse{response: p.response, public_access: p.blob_public_access, etag: p.etag, last_modified: p.last_modified, signed_identifiers: p.signed_identifiers})
+}
+
+pub struct SetFileSystemAccessPolicyOptions {
+  /// `PUBLIC_ACCESS_FILE` or `PUBLIC_ACCESS_FILE_SYSTEM`; unset makes the
+  /// file system private.
+  pub access: Str? = None
+  pub access_conditions: AccessConditions = AccessConditions{}
+  pub file_system_acl: List[SignedIdentifier] = []
+}
+
+pub fn (fs: FileSystemClient) set_access_policy(options: SetFileSystemAccessPolicyOptions = SetFileSystemAccessPolicyOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  fs.container.set_access_policy(azblob.SetAccessPolicyOptions{access: o.access, lease_id: o.access_conditions.lease_id, conditions: container_conditions(o.access_conditions), container_acl: o.file_system_acl}).map_err(to_dfs_error)
+}

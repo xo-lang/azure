@@ -1,0 +1,85 @@
+// Azure Data Lake Storage Gen2, as azdatalake v1.7.1 (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). A file system is a blob container and
+// its calls go to azblob's Go-shaped clients on the account's blob
+// endpoint; the calls only the dfs endpoint has (paths, ACLs) come later.
+// Every error is azblob's with Go's DFS error code rename.
+
+use std/path
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+
+pub const VERSION: Str = "v0.1.0"
+
+pub type SharedKeyCredential = azblob.SharedKeyCredential
+
+/// The options of every client (Go's ClientOptions): the pipeline's, a
+/// token audience and the plain-http switch. A file system's blob calls
+/// ask for the default storage scope whatever `audience` is, as Go's do
+/// (its container client is given the pipeline options only).
+pub type ClientOptions = azblob.ClientOptions
+
+/// The credential of `account_name` with `account_key` (base64).
+pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedKeyCredential ! Str {
+  azblob.new_shared_key_credential(account_name, account_key)
+}
+
+/// `PUBLIC_ACCESS_FILE` (`blob`) lets anyone read files;
+/// `PUBLIC_ACCESS_FILE_SYSTEM` (`container`) lets anyone list them too.
+pub const PUBLIC_ACCESS_FILE: Str = "blob"
+pub const PUBLIC_ACCESS_FILE_SYSTEM: Str = "container"
+
+/// The blob and dfs URLs of `u` (shared.GetURLs): the first `.dfs.` made
+/// `.blob.`, and the first `.blob.` made `.dfs.`.
+pub fn get_urls(u: Str) -> (Str, Str) {
+  (u.replace_n(".dfs.", ".blob.", 1), u.replace_n(".blob.", ".dfs.", 1))
+}
+
+/// A blob error as a DFS one (exported.ConvertToDFSError): in the error
+/// code, `blob` becomes `path` and `container` becomes `filesystem`.
+pub fn to_dfs_error(e: azcore.CallErr) -> azcore.CallErr {
+  match e {
+    Response(r) => azcore.CallErr.Response(r with {error_code: r.error_code.replace("blob", "path").replace("Blob", "Path").replace("container", "filesystem").replace("Container", "FileSystem")})
+    _ => e
+  }
+}
+
+/// The lease and conditions on a file system or path (Go's
+/// AccessConditions: its lease and modified access conditions, flattened).
+pub struct AccessConditions {
+  pub lease_id: Str? = None
+  pub if_match: Str? = None
+  pub if_none_match: Str? = None
+  pub if_modified_since: Time? = None
+  pub if_unmodified_since: Time? = None
+}
+
+/// The two date conditions, the ones a container call sends.
+fn container_conditions(a: AccessConditions) -> azblob.ContainerConditions {
+  azblob.ContainerConditions{if_modified_since: a.if_modified_since, if_unmodified_since: a.if_unmodified_since}
+}
+
+/// `root` with `segment` joined to its path, its query kept
+/// (runtime.JoinPaths with one path).
+fn join_paths(root: Str, segment: Str) -> Str {
+  var r = root
+  var qps = ""
+  if r.contains("?") {
+    // Go splits on every "?" and keeps the first two parts.
+    let parts = r.split("?")
+    r = parts[0]
+    qps = parts[1]
+  }
+  var p = if segment == "" { "" } else { path.clean(segment) }
+  if segment.ends_with("/") && !p.ends_with("/") {
+    p = p + "/"
+  }
+  if qps != "" {
+    p = if p.contains("?") { "${p}&${qps}" } else { "${p}?${qps}" }
+  }
+  if r.ends_with("/") && p.starts_with("/") {
+    r = r[0..r.len() - 1]
+  } else if !r.ends_with("/") && !p.starts_with("/") && !p.starts_with("?") {
+    p = "/" + p
+  }
+  r + p
+}

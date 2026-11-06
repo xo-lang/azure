@@ -48,7 +48,7 @@ Where it differs from Go v1.8.3:
   filled (its parser looks for `or-` after the prefix is gone);
   `object_replication_rules` here is the map of `x-ms-or-*` headers,
   as Go's generated response holds them. A download has no smart
-  access tier, as Go's conversion drops it.
+  access tier, as Go's public download response has no field for it.
 - Container calls take `ContainerConditions` (the two dates), the ones
   Go's options pass on; container `set_metadata` sends only
   If-Modified-Since, as Go's does.

@@ -1,0 +1,236 @@
+// What the tests share: a fake dfs and blob service that logs each
+// request in the Go programs' format (with its host), and Go's reflective
+// dump of a response (one `Path=value` line a set field, sorted). Copied
+// from azblob's harness_test.xo, which a test of another module cannot
+// use.
+
+use std/crypto
+use std/http
+use std/testing
+use std/time
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const BEP: Str = "http://acct1.blob.example.test"
+const DEP: Str = "http://acct1.dfs.example.test"
+const BKEY: Str = "aW52ZW50ZWQta2V5"
+const BDATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+/// Sets the Go run's x-ms-date (Go's signer sets its own clock's; ""
+/// for a client without a key, which sends none) and a fixed client
+/// request ID.
+struct GoFixed {
+  date: Str
+}
+
+fn (p: GoFixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let r = if p.date == "" { req } else { req.with_header("x-ms-date", p.date) }
+  next.send(r.with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+fn go_options(date: Str) -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{per_call_policies: [GoFixed{date: date}], retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+/// Go's `%q` of ASCII text.
+fn goq(s: Str) -> Str {
+  var out = "\""
+  for c in s.runes() {
+    out = out + (if c == '"' { "\\\"" } else if c == '\\' { "\\\\" } else if c == '\n' { "\\n" } else if c == '\t' { "\\t" } else if c == '\r' { "\\r" } else { "${c}" })
+  }
+  out + "\""
+}
+
+fn short_hash(s: Str) -> Str {
+  "sha256:${crypto.sha256(s.bytes()).to_hex()[0..16]}"
+}
+
+/// A Shared Key authorization with its signature replaced by a short
+/// sha256 of it, as the vectors keep it.
+fn hide_shared_key(v: Str) -> Str {
+  match v.find(":") {
+    Some(i) => "${v[0..i + 1]}${short_hash(v[i + 1..v.len()])}"
+    None => v
+  }
+}
+
+/// A URL with its SAS signature (one longer than 16 characters) replaced
+/// by a short sha256 of it, as the vectors keep it.
+fn hide_sas(u: Str) -> Str {
+  for m in ["?sig=", "&sig="] {
+    if let Some(i) = u.find(m) {
+      let start = i + m.len()
+      let rest = u[start..u.len()]
+      let end = match rest.find("&") {
+        Some(j) => start + j
+        None => u.len()
+      }
+      let v = u[start..end]
+      if v.len() > 16 {
+        return "${u[0..start]}${short_hash(v)}${u[end..u.len()]}"
+      }
+    }
+  }
+  u
+}
+
+/// Logs `req` in the Go programs' format.
+fn log_request(req: http.Request, log: Mutex[List[Str]]) {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "authorization" {
+      hs.push("${lk}=${hide_shared_key(v)}")
+    } else if lk != "user-agent" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // FakeNet leaves Content-Length out; Go's client sends it on a PUT or
+  // POST, 0 for no body.
+  if req.method == "PUT" || req.method == "POST" {
+    hs.push("content-length=${req.body.len()}")
+  }
+  var qv = url.values()
+  for k in req.url.query.keys().sort() {
+    qv.add(k, req.url.query.get(k) ?? "")
+  }
+  let qs = hide_sas("?${qv.encode()}")[1..]
+  // Go's URL.RequestURI: "/" for an empty path.
+  let ep = if req.escaped_path() == "" { "/" } else { req.escaped_path() }
+  let uri = if qs == "" { ep } else { "${ep}?${qs}" }
+  let lines = ["REQ ${req.method} ${req.url.host} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${goq(req.body.to_str_lossy())}"]
+  log.with(fn(var l: List[Str]) { l = l + lines })
+}
+
+/// The log so far, emptied.
+fn drain(log: Mutex[List[Str]]) -> List[Str] {
+  log.with(fn(var l: List[Str]) -> List[Str] {
+    let xs = l
+    l = []
+    xs
+  })
+}
+
+fn with_hs(r: http.Response, hs: List[(Str, Str)]) -> http.Response {
+  var x = r
+  for (k, v) in hs {
+    x = x.with_header(k, v)
+  }
+  x
+}
+
+struct Dump {
+  lines: List[Str] = []
+}
+
+/// Go's time.RFC3339Nano in UTC: the fraction without trailing zeros.
+fn go_time(t: Time) -> Str {
+  let base = time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}")
+  let ns = (t - Time.UNIX_EPOCH).nanos() % 1000000000
+  if ns == 0 {
+    return "${base}Z"
+  }
+  "${base}.${ns.to_str_width(9, zero: true).trim_end_chars("0")}Z"
+}
+
+fn (var d: Dump) s(name: Str, v: Str?) {
+  if let Some(x) = v { d.lines.push("${name}=${goq(x)}") }
+}
+
+fn (var d: Dump) i(name: Str, v: Int?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: Dump) b(name: Str, v: Bool?) {
+  if let Some(x) = v { d.lines.push("${name}=${x}") }
+}
+
+fn (var d: Dump) t(name: Str, v: Time?) {
+  if let Some(x) = v { d.lines.push("${name}=${go_time(x)}") }
+}
+
+fn (var d: Dump) m(name: Str, v: Map[Str, Str]?) {
+  if let Some(x) = v {
+    d.lines.push("${name}.len=${x.len()}")
+    for k in x.keys().sort() { d.s("${name}[${k}]", x.get(k)) }
+  }
+}
+
+fn (var d: Dump) r(r: Response) {
+  d.s("ClientRequestID", r.client_request_id)
+  d.t("Date", r.date)
+  d.s("RequestID", r.request_id)
+  d.s("Version", r.version)
+}
+
+fn (var d: Dump) etag(r: ETagResponse) {
+  d.r(r.response)
+  d.s("ETag", r.etag)
+  d.t("LastModified", r.last_modified)
+}
+
+fn (d: Dump) show(name: Str) -> List[Str] {
+  ["== ${name}"] + d.lines.sort().map(fn(l: Str) -> Str { "  ${l}" })
+}
+
+fn err_lines(name: Str, e: azcore.CallErr) -> List[Str] {
+  let text = match e {
+    Response(r) => "status ${r.status_code} code ${r.error_code}"
+    _ => e.display()
+  }
+  ["== ${name}", "  error ${text}"]
+}
+
+/// A dump of `r`, or the error.
+fn shown[T](name: Str, r: Result[T, azcore.CallErr], dump: fn(T) -> Dump) -> List[Str] {
+  match r {
+    Ok(x) => dump(x).show(name)
+    Err(e) => err_lines(name, e)
+  }
+}
+
+/// One value as Go's dump of a bare field prints it (`  ="x"`).
+fn one_str(name: Str, v: Str?) -> List[Str] {
+  match v {
+    Some(x) => ["== ${name}", "  =${goq(x)}"]
+    None => ["== ${name}"]
+  }
+}
+
+fn one_time(name: Str, v: Time?) -> List[Str] {
+  match v {
+    Some(x) => ["== ${name}", "  =${go_time(x)}"]
+    None => ["== ${name}"]
+  }
+}
+
+/// The header line alone: what Go prints for a call that returns no
+/// fields it dumps.
+fn quiet[T](name: Str, r: Result[T, azcore.CallErr]) -> List[Str] {
+  match r {
+    Ok(_) => ["== ${name}"]
+    Err(e) => err_lines(name, e)
+  }
+}
+
+fn at(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()).ok() ?? Time.UNIX_EPOCH
+}
+
+/// Serves `answer` on the dfs and blob hosts, logging each request.
+fn serve(net: testing.FakeNet, answer: fn(http.Request) -> http.Response) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    answer(req)
+  }
+  for ep in [BEP, DEP] {
+    for m in ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"] {
+      for p in ["/", "/{a}", "/{a}/{b}", "/{a}/{b}/{c}"] {
+        net.handle("${m} ${ep}${p}", h)
+      }
+    }
+  }
+  log
+}

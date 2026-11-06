@@ -1,0 +1,5 @@
+module github.com/xo-lang/azure/storage/azdatalake
+edition preview
+
+require github.com/xo-lang/azure v0.1.0
+require github.com/xo-lang/azure/storage/azblob v0.1.0

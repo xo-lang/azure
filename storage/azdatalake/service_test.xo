@@ -1,0 +1,183 @@
+// The service and file system clients against a fake that answers as the
+// Go program's fake does (fsvectors_test.xo): every request Go's, byte
+// for byte, and what is read back printed as Go's dump printed it.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+const FS_GO_DATE: Str = "Fri, 06 Nov 2026 14:25:18 GMT"
+
+const FS_ACL: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>p1</Id><AccessPolicy><Start>2026-11-01T00:00:00.0000000Z</Start><Expiry>2026-11-02T00:00:00.0000000Z</Expiry><Permission>rw</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>"
+const FS_PROPS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><DefaultServiceVersion>2026-12-06</DefaultServiceVersion><DeleteRetentionPolicy><Enabled>true</Enabled><Days>7</Days></DeleteRetentionPolicy></StorageServiceProperties>"
+
+fn fs_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let tag = fn(e: Str) -> List[(Str, Str)] { [("ETag", e), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")] }
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  if req.url.path.contains("missing") {
+    return empty(404, [("x-ms-error-code", "ContainerNotFound")])
+  }
+  if req.url.path.contains("blobby") {
+    return empty(400, [("x-ms-error-code", "InvalidBlobOrBlock")])
+  }
+  if q("restype") == "service" && req.method == "GET" {
+    return with_hs(http.text(200, FS_PROPS), common + [("Content-Type", "application/xml")])
+  }
+  if q("restype") == "service" {
+    return empty(202, [])
+  }
+  if q("comp") == "acl" && req.method == "GET" {
+    return with_hs(http.text(200, FS_ACL), common + [("Content-Type", "application/xml"), ("x-ms-blob-public-access", "container")] + tag("\"0x8D1\""))
+  }
+  if req.method == "GET" || req.method == "HEAD" {
+    return empty(200, [
+      ("x-ms-blob-public-access", "blob"), ("x-ms-default-encryption-scope", "scope1"), ("x-ms-deny-encryption-scope-override", "true"), ("x-ms-has-immutability-policy", "false"),
+      ("x-ms-has-legal-hold", "true"), ("x-ms-immutable-storage-with-versioning-enabled", "false"), ("x-ms-lease-duration", "fixed"), ("x-ms-lease-state", "leased"),
+      ("x-ms-lease-status", "locked"), ("x-ms-meta-color", "blue"),
+    ] + tag("\"0x8D1\""))
+  }
+  if req.method == "PUT" && q("comp") == "" {
+    return empty(201, tag("\"0x8D1\""))
+  }
+  if req.method == "DELETE" {
+    return empty(202, [])
+  }
+  empty(200, tag("\"0x8D2\""))
+}
+
+/// A credential that logs the scopes it is asked for, as the Go fake does.
+struct ScopeLog {
+  log: Mutex[List[Str]]
+}
+
+fn (c: ScopeLog) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN scopes=${opts.scopes.join(",")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(4070908800000)})
+}
+
+fn (var d: Dump) retention(p: Str, r: RetentionPolicy?) {
+  if let Some(x) = r {
+    d.b("${p}.AllowPermanentDelete", x.allow_permanent_delete)
+    d.i("${p}.Days", x.days)
+    d.b("${p}.Enabled", x.enabled)
+  }
+}
+
+fn svc_props_dump(x: ServicePropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  d.s("DefaultServiceVersion", x.properties.default_service_version)
+  d.retention("DeleteRetentionPolicy", x.properties.delete_retention_policy)
+  d
+}
+
+fn resp_dump(x: Response) -> Dump {
+  var d = Dump{}
+  d.r(x)
+  d
+}
+
+fn etag_dump(x: ETagResponse) -> Dump {
+  var d = Dump{}
+  d.etag(x)
+  d
+}
+
+fn fs_props_dump(x: FileSystemPropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("PublicAccess", x.public_access)
+  d.s("DefaultEncryptionScope", x.default_encryption_scope)
+  d.b("DenyEncryptionScopeOverride", x.deny_encryption_scope_override)
+  d.s("ETag", x.etag)
+  d.b("HasImmutabilityPolicy", x.has_immutability_policy)
+  d.b("HasLegalHold", x.has_legal_hold)
+  d.b("IsImmutableStorageWithVersioningEnabled", x.is_immutable_storage_with_versioning_enabled)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.m("Metadata", x.metadata)
+  d
+}
+
+fn fs_acl_dump(x: FileSystemAccessPolicyResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("PublicAccess", x.public_access)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.lines.push("SignedIdentifiers.len=${x.signed_identifiers.len()}")
+  var i = 0
+  for s in x.signed_identifiers {
+    if let Some(a) = s.access_policy {
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Expiry", a.expiry)
+      d.s("SignedIdentifiers[${i}].AccessPolicy.Permission", a.permission)
+      d.t("SignedIdentifiers[${i}].AccessPolicy.Start", a.start)
+    }
+    d.s("SignedIdentifiers[${i}].ID", s.id)
+    i += 1
+  }
+  d
+}
+
+fn urls(name: Str, dfs: Str, blob: Str) -> List[Str] {
+  ["== ${name}", "  dfs=${dfs}", "  blob=${blob}"]
+}
+
+test "the service and file system clients send what Go sends and read what Go reads" {
+  let log = serve(os.net, fs_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(FS_GO_DATE)
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/", cred, opts)
+  var out = urls("s0 service URLs", svc.dfs_url, svc.blob_url)
+  let fb = new_service_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/?sv=x&sig=y", go_options(""))
+  out = out + urls("s0b service URLs from a blob URL with a SAS", fb.dfs_url, fb.blob_url)
+  let twice = new_service_client_with_no_credential(os.net, os.clock, os.rand, "http://acct1.dfs.example.dfs.test/", go_options(""))
+  let tf = twice.new_file_system_client("fs9")
+  out = out + ["== s0c a host with .dfs. twice", "  dfs=${twice.dfs_url}", "  blob=${twice.blob_url}", "  fs dfs=${tf.dfs_url}", "  fs blob=${tf.blob_url}"]
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+
+  out = out + add(shown("s1 service get properties", svc.get_properties(), svc_props_dump))
+  out = out + add(shown("s2 service set properties", svc.set_properties(StorageServiceProperties{default_service_version: Some("2026-12-06"), delete_retention_policy: Some(RetentionPolicy{enabled: Some(true), days: Some(7)})}), resp_dump))
+  let cro = CreateFileSystemOptions{access: Some(PUBLIC_ACCESS_FILE_SYSTEM), metadata: Some({"k": "v"}), cpk_scope_info: Some(CPKScopeInfo{default_encryption_scope: Some("scope1"), prevent_encryption_scope_override: Some(true)})}
+  out = out + add(shown("s3 service create file system with every option", svc.create_file_system("fs1", cro), etag_dump))
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when)}
+  out = out + add(shown("s4 service delete file system with every condition", svc.delete_file_system("fs1", DeleteFileSystemOptions{access_conditions: ac}), resp_dump))
+  out = out + add(quiet("s5 service delete file system, not found", svc.delete_file_system("missing")))
+
+  let fs = svc.new_file_system_client("fs 2")
+  out = out + urls("f0 file system URLs", fs.dfs_url, fs.blob_url)
+  out = out + add(shown("f1 create", fs.create(), etag_dump))
+  out = out + add(shown("f2 get properties with a lease", fs.get_properties(Some("l1")), fs_props_dump))
+  out = out + add(shown("f2b get properties", fs.get_properties(), fs_props_dump))
+  out = out + add(shown("f3 set metadata with every condition", fs.set_metadata(SetFileSystemMetadataOptions{metadata: Some({"a": "1"}), access_conditions: ac}), etag_dump))
+  out = out + add(shown("f4 get access policy", fs.get_access_policy(Some("l1")), fs_acl_dump))
+  let acl = [SignedIdentifier{id: Some("p1"), access_policy: Some(AccessPolicy{start: Some(when), expiry: Some(when), permission: Some("rw")})}]
+  out = out + add(shown("f5 set access policy with every option", fs.set_access_policy(SetFileSystemAccessPolicyOptions{access: Some(PUBLIC_ACCESS_FILE), access_conditions: ac, file_system_acl: acl}), etag_dump))
+  out = out + add(shown("f6 delete", fs.delete(), resp_dump))
+  out = out + add(quiet("f7 get properties, not found", svc.new_file_system_client("missing").get_properties()))
+  out = out + add(quiet("f8 set metadata, a blob error code", svc.new_file_system_client("blobby").set_metadata()))
+
+  let cs = "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;"
+  let fc = new_file_system_client_from_connection_string(os.net, os.clock, os.rand, cs, "fs3", opts)?
+  out = out + urls("f9 file system from a connection string", fc.dfs_url, fc.blob_url)
+  out = out + add(quiet("f9b delete it", fc.delete()))
+  let sc = new_service_client_from_connection_string(os.net, os.clock, os.rand, cs, opts)?
+  out = out + urls("s6 service from a connection string", sc.dfs_url, sc.blob_url)
+
+  let tok_opts = go_options("") with {audience: "https://acct1.blob.example.test", insecure_allow_credential_with_http: true}
+  let ft = new_file_system_client(os.net, os.clock, os.rand, "${DEP}/fs4", ScopeLog{log: log}, tok_opts)
+  out = out + add(quiet("f10 a token with an audience: the blob call's scope", ft.get_properties()))
+  out = out + drain(log)
+  expect(out) == FS_OUTPUT
+}
+
+test "get_urls swaps the first .dfs. or .blob." {
+  expect(get_urls("https://a.dfs.core.windows.net/fs")) == ("https://a.blob.core.windows.net/fs", "https://a.dfs.core.windows.net/fs")
+  expect(get_urls("https://a.blob.x.blob.y/")) == ("https://a.blob.x.blob.y/", "https://a.dfs.x.blob.y/")
+  expect(get_urls("http://127.0.0.1:10000/acct")) == ("http://127.0.0.1:10000/acct", "http://127.0.0.1:10000/acct")
+}
