@@ -68,7 +68,8 @@ What it does:
   and the AMQP condition.
 - `custom_endpoint` in the client options (Go's CustomEndpoint): the
   connection goes to that `host[:port]`, such as a TCP proxy, while the
-  AMQP Open's hostname and the token audiences name the namespace.
+  AMQP Open's hostname, the TLS server name (needs xo 4bd90321b or
+  later) and the token audiences name the namespace.
 
 Where it differs from Go v1.4.0:
 
@@ -90,10 +91,6 @@ Where it differs from Go v1.4.0:
 - `checkpoints.new_blob_store` takes an azblob `Client` and a container
   name (Go: a `container.Client`; this azblob has one client per
   account).
-- Over TLS, a custom endpoint's certificate is checked against the
-  endpoint's host; Go checks it against the namespace (go-amqp takes
-  the TLS server name from the Open's hostname). std/amqp's dial has no
-  separate server name yet.
 
 Not yet: web sockets.
 
