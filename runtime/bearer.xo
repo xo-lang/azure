@@ -34,22 +34,28 @@ pub fn token_cache(credential: azcore.TokenCredential, scopes: List[Str], clock:
 /// The cached token, or a new one when there is none or it needs a
 /// refresh.
 pub fn (c: TokenCache) get() -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-    if let Some(have) = t {
-      if !azcore.needs_refresh(have, c.clock.now()) {
-        return Ok(have)
-      }
-    }
-    let fresh = c.credential.get_token(azcore.TokenRequestOptions{scopes: c.scopes, enable_cae: c.enable_cae})?
-    t = Some(fresh)
-    Ok(fresh)
-  })
+  c.get_with(azcore.TokenRequestOptions{scopes: c.scopes})
 }
 
 /// A new token for a claims challenge; it replaces the cached one.
 pub fn (c: TokenCache) get_for_claims(claims: Str) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.get_with(azcore.TokenRequestOptions{scopes: c.scopes, claims: claims})
+}
+
+/// The cached token, or a new one for `opts` when there is none, it
+/// needs a refresh, or `opts` has claims (which always fetch), as
+/// azcore's temporal.Resource.Get with the request's options: the cache
+/// holds one token whatever scopes it was fetched for.
+pub fn (c: TokenCache) get_with(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
   c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-    let fresh = c.credential.get_token(azcore.TokenRequestOptions{scopes: c.scopes, claims: claims, enable_cae: c.enable_cae})?
+    if opts.claims == "" {
+      if let Some(have) = t {
+        if !azcore.needs_refresh(have, c.clock.now()) {
+          return Ok(have)
+        }
+      }
+    }
+    let fresh = c.credential.get_token(opts with {enable_cae: c.enable_cae})?
     t = Some(fresh)
     Ok(fresh)
   })
@@ -60,6 +66,57 @@ pub fn (c: TokenCache) reset() {
   c.token.reset(None)
 }
 
+/// azcore's policy.AuthorizationHandler: client logic that runs when
+/// the bearer policy must authorize a request. Each hook gets an
+/// Authorizer (azcore's authNZ function) and returns the request it
+/// authorized.
+pub struct AuthorizationHandler {
+  /// Authorizes every request; None asks for a token for the policy's
+  /// scopes. On a CAE challenge it runs again, and its Authorizer adds
+  /// the challenge's claims.
+  pub on_request: Option[fn(policy.Request, Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand)] = None
+  /// Answers a 401 challenge the policy cannot answer itself (anything
+  /// but CAE): it parses the response's WWW-Authenticate and authorizes
+  /// the request again, which is then sent once more. None returns the
+  /// 401 to the caller.
+  pub on_challenge: Option[fn(policy.Request, http.Response, Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand)] = None
+}
+
+/// azcore's policy.BearerTokenOptions.
+pub struct BearerTokenOptions {
+  pub authorization_handler: AuthorizationHandler = AuthorizationHandler{}
+  /// Send tokens over plain HTTP too (emulators and tests only).
+  pub insecure_allow_credential_with_http: Bool = false
+}
+
+/// Authorizes one request with a token from the policy's cache, as
+/// azcore's authenticateAndAuthorize: the cached token, or one fetched
+/// for the given options (always with CAE).
+pub struct Authorizer {
+  req: policy.Request
+  cache: TokenCache
+  credential: azcore.TokenCredential
+  auxiliary_tenants: List[Str]
+  /// A CAE challenge's claims, added to every fetch.
+  claims: Str
+}
+
+/// The request with an Authorization header for a token for `opts`.
+pub fn (a: Authorizer) authorize(opts: azcore.TokenRequestOptions) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+  let want = if a.claims == "" { opts } else { opts with {claims: a.claims} }
+  let t = a.cache.get_with(want) ?? e => return Err(policy.SendErr.Auth(e.display()))
+  var r = a.req.with_header("Authorization", "Bearer ${t.token.reveal()}")
+  if !a.auxiliary_tenants.is_empty() {
+    var aux: List[Str] = []
+    for tenant in a.auxiliary_tenants {
+      let at = a.credential.get_token(azcore.TokenRequestOptions{scopes: opts.scopes, tenant_id: tenant, enable_cae: true}) ?? e => return Err(policy.SendErr.Auth(e.display()))
+      aux.push("Bearer ${at.token.reveal()}")
+    }
+    r = r.with_header("x-ms-authorization-auxiliary", aux.join(", "))
+  }
+  Ok(r)
+}
+
 pub struct BearerTokenPolicy {
   pub credential: azcore.TokenCredential
   pub scopes: List[Str]
@@ -68,6 +125,7 @@ pub struct BearerTokenPolicy {
   pub insecure_allow_http: Bool = false
   /// Extra tenants whose tokens go in `x-ms-authorization-auxiliary`.
   pub auxiliary_tenants: List[Str] = []
+  pub authorization_handler: AuthorizationHandler = AuthorizationHandler{}
   cache: TokenCache
 }
 
@@ -75,39 +133,58 @@ pub fn bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str]
   BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: insecure_allow_http, auxiliary_tenants: auxiliary_tenants, cache: token_cache(credential, scopes, clock)}
 }
 
-fn (p: BearerTokenPolicy) authorize(req: policy.Request, t: azcore.AccessToken) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
-  var r = req.with_header("Authorization", "Bearer ${t.token.reveal()}")
-  if !p.auxiliary_tenants.is_empty() {
-    var aux: List[Str] = []
-    for tenant in p.auxiliary_tenants {
-      let at = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, tenant_id: tenant, enable_cae: true}) ?? e => return Err(policy.SendErr.Auth(e.display()))
-      aux.push("Bearer ${at.token.reveal()}")
-    }
-    r = r.with_header("x-ms-authorization-auxiliary", aux.join(", "))
-  }
-  Ok(r)
+/// azcore's NewBearerTokenPolicy with its options.
+pub fn new_bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, opts: BearerTokenOptions = BearerTokenOptions{}) -> BearerTokenPolicy {
+  BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: opts.insecure_allow_credential_with_http, authorization_handler: opts.authorization_handler, cache: token_cache(credential, scopes, clock)}
 }
 
-/// Sends with a token; on a 401 the cached token is dropped, and a CAE
-/// challenge (`error="insufficient_claims"`, base64 `claims`) is answered
-/// once with a token for those claims, as azcore's handleChallenge.
+fn (p: BearerTokenPolicy) authorizer(req: policy.Request, claims: Str) -> Authorizer {
+  Authorizer{req: req, cache: p.cache, credential: p.credential, auxiliary_tenants: p.auxiliary_tenants, claims: claims}
+}
+
+fn (p: BearerTokenPolicy) on_request(req: policy.Request, claims: Str) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+  let a = p.authorizer(req, claims)
+  match p.authorization_handler.on_request {
+    Some(f) => f(req, a)
+    None => a.authorize(azcore.TokenRequestOptions{scopes: p.scopes})
+  }
+}
+
+/// Sends with a token, then answers a 401's challenge as azcore's
+/// handleChallenge.
 fn (p: BearerTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   if !req.url.starts_with("https://") && !p.insecure_allow_http {
     return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
   }
-  let t = p.cache.get() ?? e => return Err(policy.SendErr.Auth(e.display()))
-  let resp = next.send(p.authorize(req, t)?)?
+  let resp = next.send(p.on_request(req, "")?)?
+  p.handle_challenge(req, resp, false, next)
+}
+
+/// On a 401 the cached token is dropped. A CAE challenge
+/// (`error="insufficient_claims"`, base64 `claims`) is answered once
+/// through on_request with those claims; any other challenge goes to
+/// on_challenge, and its resend's answer is handled once more (so a CAE
+/// challenge after it is answered too).
+fn (p: BearerTokenPolicy) handle_challenge(req: policy.Request, resp: http.Response, recursed: Bool, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   if resp.status != 401 {
     return Ok(resp)
   }
   p.cache.reset()
-  let claims = match cae_claims(resp) {
-    Ok(Some(c)) => c
-    Ok(None) => return Ok(resp)
-    Err(e) => return Err(policy.SendErr.Auth(e))
+  // Go's Header.Get: the first value only
+  if (resp.header_values("WWW-Authenticate").first() ?? "") == "" {
+    return Ok(resp)
   }
-  let fresh = p.cache.get_for_claims(claims) ?? e => return Err(policy.SendErr.Auth(e.display()))
-  next.send(p.authorize(req, fresh)?)
+  match cae_claims(resp) {
+    Err(e) => Err(policy.SendErr.Auth(e))
+    Ok(Some(c)) => next.send(p.on_request(req, c)?)
+    Ok(None) => match p.authorization_handler.on_challenge {
+      Some(f) if !recursed => {
+        let again = next.send(f(req, resp, p.authorizer(req, ""))?)?
+        p.handle_challenge(req, again, true, next)
+      }
+      _ => Ok(resp)
+    }
+  }
 }
 
 /// An authentication challenge: its scheme and quoted parameters.

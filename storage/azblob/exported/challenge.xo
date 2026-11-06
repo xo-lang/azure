@@ -1,0 +1,58 @@
+// The storage challenge policy, as azblob v1.8.3's internal/shared
+// NewStorageChallengePolicy (challenge_policy.go; MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md), which azqueue and azdatalake carry
+// copies of: a bearer token policy that asks for the audience's scope,
+// and on a 401 challenge naming a `resource_id` asks for that
+// resource's scope instead, for this request and every later one.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// A bearer token policy for `audience` (a scope, such as
+/// `https://storage.azure.com/.default`) that answers storage's bearer
+/// challenges. `allow_http` sends tokens over plain HTTP too (emulators
+/// and tests only).
+pub fn new_storage_challenge_policy(cred: azcore.TokenCredential, audience: Str, clock: Clock, allow_http: Bool = false) -> runtime.BearerTokenPolicy {
+  let scopes = Mutex[List[Str]].new([audience])
+  let on_request = fn(req: policy.Request, a: runtime.Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+    a.authorize(azcore.TokenRequestOptions{scopes: scopes.with_read(fn(s: List[Str]) -> List[Str] { s })})
+  }
+  let on_challenge = fn(req: policy.Request, resp: http.Response, a: runtime.Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+    let s = parse_storage_challenge(resp) ?? e => return Err(policy.SendErr.Auth(e))
+    scopes.reset(s)
+    a.authorize(azcore.TokenRequestOptions{scopes: s})
+  }
+  runtime.new_bearer_token_policy(cred, [audience], clock, runtime.BearerTokenOptions{authorization_handler: runtime.AuthorizationHandler{on_request: Some(on_request), on_challenge: Some(on_challenge)}, insecure_allow_credential_with_http: allow_http})
+}
+
+/// The scopes a storage challenge asks for, as Go's parseChallenge: the
+/// first WWW-Authenticate value without its `Bearer `, split on spaces,
+/// each `key=value` part (one `=` only) unquoted with any trailing comma
+/// cut; `resource_id` with `/.default` added when it lacks it. Go also
+/// parses `authorization_uri`'s tenant but never uses it (and panics on
+/// a URI of three `/` parts, such as `https://login`), so it is not
+/// parsed here.
+pub fn parse_storage_challenge(resp: http.Response) -> List[Str] ! Str {
+  // Go's Header.Get: the first value only
+  let header = resp.header_values("WWW-Authenticate").first() ?? ""
+  if header == "" {
+    return Err("response has no WWW-Authenticate header for challenge authentication")
+  }
+  var vals: Map[Str, Str] = {}
+  for part in header.replace("Bearer ", "").split(" ") {
+    let sub = part.split("=")
+    if sub.len() == 2 {
+      vals[sub[0]] = sub[1].replace("\"", "").trim_suffix(",")
+    }
+  }
+  var scope = vals.get("resource_id") ?? ""
+  if scope == "" {
+    return Err("could not find a valid resource in the WWW-Authenticate header")
+  }
+  if !scope.ends_with("/.default") {
+    scope = "${scope}/.default"
+  }
+  Ok([scope])
+}

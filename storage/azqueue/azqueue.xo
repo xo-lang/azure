@@ -30,6 +30,15 @@ pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedK
 
 pub struct ClientOptions {
   pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// The token audience (`<audience>/.default`) when it is not
+  /// Storage's (base.ClientOptions.Audience). As in Go, only
+  /// new_queue_client reads it: new_service_client (and the queue
+  /// clients it makes) ask for Storage's scope.
+  pub audience: Str = ""
+  /// Sends a token over plain http (Go's
+  /// azcore.ClientOptions.InsecureAllowCredentialWithHTTP); for local
+  /// fakes and emulators only.
+  pub insecure_allow_credential_with_http: Bool = false
 }
 
 /// What both clients share: the pipeline, and the key for SAS URLs.
@@ -51,8 +60,23 @@ fn core_with_shared_key(net: Net, clock: Clock, rand: Rand, u: Str, cred: Shared
   Core{url: u, pipeline: pipeline(net, clock, rand, [shared_key(cred, clock)], opts), cred: Some(cred)}
 }
 
-fn core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
-  Core{url: u, pipeline: pipeline(net, clock, rand, [runtime.bearer_token_policy(cred, [TOKEN_SCOPE], clock)], opts), cred: None}
+/// The token scope (base.GetAudience).
+fn audience_scope(opts: ClientOptions) -> Str {
+  if opts.audience.trim() == "" { TOKEN_SCOPE } else { "${opts.audience.trim_end_chars("/")}/.default" }
+}
+
+/// A service client's token policy (NewServiceClient): Storage's scope,
+/// whatever the audience, and no challenge handling, as Go.
+fn service_core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
+  let bp = runtime.new_bearer_token_policy(cred, [TOKEN_SCOPE], clock, runtime.BearerTokenOptions{insecure_allow_credential_with_http: opts.insecure_allow_credential_with_http})
+  Core{url: u, pipeline: pipeline(net, clock, rand, [bp], opts), cred: None}
+}
+
+/// A queue client's token policy (NewQueueClient): the storage
+/// challenge policy for the audience.
+fn queue_core_with_token(net: Net, clock: Clock, rand: Rand, u: Str, cred: azcore.TokenCredential, opts: ClientOptions) -> Core {
+  let cp = exported.new_storage_challenge_policy(cred, audience_scope(opts), clock, allow_http: opts.insecure_allow_credential_with_http)
+  Core{url: u, pipeline: pipeline(net, clock, rand, [cp], opts), cred: None}
 }
 
 fn core_with_no_credential(net: Net, clock: Clock, rand: Rand, u: Str, opts: ClientOptions) -> Core {

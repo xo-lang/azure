@@ -1,0 +1,64 @@
+// The storage challenge policy on azdatalake's dfs pipeline, case by
+// case as the Go program runs it (challengevectors_test.xo): a
+// recording fake credential and a fake service that answers each
+// path's scripted 401s, then 201. No Entra calls.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const CEP: Str = "http://chal.dfs.example.test"
+
+const CH: Str = "Bearer authorization_uri=\"https://login.example.test/00000000-0000-0000-0000-000000000000/oauth2/authorize\" resource_id=\"https://a.example.test\""
+
+/// A fake credential that writes each token request to `log`.
+struct RecCred {
+  log: Mutex[List[Str]]
+  n: Atomic[Int]
+}
+
+fn (c: RecCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.n.add(1)
+  c.log.with(fn(var xs: List[Str]) { xs.push("  token ${n}: scopes=${opts.scopes.join(",")} tenant=${go_quote(opts.tenant_id)} claims=${go_quote(opts.claims)} cae=${opts.enable_cae}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok-${n}"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+test "the dfs pipeline answers storage challenges as Go's" {
+  let log = Mutex[List[Str]].new([])
+  let script = Mutex[Map[Str, List[Str]]].new({})
+  os.net.handle("PUT ${CEP}/fs1/{d}", fn(req: http.Request) -> http.Response {
+    log.with(fn(var xs: List[Str]) { xs.push("  send PUT ${req.path} auth=${go_quote(req.header("Authorization") ?? "")}") })
+    let next = script.with(fn(var m: Map[Str, List[Str]]) -> Str? {
+      let rs = m.get(req.path) ?? []
+      if rs.is_empty() {
+        return None
+      }
+      m[req.path] = rs[1..rs.len()]
+      Some(rs[0])
+    })
+    match next {
+      Some(a) => {
+        let r = http.text(401, "").with_header("Date", "Fri, 06 Nov 2026 15:52:15 GMT")
+        if a == "" { r } else { r.add_header("WWW-Authenticate", a) }
+      }
+      None => http.text(201, "").with_header("Date", "Fri, 06 Nov 2026 15:52:15 GMT")
+    }
+  })
+  var out: List[Str] = []
+  for (name, audience, replies) in [("plain", "", []), ("audience", "https://acct1.example.test/", []), ("challenge", "", [CH]), ("nochallenge", "", [""])] {
+    script.with(fn(var m: Map[Str, List[Str]]) { m["/fs1/d-${name}"] = replies })
+    let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, audience: audience, insecure_allow_credential_with_http: true}
+    log.reset(["directory.Client ${name}:"])
+    let dc = new_directory_client(os.net, os.clock, os.rand, "${CEP}/fs1/d-${name}", RecCred{log: log, n: Atomic.new(0)}, opts)
+    for _ in 0..2 {
+      let l = match dc.create() {
+        Ok(_) => "  ok"
+        Err(Response(e)) => "  status ${e.status_code}"
+        Err(e) => "  err: ${e.display()}"
+      }
+      log.with(fn(var xs: List[Str]) { xs.push(l) })
+    }
+    out = out + log.with_read(fn(xs: List[Str]) -> List[Str] { xs })
+  }
+  expect(out) == CHALLENGE_OUTPUT
+}

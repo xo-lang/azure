@@ -1,5 +1,12 @@
 # azdatalake changes
 
+## v0.7.0
+
+- The dfs pipeline's token policy is the storage challenge policy
+  (azblob's `exported.new_storage_challenge_policy`), as Go's: a 401
+  bearer challenge naming a `resource_id` gets a token for that
+  resource, kept for later calls.
+
 ## v0.6.0
 
 - `datalakeerror`: Go azdatalake v1.7.1's error codes, `has_code` and

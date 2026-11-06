@@ -1,5 +1,17 @@
 # azblob changes
 
+## v0.6.0
+
+- `exported.new_storage_challenge_policy` and
+  `exported.parse_storage_challenge`: Go's storage challenge policy (a
+  401 bearer challenge naming a `resource_id` gets a token for that
+  resource, kept for later calls), exported for azqueue and
+  azdatalake. Every token client uses it, as in Go.
+- `new_client` now reads `ClientOptions.audience` and
+  `insecure_allow_credential_with_http`, as Go's azblob.NewClient
+  passes them on to service.NewClient; it asked for Storage's scope
+  before.
+
 ## v0.5.0
 
 - `BlobClient.download_stream_with_response`: the download and the

@@ -46,9 +46,14 @@ Where it differs from Go v1.0.1:
   service properties come back in `.properties` rather than embedded.
 - Response metadata names stay as the service sent them (Go
   canonicalizes them: `Color`).
-- Bearer tokens use azcore's bearer token policy with the Storage scope;
-  Go's storage challenge policy (a tenant from a 401 challenge) is not
-  ported yet.
+- Bearer tokens: as in Go, `new_queue_client` uses the storage
+  challenge policy (azblob's `exported.new_storage_challenge_policy`)
+  for `ClientOptions.audience`, while `new_service_client`, and the
+  queue clients a service client makes, use the plain bearer policy
+  with Storage's scope whatever the audience (Go's NewServiceClient
+  ignores `Audience`). Go's challenge parser panics on an
+  `authorization_uri` of three `/` parts (`https://login`); Xo reads
+  the challenge, since Go never uses that tenant.
 - A date or time that does not parse gives Go's error text up to the
   layout (`parsing time "x" as "Mon, 02 Jan 2006 15:04:05 MST"`), not
   the part after it that names the element.

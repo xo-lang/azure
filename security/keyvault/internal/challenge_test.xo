@@ -173,3 +173,20 @@ test "parse_id splits a Key Vault object ID as Go's ParseID" {
   expect(parse_id("https://v.vault.example.test/secrets")) == (Some("https://v.vault.example.test"), None, None)
   expect(parse_id("not a url")) == (None, None, None)
 }
+
+test "only the first WWW-Authenticate value is read, as Go's Header.Get" {
+  let seen = Mutex[List[Int]].new([])
+  os.net.handle("GET ${VAULT}/secrets/two", fn(req: http.Request) -> http.Response {
+    let n = seen.with(fn(var xs: List[Int]) -> Int {
+      xs.push(1)
+      xs.len()
+    })
+    if n == 1 {
+      return http.text(401, "").add_header("WWW-Authenticate", KV1).add_header("WWW-Authenticate", "Bearer resource=\"https://other.example.test\"")
+    }
+    http.text(200, "{}")
+  })
+  let cred = recording()
+  expect(pipeline(os.net, os.clock, os.rand, cred).send(policy.Request{method: "GET", url: "${VAULT}/secrets/two"})?.status) == 200
+  expect(cred.requests()[0].scopes) == [SCOPE]
+}

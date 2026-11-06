@@ -133,3 +133,21 @@ test "a token cache is shared by its copies, refreshes near expiry, and resets" 
   expect(copy.get()?.token.reveal()) == "tok-home-4"
   expect(cred.calls.get()) == 4
 }
+
+/// A credential that records each request's scopes and tenant.
+struct ScopeRec {
+  seen: Mutex[List[Str]]
+}
+
+fn (c: ScopeRec) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.seen.with(fn(var xs: List[Str]) { xs.push("${opts.tenant_id}:${opts.scopes.join(",")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+test "auxiliary tenants' tokens are for the policy's scopes" {
+  capture(os.net, ARM)
+  let cred = ScopeRec{seen: Mutex.new([])}
+  let bp = bearer_token_policy(cred, ["https://management.test/.default"], os.clock, auxiliary_tenants: ["t1"])
+  new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bp]}, policy.ClientOptions{}).send(policy.Request{method: "GET", url: ARM})?
+  expect(cred.seen.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == [":https://management.test/.default", "t1:https://management.test/.default"]
+}

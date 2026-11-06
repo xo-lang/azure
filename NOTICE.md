@@ -16,7 +16,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   lease clients, their options, responses and XML models, connection
   strings, and the download and buffered download logic, requests
   checked against its code; Shared Key, the user delegation
-  credential, and the `sas` package:
+  credential, the storage challenge policy (internal/shared
+  challenge_policy.go; behavior checked against its code), and the
+  `sas` package:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and
   `storage/azblob/sas/testdata`), `sdk/storage/azqueue` v1.0.1 (the

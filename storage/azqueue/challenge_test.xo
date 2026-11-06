@@ -1,0 +1,142 @@
+// The storage challenge policy on a QueueClient, case by case as the Go
+// program runs it (challengevectors_test.xo): a recording fake
+// credential and a fake service that answers each queue's scripted
+// replies in order, then 200. No Entra calls.
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const CEP: Str = "http://chal.queue.example.test"
+
+const CHAL_DATE: Str = "Fri, 06 Nov 2026 15:52:15 GMT"
+
+const AURI: Str = "authorization_uri=\"https://login.example.test/00000000-0000-0000-0000-000000000000/oauth2/authorize\""
+
+// {"access_token":{"nbf":{"essential":true,"value":"1726077595"}}}
+const CAE_CLAIMS: Str = "eyJhY2Nlc3NfdG9rZW4iOnsibmJmIjp7ImVzc2VudGlhbCI6dHJ1ZSwidmFsdWUiOiIxNzI2MDc3NTk1In19fQ=="
+
+/// A fake credential that writes each token request to `log`.
+struct RecCred {
+  log: Mutex[List[Str]]
+  n: Atomic[Int]
+  fail: Bool
+}
+
+fn (c: RecCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.n.add(1)
+  c.log.with(fn(var xs: List[Str]) { xs.push("  token ${n}: scopes=${opts.scopes.join(",")} tenant=${go_quote(opts.tenant_id)} claims=${go_quote(opts.claims)} cae=${opts.enable_cae}") })
+  if c.fail {
+    return Err(azcore.AuthErr{credential: "fake", msg: "fake credential failed"})
+  }
+  Ok(azcore.AccessToken{token: Secret.new("tok-${n}"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+struct Reply {
+  status: Int
+  auth: List[Str]
+}
+
+fn ch(v: Str) -> Reply {
+  Reply{status: 401, auth: [v]}
+}
+
+fn cae() -> Reply {
+  ch("Bearer realm=\"\", error=\"insufficient_claims\", claims=\"${CAE_CLAIMS}\"")
+}
+
+/// Runs `calls` GetProperties on queue `name` with `replies` scripted,
+/// and gives the log in the Go program's shape. A credential's error
+/// reads without the credential's name, as Go's fake error has none.
+fn chal_run(net: Net, clock: Clock, rand: Rand, log: Mutex[List[Str]], script: Mutex[Map[Str, List[Reply]]], name: Str, audience: Str, calls: Int, replies: List[Reply], fail: Bool) -> List[Str] {
+  log.reset(["${name}:"])
+  script.with(fn(var m: Map[Str, List[Reply]]) { m["/${name}"] = replies })
+  let cred = RecCred{log: log, n: Atomic.new(0), fail: fail}
+  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, audience: audience, insecure_allow_credential_with_http: true}
+  let q = new_queue_client(net, clock, rand, "${CEP}/${name}", cred, opts)
+  for _ in 0..calls {
+    let line = match q.get_properties() {
+      Ok(_) => "  ok"
+      Err(Response(r)) => "  status ${r.status_code}"
+      Err(Send(Auth(m))) => "  err: ${m.trim_prefix("fake: ")}"
+      Err(e) => "  err: ${e.display()}"
+    }
+    log.with(fn(var xs: List[Str]) { xs.push(line) })
+  }
+  log.with_read(fn(xs: List[Str]) -> List[Str] { xs })
+}
+
+fn chal_setup(net: testing.FakeNet) -> (Mutex[List[Str]], Mutex[Map[Str, List[Reply]]]) {
+  let log = Mutex[List[Str]].new([])
+  let script = Mutex[Map[Str, List[Reply]]].new({})
+  net.handle("GET ${CEP}/{q}", fn(req: http.Request) -> http.Response {
+    log.with(fn(var xs: List[Str]) { xs.push("  send GET ${req.path} auth=${go_quote(req.header("Authorization") ?? "")}") })
+    let next = script.with(fn(var m: Map[Str, List[Reply]]) -> Reply? {
+      let rs = m.get(req.path) ?? []
+      if rs.is_empty() {
+        return None
+      }
+      m[req.path] = rs[1..rs.len()]
+      Some(rs[0])
+    })
+    var resp = http.text(200, "").with_header("Date", CHAL_DATE)
+    if let Some(r) = next {
+      resp = http.text(r.status, "").with_header("Date", CHAL_DATE)
+      for a in r.auth {
+        resp = resp.add_header("WWW-Authenticate", a)
+      }
+    }
+    resp
+  })
+  (log, script)
+}
+
+test "a queue client answers storage challenges as Go's" {
+  let (log, script) = chal_setup(os.net)
+  let a = "https://a.example.test"
+  var out: List[Str] = []
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "plain", "", 2, [], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "audience", "https://acct1.queue.example.test/", 1, [], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "challenge", "", 3, [ch("Bearer ${AURI} resource_id=\"https://acct1.queue.example.test\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "challengedefault", "", 1, [ch("Bearer ${AURI} resource_id=\"https://acct1.queue.example.test/.default\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "challengecomma", "", 1, [ch("Bearer ${AURI}, resource_id=\"https://acct1.queue.example.test\",")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "noresource", "", 1, [ch("Bearer ${AURI}")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "nochallenge", "", 1, [Reply{status: 401, auth: []}], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "twice", "", 1, [ch("Bearer ${AURI} resource_id=\"${a}\""), ch("Bearer ${AURI} resource_id=\"https://b.example.test\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "thencae", "", 1, [ch("Bearer ${AURI} resource_id=\"${a}\""), cae()], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "cae", "", 1, [cae()], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "caetwice", "", 1, [cae(), cae()], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "caebad", "", 1, [ch("Bearer realm=\"\", error=\"insufficient_claims\", claims=\"not base64!\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "persist", "", 3, [ch("Bearer ${AURI} resource_id=\"${a}\""), Reply{status: 401, auth: []}], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "twoheaders", "", 1, [Reply{status: 401, auth: ["Bearer ${AURI}", "Bearer resource_id=\"${a}\""]}], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "emptyuri", "", 1, [ch("Bearer resource_id=\"${a}\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "nobearer", "", 1, [ch("resource_id=\"${a}\"")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "unquoted", "", 1, [ch("Bearer resource_id=${a}")], false)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "credfail", "", 1, [], true)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "challengecredfail", "", 1, [ch("Bearer ${AURI} resource_id=\"${a}\"")], true)
+  out = out + chal_run(os.net, os.clock, os.rand, log, script, "notfound", "", 2, [Reply{status: 404, auth: []}], false)
+  expect(out) == CHALLENGE_OUTPUT
+}
+
+test "a short authorization_uri is answered, where Go's parseTenant panics" {
+  let (log, script) = chal_setup(os.net)
+  let out = chal_run(os.net, os.clock, os.rand, log, script, "shorturi", "", 1, [ch("Bearer authorization_uri=\"https://login\" resource_id=\"https://a.example.test\"")], false)
+  expect(out[out.len() - 1]) == "  ok"
+  expect(out[3]) == "  token 2: scopes=https://a.example.test/.default tenant=\"\" claims=\"\" cae=true"
+}
+
+test "a service client asks for Storage's scope whatever the audience, as Go" {
+  let (log, script) = chal_setup(os.net)
+  log.reset([])
+  let cred = RecCred{log: log, n: Atomic.new(0), fail: false}
+  let opts = ClientOptions{audience: "https://acct1.queue.example.test", insecure_allow_credential_with_http: true}
+  let svc = new_service_client(os.net, os.clock, os.rand, CEP, cred, opts)
+  script.with(fn(var m: Map[Str, List[Reply]]) { m["/svcq"] = [ch("Bearer resource_id=\"https://a.example.test\"")] })
+  match svc.new_queue_client("svcq").get_properties() {
+    Err(Response(r)) => expect(r.status_code) == 401
+    _ => fault("want the 401: the service pipeline answers no challenge")
+  }
+  let tokens = log.with_read(fn(xs: List[Str]) -> List[Str] { xs.filter(fn(l: Str) -> Bool { l.contains("token") }) })
+  expect(tokens) == ["  token 1: scopes=https://storage.azure.com/.default tenant=\"\" claims=\"\" cae=true"]
+}
