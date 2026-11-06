@@ -76,3 +76,55 @@ test "the delay doubles with azcore's jitter and is capped" {
   expect(delay(o, 3, 0.4).millis()) == 5600
   expect(delay(o, 10, 0.5)) == 60s
 }
+
+test "a transport error is retried, then the response returned" {
+  os.net.handle("GET https://example.management.test/subscriptions/x/resourceGroups", fn(req: http.Request) -> http.Response { http.text(200, "ok") })
+  os.net.fail_next("GET https://example.management.test/subscriptions/x/resourceGroups", http.ClientErr.Connect("refused"))
+  let resp = pipeline(os.net, os.clock, os.rand, policy.ClientOptions{}).send(policy.Request{method: "GET", url: URL})?
+  expect(resp.status) == 200
+  expect(os.net.requests().len()) == 2
+}
+
+test "an invalid URL is not retried" {
+  os.net.fail("GET https://example.management.test/subscriptions/x/resourceGroups", http.ClientErr.InvalidUrl("bad"))
+  let r = pipeline(os.net, os.clock, os.rand, policy.ClientOptions{}).send(policy.Request{method: "GET", url: URL})
+  expect(r.is_err()) == true
+  expect(os.net.requests().len()) == 1
+}
+
+test "a status outside the retried set returns at once" {
+  let n = Atomic[Int].new(0)
+  os.net.handle("GET https://example.management.test/subscriptions/x/resourceGroups", fn(req: http.Request) -> http.Response {
+    n.add(1)
+    http.text(404, "")
+  })
+  expect(pipeline(os.net, os.clock, os.rand, policy.ClientOptions{}).send(policy.Request{method: "GET", url: URL})?.status) == 404
+  expect(n.get()) == 1
+}
+
+test "x-ms-retry-after-ms is honored; a delay past max_retry_delay is not waited for" {
+  let n = Atomic[Int].new(0)
+  os.net.handle("GET https://example.management.test/subscriptions/x/resourceGroups", fn(req: http.Request) -> http.Response {
+    match n.add(1) {
+      1 => http.text(503, "").with_header("x-ms-retry-after-ms", "1500")
+      2 => http.text(503, "").with_header("Retry-After", "120")
+      _ => http.text(200, "")
+    }
+  })
+  let start = os.clock.now()
+  let resp = pipeline(os.net, os.clock, os.rand, policy.ClientOptions{retry: policy.RetryOptions{max_retry_delay: 60s}}).send(policy.Request{method: "GET", url: URL})?
+  // the second 503 asks for 120 s, past the 60 s cap: azcore returns it
+  expect(resp.status) == 503
+  expect(n.get()) == 2
+  expect(os.clock.since(start).millis()) == 1500
+}
+
+test "the backoff doubles with jitter in [0.8, 1.3) and stops at max_retry_delay" {
+  let o = policy.RetryOptions{retry_delay: 800ms, max_retry_delay: 60s}
+  expect(delay(o, 1, 0.0).millis()) == 640
+  expect(delay(o, 1, 0.5).millis()) == 840
+  expect(delay(o, 2, 0.0).millis()) == 1920
+  expect(delay(o, 3, 0.999).millis() < 7280) == true
+  expect(delay(o, 10, 0.5)) == 60s
+}
+

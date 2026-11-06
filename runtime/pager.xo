@@ -1,11 +1,14 @@
-// Pages of a list operation, as azcore's runtime.Pager and
-// FetcherForNextLink (MIT, Copyright (c) Microsoft Corporation;
-// NOTICE.md): the first request, then a GET of each page's next link
-// (its query re-encoded) until a page has none.
+// Pages of a list operation, as azcore's runtime.Pager with its
+// PagingHandler (MIT, Copyright (c) Microsoft Corporation; NOTICE.md):
+// the first request, then the request for each next page until a page
+// has none. Two shapes come with it, as Go's callers write them:
+// `new_pager`, a GET of the page's next link (ARM's nextLink,
+// FetcherForNextLink), and `new_marker_pager`, the first request again
+// with a marker query parameter (Storage's NextMarker).
 //
-// A Pager holds the pipeline and two pure functions, the page decoder
-// and the next link reader; the sends are its own, since Xo does not
-// store a closure that uses the network (decision 0006, item 4).
+// A Pager holds the pipeline and pure functions (the decoder and the
+// next request builder); the sends are its own, since an interface
+// method's effects are fixed (decision 0006, item 4).
 
 use std/http
 use std/url
@@ -16,31 +19,54 @@ pub struct Pager[T] {
   pub pipeline: Pipeline
   pub first: policy.Request
   pub decode: fn(http.Response) -> T ! Str
-  /// The page's next link, None or "" on the last page.
-  pub next_link: fn(T) -> Str?
+  /// The request for the page after `page` (fetched with `prev`), None
+  /// after the last page.
+  pub next: fn(policy.Request, T) -> policy.Request?
   /// Statuses of a page besides 200.
   pub ok_status: List[Int] = []
   started: Bool = false
-  link: Str? = None
+  pending: policy.Request? = None
 }
 
+/// A pager with any next-request rule (azcore's PagingHandler).
+pub fn new_pager_with[T](pipeline: Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, next: fn(policy.Request, T) -> policy.Request?) -> Pager[T] {
+  Pager{pipeline: pipeline, first: first, decode: decode, next: next}
+}
+
+/// A pager that GETs each page's next link, its query re-encoded
+/// (azcore's FetcherForNextLink); a link of "" ends it.
 pub fn new_pager[T](pipeline: Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, next_link: fn(T) -> Str?) -> Pager[T] {
-  Pager{pipeline: pipeline, first: first, decode: decode, next_link: next_link}
+  new_pager_with(pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
+    let link = next_link(page) ?? return None
+    if link == "" {
+      return None
+    }
+    Some(prev with {method: "GET", url: encode_query(link), body: b""})
+  })
+}
+
+/// A pager that sends the first request again with query parameter
+/// `name` (Storage's `marker`) set to each page's marker; a marker of ""
+/// ends it.
+pub fn new_marker_pager[T](pipeline: Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, name: Str, marker: fn(T) -> Str?) -> Pager[T] {
+  new_pager_with(pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
+    let m = marker(page) ?? return None
+    if m == "" {
+      return None
+    }
+    Some(prev with {url: set_query(prev.url, name, m)})
+  })
 }
 
 /// Whether another page can be fetched.
 pub fn (p: Pager[T]) more() -> Bool {
-  !p.started || (p.link ?? "") != ""
+  !p.started || p.pending.is_some()
 }
 
 /// The next page.
 pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
   let req = if !p.started { p.first } else {
-    let link = p.link ?? ""
-    if link == "" {
-      return Err(azcore.CallErr.InvalidInput("no more pages"))
-    }
-    p.first with {method: "GET", url: encode_query(link), body: b""}
+    p.pending ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
   }
   let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if resp.status != 200 && !p.ok_status.contains(resp.status) {
@@ -48,7 +74,7 @@ pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock
   }
   let page = (p.decode)(resp) ?? e => return Err(azcore.CallErr.Decode(e))
   p.started = true
-  p.link = (p.next_link)(page)
+  p.pending = (p.next)(req, page)
   Ok(page)
 }
 
