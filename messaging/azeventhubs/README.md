@@ -49,6 +49,14 @@ What it does:
 - `InMemoryCheckpointStore` (`new_in_memory_checkpoint_store`), with
   etag checked claims, `expire_ownership` and `relinquish_ownership`
   (Go has it only in its tests).
+- `checkpoints.BlobStore` (`checkpoints.new_blob_store(client, container)`),
+  over this repo's azblob: each ownership and checkpoint is an empty
+  block blob named `<namespace>/<hub>/<group>/ownership/<partition>` or
+  `.../checkpoint/<partition>` whose metadata holds `ownerid`, or
+  `sequencenumber` and `offset`. A claim with an etag sets the metadata
+  with `If-Match`, one without creates the blob with `If-None-Match: *`,
+  and a lost race (412 or 409) is skipped. The requests are checked line
+  for line against Go's BlobStore on the same fake blob service.
 - Retries and recovery as Go's (`retry_options`: 3 retries, 4 s
   doubling with jitter, 120 s cap by default): a busy server or a
   timeout is retried as it is, a forced detach gets a new link (one
@@ -77,8 +85,11 @@ Where it differs from Go v1.4.0:
 - The in-memory store's errors are errors (Go's test store panics), and
   its lists hold only the asked hub and group.
 
-Not yet: the Blob checkpoint store (`checkpoints` package, over
-azblob), web sockets and custom endpoints.
+- `checkpoints.new_blob_store` takes an azblob `Client` and a container
+  name (Go: a `container.Client`; this azblob has one client per
+  account).
+
+Not yet: web sockets and custom endpoints.
 
 Tests run against std/amqptest's in-process broker in its event hub
 mode on the test world's network (`xo test .`).

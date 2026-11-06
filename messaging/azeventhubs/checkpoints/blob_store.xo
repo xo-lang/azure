@@ -1,0 +1,153 @@
+// A CheckpointStore in Azure Blob Storage, as azeventhubs's
+// checkpoints.BlobStore (checkpoints/blob_store.go) (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). Each ownership and checkpoint is an
+// empty block blob, `<namespace>/<hub>/<group>/ownership/<partition>` or
+// `.../checkpoint/<partition>`, whose metadata holds the owner id, or
+// the sequence number and offset; the blob's ETag versions an ownership.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/messaging/azeventhubs
+use github.com/xo-lang/azure/storage/azblob
+
+pub struct BlobStoreOptions {}
+
+pub struct BlobStore {
+  client: azblob.Client
+  container: Str
+}
+
+/// A store in `container` of the blob service `client` talks to. (Go
+/// takes a container.Client; this port's azblob has one Client for the
+/// account, so the container is named here.)
+pub fn new_blob_store(client: azblob.Client, container: Str, options: BlobStoreOptions = BlobStoreOptions{}) -> BlobStore {
+  BlobStore{client: client, container: container}
+}
+
+fn failed(e: azcore.CallErr) -> azeventhubs.EventHubsErr {
+  azeventhubs.EventHubsErr{msg: e.display()}
+}
+
+fn bad(msg: Str) -> azeventhubs.EventHubsErr {
+  azeventhubs.EventHubsErr{msg: msg}
+}
+
+/// The service's error code of a failed call, "" for none.
+fn code_of(e: azcore.CallErr) -> Str {
+  match e {
+    azcore.CallErr.Response(r) => r.error_code
+    _ => ""
+  }
+}
+
+fn blob_name(ns: Str, hub: Str, group: Str, kind: Str, partition: Str) -> Str ! azeventhubs.EventHubsErr {
+  if ns == "" || hub == "" || group == "" || partition == "" {
+    return Err(bad("missing fields for blob name"))
+  }
+  Ok("${ns}/${hub}/${group}/${kind}/${partition}")
+}
+
+fn blob_prefix(ns: Str, hub: Str, group: Str, kind: Str) -> Str ! azeventhubs.EventHubsErr {
+  if ns == "" || hub == "" || group == "" {
+    return Err(bad("missing fields for blob prefix"))
+  }
+  Ok("${ns}/${hub}/${group}/${kind}/")
+}
+
+/// The last path segment of a blob name (Go's `[^/]+?$`).
+fn partition_of(name: Str) -> Str {
+  match name.rfind("/") {
+    Some(i) => name[i + 1..name.len()]
+    None => name
+  }
+}
+
+/// Claims each ownership: an ownership with an etag by setting its
+/// blob's metadata under If-Match, one without by creating its blob under
+/// If-None-Match `*`. One that changed or was created first (412
+/// ConditionNotMet, 409 BlobAlreadyExists) is skipped, as Go's.
+pub fn (b: BlobStore) claim_ownership(partition_ownership: List[azeventhubs.Ownership], options: azeventhubs.ClaimOwnershipOptions = azeventhubs.ClaimOwnershipOptions{}) -> List[azeventhubs.Ownership] ! azeventhubs.EventHubsErr uses (net.dial, clock, rand) {
+  var out: List[azeventhubs.Ownership] = []
+  for po in partition_ownership {
+    let name = blob_name(po.fully_qualified_namespace, po.event_hub_name, po.consumer_group, "ownership", po.partition_id)?
+    let meta: Map[Str, Str] = {"ownerid": po.owner_id}
+    let r = match po.etag {
+      Some(etag) => b.client.set_blob_metadata(b.container, name, meta, if_match: etag)
+      None => b.client.upload_buffer(b.container, name, b"", metadata: meta, if_none_match: "*")
+    }
+    match r {
+      Ok(w) => out.push(po with {etag: Some(w.etag), last_modified_time: w.last_modified})
+      Err(e) => {
+        let code = code_of(e)
+        if code != "ConditionNotMet" && code != "BlobAlreadyExists" {
+          return Err(failed(e))
+        }
+      }
+    }
+  }
+  Ok(out)
+}
+
+/// The blobs under `prefix` with their metadata, every page.
+fn (b: BlobStore) list(prefix: Str) -> List[azblob.BlobItem] ! azeventhubs.EventHubsErr uses (net.dial, clock, rand) {
+  var pager = b.client.new_list_blobs_flat_pager(b.container, prefix: prefix, include_metadata: true)
+  var out: List[azblob.BlobItem] = []
+  while pager.more() {
+    let page = pager.next_page() ?? e => return Err(failed(e))
+    out = out + page.blobs
+  }
+  Ok(out)
+}
+
+/// Go's strconv.ParseInt of a metadata value, with its error text.
+fn int_of(m: Map[Str, Str], key: Str) -> Int ! azeventhubs.EventHubsErr {
+  let v = m.get(key) ?? return Err(bad("${key} is missing from metadata"))
+  Ok(Int.parse(v) ?? return Err(bad("${key} could not be parsed as an int64: strconv.ParseInt: parsing \"${v}\": invalid syntax")))
+}
+
+pub fn (b: BlobStore) list_checkpoints(fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: azeventhubs.ListCheckpointsOptions = azeventhubs.ListCheckpointsOptions{}) -> List[azeventhubs.Checkpoint] ! azeventhubs.EventHubsErr uses (net.dial, clock, rand) {
+  let prefix = blob_prefix(fully_qualified_namespace, event_hub_name, consumer_group, "checkpoint")?
+  var out: List[azeventhubs.Checkpoint] = []
+  for item in b.list(prefix)? {
+    let seq = int_of(item.metadata, "sequencenumber")?
+    let off = int_of(item.metadata, "offset")?
+    out.push(azeventhubs.Checkpoint{fully_qualified_namespace: fully_qualified_namespace, event_hub_name: event_hub_name, consumer_group: consumer_group, partition_id: partition_of(item.name), sequence_number: Some(seq), offset: Some(off)})
+  }
+  Ok(out)
+}
+
+/// The ownerships, each with its blob's ETag and modification time. A
+/// blob with metadata but no `ownerid` is an error, as Go's; one with no
+/// metadata at all is unowned.
+pub fn (b: BlobStore) list_ownership(fully_qualified_namespace: Str, event_hub_name: Str, consumer_group: Str, options: azeventhubs.ListOwnershipOptions = azeventhubs.ListOwnershipOptions{}) -> List[azeventhubs.Ownership] ! azeventhubs.EventHubsErr uses (net.dial, clock, rand) {
+  let prefix = blob_prefix(fully_qualified_namespace, event_hub_name, consumer_group, "ownership")?
+  var out: List[azeventhubs.Ownership] = []
+  for item in b.list(prefix)? {
+    let owner = if item.metadata.is_empty() { "" } else { item.metadata.get("ownerid") ?? return Err(bad("ownerid is missing from metadata")) }
+    out.push(azeventhubs.Ownership{fully_qualified_namespace: fully_qualified_namespace, event_hub_name: event_hub_name, consumer_group: consumer_group, partition_id: partition_of(item.name), owner_id: owner, last_modified_time: item.last_modified, etag: Some(item.etag)})
+  }
+  Ok(out)
+}
+
+/// Sets the checkpoint blob's metadata, creating the blob when it does
+/// not exist yet (404 BlobNotFound), as Go's.
+pub fn (b: BlobStore) set_checkpoint(checkpoint: azeventhubs.Checkpoint, options: azeventhubs.SetCheckpointOptions = azeventhubs.SetCheckpointOptions{}) -> () ! azeventhubs.EventHubsErr uses (net.dial, clock, rand) {
+  let c = checkpoint
+  let name = blob_name(c.fully_qualified_namespace, c.event_hub_name, c.consumer_group, "checkpoint", c.partition_id)?
+  var meta: Map[Str, Str] = {}
+  if let Some(n) = c.sequence_number {
+    meta["sequencenumber"] = "${n}"
+  }
+  if let Some(o) = c.offset {
+    meta["offset"] = "${o}"
+  }
+  match b.client.set_blob_metadata(b.container, name, meta) {
+    Ok(_) => Ok(())
+    Err(e) => {
+      if code_of(e) != "BlobNotFound" {
+        return Err(failed(e))
+      }
+      b.client.upload_buffer(b.container, name, b"", metadata: meta) ?? x => return Err(failed(x))
+      Ok(())
+    }
+  }
+}

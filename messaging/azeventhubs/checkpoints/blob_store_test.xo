@@ -1,0 +1,161 @@
+// The Blob checkpoint store against a fake blob service on the test
+// world's network, checked against what Go's checkpoints.BlobStore sends
+// to the same fake (azeventhubs v1.4.0 with azblob v1.6.1, run locally
+// against an httptest server; no storage account).
+
+use std/http
+use std/testing
+use std/url
+use github.com/xo-lang/azure/messaging/azeventhubs
+use github.com/xo-lang/azure/storage/azblob
+
+const EP: Str = "http://blob1.example.test"
+const NS: Str = "ns1.servicebus.example.test"
+const LAST_MOD: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+struct FakeBlob {
+  meta: List[(Str, Str)]
+  etag: Str
+}
+
+struct Fake {
+  blobs: Map[Str, FakeBlob] = {}
+  n: Int = 0
+  log: List[Str] = []
+}
+
+fn sorted_pairs(m: Map[Str, Str]) -> List[(Str, Str)] {
+  var out: List[(Str, Str)] = []
+  for k in m.keys().sort() {
+    out.push((k, m.get(k) ?? ""))
+  }
+  out
+}
+
+/// The same fake as the Go program's: upload with If-None-Match `*`,
+/// set metadata with If-Match, a flat list with metadata; each request
+/// logged in the Go program's format.
+fn serve(net: testing.FakeNet) -> Mutex[Fake] {
+  let st = Mutex[Fake].new(Fake{})
+  let h = fn(req: http.Request) -> http.Response {
+    st.with(fn(var f: Fake) -> http.Response {
+      var hs: Map[Str, Str] = {}
+      var meta: Map[Str, Str] = {}
+      for (k, v) in req.headers {
+        let lk = k.to_lower()
+        if lk.starts_with("x-ms-meta-") || lk == "if-match" || lk == "if-none-match" || lk == "x-ms-blob-type" {
+          hs[lk] = v
+        }
+        if lk.starts_with("x-ms-meta-") {
+          meta[lk[10..lk.len()]] = v
+        }
+      }
+      let name = if req.method == "GET" { "" } else { req.param("name") }
+      let path = if req.method == "GET" { "/c" } else { "/c/${url.path_escape(name)}" }
+      let q = sorted_pairs(req.url.query).map(fn(kv: (Str, Str)) -> Str { "${kv.0}=${kv.1}" }).join("&")
+      let h = sorted_pairs(hs).map(fn(kv: (Str, Str)) -> Str { "${kv.0}=${kv.1}" }).join(" ")
+      f.log.push("REQ ${req.method} ${path} ?${q} ${h} len=${req.body.len()}")
+      let fail = fn(status: Int, code: Str) -> http.Response { http.text(status, "").with_header("x-ms-error-code", code) }
+      let comp = req.url.query.get("comp") ?? ""
+      if req.method == "GET" && comp == "list" {
+        let prefix = req.url.query.get("prefix") ?? ""
+        var body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"c\"><Prefix>${prefix}</Prefix><Blobs>"
+        for k in f.blobs.keys().sort() {
+          if !k.starts_with(prefix) {
+            continue
+          }
+          let b = f.blobs.get(k) ?? continue
+          body = body + "<Blob><Name>${k}</Name><Properties><Last-Modified>${LAST_MOD}</Last-Modified><Etag>${b.etag}</Etag><BlobType>BlockBlob</BlobType></Properties><Metadata>"
+          for (mk, mv) in b.meta {
+            body = body + "<${mk}>${mv}</${mk}>"
+          }
+          body = body + "</Metadata></Blob>"
+        }
+        return http.text(200, body + "</Blobs><NextMarker /></EnumerationResults>").with_header("Content-Type", "application/xml")
+      }
+      if req.method == "PUT" && comp == "metadata" {
+        let b = f.blobs.get(name) ?? return fail(404, "BlobNotFound")
+        if let Some(im) = req.header("If-Match") {
+          if im != b.etag {
+            return fail(412, "ConditionNotMet")
+          }
+        }
+        f.n += 1
+        let etag = "\"0x${f.n}\""
+        f.blobs[name] = FakeBlob{meta: sorted_pairs(meta), etag: etag}
+        return http.text(200, "").with_header("ETag", etag).with_header("Last-Modified", LAST_MOD)
+      }
+      if req.method == "PUT" {
+        if req.header("If-None-Match") == Some("*") && f.blobs.get(name).is_some() {
+          return fail(409, "BlobAlreadyExists")
+        }
+        f.n += 1
+        let etag = "\"0x${f.n}\""
+        f.blobs[name] = FakeBlob{meta: sorted_pairs(meta), etag: etag}
+        return http.text(201, "").with_header("ETag", etag).with_header("Last-Modified", LAST_MOD)
+      }
+      fail(400, "Unexpected")
+    })
+  }
+  net.handle("PUT ${EP}/c/{name}", h)
+  net.handle("GET ${EP}/c", h)
+  st
+}
+
+fn own(p: Str, owner: Str, etag: Str? = None) -> azeventhubs.Ownership {
+  azeventhubs.Ownership{fully_qualified_namespace: NS, event_hub_name: "eh1", consumer_group: "$Default", partition_id: p, owner_id: owner, etag: etag}
+}
+
+fn shown(os: List[azeventhubs.Ownership]) -> List[Str] {
+  os.map(fn(o: azeventhubs.Ownership) -> Str { "${o.partition_id} owner=\"${o.owner_id}\" etag=${o.etag ?? ""} mod=${o.last_modified_time.map(fn(t: Time) -> Int { t.unix() }) ?? 0}" })
+}
+
+test "blob names escape as Go's azblob escapes them" {
+  expect(url.path_escape("${NS}/eh1/$Default/ownership/0")) == "ns1.servicebus.example.test%2Feh1%2F$Default%2Fownership%2F0"
+  expect(partition_of("${NS}/eh1/$Default/checkpoint/12")) == "12"
+}
+
+test "claims, lists and checkpoints send what Go's BlobStore sends and read back what it reads" {
+  let st = serve(os.net)
+  let store = new_blob_store(azblob.new_client_with_no_credential(os.net, os.clock, os.rand, EP), "c")
+  let c1 = store.claim_ownership([own("0", "a"), own("1", "a")])?
+  expect(shown(c1)) == ["0 owner=\"a\" etag=\"0x1\" mod=1793847845", "1 owner=\"a\" etag=\"0x2\" mod=1793847845"]
+  // b takes 0 with its etag; a stale etag for 1 is skipped (412).
+  let c2 = store.claim_ownership([own("0", "b", c1[0].etag), own("1", "b", Some("\"0x99\""))])?
+  expect(shown(c2)) == ["0 owner=\"b\" etag=\"0x3\" mod=1793847845"]
+  // A create of an existing ownership is skipped (409).
+  expect(store.claim_ownership([own("1", "c")])?.len()) == 0
+  expect(shown(store.list_ownership(NS, "eh1", "$Default")?)) == ["0 owner=\"b\" etag=\"0x3\" mod=1793847845", "1 owner=\"a\" etag=\"0x2\" mod=1793847845"]
+  let cp = azeventhubs.Checkpoint{fully_qualified_namespace: NS, event_hub_name: "eh1", consumer_group: "$Default", partition_id: "0", sequence_number: Some(5), offset: Some(704)}
+  store.set_checkpoint(cp)?
+  store.set_checkpoint(cp with {sequence_number: Some(6), offset: Some(832)})?
+  let cps = store.list_checkpoints(NS, "eh1", "$Default")?
+  expect(cps.map(fn(c: azeventhubs.Checkpoint) -> Str { "${c.partition_id} seq=${c.sequence_number ?? -1} off=${c.offset ?? -1}" })) == ["0 seq=6 off=832"]
+  // Go's requests, line for line (the Go program's output).
+  let p = "/c/ns1.servicebus.example.test%2Feh1%2F$Default%2F"
+  expect(st.with_read(fn(f: Fake) -> List[Str] { f.log })) == [
+    "REQ PUT ${p}ownership%2F0 ? if-none-match=* x-ms-blob-type=BlockBlob x-ms-meta-ownerid=a len=0",
+    "REQ PUT ${p}ownership%2F1 ? if-none-match=* x-ms-blob-type=BlockBlob x-ms-meta-ownerid=a len=0",
+    "REQ PUT ${p}ownership%2F0 ?comp=metadata if-match=\"0x1\" x-ms-meta-ownerid=b len=0",
+    "REQ PUT ${p}ownership%2F1 ?comp=metadata if-match=\"0x99\" x-ms-meta-ownerid=b len=0",
+    "REQ PUT ${p}ownership%2F1 ? if-none-match=* x-ms-blob-type=BlockBlob x-ms-meta-ownerid=c len=0",
+    "REQ GET /c ?comp=list&include=metadata&prefix=ns1.servicebus.example.test/eh1/$Default/ownership/&restype=container  len=0",
+    "REQ PUT ${p}checkpoint%2F0 ?comp=metadata x-ms-meta-offset=704 x-ms-meta-sequencenumber=5 len=0",
+    "REQ PUT ${p}checkpoint%2F0 ? x-ms-blob-type=BlockBlob x-ms-meta-offset=704 x-ms-meta-sequencenumber=5 len=0",
+    "REQ PUT ${p}checkpoint%2F0 ?comp=metadata x-ms-meta-offset=832 x-ms-meta-sequencenumber=6 len=0",
+    "REQ GET /c ?comp=list&include=metadata&prefix=ns1.servicebus.example.test/eh1/$Default/checkpoint/&restype=container  len=0",
+  ]
+}
+
+test "a checkpoint blob without its numbers is an error with Go's text; a failed call is returned" {
+  let st = serve(os.net)
+  let store = new_blob_store(azblob.new_client_with_no_credential(os.net, os.clock, os.rand, EP), "c")
+  st.with(fn(var f: Fake) { f.blobs["${NS}/eh1/$Default/checkpoint/3"] = FakeBlob{meta: [("offset", "x1")], etag: "\"0x7\""} })
+  expect(store.list_checkpoints(NS, "eh1", "$Default").err().map(fn(e: azeventhubs.EventHubsErr) -> Str { e.msg })) == Some("sequencenumber is missing from metadata")
+  st.with(fn(var f: Fake) { f.blobs["${NS}/eh1/$Default/checkpoint/3"] = FakeBlob{meta: [("offset", "x1"), ("sequencenumber", "2")], etag: "\"0x7\""} })
+  expect(store.list_checkpoints(NS, "eh1", "$Default").err().map(fn(e: azeventhubs.EventHubsErr) -> Str { e.msg })) == Some("offset could not be parsed as an int64: strconv.ParseInt: parsing \"x1\": invalid syntax")
+  expect(store.list_ownership("", "eh1", "$Default").err().map(fn(e: azeventhubs.EventHubsErr) -> Str { e.msg })) == Some("missing fields for blob prefix")
+  os.net.handle("PUT http://blob2.example.test/c/{name}", fn(req: http.Request) -> http.Response { http.text(403, "").with_header("x-ms-error-code", "AuthorizationFailure") })
+  let denied = new_blob_store(azblob.new_client_with_no_credential(os.net, os.clock, os.rand, "http://blob2.example.test"), "c")
+  expect(denied.claim_ownership([own("0", "a")]).is_err()) == true
+}

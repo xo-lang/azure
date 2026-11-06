@@ -118,7 +118,14 @@ fn metadata_of(resp: http.Response) -> Map[Str, Str] {
 
 /// An HTTP date header as a Time.
 fn http_time(resp: http.Response, name: Str) -> Time? {
-  let v = resp.header(name) ?? return None
+  rfc1123(resp.header(name) ?? return None)
+}
+
+/// An HTTP date (`Thu, 05 Nov 2026 03:04:05 GMT`) as a Time.
+fn rfc1123(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
   time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
 }
 
@@ -162,14 +169,36 @@ pub fn (c: Client) delete_container(container: Str) -> WriteResponse ! azcore.Ca
 }
 
 /// Uploads `data` as a block blob in one request (blockblob.Upload; Go's
-/// UploadBuffer for a buffer within one request).
-pub fn (c: Client) upload_buffer(container: Str, blob: Str, data: Bytes, content_type: Str = "", metadata: Map[Str, Str] = {}) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  var hs = [("x-ms-blob-type", "BlockBlob")] + meta_headers(metadata)
+/// UploadBuffer for a buffer within one request). `if_match` and
+/// `if_none_match` are the access conditions (`*` for any blob; an
+/// unmet one is a 412, or a 409 BlobAlreadyExists for `if_none_match:
+/// "*"`).
+pub fn (c: Client) upload_buffer(container: Str, blob: Str, data: Bytes, content_type: Str = "", metadata: Map[Str, Str] = {}, if_match: Str = "", if_none_match: Str = "") -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = [("x-ms-blob-type", "BlockBlob")] + meta_headers(metadata) + conditions(if_match, if_none_match)
   if content_type != "" {
     hs.push(("x-ms-blob-content-type", content_type))
   }
   let resp = c.call(policy.Request{method: "PUT", url: c.url_for(blob_path(container, blob)), headers: hs, body: data}, [201])?
   Ok(write_response(resp))
+}
+
+/// Replaces a blob's metadata (blob.Client.SetMetadata), only while its
+/// ETag is `if_match` when given (else a 412 ConditionNotMet).
+pub fn (c: Client) set_blob_metadata(container: Str, blob: Str, metadata: Map[Str, Str], if_match: Str = "") -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.call(policy.Request{method: "PUT", url: c.url_for(blob_path(container, blob), [("comp", "metadata")]), headers: meta_headers(metadata) + conditions(if_match, "")}, [200])?
+  Ok(write_response(resp))
+}
+
+/// The If-Match and If-None-Match headers that are set.
+fn conditions(if_match: Str, if_none_match: Str) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  if if_match != "" {
+    hs.push(("If-Match", if_match))
+  }
+  if if_none_match != "" {
+    hs.push(("If-None-Match", if_none_match))
+  }
+  hs
 }
 
 /// A blob's content and properties.
@@ -321,6 +350,7 @@ pub struct BlobItem {
   pub content_type: Str = ""
   pub etag: Str = ""
   pub blob_type: Str = ""
+  pub last_modified: Time? = None
   pub metadata: Map[Str, Str] = {}
 }
 
@@ -336,7 +366,7 @@ pub fn parse_blobs(text: Str) -> ListBlobsFlatPage ! Str {
     bs.children_named("Blob").map(fn(b: xml.Element) -> BlobItem {
       let p = b.child("Properties")
       let f = fn(k: Str) -> Str { p.map(fn(x: xml.Element) -> Str { text_of(x, k) }) ?? "" }
-      BlobItem{name: text_of(b, "Name"), content_length: Int.parse(f("Content-Length")) ?? 0, content_type: f("Content-Type"), etag: f("Etag"), blob_type: f("BlobType"), metadata: meta_of(b)}
+      BlobItem{name: text_of(b, "Name"), content_length: Int.parse(f("Content-Length")) ?? 0, content_type: f("Content-Type"), etag: f("Etag"), blob_type: f("BlobType"), last_modified: rfc1123(f("Last-Modified")), metadata: meta_of(b)}
     })
   }) ?? []
   Ok(ListBlobsFlatPage{blobs: items, prefix: text_of(doc, "Prefix"), next_marker: text_of(doc, "NextMarker")})

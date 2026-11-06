@@ -28,7 +28,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   v1.4.0 (the ProducerClient, EventDataBatch, ConsumerClient,
   PartitionClient and its start positions, the Processor, its load
   balancer and ProcessorPartitionClient, the CheckpointStore interface
-  and the in-memory store of its tests, EventData and
+  and the in-memory store of its tests, the Blob checkpoint store of
+  `checkpoints/blob_store.go`, EventData and
   ReceivedEventData and their AMQP mapping, the connection string
   parser and SAS signer, and the `$management` READ requests of
   `mgmt.go`, hand written over std/amqp; the batch encoding checked
