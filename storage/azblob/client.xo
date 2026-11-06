@@ -1,0 +1,362 @@
+// The Blob service client, as azblob.Client and the parts of
+// container.Client, blob.Client and blockblob.Client it calls (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md), hand written ahead of
+// the generator: containers, whole blob upload and download, block
+// staging with a commit list, and the container and blob list pagers.
+// Requests carry x-ms-version; a blob name is path escaped as azblob
+// escapes it (a slash too).
+
+use std/http
+use std/time
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// The REST API version these calls are written for (azblob v1.6.1's).
+pub const SERVICE_VERSION: Str = "2025-05-05"
+
+/// The scope of a token for Storage.
+pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
+
+/// Sets x-ms-version on every request.
+pub struct VersionPolicy {
+  pub version: Str
+}
+
+fn (p: VersionPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-version", p.version))
+}
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// A client of one storage account's Blob service.
+pub struct Client {
+  /// The service URL (`https://<account>.blob.core.windows.net`, or
+  /// Azurite's `http://127.0.0.1:10000/devstoreaccount1`), with a SAS
+  /// query when the client has no credential.
+  pub url: Str
+  pipeline: runtime.Pipeline
+}
+
+fn new_with(net: Net, clock: Clock, rand: Rand, service_url: Str, auth: List[policy.Policy], opts: ClientOptions) -> Client {
+  let pl = runtime.new_pipeline("azblob", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [VersionPolicy{version: SERVICE_VERSION}], per_retry: auth}, opts.client)
+  Client{url: service_url, pipeline: pl}
+}
+
+/// A client authorized by the account key (azblob.NewClientWithSharedKeyCredential).
+pub fn new_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: exported.SharedKeyCredential, opts: ClientOptions = ClientOptions{}) -> Client {
+  new_with(net, clock, rand, service_url, [exported.shared_key_policy(cred, clock)], opts)
+}
+
+/// A client authorized by Entra ID tokens (azblob.NewClient).
+pub fn new_client(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential, opts: ClientOptions = ClientOptions{}) -> Client {
+  new_with(net, clock, rand, service_url, [runtime.bearer_token_policy(cred, [TOKEN_SCOPE], clock)], opts)
+}
+
+/// A client with no credential: a SAS in `service_url`, or public
+/// access (azblob.NewClientWithNoCredential).
+pub fn new_client_with_no_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, opts: ClientOptions = ClientOptions{}) -> Client {
+  new_with(net, clock, rand, service_url, [], opts)
+}
+
+/// The service URL with `path` appended and `query` added before any
+/// SAS query it holds.
+pub fn (c: Client) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
+  let (base, sas) = match c.url.find("?") {
+    Some(i) => (c.url[0..i], c.url[i + 1..c.url.len()])
+    None => (c.url, "")
+  }
+  var parts = query.map(fn(kv: (Str, Str)) -> Str { "${url.query_escape(kv.0)}=${url.query_escape(kv.1)}" })
+  if sas != "" {
+    parts.push(sas)
+  }
+  let q = if parts.is_empty() { "" } else { "?${parts.join("&")}" }
+  "${base.trim_end_chars("/")}${path}${q}"
+}
+
+fn container_path(container: Str) -> Str {
+  "/${url.path_escape(container)}"
+}
+
+fn blob_path(container: Str, blob: Str) -> Str {
+  "/${url.path_escape(container)}/${url.path_escape(blob)}"
+}
+
+fn (c: Client) call(req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !ok.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+fn meta_headers(metadata: Map[Str, Str]) -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  for k in metadata.keys().sort() {
+    hs.push(("x-ms-meta-${k}", metadata.get(k) ?? ""))
+  }
+  hs
+}
+
+/// `x-ms-meta-*` response headers, prefix removed. The names come back
+/// canonicalized (`Kind`), as Go's azblob returns them; the service
+/// compares metadata names without case.
+fn metadata_of(resp: http.Response) -> Map[Str, Str] {
+  var m: Map[Str, Str] = {}
+  for (k, v) in resp.headers {
+    if k.to_lower().starts_with("x-ms-meta-") {
+      m[k[10..k.len()]] = v
+    }
+  }
+  m
+}
+
+/// An HTTP date header as a Time.
+fn http_time(resp: http.Response, name: Str) -> Time? {
+  let v = resp.header(name) ?? return None
+  time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
+}
+
+fn int_header(resp: http.Response, name: Str) -> Int? {
+  Int.parse(resp.header(name) ?? "")
+}
+
+/// What a write returns (ETag, Last-Modified and request ID).
+pub struct WriteResponse {
+  pub etag: Str = ""
+  pub last_modified: Time? = None
+  pub request_id: Str = ""
+  pub version_id: Str = ""
+}
+
+fn write_response(resp: http.Response) -> WriteResponse {
+  WriteResponse{etag: resp.header("ETag") ?? "", last_modified: http_time(resp, "Last-Modified"), request_id: resp.header("x-ms-request-id") ?? "", version_id: resp.header("x-ms-version-id") ?? ""}
+}
+
+/// Public read access of a new container.
+pub enum PublicAccess {
+  None
+  Blob
+  Container
+}
+
+pub fn (c: Client) create_container(container: Str, metadata: Map[Str, Str] = {}, access: PublicAccess = PublicAccess.None) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = meta_headers(metadata)
+  match access {
+    Blob => hs.push(("x-ms-blob-public-access", "blob"))
+    Container => hs.push(("x-ms-blob-public-access", "container"))
+    None => {}
+  }
+  let resp = c.call(policy.Request{method: "PUT", url: c.url_for(container_path(container), [("restype", "container")]), headers: hs}, [201])?
+  Ok(write_response(resp))
+}
+
+pub fn (c: Client) delete_container(container: Str) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.call(policy.Request{method: "DELETE", url: c.url_for(container_path(container), [("restype", "container")])}, [202])?
+  Ok(write_response(resp))
+}
+
+/// Uploads `data` as a block blob in one request (blockblob.Upload; Go's
+/// UploadBuffer for a buffer within one request).
+pub fn (c: Client) upload_buffer(container: Str, blob: Str, data: Bytes, content_type: Str = "", metadata: Map[Str, Str] = {}) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = [("x-ms-blob-type", "BlockBlob")] + meta_headers(metadata)
+  if content_type != "" {
+    hs.push(("x-ms-blob-content-type", content_type))
+  }
+  let resp = c.call(policy.Request{method: "PUT", url: c.url_for(blob_path(container, blob)), headers: hs, body: data}, [201])?
+  Ok(write_response(resp))
+}
+
+/// A blob's content and properties.
+pub struct DownloadResponse {
+  pub body: Bytes
+  pub content_length: Int = 0
+  pub content_type: Str = ""
+  pub etag: Str = ""
+  pub last_modified: Time? = None
+  pub metadata: Map[Str, Str] = {}
+}
+
+/// The whole blob, or `range` (`bytes=0-9`) of it.
+pub fn (c: Client) download_buffer(container: Str, blob: Str, range: Str = "") -> DownloadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = if range == "" { [] } else { [("x-ms-range", range)] }
+  let resp = c.call(policy.Request{method: "GET", url: c.url_for(blob_path(container, blob)), headers: hs}, [200, 206])?
+  Ok(DownloadResponse{
+    body: resp.body, content_length: int_header(resp, "Content-Length") ?? resp.body.len(),
+    content_type: resp.header("Content-Type") ?? "", etag: resp.header("ETag") ?? "",
+    last_modified: http_time(resp, "Last-Modified"), metadata: metadata_of(resp),
+  })
+}
+
+/// A blob's properties (blob.GetProperties, a HEAD).
+pub struct BlobProperties {
+  pub content_length: Int = 0
+  pub content_type: Str = ""
+  pub etag: Str = ""
+  pub last_modified: Time? = None
+  pub blob_type: Str = ""
+  pub metadata: Map[Str, Str] = {}
+}
+
+pub fn (c: Client) get_blob_properties(container: Str, blob: Str) -> BlobProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.call(policy.Request{method: "HEAD", url: c.url_for(blob_path(container, blob))}, [200])?
+  Ok(BlobProperties{
+    content_length: int_header(resp, "Content-Length") ?? 0, content_type: resp.header("Content-Type") ?? "",
+    etag: resp.header("ETag") ?? "", last_modified: http_time(resp, "Last-Modified"),
+    blob_type: resp.header("x-ms-blob-type") ?? "", metadata: metadata_of(resp),
+  })
+}
+
+pub fn (c: Client) delete_blob(container: Str, blob: Str, if_match: Str = "") -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = if if_match == "" { [] } else { [("If-Match", if_match)] }
+  let resp = c.call(policy.Request{method: "DELETE", url: c.url_for(blob_path(container, blob)), headers: hs}, [202])?
+  Ok(write_response(resp))
+}
+
+/// Uploads one block (blockblob.StageBlock); `block_id` is base64, and
+/// every block of a blob has an ID of the same length.
+pub fn (c: Client) stage_block(container: Str, blob: Str, block_id: Str, data: Bytes) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.call(policy.Request{method: "PUT", url: c.url_for(blob_path(container, blob), [("comp", "block"), ("blockid", block_id)]), body: data}, [201])?
+  Ok(write_response(resp))
+}
+
+/// The `<BlockList>` body naming `ids` as Latest (azblob's choice).
+pub fn block_list_xml(ids: List[Str]) -> Str {
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?><BlockList>${ids.map(fn(id: Str) -> Str { "<Latest>${xml.escape(id)}</Latest>" }).join("")}</BlockList>"
+}
+
+/// Makes the blob the staged or committed blocks `ids`, in order
+/// (blockblob.CommitBlockList).
+pub fn (c: Client) commit_block_list(container: Str, blob: Str, ids: List[Str], content_type: Str = "", metadata: Map[Str, Str] = {}) -> WriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs = [("Content-Type", "application/xml")] + meta_headers(metadata)
+  if content_type != "" {
+    hs.push(("x-ms-blob-content-type", content_type))
+  }
+  let resp = c.call(policy.Request{method: "PUT", url: c.url_for(blob_path(container, blob), [("comp", "blocklist")]), headers: hs, body: block_list_xml(ids).bytes()}, [201])?
+  Ok(write_response(resp))
+}
+
+pub struct Block {
+  pub name: Str
+  pub size: Int
+}
+
+pub struct BlockList {
+  pub committed: List[Block] = []
+  pub uncommitted: List[Block] = []
+}
+
+/// The blob's blocks; `list_type` is committed, uncommitted or all.
+pub fn (c: Client) get_block_list(container: Str, blob: Str, list_type: Str = "all") -> BlockList ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.call(policy.Request{method: "GET", url: c.url_for(blob_path(container, blob), [("comp", "blocklist"), ("blocklisttype", list_type)])}, [200])?
+  parse_block_list(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+fn blocks_of(e: xml.Element?) -> List[Block] {
+  match e {
+    Some(x) => x.children_named("Block").map(fn(b: xml.Element) -> Block {
+      Block{name: b.child("Name").map(fn(n: xml.Element) -> Str { n.text() }) ?? "", size: Int.parse(b.child("Size").map(fn(n: xml.Element) -> Str { n.text() }) ?? "") ?? 0}
+    })
+    None => []
+  }
+}
+
+pub fn parse_block_list(text: Str) -> BlockList ! Str {
+  let doc = xml.parse(text) ?? e => return Err("the block list is not XML: ${e.display()}")
+  Ok(BlockList{committed: blocks_of(doc.child("CommittedBlocks")), uncommitted: blocks_of(doc.child("UncommittedBlocks"))})
+}
+
+fn text_of(e: xml.Element, local: Str) -> Str {
+  e.child(local).map(fn(x: xml.Element) -> Str { x.text() }) ?? ""
+}
+
+fn meta_of(e: xml.Element) -> Map[Str, Str] {
+  var m: Map[Str, Str] = {}
+  if let Some(md) = e.child("Metadata") {
+    for n in md.children {
+      if let xml.Node.Elem(x) = n {
+        m[x.name.local] = x.text()
+      }
+    }
+  }
+  m
+}
+
+pub struct ContainerItem {
+  pub name: Str
+  pub etag: Str = ""
+  pub last_modified: Time? = None
+  pub metadata: Map[Str, Str] = {}
+}
+
+pub struct ListContainersPage {
+  pub containers: List[ContainerItem] = []
+  pub next_marker: Str = ""
+}
+
+pub fn parse_containers(text: Str) -> ListContainersPage ! Str {
+  let doc = xml.parse(text) ?? e => return Err("the container list is not XML: ${e.display()}")
+  let items = doc.child("Containers").map(fn(cs: xml.Element) -> List[ContainerItem] {
+    cs.children_named("Container").map(fn(c: xml.Element) -> ContainerItem {
+      let props = c.child("Properties")
+      ContainerItem{
+        name: text_of(c, "Name"),
+        etag: props.map(fn(p: xml.Element) -> Str { text_of(p, "Etag") }) ?? "",
+        last_modified: props.and_then(fn(p: xml.Element) -> Time? { time.parse(text_of(p, "Last-Modified").replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok() }),
+        metadata: meta_of(c),
+      }
+    })
+  }) ?? []
+  Ok(ListContainersPage{containers: items, next_marker: text_of(doc, "NextMarker")})
+}
+
+pub struct BlobItem {
+  pub name: Str
+  pub content_length: Int = 0
+  pub content_type: Str = ""
+  pub etag: Str = ""
+  pub blob_type: Str = ""
+  pub metadata: Map[Str, Str] = {}
+}
+
+pub struct ListBlobsFlatPage {
+  pub blobs: List[BlobItem] = []
+  pub prefix: Str = ""
+  pub next_marker: Str = ""
+}
+
+pub fn parse_blobs(text: Str) -> ListBlobsFlatPage ! Str {
+  let doc = xml.parse(text) ?? e => return Err("the blob list is not XML: ${e.display()}")
+  let items = doc.child("Blobs").map(fn(bs: xml.Element) -> List[BlobItem] {
+    bs.children_named("Blob").map(fn(b: xml.Element) -> BlobItem {
+      let p = b.child("Properties")
+      let f = fn(k: Str) -> Str { p.map(fn(x: xml.Element) -> Str { text_of(x, k) }) ?? "" }
+      BlobItem{name: text_of(b, "Name"), content_length: Int.parse(f("Content-Length")) ?? 0, content_type: f("Content-Type"), etag: f("Etag"), blob_type: f("BlobType"), metadata: meta_of(b)}
+    })
+  }) ?? []
+  Ok(ListBlobsFlatPage{blobs: items, prefix: text_of(doc, "Prefix"), next_marker: text_of(doc, "NextMarker")})
+}
+
+/// The account's containers, `max_results` a page (0 for the
+/// service's default), with their metadata when `include_metadata`.
+pub fn (c: Client) new_list_containers_pager(prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListContainersPage] {
+  var q = [("comp", "list")]
+  if prefix != "" { q.push(("prefix", prefix)) }
+  if max_results > 0 { q.push(("maxresults", "${max_results}")) }
+  if include_metadata { q.push(("include", "metadata")) }
+  runtime.new_marker_pager(c.pipeline, policy.Request{method: "GET", url: c.url_for("/", q)}, fn(r: http.Response) -> ListContainersPage ! Str { parse_containers(r.body.to_str_lossy()) }, "marker", fn(p: ListContainersPage) -> Str? { Some(p.next_marker) })
+}
+
+/// A container's blobs, flat (azblob.Client.NewListBlobsFlatPager).
+pub fn (c: Client) new_list_blobs_flat_pager(container: Str, prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListBlobsFlatPage] {
+  var q = [("restype", "container"), ("comp", "list")]
+  if prefix != "" { q.push(("prefix", prefix)) }
+  if max_results > 0 { q.push(("maxresults", "${max_results}")) }
+  if include_metadata { q.push(("include", "metadata")) }
+  runtime.new_marker_pager(c.pipeline, policy.Request{method: "GET", url: c.url_for(container_path(container), q)}, fn(r: http.Response) -> ListBlobsFlatPage ! Str { parse_blobs(r.body.to_str_lossy()) }, "marker", fn(p: ListBlobsFlatPage) -> Str? { Some(p.next_marker) })
+}

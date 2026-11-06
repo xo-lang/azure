@@ -1,0 +1,116 @@
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob/exported
+
+const EP: Str = "http://127.0.0.1:10000/devstoreaccount1"
+/// Azurite's public development key; valid nowhere else.
+const DEV_KEY: Str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
+fn client(net: testing.FakeNet, clock: Clock, rand: Rand) -> Client ! Str {
+  Ok(new_client_with_shared_key_credential(net, clock, rand, EP, exported.new_shared_key_credential("devstoreaccount1", DEV_KEY)?))
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn first(seen: Mutex[List[http.Request]]) -> http.Request {
+  seen.with_read(fn(xs: List[http.Request]) -> http.Request { xs[0] })
+}
+
+test "requests carry x-ms-version, a Shared Key signature and azblob's escaping" {
+  let seen = capture(os.net, "PUT ${EP}/photos/my-file.txt", 201, "", [("ETag", "\"0x1\""), ("Last-Modified", "Thu, 05 Nov 2026 03:04:05 GMT")])
+  let c = client(os.net, os.clock, os.rand)?
+  let w = c.upload_buffer("photos", "my-file.txt", b"hi", content_type: "text/plain", metadata: {"project": "xo"})?
+  expect(w.etag) == "\"0x1\""
+  expect(w.last_modified.map(fn(t: Time) -> Int { t.unix() })) == Some(1793847845)
+  let r = first(seen)
+  expect(r.header("x-ms-version")) == Some(SERVICE_VERSION)
+  expect(r.header("x-ms-blob-type")) == Some("BlockBlob")
+  expect(r.header("x-ms-blob-content-type")) == Some("text/plain")
+  expect(r.header("x-ms-meta-project")) == Some("xo")
+  expect((r.header("Authorization") ?? "").starts_with("SharedKey devstoreaccount1:")) == true
+  expect(r.body) == b"hi"
+}
+
+test "stage_block and commit_block_list send the block ID and a Latest list" {
+  let staged = capture(os.net, "PUT ${EP}/c/big.bin", 201)
+  let c = client(os.net, os.clock, os.rand)?
+  c.stage_block("c", "big.bin", "YmxvY2stMDAwMQ==", b"part one")?
+  let r = first(staged)
+  expect(r.url.query.get("comp")) == Some("block")
+  expect(r.url.query.get("blockid")) == Some("YmxvY2stMDAwMQ==")
+  expect(block_list_xml(["YQ==", "Yg=="])) == "<?xml version=\"1.0\" encoding=\"UTF-8\"?><BlockList><Latest>YQ==</Latest><Latest>Yg==</Latest></BlockList>"
+}
+
+test "blob names are path escaped as azblob escapes them, a slash too" {
+  expect(blob_path("photos", "dir/my file ü.txt")) == "/photos/dir%2Fmy%20file%20%C3%BC.txt"
+}
+
+test "a SAS client keeps its SAS after the operation's query" {
+  let c = new_client_with_no_credential(os.net, os.clock, os.rand, "${EP}?sv=2025-05-05&sig=x")
+  expect(c.url_for("/c/b", [("comp", "block"), ("blockid", "a+b=")])) == "${EP}/c/b?comp=block&blockid=a%2Bb%3D&sv=2025-05-05&sig=x"
+  expect(c.url_for("/")) == "${EP}/?sv=2025-05-05&sig=x"
+}
+
+test "the blob list pager decodes pages and follows NextMarker" {
+  os.net.handle("GET ${EP}/photos", fn(req: http.Request) -> http.Response {
+    if req.url.query.get("marker") == Some("m2") {
+      return http.text(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"photos\"><Prefix>d/</Prefix><Blobs><Blob><Name>d/b.txt</Name><Properties><Content-Length>3</Content-Length><Content-Type>text/plain</Content-Type><Etag>0x2</Etag><BlobType>BlockBlob</BlobType></Properties></Blob></Blobs><NextMarker /></EnumerationResults>")
+    }
+    http.text(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"photos\"><Prefix>d/</Prefix><Blobs><Blob><Name>d/a.txt</Name><Properties><Content-Length>12</Content-Length><Content-Type>text/plain</Content-Type><Etag>0x1</Etag><BlobType>BlockBlob</BlobType></Properties><Metadata><project>xo</project></Metadata></Blob></Blobs><NextMarker>m2</NextMarker></EnumerationResults>")
+  })
+  let c = client(os.net, os.clock, os.rand)?
+  var p = c.new_list_blobs_flat_pager("photos", prefix: "d/", include_metadata: true)
+  var names: List[Str] = []
+  var sizes: List[Int] = []
+  var meta = ""
+  while p.more() {
+    let page = p.next_page()?
+    for b in page.blobs {
+      names.push(b.name)
+      sizes.push(b.content_length)
+      meta = meta + (b.metadata.get("project") ?? "")
+    }
+  }
+  expect(names) == ["d/a.txt", "d/b.txt"]
+  expect(sizes) == [12, 3]
+  expect(meta) == "xo"
+  let reqs = os.net.requests()
+  expect(reqs.len()) == 2
+  expect(reqs[0].url.query.get("include")) == Some("metadata")
+  expect(reqs[1].url.query.get("prefix")) == Some("d/")
+}
+
+test "the container list and the block list decode the service's XML" {
+  let page = parse_containers("<?xml version=\"1.0\"?><EnumerationResults ServiceEndpoint=\"x\"><Containers><Container><Name>a</Name><Properties><Last-Modified>Thu, 05 Nov 2026 03:04:05 GMT</Last-Modified><Etag>\"0x9\"</Etag></Properties></Container></Containers><NextMarker/></EnumerationResults>")?
+  expect(page.containers.map(fn(c: ContainerItem) -> Str { c.name })) == ["a"]
+  expect(page.containers[0].etag) == "\"0x9\""
+  expect(page.containers[0].last_modified.is_some()) == true
+  expect(page.next_marker) == ""
+  let bl = parse_block_list("<?xml version=\"1.0\"?><BlockList><CommittedBlocks><Block><Name>YQ==</Name><Size>4</Size></Block></CommittedBlocks><UncommittedBlocks><Block><Name>Yg==</Name><Size>2</Size></Block></UncommittedBlocks></BlockList>")?
+  expect(bl.committed.map(fn(b: Block) -> Str { b.name })) == ["YQ=="]
+  expect(bl.uncommitted.map(fn(b: Block) -> Int { b.size })) == [2]
+}
+
+test "a service error is a ResponseError with the storage error code" {
+  capture(os.net, "GET ${EP}/c/missing.txt", 404, "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.</Message></Error>", [("x-ms-error-code", "BlobNotFound")])
+  let c = client(os.net, os.clock, os.rand)?
+  match c.download_buffer("c", "missing.txt") {
+    Err(azcore.CallErr.Response(e)) => {
+      expect(e.status_code) == 404
+      expect(e.error_code) == "BlobNotFound"
+    }
+    _ => expect(false)
+  }
+}

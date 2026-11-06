@@ -11,7 +11,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
-  (Shared Key, the user delegation credential, and the `sas` package:
+  (the Blob client's container, blob, block and list calls, hand
+  written ahead of the generator; Shared Key, the user delegation
+  credential, and the `sas` package:
   account, service and user delegation SAS; signing vectors captured
   from its code in `storage/azblob/exported/testdata` and
   `storage/azblob/sas/testdata`), and later the other data plane packages. Each ported file names its source in a header comment.

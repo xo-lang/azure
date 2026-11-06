@@ -4,8 +4,10 @@
 // public development account is used; the client's Net reaches only the
 // loopback host. Without `xo test --real` these tests are skipped.
 
+use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob
 use github.com/xo-lang/azure/storage/azblob/exported
 use github.com/xo-lang/azure/storage/azblob/sas
 
@@ -72,4 +74,67 @@ test "Shared Key and SAS round trip against Azurite" uses net, env, clock {
 
   let gone = signed.send(req("DELETE", "${ep}/${CONTAINER}?restype=container"))?
   expect(gone.status) == 202
+}
+
+test "the Blob client against Azurite: containers, blobs, blocks and pagers" uses net, env, clock {
+  let ep = (os.env.get("XO_AZURE_TEST_BLOB") ?? "http://127.0.0.1:20000/devstoreaccount1").trim_end_chars("/")
+  let net = os.net.only(["127.0.0.1", "localhost"])
+  let cred = exported.new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  let c = azblob.new_client_with_shared_key_credential(net, os.clock, os.rand, ep, cred)
+  let ctr = "xo-lang-azure-client-it"
+  c.create_container(ctr, metadata: {"project": "xo"})?
+
+  // a name with a slash, a space and a non-ASCII letter: escaped and signed as azblob does
+  let name = "dir/hello world ü.txt"
+  let w = c.upload_buffer(ctr, name, b"hello from the xo client", content_type: "text/plain", metadata: {"kind": "greeting"})?
+  expect(w.etag != "") == true
+  let d = c.download_buffer(ctr, name)?
+  expect(d.body) == b"hello from the xo client"
+  // header names come back canonicalized, as in Go's azblob (metadata names are case insensitive)
+  expect(d.metadata.get("Kind")) == Some("greeting")
+  expect(c.download_buffer(ctr, name, range: "bytes=0-4")?.body) == b"hello"
+  let props = c.get_blob_properties(ctr, name)?
+  expect(props.content_length) == 24
+  expect(props.content_type) == "text/plain"
+  expect(props.blob_type) == "BlockBlob"
+
+  // three blocks, committed in order
+  let ids = ["YmxvY2stMDAwMQ==", "YmxvY2stMDAwMg==", "YmxvY2stMDAwMw=="]
+  c.stage_block(ctr, "big.bin", ids[0], b"one,")?
+  c.stage_block(ctr, "big.bin", ids[1], b"two,")?
+  c.stage_block(ctr, "big.bin", ids[2], b"three")?
+  let staged = c.get_block_list(ctr, "big.bin", list_type: "uncommitted")?
+  expect(staged.uncommitted.len()) == 3
+  c.commit_block_list(ctr, "big.bin", ids, content_type: "application/octet-stream")?
+  expect(c.download_buffer(ctr, "big.bin")?.body) == b"one,two,three"
+  expect(c.get_block_list(ctr, "big.bin", list_type: "committed")?.committed.map(fn(b: azblob.Block) -> Int { b.size })) == [4, 4, 5]
+
+  // a pager of one blob a page
+  for i in 0..3 {
+    c.upload_buffer(ctr, "page/${i}.txt", "${i}".bytes())?
+  }
+  var p = c.new_list_blobs_flat_pager(ctr, prefix: "page/", max_results: 1, include_metadata: true)
+  var names: List[Str] = []
+  var pages = 0
+  while p.more() {
+    names = names + p.next_page()?.blobs.map(fn(b: azblob.BlobItem) -> Str { b.name })
+    pages += 1
+  }
+  expect(names) == ["page/0.txt", "page/1.txt", "page/2.txt"]
+  expect(pages >= 3) == true
+  var cp = c.new_list_containers_pager(prefix: "xo-lang-azure-client", include_metadata: true)
+  let found = cp.next_page()?.containers
+  expect(found.map(fn(x: azblob.ContainerItem) -> Str { x.name })) == [ctr]
+  // std/http sends header names canonicalized (X-Ms-Meta-Project), so
+  // the service stores `Project`; Go's azblob keeps the caller's case
+  // (xo-issues 16). Metadata names compare without case.
+  expect(found[0].metadata.get("Project")) == Some("xo")
+
+  // errors carry the storage error code
+  match c.download_buffer(ctr, "missing.txt") {
+    Err(azcore.CallErr.Response(e)) => expect(e.error_code) == "BlobNotFound"
+    _ => expect(false)
+  }
+  c.delete_blob(ctr, name)?
+  c.delete_container(ctr)?
 }
