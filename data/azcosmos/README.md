@@ -8,10 +8,20 @@ What it does:
 - `Client` with the master key (`new_client_with_key`), Entra ID tokens
   for the account's scope (`type=aad&ver=1.0&sig=<token>`), or a
   connection string (`AccountEndpoint` and `AccountKey`).
-- The account's regional endpoints: read once from the account on
-  first use, writes to its first write region and reads to the first
-  preferred region it has (`ClientOptions.preferred_regions`), else its
-  first read region.
+- Regional routing and failover as Go's: the account read on first
+  use and every 5 minutes; reads in the order of
+  `ClientOptions.preferred_regions` (names compared without case or
+  spaces), writes to the first write region (or the preferred ones on
+  a multi-write account, with `x-ms-cosmos-allow-tentative-writes`);
+  an endpoint that fails is put last for 5 minutes.
+- Go's Cosmos retry rules: 403 write-forbidden and account-not-found
+  mark the endpoint and retry after a fresh account read; 404
+  read-session-not-available retries on the write region; 503 moves to
+  the next preferred region (writes only on multi-write accounts);
+  408 once and 500, 502, 504 once in region then once in the next
+  region, for reads; a connection that fails retries in region three
+  times, then marks the region and fails over. What the policy gives up
+  on is not retried again by azcore's retry policy; 429 is left to it.
 - Databases: create (with manual or autoscale throughput), read,
   delete, and the query pager.
 - Containers: create (partition key definition, indexing policy,
@@ -56,9 +66,13 @@ Where it differs from Go v1.5.0:
   for a second token.
 - The pipeline sends `x-ms-client-request-id` (decision 0003); Go's
   Cosmos pipeline has no request ID policy.
-- Not ported yet: cross-region failover and Go's Cosmos retry policy
-  (requests use azcore's retry), the partition key range cache and
-  cross partition query execution (ORDER BY, aggregates), ReadMany, the change feed, throughput read and replace
-  (offers), and vector or full text policies.
+- Go reads the account again in the background after a failover or
+  when 5 minutes have passed; here the call that needs it reads it
+  first. The regions each attempt goes to are Go's (the test replays
+  14 failover cases against Go's output).
+- Not ported yet: the partition key range cache and cross partition
+  query execution (ORDER BY, aggregates), ReadMany, the change feed,
+  throughput read and replace (offers), and vector or full text
+  policies.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.

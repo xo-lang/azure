@@ -270,14 +270,25 @@ test "throughput, patch values and partition keys are written as Go writes them"
   expect(new_partition_key_number(1e21).append_string("\\\n").to_json_string()) == "[1e+21,\"\\\\\\n\"]"
 }
 
-test "a connection string needs an endpoint and a key; preferred regions pick the read endpoint" {
+test "a connection string needs an endpoint and a key; preferred regions order the read endpoints" {
   expect(new_client_from_connection_string(os.net, os.clock, os.rand, "AccountEndpoint=${EP}/").err()) == Some("failed parsing connection string due to it not consist of two parts separated by ';'")
   let c = new_client_from_connection_string(os.net, os.clock, os.rand, "accountendpoint=${EP}/;AccountKey=${KEY};")?
   expect(c.endpoint()) == "${EP}/"
-  let locs = [("West US", "https://w.example.test/"), ("East US", "https://e.example.test/")]
-  expect(region_endpoint(locs, ["East US"])) == Some("https://e.example.test/")
-  expect(region_endpoint(locs, ["North"])) == Some("https://w.example.test/")
-  expect(region_endpoint([], [])) == None
+  let acct = json.parse_value("{\"writableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://w.example.test/\"}],\"readableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://w.example.test/\"},{\"name\":\"East US\",\"databaseAccountEndpoint\":\"https://e.example.test:443/\"}]}")?
+  let now = Time.from_unix_millis(0)
+  // Region names compare as Go's regionId: no case, no spaces.
+  expect(new_locations("https://a.example.test/", ["EASTUS"]).update(Some(acct), now).read_endpoints) == ["https://e.example.test:443"]
+  expect(new_locations("https://a.example.test/", ["North"]).update(Some(acct), now).read_endpoints) == ["https://w.example.test"]
+  expect(new_locations("https://a.example.test/", []).read_endpoints) == ["https://a.example.test"]
+  let l = new_locations("https://a.example.test/", ["East US", "West US"]).update(Some(acct), now)
+  expect(l.read_endpoints) == ["https://e.example.test:443", "https://w.example.test"]
+  let (marked, was) = l.mark("https://e.example.test:443", OP_READ, now)
+  expect(was) == false
+  expect(marked.read_endpoints) == ["https://w.example.test", "https://e.example.test:443"]
+  expect(marked.mark("https://e.example.test:443", OP_READ, now + 1m).1) == true
+  // After 5 minutes the mark has expired.
+  expect(marked.update(None, now + 6m).read_endpoints) == ["https://e.example.test:443", "https://w.example.test"]
+  expect(rehost("https://a.example.test:443/dbs/x?y=1", "https://b.example.test")) == "https://b.example.test/dbs/x?y=1"
 }
 
 test "query items are kept as the service wrote them, each one, spacing inside kept" {

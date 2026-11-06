@@ -126,29 +126,28 @@ pub struct ClientOptions {
 pub const PRIORITY_LEVEL_HIGH: Str = "High"
 pub const PRIORITY_LEVEL_LOW: Str = "Low"
 
-/// The account's regional endpoints, read once from the account
-/// (Go's global endpoint manager, without its failover).
-struct Endpoints {
-  write: Str
-  read: Str
-}
-
 /// What every client shares: the account endpoint, the pipeline and the
-/// regional endpoints once known.
+/// regional routing.
 struct Core {
   endpoint: Str
   pipeline: runtime.Pipeline
   rand: Rand
-  preferred_regions: List[Str]
   content_on_write: Bool
   priority_level: Str?
   throughput_bucket: Int?
-  endpoints: Mutex[Endpoints?]
+  gem: Gem
 }
 
+/// Go's two pipelines: the account reads go through one with only the
+/// authorization policy; operations through one with the endpoint
+/// manager's policy per call and the Cosmos retry policy before the
+/// authorization in each try. The authorization policy (and its token
+/// cache) is the same value in both.
 fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy, opts: ClientOptions) -> Core {
-  let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
-  Core{endpoint: endpoint, pipeline: pl, rand: rand, preferred_regions: opts.preferred_regions, content_on_write: opts.enable_content_response_on_write, priority_level: opts.priority_level, throughput_bucket: opts.throughput_bucket, endpoints: Mutex[Endpoints?].new(None)}
+  let internal = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  let gem = new_gem(endpoint, internal, clock, rand, opts.preferred_regions)
+  let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [GemPolicy{gem: gem}], per_retry: [CosmosRetryPolicy{gem: gem}, auth]}, opts.client)
+  Core{endpoint: endpoint, pipeline: pl, rand: rand, content_on_write: opts.enable_content_response_on_write, priority_level: opts.priority_level, throughput_bucket: opts.throughput_bucket, gem: gem}
 }
 
 /// A client with the account's master key.
@@ -217,11 +216,11 @@ fn join_url(base: Str, path: Str) -> Str {
   if path == "" { "${b}/" } else { "${b}/${path}" }
 }
 
-fn (c: Core) request(call: Call, base: Str) -> policy.Request uses rand {
+fn cosmos_request(rand: Rand, call: Call, base: Str) -> policy.Request uses rand {
   var hs = call.headers + [
     ("x-ms-version", API_VERSION),
     ("x-ms-cosmos-sdk-supportedcapabilities", "1"),
-    ("x-ms-activity-id", uuid.v4(c.rand).display()),
+    ("x-ms-activity-id", uuid.v4(rand).display()),
   ]
   if call.content_type != "" {
     hs.push(("Content-Type", call.content_type))
@@ -229,58 +228,18 @@ fn (c: Core) request(call: Call, base: Str) -> policy.Request uses rand {
   policy.Request{method: call.method, url: join_url(base, call.path), headers: hs, body: call.body}
 }
 
-fn region_endpoint(locs: List[(Str, Str)], preferred: List[Str]) -> Str? {
-  for p in preferred {
-    for (name, ep) in locs {
-      if name == p {
-        return Some(ep)
-      }
-    }
-  }
-  locs.first().map(fn(l: (Str, Str)) -> Str { l.1 })
-}
-
-fn locations_of(v: json.Value, key: Str) -> List[(Str, Str)] {
-  let xs = match v.get(key) {
-    Some(json.Value.List(items)) => items
-    _ => []
-  }
-  var out: List[(Str, Str)] = []
-  for x in xs {
-    match (x.get("name"), x.get("databaseAccountEndpoint")) {
-      (Some(json.Value.Str(n)), Some(json.Value.Str(e))) => out.push((n, e))
-      _ => ()
-    }
-  }
-  out
-}
-
-/// The regional endpoints, read from the account on first use.
-fn (c: Core) resolved() -> Endpoints ! azcore.CallErr uses (net.dial, clock, rand) {
-  if let Some(e) = c.endpoints.with_read(fn(e: Endpoints?) -> Endpoints? { e }) {
-    return Ok(e)
-  }
-  let req = c.request(Call{method: "GET", path: ""}, c.endpoint)
-  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
-  if resp.status < 200 || resp.status >= 300 {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
-  }
-  let v = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e.display()))
-  let w = region_endpoint(locations_of(v, "writableLocations"), []) ?? c.endpoint
-  let r = region_endpoint(locations_of(v, "readableLocations"), c.preferred_regions) ?? w
-  let eps = Endpoints{write: w, read: r}
-  c.endpoints.with(fn(var e: Endpoints?) { e = Some(eps) })
-  Ok(eps)
-}
-
 fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  let eps = c.resolved()?
   // Go's header policy adds these to operations, not to the account read.
   var hs = call.headers
   if let Some(p) = call.priority_level ?? c.priority_level { hs.push(("x-ms-cosmos-priority-level", p)) }
   if let Some(b) = call.throughput_bucket ?? c.throughput_bucket { hs.push(("x-ms-cosmos-throughput-bucket", "${b}")) }
-  let req = c.request(call with {headers: hs}, if call.write { eps.write } else { eps.read })
-  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let (_, rtype) = resource_of(call.path)
+  let req = cosmos_request(c.rand, call with {headers: hs}, c.endpoint) with {values: {"cosmos.write": if call.write { "1" } else { "0" }, "cosmos.document": if rtype == "docs" { "1" } else { "0" }}}
+  let resp = match c.pipeline.send(req) {
+    Ok(r) => r
+    Err(policy.SendErr.FinalResponse(r)) => return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, r)))
+    Err(e) => return Err(azcore.CallErr.Send(e))
+  }
   if (resp.status >= 200 && resp.status < 300) || resp.status == 304 {
     return Ok(resp)
   }

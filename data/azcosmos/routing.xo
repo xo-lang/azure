@@ -1,0 +1,505 @@
+// Regional routing and failover, as azcosmos's cosmos_location_cache.go,
+// cosmos_global_endpoint_manager.go, its policy and
+// cosmos_client_retry_policy.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): the account's regions in preference order,
+// endpoints marked unavailable for 5 minutes, the account re-read every
+// 5 minutes or after a failover, and the Cosmos retry rules for 403
+// write-forbidden, 404 session-not-available, 408, 500, 502, 503, 504
+// and connection errors. Unlike Go, the account is re-read in the call
+// that needs it, not in a background task.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+const UNAVAILABLE_FOR: Duration = 5m
+const REFRESH_EVERY: Duration = 5m
+const FORCED_REFRESH_MIN: Duration = 2s
+const MAX_RETRY_COUNT: Int = 120
+const MAX_SERVER_ERROR_RETRIES: Int = 2
+const MAX_SAME_REGION_RETRIES: Int = 3
+const BACKOFF: Duration = 1s
+
+const OP_READ: Int = 1
+const OP_WRITE: Int = 2
+
+/// A region name as Go's regionId compares it: lowercase, no spaces.
+fn canonical_region(name: Str) -> Str {
+  var out = ""
+  for c in name.to_lower().runes() {
+    let r = "${c}"
+    if r != " " && r != "\t" && r != "\n" && r != "\r" {
+      out = out + r
+    }
+  }
+  out
+}
+
+/// `scheme://host[:port]` of a URL, the key Go's endpointKey makes.
+fn endpoint_key(u: Str) -> Str {
+  match http.parse_url(u) {
+    Ok(p) => match p.port {
+      Some(n) => "${p.scheme}://${p.host}:${n}"
+      None => "${p.scheme}://${p.host}"
+    }
+    Err(_) => u.trim_end_chars("/")
+  }
+}
+
+/// `url` with its scheme and host replaced by `endpoint`'s.
+fn rehost(url: Str, endpoint: Str) -> Str {
+  let after = (url.find("://") ?? return url) + 3
+  let rest = url[after..url.len()]
+  let path = match rest.find("/") {
+    Some(i) => rest[i..rest.len()]
+    None => "/"
+  }
+  "${endpoint}${path}"
+}
+
+struct Unavailable {
+  since: Time
+  ops: Int
+}
+
+/// Go's locationCache: what the account said and which endpoints have
+/// failed lately.
+struct Locations {
+  default_endpoint: Str
+  preferred: List[Str]
+  write_locations: List[Str] = []
+  read_locations: List[Str] = []
+  write_by_location: Map[Str, Str] = {}
+  read_by_location: Map[Str, Str] = {}
+  write_endpoints: List[Str]
+  read_endpoints: List[Str]
+  multi_write: Bool = false
+  unavailable: Map[Str, Unavailable] = {}
+}
+
+fn new_locations(default_endpoint: Str, preferred: List[Str]) -> Locations {
+  let d = endpoint_key(default_endpoint)
+  Locations{default_endpoint: d, preferred: preferred.map(canonical_region), write_endpoints: [d], read_endpoints: [d]}
+}
+
+fn (l: Locations) is_unavailable(endpoint: Str, ops: Int, now: Time) -> Bool {
+  match l.unavailable.get(endpoint) {
+    Some(u) => ops != 0 && (ops & u.ops) == ops && now - u.since < UNAVAILABLE_FOR
+    None => false
+  }
+}
+
+/// The endpoints in preference order, unavailable ones last (Go's
+/// getPrefAvailableEndpointsLocked with cross-region retries on).
+fn (l: Locations) preferred_endpoints(by_location: Map[Str, Str], locations: List[Str], ops: Int, fallback: Str, now: Time) -> List[Str] {
+  var out: List[Str] = []
+  if l.multi_write || (ops & OP_READ) != 0 {
+    var down: List[Str] = []
+    for loc in l.preferred {
+      if let Some(ep) = by_location.get(loc) {
+        if l.is_unavailable(ep, ops, now) { down.push(ep) } else { out.push(ep) }
+      }
+    }
+    out = out + down
+  } else {
+    for loc in locations {
+      if let Some(ep) = by_location.get(loc) {
+        if loc != "" { out.push(ep) }
+      }
+    }
+  }
+  if out.is_empty() { [fallback] } else { out }
+}
+
+/// The account's regions as `(canonical name, endpoint key)`.
+fn regions_of(v: json.Value, key: Str) -> List[(Str, Str)] {
+  let xs = match v.get(key) {
+    Some(json.Value.List(items)) => items
+    _ => []
+  }
+  var out: List[(Str, Str)] = []
+  for x in xs {
+    match (x.get("name"), x.get("databaseAccountEndpoint")) {
+      (Some(json.Value.Str(n)), Some(json.Value.Str(e))) => if n != "" { out.push((canonical_region(n), endpoint_key(e))) }
+      _ => ()
+    }
+  }
+  out
+}
+
+/// Recomputes the endpoint lists, with the account's regions when given
+/// (Go's updateLocked): expired unavailability is dropped first.
+fn (l: Locations) update(account: json.Value?, now: Time) -> Locations {
+  var next = l
+  var keep: Map[Str, Unavailable] = {}
+  for (ep, u) in l.unavailable {
+    if now - u.since <= UNAVAILABLE_FOR { keep[ep] = u }
+  }
+  next = next with {unavailable: keep}
+  if let Some(v) = account {
+    let ws = regions_of(v, "writableLocations")
+    let rs = regions_of(v, "readableLocations")
+    var wb: Map[Str, Str] = {}
+    for (n, e) in ws { wb[n] = e }
+    var rb: Map[Str, Str] = {}
+    for (n, e) in rs { rb[n] = e }
+    let multi = match v.get("enableMultipleWriteLocations") {
+      Some(json.Value.Bool(b)) => b
+      _ => false
+    }
+    next = next with {write_locations: ws.map(fn(r: (Str, Str)) -> Str { r.0 }), read_locations: rs.map(fn(r: (Str, Str)) -> Str { r.0 }), write_by_location: wb, read_by_location: rb, multi_write: multi}
+  }
+  let wf = next.write_locations.first().and_then(fn(loc: Str) -> Str? { next.write_by_location.get(loc) }) ?? next.default_endpoint
+  let wes = next.preferred_endpoints(next.write_by_location, next.write_locations, OP_WRITE, wf, now)
+  let rf = next.read_locations.first().and_then(fn(loc: Str) -> Str? { next.read_by_location.get(loc) }) ?? wes[0]
+  let res = next.preferred_endpoints(next.read_by_location, next.read_locations, OP_READ, rf, now)
+  next with {write_endpoints: wes, read_endpoints: res}
+}
+
+/// The endpoint for try `index` (Go's resolveServiceEndpoint).
+fn (l: Locations) resolve(index: Int, document: Bool, write: Bool, use_write: Bool) -> Str {
+  if (write || use_write) && !(l.multi_write && document) {
+    if !l.write_locations.is_empty() {
+      let i = if index % 2 < l.write_locations.len() - 1 { index % 2 } else { l.write_locations.len() - 1 }
+      return l.write_by_location.get(l.write_locations[i]) ?? l.default_endpoint
+    }
+    return l.default_endpoint
+  }
+  let eps = if write { l.write_endpoints } else { l.read_endpoints }
+  eps[index % eps.len()]
+}
+
+/// Marks `endpoint` unavailable for `op`; whether it already was.
+fn (l: Locations) mark(endpoint: Str, op: Int, now: Time) -> (Locations, Bool) {
+  match l.unavailable.get(endpoint) {
+    Some(u) => {
+      let was = (op & u.ops) == op && now - u.since < UNAVAILABLE_FOR
+      var m = l.unavailable
+      m[endpoint] = Unavailable{since: now, ops: u.ops | op}
+      let next = l with {unavailable: m}
+      if was { (next, true) } else { (next.update(None, now), false) }
+    }
+    None => {
+      var m = l.unavailable
+      m[endpoint] = Unavailable{since: now, ops: op}
+      ((l with {unavailable: m}).update(None, now), false)
+    }
+  }
+}
+
+struct GemState {
+  locations: Locations
+  last_update: Time? = None
+  last_attempt: Time? = None
+  last_forced: Time? = None
+  populated: Bool = false
+  last_err: Str? = None
+}
+
+/// Go's globalEndpointManager: the account read on first use, again
+/// every 5 minutes, and at once after an endpoint is marked unavailable
+/// (then in the call that notices, where Go refreshes in the
+/// background). One refresh runs at a time; others wait for it.
+struct Gem {
+  endpoint: Str
+  pipeline: runtime.Pipeline
+  clock: Clock
+  rand: Rand
+  preferred: List[Str]
+  state: Mutex[GemState]
+}
+
+fn new_gem(endpoint: Str, pipeline: runtime.Pipeline, clock: Clock, rand: Rand, preferred: List[Str]) -> Gem {
+  Gem{endpoint: endpoint, pipeline: pipeline, clock: clock, rand: rand, preferred: preferred, state: Mutex.new(GemState{locations: new_locations(endpoint, preferred)})}
+}
+
+fn (s: GemState) should_refresh(now: Time) -> Bool {
+  let last = match (s.last_update, s.last_attempt) {
+    (Some(u), Some(a)) => if a > u { Some(a) } else { Some(u) }
+    (Some(u), None) => Some(u)
+    (None, a) => a
+  }
+  match last {
+    Some(t) => now - t > REFRESH_EVERY
+    None => true
+  }
+}
+
+/// Reads the account when due (or now, when `force`); the error of the
+/// last read while the account was never read.
+fn (g: Gem) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  // The closure's value is the outcome, so a failed read still records
+  // its attempt and error (a closure's Err would undo them).
+  let outcome = g.state.with(fn(var s: GemState) -> Result[(), azcore.CallErr] uses (net.dial, clock, rand) {
+    let now = g.clock.now()
+    if !force && !s.should_refresh(now) {
+      return match s.last_err {
+        Some(e) => if s.populated { Ok(()) } else { Err(azcore.CallErr.InvalidInput(e)) }
+        None => Ok(())
+      }
+    }
+    let read = g.read_account()
+    s = s with {last_attempt: Some(now)}
+    match read {
+      Ok(v) => {
+        s = s with {locations: s.locations.update(Some(v), now), last_update: Some(now), populated: true, last_err: None}
+        Ok(())
+      }
+      Err(e) => {
+        s = s with {last_err: Some("failed to retrieve account properties: ${e.display()}")}
+        if s.populated { Ok(()) } else { Err(e) }
+      }
+    }
+  })
+  outcome
+}
+
+fn (g: Gem) read_account() -> json.Value ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = cosmos_request(g.rand, Call{method: "GET", path: ""}, g.endpoint)
+  let resp = g.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status < 200 || resp.status >= 300 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  json.parse_value(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e.display()))
+}
+
+fn (g: Gem) locations() -> Locations {
+  g.state.with_read(fn(s: GemState) -> Locations { s.locations })
+}
+
+/// Marks an endpoint unavailable; on a new mark the account is due for a
+/// read (Go's invalidate). Whether it already was unavailable.
+fn (g: Gem) mark(endpoint: Str, op: Int) -> Bool {
+  g.state.with(fn(var s: GemState) -> Bool {
+    let (l, was) = s.locations.mark(endpoint_key(endpoint), op, g.clock.now())
+    s = s with {locations: l}
+    if !was {
+      s = s with {last_update: None, last_attempt: None}
+    }
+    was
+  })
+}
+
+/// Go's globalEndpointManagerPolicy: the account read before the first
+/// call and when due, and the tentative-writes header on a multi-write
+/// account.
+struct GemPolicy {
+  gem: Gem
+}
+
+fn (p: GemPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  match p.gem.update(false) {
+    Ok(_) => ()
+    Err(azcore.CallErr.Send(e)) => return Err(e)
+    Err(e) => return Err(policy.SendErr.Auth(e.display()))
+  }
+  let r = if p.gem.locations().multi_write { req.with_header("x-ms-cosmos-allow-tentative-writes", "true") } else { req }
+  next.send(r)
+}
+
+struct RetryState {
+  use_write: Bool = false
+  retry_count: Int = 0
+  session_retries: Int = 0
+  preferred_index: Int = 0
+  server_error_retries: Int = 0
+  same_region_retries: Int = 0
+  cross_region_done: Bool = false
+  timeout_retry_done: Bool = false
+  from_head: Bool = false
+}
+
+/// Go's clientRetryPolicy, before the authorization policy in each of
+/// azcore's tries: it picks the endpoint of every attempt and retries
+/// the Cosmos failures in place or in another region. A response it
+/// gives up on is final (azcore does not retry it again).
+struct CosmosRetryPolicy {
+  gem: Gem
+}
+
+/// Go's classifyNetworkError: a failed connect was not sent; a timeout
+/// or broken exchange may have been.
+fn network_kind(e: http.ClientErr) -> Int {
+  match e {
+    Connect(_) => 1
+    Timeout | Protocol(_) => 2
+    _ => 0
+  }
+}
+
+fn (p: CosmosRetryPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let write = req.values.get("cosmos.write") == Some("1")
+  let document = req.values.get("cosmos.document") == Some("1")
+  var st = RetryState{}
+  while true {
+    let index = if st.from_head { 0 } else { st.retry_count }
+    st = st with {from_head: false}
+    let endpoint = p.gem.locations().resolve(index, document, write, st.use_write)
+    let attempt = req with {url: rehost(req.url, endpoint)}
+    match next.send(attempt) {
+      Err(policy.SendErr.Http(he)) => {
+        let kind = network_kind(he)
+        if kind == 0 {
+          return Err(policy.SendErr.Http(he))
+        }
+        let (retry, next_st) = p.on_network_error(kind, write, endpoint, st)
+        if !retry {
+          return Err(policy.SendErr.Final(he))
+        }
+        st = next_st
+      }
+      Err(e) => return Err(e)
+      Ok(resp) => {
+        let sub = resp.header("x-ms-substatus") ?? ""
+        if !should_retry_status(resp.status, sub) {
+          return Ok(resp)
+        }
+        st = st with {use_write: false}
+        var advance = true
+        var retry = false
+        if resp.status == 403 {
+          let (r, s2) = p.on_endpoint_failure(write, endpoint, st)
+          retry = r
+          st = s2
+        } else if resp.status == 404 {
+          let (r, s2) = p.on_session_unavailable(write, st)
+          retry = r
+          st = s2
+        } else if resp.status == 503 {
+          let (r, s2) = p.on_service_unavailable(write, st)
+          retry = r
+          st = s2
+        } else if resp.status == 408 {
+          let (r, s2) = p.on_request_timeout(write, st)
+          retry = r
+          st = s2
+        } else {
+          let (r, in_region, s2) = p.on_server_error(write, st)
+          retry = r
+          st = s2
+          advance = !in_region
+        }
+        if !retry {
+          return Err(policy.SendErr.FinalResponse(resp))
+        }
+        if advance {
+          st = st with {retry_count: st.retry_count + 1}
+        }
+        st = st with {same_region_retries: 0}
+      }
+    }
+  }
+  Err(policy.SendErr.Auth("unreachable"))
+}
+
+fn should_retry_status(status: Int, sub: Str) -> Bool {
+  (status == 403 && (sub == "3" || sub == "1008")) || (status == 404 && sub == "1002") || status == 503 || status == 408 || status == 500 || status == 502 || status == 504
+}
+
+fn (p: CosmosRetryPolicy) on_network_error(kind: Int, write: Bool, endpoint: Str, st: RetryState) -> (Bool, RetryState) {
+  if st.retry_count > MAX_RETRY_COUNT {
+    return (false, st)
+  }
+  if !st.cross_region_done && st.same_region_retries < MAX_SAME_REGION_RETRIES && (!write || kind == 1) {
+    p.gem.clock.sleep(BACKOFF)
+    return (true, st with {same_region_retries: st.same_region_retries + 1})
+  }
+  if st.cross_region_done {
+    return (false, st)
+  }
+  let multi = p.gem.locations().multi_write
+  let can_cross_write = !write || multi
+  if write && (kind != 1 || !can_cross_write) {
+    if kind == 1 {
+      p.gem.mark(endpoint, OP_READ)
+      if can_cross_write { p.gem.mark(endpoint, OP_WRITE) }
+    }
+    return (false, st)
+  }
+  var next = st
+  if kind == 1 {
+    p.gem.mark(endpoint, OP_READ)
+    if write { p.gem.mark(endpoint, OP_WRITE) }
+    next = next with {from_head: true}
+  } else {
+    next = next with {retry_count: next.retry_count + 1}
+  }
+  p.gem.clock.sleep(BACKOFF)
+  (true, next with {same_region_retries: 0, cross_region_done: true})
+}
+
+fn (p: CosmosRetryPolicy) on_endpoint_failure(write: Bool, endpoint: Str, st: RetryState) -> (Bool, RetryState) {
+  if st.retry_count > MAX_RETRY_COUNT {
+    return (false, st)
+  }
+  let was = p.gem.mark(endpoint, if write { OP_WRITE } else { OP_READ })
+  let now = p.gem.clock.now()
+  // Checked and claimed in one step, so one caller forces the read.
+  let force = p.gem.state.with(fn(var s: GemState) -> Bool {
+    let stale = match s.last_forced {
+      Some(t) => now - t >= FORCED_REFRESH_MIN
+      None => true
+    }
+    if !was || stale {
+      s = s with {last_forced: Some(now)}
+      return true
+    }
+    false
+  })
+  if force {
+    // Go refreshes in the background; here before the retry. A failed
+    // read keeps the last regions, as Go's does.
+    p.gem.update(true).ok()
+  }
+  p.gem.clock.sleep(BACKOFF)
+  (true, st with {from_head: true})
+}
+
+fn (p: CosmosRetryPolicy) on_session_unavailable(write: Bool, st: RetryState) -> (Bool, RetryState) {
+  let l = p.gem.locations()
+  if l.multi_write {
+    let n = if write { l.write_locations.len() } else { l.read_locations.len() }
+    if st.session_retries >= n {
+      return (false, st)
+    }
+    return (true, st with {session_retries: st.session_retries + 1})
+  }
+  if st.session_retries > 0 {
+    return (false, st)
+  }
+  (true, st with {use_write: true, session_retries: st.session_retries + 1})
+}
+
+fn (p: CosmosRetryPolicy) on_service_unavailable(write: Bool, st: RetryState) -> (Bool, RetryState) {
+  if st.preferred_index >= p.gem.preferred.len() {
+    return (false, st)
+  }
+  if write && !p.gem.locations().multi_write {
+    return (false, st)
+  }
+  (true, st with {preferred_index: st.preferred_index + 1})
+}
+
+/// (retry, in the same region, state).
+fn (p: CosmosRetryPolicy) on_server_error(write: Bool, st: RetryState) -> (Bool, Bool, RetryState) {
+  if write || st.server_error_retries >= MAX_SERVER_ERROR_RETRIES {
+    return (false, false, st)
+  }
+  if st.server_error_retries == 0 {
+    return (true, true, st with {server_error_retries: 1})
+  }
+  if st.preferred_index >= p.gem.preferred.len() || p.gem.locations().read_endpoints.len() <= 1 {
+    return (false, false, st)
+  }
+  (true, false, st with {server_error_retries: st.server_error_retries + 1, preferred_index: st.preferred_index + 1})
+}
+
+fn (p: CosmosRetryPolicy) on_request_timeout(write: Bool, st: RetryState) -> (Bool, RetryState) {
+  if write || st.timeout_retry_done {
+    return (false, st)
+  }
+  p.gem.clock.sleep(BACKOFF)
+  (true, st with {timeout_retry_done: true})
+}

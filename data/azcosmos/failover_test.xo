@@ -1,0 +1,170 @@
+// Retry and failover across two regions, compared with Go's azcosmos
+// v1.5.0 on the same fake account (failvectors_test.xo): which endpoint
+// each attempt goes to, and what the caller gets.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const FWEST: Str = "acct1-westus.documents.example.test:443"
+const FEAST: Str = "acct1-eastus.documents.example.test:443"
+const ACCT2: Str = "https://acct2.documents.example.test:443"
+
+struct FailFake {
+  log: Mutex[List[Str]]
+  write_east: Atomic[Bool]
+}
+
+fn (f: FailFake) account(host: Str) -> Str {
+  let w = "{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://${FWEST}/\"}"
+  let e = "{\"name\":\"East US\",\"databaseAccountEndpoint\":\"https://${FEAST}/\"}"
+  if host.starts_with("acct2.") {
+    return "{\"id\":\"acct2\",\"writableLocations\":[${e},${w}],\"readableLocations\":[${e},${w}],\"enableMultipleWriteLocations\":true}"
+  }
+  if f.write_east.get() {
+    return "{\"id\":\"acct1\",\"writableLocations\":[${e}],\"readableLocations\":[${w},${e}],\"enableMultipleWriteLocations\":false}"
+  }
+  "{\"id\":\"acct1\",\"writableLocations\":[${w}],\"readableLocations\":[${w},${e}],\"enableMultipleWriteLocations\":false}"
+}
+
+fn (f: FailFake) answer(req: http.Request) -> http.Response {
+  let host = match req.url.port {
+    Some(n) => "${req.url.host}:${n}"
+    None => req.url.host
+  }
+  let p = req.escaped_path()
+  var line = "${req.method} ${host}${p}"
+  if let Some(v) = req.header("x-ms-cosmos-allow-tentative-writes") {
+    line = "${line} tentative=${v}"
+  }
+  f.log.with(fn(var l: List[Str]) { l.push(if p == "/" { "ACCOUNT ${host}" } else { line }) })
+  let pk = req.header("x-ms-documentdb-partitionkey") ?? ""
+  let post_docs = p.ends_with("/docs") && req.method == "POST"
+  var status = 200
+  var sub = ""
+  if p == "/" {
+    return js_resp(200, f.account(host))
+  } else if p.ends_with("/s2") && host == FEAST {
+    status = 503
+  } else if p.ends_with("/s3") && host == FEAST {
+    status = 500
+  } else if p.ends_with("/s4") && host == FEAST {
+    status = 408
+  } else if p.ends_with("/s5") && host == FEAST {
+    status = 404
+    sub = "1002"
+  } else if p.ends_with("/s6") {
+    status = 404
+    sub = "1002"
+  } else if p.ends_with("/s8") {
+    status = 429
+  } else if post_docs && host == FWEST && pk.starts_with("[\"w403\"") {
+    f.write_east.set(true)
+    status = 403
+    sub = "3"
+  } else if post_docs && pk.starts_with("[\"w503\"") {
+    status = 503
+  } else if post_docs {
+    status = 201
+  }
+  let body = if status >= 400 { "{\"code\":\"Err\",\"message\":\"x\"}" } else { "{\"id\":\"i1\"}" }
+  let r = js_resp(status, body)
+  if sub != "" { r.with_header("x-ms-substatus", sub) } else { r }
+}
+
+fn fail_serve(net: testing.FakeNet) -> FailFake {
+  let f = FailFake{log: Mutex[List[Str]].new([]), write_east: Atomic.new(false)}
+  let h = fn(req: http.Request) -> http.Response { f.answer(req) }
+  for base in [EP, ACCT2, "https://${FWEST}", "https://${FEAST}"] {
+    for m in ["GET", "POST"] {
+      for path in ["/", "/{a}/{b}/{c}/{d}/{e}", "/{a}/{b}/{c}/{d}/{e}/{f}"] {
+        net.handle("${m} ${base}${path}", h)
+      }
+    }
+  }
+  net.fail("GET https://${FEAST}/dbs/db1/colls/c1/docs/s7", http.ClientErr.Connect("connection refused"))
+  f
+}
+
+test "retries and failover go where Go's go, and give the caller what Go gives" {
+  let f = fail_serve(os.net)
+  let out = Mutex[List[Str]].new([])
+  let accounts = Atomic.new(0)
+  let flush = fn(name: Str, r: Result[(), azcore.CallErr]) {
+    var add = ["== ${name}"]
+    let lines = f.log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+    for l in lines {
+      if l.starts_with("ACCOUNT ") {
+        accounts.add(1)
+      } else {
+        add.push("  ${l}")
+      }
+    }
+    add.push(match r {
+      Ok(_) => "  ok"
+      Err(azcore.CallErr.Response(e)) => "  error status ${e.status_code}"
+      Err(_) => "  error transport"
+    })
+    out.with(fn(var o: List[Str]) { o = o + add })
+  }
+  let cred = new_key_credential(KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, preferred_regions: ["East US", "West US"]}
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  let ct = c.new_container("db1", "c1")?
+  let pk = new_partition_key_string("a")
+  let read = fn(id: Str) -> Result[(), azcore.CallErr] uses (net.dial, clock, rand) { ct.read_item(pk, id).map(fn(_: ItemResponse) {}) }
+
+  flush("s1 read goes to the first preferred region", read("s1"))
+  flush("s2 503 moves a read to the next preferred region", read("s2"))
+  flush("s3 500 retries in region once, then the next region", read("s3"))
+  flush("s4 408 moves a read once", read("s4"))
+  flush("s5 404/1002 on a single-write account retries on the write endpoint", read("s5"))
+  flush("s6 404/1002 twice fails", read("s6"))
+  // A request failed with FakeNet.fail never reaches the handler, so its
+  // attempts are taken from FakeNet's own request record.
+  let east_s7 = fn() -> Int { os.net.requests().filter(fn(r: http.Request) -> Bool { r.url.host == "acct1-eastus.documents.example.test" && r.escaped_path().ends_with("/s7") }).len() }
+  let before = east_s7()
+  let r7 = read("s7")
+  let failed = east_s7() - before
+  f.log.with(fn(var l: List[Str]) {
+    var east: List[Str] = []
+    for _ in 0..failed { east.push("GET ${FEAST}/dbs/db1/colls/c1/docs/s7") }
+    l = east + l
+  })
+  flush("s7 a dial error retries in region 3 times, then marks it and fails over", r7)
+  flush("s7b the marked region is last for reads now", read("s1"))
+  flush("s8 429 is not the cosmos policy's", read("s8"))
+  let opts3 = opts with {preferred_regions: ["East US"]}
+  let ct3 = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts3).new_container("db1", "c1")?
+  flush("s5b with East alone preferred, the session retry goes to the write region", ct3.read_item(pk, "s5").map(fn(_: ItemResponse) {}))
+  flush("w1 503 on a write to a single-write account fails", ct.create_item(new_partition_key_string("w503"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
+  flush("w2 403/3 marks the write region and retries after the account moved it", ct.create_item(new_partition_key_string("w403"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
+
+  let c2 = new_client_with_key(os.net, os.clock, os.rand, "${ACCT2}/", cred, opts)
+  let ct2 = c2.new_container("db1", "c1")?
+  flush("m1 a multi-write account writes to the preferred region, tentatively", ct2.create_item(pk, "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
+  flush("m2 503 moves a multi-write write to the next region", ct2.create_item(new_partition_key_string("w503"), "{\"id\":\"i1\"}").map(fn(_: ItemResponse) {}))
+
+  expect(out.with_read(fn(o: List[Str]) -> List[Str] { o })) == FAILOVER_OUTPUT
+  expect(accounts.get()) == FAILOVER_ACCOUNT_READS
+}
+
+test "a response the Cosmos policy gives up on is not retried again by azcore's retry policy" {
+  let f = fail_serve(os.net)
+  let cred = new_key_credential(KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: 3}}, preferred_regions: ["East US", "West US"]}
+  let ct = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts).new_container("db1", "c1")?
+  let r = ct.create_item(new_partition_key_string("w503"), "{\"id\":\"i1\"}")
+  expect(r.is_err()) == true
+  let posts = f.log.with_read(fn(l: List[Str]) -> Int { l.filter(fn(x: Str) -> Bool { x.starts_with("POST ") }).len() })
+  // Go returns a NonRetriableError: one try. azcore would retry a 503 three times.
+  expect(posts) == 1
+  // A 429 is azcore's to retry: 1 try and 3 retries.
+  ct.read_item(new_partition_key_string("a"), "s8").is_err()
+  let gets = f.log.with_read(fn(l: List[Str]) -> Int { l.filter(fn(x: Str) -> Bool { x.ends_with("/s8") }).len() })
+  expect(gets) == 4
+}
