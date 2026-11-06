@@ -1,0 +1,316 @@
+// Rules, as admin_client_rules.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). Parameters are written in key order (Go
+// writes a map's, in no set order). Filters and actions of a type this
+// does not know keep their XML; written back, they are well formed
+// (Go's round trip repeats the type attribute).
+
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+/// A SQL filter or action parameter (Go's map[string]any values).
+pub enum SqlParam {
+  Str(v: Str)
+  Bool(v: Bool)
+  Int(v: Int)
+  Float(v: Float)
+  Time(v: Time)
+}
+
+pub struct CorrelationFilter {
+  pub application_properties: Map[Str, SqlParam] = {}
+  pub content_type: Str? = None
+  pub correlation_id: Str? = None
+  pub message_id: Str? = None
+  pub reply_to: Str? = None
+  pub reply_to_session_id: Str? = None
+  pub session_id: Str? = None
+  pub subject: Str? = None
+  pub to: Str? = None
+}
+
+pub enum RuleFilter {
+  /// A SQL92 expression over the message's properties.
+  Sql(expression: Str, parameters: Map[Str, SqlParam])
+  True
+  False
+  Correlation(f: CorrelationFilter)
+  /// A type this client does not know, as `<Filter i:type="...">...</Filter>`.
+  Unknown(type_name: Str, raw_xml: Str)
+}
+
+pub enum RuleAction {
+  Sql(expression: Str, parameters: Map[Str, SqlParam])
+  /// A type this client does not know, as `<Action i:type="...">...</Action>`.
+  Unknown(type_name: Str, raw_xml: Str)
+}
+
+pub struct RuleProperties {
+  /// `$Default` when empty.
+  pub name: Str = ""
+  /// A true filter when None.
+  pub filter: RuleFilter? = None
+  pub action: RuleAction? = None
+}
+
+pub struct CreateRuleResponse {
+  pub rule_properties: RuleProperties
+}
+
+pub struct UpdateRuleResponse {
+  pub rule_properties: RuleProperties
+}
+
+pub struct GetRuleResponse {
+  pub rule_properties: RuleProperties
+}
+
+fn rule_name(r: RuleProperties) -> Str {
+  if r.name == "" { "$Default" } else { r.name }
+}
+
+fn rule_path(topic: Str, subscription: Str, rule: Str) -> Str {
+  "/${topic}/Subscriptions/${subscription}/Rules/${rule}"
+}
+
+const XS_NS: Str = "http://www.w3.org/2001/XMLSchema"
+
+/// The opening of a Filter or Action with its instance type, as Go writes it.
+fn typed_open(name: Str, type_name: Str, extra: Str = "") -> Str {
+  "<${name} xmlns:_XMLSchema-instance=\"${XSI_NS}\" _XMLSchema-instance:type=\"${xml.escape(type_name)}\"${extra}>"
+}
+
+fn param_xml(v: SqlParam) -> (Str, Str) {
+  match v {
+    SqlParam.Str(s) => ("string", s)
+    SqlParam.Bool(b) => ("boolean", if b { "true" } else { "false" })
+    SqlParam.Int(i) => ("int", "${i}")
+    // Go's %f.
+    SqlParam.Float(f) => ("double", f.to_fixed(6))
+    SqlParam.Time(t) => ("dateTime", t.format_rfc3339())
+  }
+}
+
+fn params_xml(name: Str, params: Map[Str, SqlParam]) -> Str {
+  if params.is_empty() {
+    return ""
+  }
+  var out = "<${name}>"
+  for k in params.keys().sort() {
+    let (t, text) = param_xml(params.get(k) ?? SqlParam.Str(""))
+    out = out + "<KeyValueOfstringanyType><Key>${xml.escape(k)}</Key><Value _XMLSchema-instance:type=\"l28:${t}\" xmlns:l28=\"${XS_NS}\">${xml.escape(text)}</Value></KeyValueOfstringanyType>"
+  }
+  out + "</${name}>"
+}
+
+fn filter_xml(f: RuleFilter?) -> Str {
+  match f {
+    None | Some(RuleFilter.True) => typed_open("Filter", "TrueFilter") + "<SqlExpression>1=1</SqlExpression></Filter>"
+    Some(RuleFilter.False) => typed_open("Filter", "FalseFilter") + "<SqlExpression>1=0</SqlExpression></Filter>"
+    Some(RuleFilter.Sql(expression: e, parameters: ps)) => typed_open("Filter", "SqlFilter") + el("SqlExpression", Some(e)) + params_xml("Parameters", ps) + "</Filter>"
+    Some(RuleFilter.Correlation(cf)) => typed_open("Filter", "CorrelationFilter") +
+      el("CorrelationId", cf.correlation_id) + el("MessageId", cf.message_id) + el("To", cf.to) + el("ReplyTo", cf.reply_to) +
+      el("Label", cf.subject) + el("SessionId", cf.session_id) + el("ReplyToSessionId", cf.reply_to_session_id) +
+      el("ContentType", cf.content_type) + params_xml("Properties", cf.application_properties) + "</Filter>"
+    Some(RuleFilter.Unknown(type_name: t, raw_xml: raw)) => unknown_xml("Filter", t, raw)
+  }
+}
+
+fn action_xml(a: RuleAction?) -> Str {
+  match a {
+    None => ""
+    Some(RuleAction.Sql(expression: e, parameters: ps)) => typed_open("Action", "SqlRuleAction") + el("SqlExpression", if e == "" { None } else { Some(e) }) + params_xml("Parameters", ps) + "</Action>"
+    Some(RuleAction.Unknown(type_name: t, raw_xml: raw)) => unknown_xml("Action", t, raw)
+  }
+}
+
+/// An unknown filter or action from its kept XML: the `i:type` in it (or
+/// `type_name` without one), its other attributes, and what is inside.
+fn unknown_xml(name: Str, type_name: Str, raw: Str) -> Str {
+  match xml.parse(raw) {
+    Ok(e) => {
+      var t = type_name
+      var extra = ""
+      let scope = prefixes_of(e, {})
+      for a in e.attrs {
+        if a.name.local == "type" && (a.name.space == XSI_NS || a.name.space == "i") {
+          t = a.value
+        } else if !(a.name.space == "xmlns" && scope.get(a.value) == Some(a.name.local) && a.value == XSI_NS) {
+          extra = extra + " ${attr_name(a.name, scope)}=\"${xml.escape(a.value)}\""
+        }
+      }
+      typed_open(name, t, extra) + inner_xml(e, scope, "") + "</${name}>"
+    }
+    Err(_) => typed_open(name, type_name) + "</${name}>"
+  }
+}
+
+// Writing kept XML again: the prefixes come from the xmlns declarations
+// in scope; names in the default namespace are written bare.
+
+/// `scope` with e's xmlns declarations added, namespace URL to prefix.
+fn prefixes_of(e: xml.Element, scope: Map[Str, Str]) -> Map[Str, Str] {
+  var m = scope
+  for a in e.attrs {
+    if a.name.space == "xmlns" {
+      m[a.value] = a.name.local
+    }
+  }
+  m
+}
+
+fn attr_name(n: xml.Name, scope: Map[Str, Str]) -> Str {
+  if n.space == "" {
+    return n.local
+  }
+  if n.space == "xmlns" {
+    return "xmlns:${n.local}"
+  }
+  match scope.get(n.space) {
+    Some(p) => "${p}:${n.local}"
+    None => "${n.space}:${n.local}"
+  }
+}
+
+fn elem_name(n: xml.Name, scope: Map[Str, Str], default_ns: Str) -> Str {
+  if n.space == "" || n.space == default_ns {
+    return n.local
+  }
+  attr_name(n, scope)
+}
+
+fn inner_xml(e: xml.Element, scope: Map[Str, Str], default_ns: Str) -> Str {
+  var out = ""
+  for n in e.children {
+    match n {
+      xml.Node.Elem(c) => out = out + elem_xml(c, scope, default_ns)
+      xml.Node.Text(s) => out = out + xml.escape(s)
+      _ => {}
+    }
+  }
+  out
+}
+
+fn elem_xml(e: xml.Element, scope: Map[Str, Str], default_ns: Str) -> Str {
+  let inner_scope = prefixes_of(e, scope)
+  var dns = default_ns
+  var attrs = ""
+  for a in e.attrs {
+    if a.name.space == "" && a.name.local == "xmlns" {
+      dns = a.value
+    }
+    attrs = attrs + " ${attr_name(a.name, inner_scope)}=\"${xml.escape(a.value)}\""
+  }
+  let name = elem_name(e.name, inner_scope, dns)
+  "<${name}${attrs}>${inner_xml(e, inner_scope, dns)}</${name}>"
+}
+
+/// Kept XML of an unknown filter or action, as Go's
+/// newUnknownRuleFilterFromFilterDescription: its attributes but the
+/// type, then `i:type`, then what is inside.
+fn unknown_of(e: xml.Element, scope: Map[Str, Str]) -> (Str, Str) {
+  let inner_scope = prefixes_of(e, scope)
+  var t = ""
+  var attrs = ""
+  for a in e.attrs {
+    if a.name.local == "type" && a.name.space == XSI_NS {
+      t = a.value
+    } else {
+      attrs = attrs + " ${attr_name(a.name, inner_scope)}=\"${xml.escape(a.value)}\""
+    }
+  }
+  let name = e.name.local
+  (t, "<${name}${attrs} i:type=\"${xml.escape(t)}\">${inner_xml(e, inner_scope, e.name.space)}</${name}>")
+}
+
+fn params_of(e: xml.Element?) -> Map[Str, SqlParam] ! Str {
+  var m: Map[Str, SqlParam] = {}
+  let list = e ?? return Ok(m)
+  for kv in list.children_named("KeyValueOfstringanyType") {
+    let key = opt_text(kv, "Key") ?? ""
+    let v = kv.child("Value") ?? return Err("parameter ${key} has no value")
+    let full = v.attr("type") ?? ""
+    let parts = full.split(":")
+    let t = if parts.len() == 2 { parts[1] } else { full }
+    let text = v.text()
+    m[key] = match t {
+      "string" => SqlParam.Str(text)
+      "boolean" => match text {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => SqlParam.Bool(true)
+        "0" | "f" | "F" | "false" | "FALSE" | "False" => SqlParam.Bool(false)
+        _ => return Err("strconv.ParseBool: parsing \"${text}\": invalid syntax")
+      }
+      "int" => SqlParam.Int(Int.parse(text) ?? return Err("strconv.ParseInt: parsing \"${text}\": invalid syntax"))
+      "double" => SqlParam.Float(Float.parse(text) ?? return Err("strconv.ParseFloat: parsing \"${text}\": invalid syntax"))
+      "dateTime" => SqlParam.Time(Time.parse_rfc3339(text) ?? return Err("parsing time \"${text}\" as RFC 3339"))
+      _ => return Err("type ${t} of parameter ${key} is not a handled type for SQL parameters")
+    }
+  }
+  Ok(m)
+}
+
+fn rule_of(entry: xml.Element) -> RuleProperties ! Str {
+  let content = entry.child("content") ?? return Err("the entry has no content")
+  let d = content.child("RuleDescription") ?? return Err("the entry has no RuleDescription")
+  let scope = prefixes_of(d, prefixes_of(content, prefixes_of(entry, {})))
+  var props = RuleProperties{name: opt_text(d, "Name") ?? ""}
+  if let Some(f) = d.child("Filter") {
+    props.filter = Some(match f.attr("type") ?? "" {
+      "TrueFilter" => RuleFilter.True
+      "FalseFilter" => RuleFilter.False
+      "CorrelationFilter" => RuleFilter.Correlation(CorrelationFilter{
+        content_type: opt_text(f, "ContentType"), correlation_id: opt_text(f, "CorrelationId"), message_id: opt_text(f, "MessageId"),
+        reply_to: opt_text(f, "ReplyTo"), reply_to_session_id: opt_text(f, "ReplyToSessionId"), session_id: opt_text(f, "SessionId"),
+        subject: opt_text(f, "Label"), to: opt_text(f, "To"), application_properties: params_of(f.child("Properties"))?,
+      })
+      "SqlFilter" => RuleFilter.Sql(expression: opt_text(f, "SqlExpression") ?? "", parameters: params_of(f.child("Parameters"))?)
+      _ => {
+        let (t, raw) = unknown_of(f, scope)
+        RuleFilter.Unknown(type_name: t, raw_xml: raw)
+      }
+    })
+  }
+  if let Some(a) = d.child("Action") {
+    props.action = match a.attr("type") ?? "" {
+      "EmptyRuleAction" => None
+      "SqlRuleAction" => Some(RuleAction.Sql(expression: opt_text(a, "SqlExpression") ?? "", parameters: params_of(a.child("Parameters"))?))
+      _ => {
+        let (t, raw) = unknown_of(a, scope)
+        Some(RuleAction.Unknown(type_name: t, raw_xml: raw))
+      }
+    }
+  }
+  Ok(props)
+}
+
+fn rule_xml(r: RuleProperties) -> Str {
+  "<RuleDescription xmlns=\"${SB_NS}\" xmlns:i=\"${XSI_NS}\">${filter_xml(r.filter)}${action_xml(r.action)}${el("Name", Some(rule_name(r)))}</RuleDescription>"
+}
+
+fn (c: Client) put_rule(topic: Str, subscription: Str, r: RuleProperties, update: Bool) -> RuleProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  // Go puts to the given name, `.../Rules/` for an empty one, while the
+  // body names `$Default`; the path here names the rule the body does.
+  let entry = c.put_entry(rule_path(topic, subscription, rule_name(r)), rule_xml(r), update)?
+  decoded(rule_of(entry))
+}
+
+pub fn (c: Client) create_rule(topic_name: Str, subscription_name: Str, properties: RuleProperties = RuleProperties{}) -> CreateRuleResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(CreateRuleResponse{rule_properties: c.put_rule(topic_name, subscription_name, properties, false)?})
+}
+
+pub fn (c: Client) update_rule(topic_name: Str, subscription_name: Str, properties: RuleProperties) -> UpdateRuleResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(UpdateRuleResponse{rule_properties: c.put_rule(topic_name, subscription_name, properties, true)?})
+}
+
+/// A rule; None when it does not exist.
+pub fn (c: Client) get_rule(topic_name: Str, subscription_name: Str, rule_name: Str) -> GetRuleResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry(rule_path(topic_name, subscription_name, rule_name))? ?? return Ok(None)
+  Ok(Some(GetRuleResponse{rule_properties: decoded(rule_of(entry))?}))
+}
+
+pub fn (c: Client) delete_rule(topic_name: Str, subscription_name: Str, rule_name: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.delete_entry(rule_path(topic_name, subscription_name, rule_name))
+}
+
+pub fn (c: Client) new_list_rules_pager(topic_name: Str, subscription_name: Str, max_page_size: Int = 0) -> EntityPager[RuleProperties] {
+  c.pager("/${topic_name}/Subscriptions/${subscription_name}/Rules/", max_page_size, rule_of)
+}

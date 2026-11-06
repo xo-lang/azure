@@ -1,0 +1,132 @@
+// Topics, as admin_client_topic.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md).
+
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+pub struct TopicProperties {
+  pub max_size_in_megabytes: Int? = None
+  pub requires_duplicate_detection: Bool? = None
+  pub default_message_time_to_live: Str? = None
+  pub duplicate_detection_history_time_window: Str? = None
+  pub enable_batched_operations: Bool? = None
+  pub status: EntityStatus? = None
+  pub auto_delete_on_idle: Str? = None
+  pub enable_partitioning: Bool? = None
+  pub support_ordering: Bool? = None
+  pub user_metadata: Str? = None
+  pub authorization_rules: List[AuthorizationRule] = []
+  pub max_message_size_in_kilobytes: Int? = None
+}
+
+pub struct TopicRuntimeProperties {
+  pub size_in_bytes: Int = 0
+  pub created_at: Time? = None
+  pub updated_at: Time? = None
+  pub accessed_at: Time? = None
+  pub subscription_count: Int = 0
+  pub sql_filter_count: Int = 0
+  pub correlation_filter_count: Int = 0
+  pub scheduled_message_count: Int = 0
+}
+
+pub struct CreateTopicResponse {
+  pub topic_name: Str
+  pub topic_properties: TopicProperties
+}
+
+pub struct UpdateTopicResponse {
+  pub topic_name: Str
+  pub topic_properties: TopicProperties
+}
+
+pub struct GetTopicResponse {
+  pub topic_name: Str
+  pub topic_properties: TopicProperties
+}
+
+pub struct GetTopicRuntimePropertiesResponse {
+  pub topic_name: Str
+  pub topic_runtime_properties: TopicRuntimeProperties
+}
+
+pub struct TopicItem {
+  pub topic_name: Str
+  pub topic_properties: TopicProperties
+}
+
+pub struct TopicRuntimePropertiesItem {
+  pub topic_name: Str
+  pub topic_runtime_properties: TopicRuntimeProperties
+}
+
+fn topic_xml(p: TopicProperties) -> Str {
+  description("TopicDescription",
+    el("DefaultMessageTimeToLive", p.default_message_time_to_live) + el_int("MaxSizeInMegabytes", p.max_size_in_megabytes) +
+    el_bool("RequiresDuplicateDetection", p.requires_duplicate_detection) +
+    el("DuplicateDetectionHistoryTimeWindow", p.duplicate_detection_history_time_window) +
+    el_bool("EnableBatchedOperations", p.enable_batched_operations) + rules_xml(p.authorization_rules) +
+    el("Status", p.status) + el("UserMetadata", p.user_metadata) + el_bool("SupportOrdering", p.support_ordering) +
+    el("AutoDeleteOnIdle", p.auto_delete_on_idle) + el_bool("EnablePartitioning", p.enable_partitioning) +
+    el_int("MaxMessageSizeInKilobytes", p.max_message_size_in_kilobytes))
+}
+
+fn topic_of(entry: xml.Element) -> TopicItem ! Str {
+  let d = description_of(entry, "TopicDescription")?
+  Ok(TopicItem{topic_name: title_of(entry), topic_properties: TopicProperties{
+    max_size_in_megabytes: opt_int(d, "MaxSizeInMegabytes")?, requires_duplicate_detection: opt_bool(d, "RequiresDuplicateDetection")?,
+    default_message_time_to_live: opt_text(d, "DefaultMessageTimeToLive"),
+    duplicate_detection_history_time_window: opt_text(d, "DuplicateDetectionHistoryTimeWindow"),
+    enable_batched_operations: opt_bool(d, "EnableBatchedOperations")?, status: opt_text(d, "Status"),
+    user_metadata: opt_text(d, "UserMetadata"), auto_delete_on_idle: opt_text(d, "AutoDeleteOnIdle"),
+    enable_partitioning: opt_bool(d, "EnablePartitioning")?, support_ordering: opt_bool(d, "SupportOrdering")?,
+    authorization_rules: rules_of(d)?, max_message_size_in_kilobytes: opt_int(d, "MaxMessageSizeInKilobytes")?,
+  }})
+}
+
+fn topic_runtime_of(entry: xml.Element) -> TopicRuntimePropertiesItem ! Str {
+  let d = description_of(entry, "TopicDescription")?
+  let cd = counts_of(d, "topic")?
+  Ok(TopicRuntimePropertiesItem{topic_name: title_of(entry), topic_runtime_properties: TopicRuntimeProperties{
+    size_in_bytes: int_or_zero(d, "SizeInBytes")?, scheduled_message_count: int_or_zero(cd, "ScheduledMessageCount")?,
+    subscription_count: int_or_zero(d, "SubscriptionCount")?, sql_filter_count: int_or_zero(d, "SqlFilterCount")?,
+    correlation_filter_count: int_or_zero(d, "CorrelationFilterCount")?,
+    created_at: entity_time(d, "CreatedAt")?, updated_at: entity_time(d, "UpdatedAt")?, accessed_at: entity_time(d, "AccessedAt")?,
+  }})
+}
+
+fn (c: Client) put_topic(name: Str, p: TopicProperties, update: Bool) -> TopicProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.put_entry("/${name}", topic_xml(p), update)?
+  Ok(decoded(topic_of(entry))?.topic_properties)
+}
+
+pub fn (c: Client) create_topic(topic_name: Str, properties: TopicProperties = TopicProperties{}) -> CreateTopicResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(CreateTopicResponse{topic_name: topic_name, topic_properties: c.put_topic(topic_name, properties, false)?})
+}
+
+pub fn (c: Client) update_topic(topic_name: Str, properties: TopicProperties) -> UpdateTopicResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(UpdateTopicResponse{topic_name: topic_name, topic_properties: c.put_topic(topic_name, properties, true)?})
+}
+
+/// A topic's properties; None when it does not exist.
+pub fn (c: Client) get_topic(topic_name: Str) -> GetTopicResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry("/${topic_name}")? ?? return Ok(None)
+  Ok(Some(GetTopicResponse{topic_name: topic_name, topic_properties: decoded(topic_of(entry))?.topic_properties}))
+}
+
+pub fn (c: Client) get_topic_runtime_properties(topic_name: Str) -> GetTopicRuntimePropertiesResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry("/${topic_name}")? ?? return Ok(None)
+  Ok(Some(GetTopicRuntimePropertiesResponse{topic_name: topic_name, topic_runtime_properties: decoded(topic_runtime_of(entry))?.topic_runtime_properties}))
+}
+
+pub fn (c: Client) delete_topic(topic_name: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.delete_entry("/${topic_name}")
+}
+
+pub fn (c: Client) new_list_topics_pager(max_page_size: Int = 0) -> EntityPager[TopicItem] {
+  c.pager("/$Resources/Topics", max_page_size, topic_of)
+}
+
+pub fn (c: Client) new_list_topics_runtime_properties_pager(max_page_size: Int = 0) -> EntityPager[TopicRuntimePropertiesItem] {
+  c.pager("/$Resources/Topics", max_page_size, topic_runtime_of)
+}

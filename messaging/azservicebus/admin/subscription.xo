@@ -1,0 +1,152 @@
+// Subscriptions, as admin_client_subscription.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). The default rule is written on
+// create and update; Go does not read it back, and neither does this.
+// Status is sent; Go v1.11.0 drops it from the body.
+
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+pub struct SubscriptionProperties {
+  pub lock_duration: Str? = None
+  pub requires_session: Bool? = None
+  pub default_message_time_to_live: Str? = None
+  pub dead_lettering_on_message_expiration: Bool? = None
+  pub enable_dead_lettering_on_filter_evaluation_exceptions: Bool? = None
+  pub max_delivery_count: Int? = None
+  pub status: EntityStatus? = None
+  pub auto_delete_on_idle: Str? = None
+  pub forward_to: Str? = None
+  pub forward_dead_lettered_messages_to: Str? = None
+  pub enable_batched_operations: Bool? = None
+  pub user_metadata: Str? = None
+  /// The rule the subscription starts with (a true filter when None).
+  pub default_rule: RuleProperties? = None
+}
+
+pub struct SubscriptionRuntimeProperties {
+  pub total_message_count: Int = 0
+  pub active_message_count: Int = 0
+  pub dead_letter_message_count: Int = 0
+  pub transfer_message_count: Int = 0
+  pub transfer_dead_letter_message_count: Int = 0
+  pub accessed_at: Time? = None
+  pub created_at: Time? = None
+  pub updated_at: Time? = None
+}
+
+pub struct CreateSubscriptionResponse {
+  pub subscription_name: Str
+  pub topic_name: Str
+  pub subscription_properties: SubscriptionProperties
+}
+
+pub struct UpdateSubscriptionResponse {
+  pub topic_name: Str
+  pub subscription_name: Str
+  pub subscription_properties: SubscriptionProperties
+}
+
+pub struct GetSubscriptionResponse {
+  pub subscription_name: Str
+  pub topic_name: Str
+  pub subscription_properties: SubscriptionProperties
+}
+
+pub struct GetSubscriptionRuntimePropertiesResponse {
+  pub topic_name: Str
+  pub subscription_name: Str
+  pub subscription_runtime_properties: SubscriptionRuntimeProperties
+}
+
+pub struct SubscriptionPropertiesItem {
+  pub topic_name: Str
+  pub subscription_name: Str
+  pub subscription_properties: SubscriptionProperties
+}
+
+pub struct SubscriptionRuntimePropertiesItem {
+  pub topic_name: Str
+  pub subscription_name: Str
+  pub subscription_runtime_properties: SubscriptionRuntimeProperties
+}
+
+fn subscription_path(topic: Str, subscription: Str) -> Str {
+  "/${topic}/Subscriptions/${subscription}"
+}
+
+fn subscription_xml(p: SubscriptionProperties) -> Str {
+  let default_rule = match p.default_rule {
+    Some(r) => "<DefaultRuleDescription>${filter_xml(r.filter)}${action_xml(r.action)}${el("Name", Some(rule_name(r)))}</DefaultRuleDescription>"
+    None => ""
+  }
+  description("SubscriptionDescription",
+    el("LockDuration", p.lock_duration) + el_bool("RequiresSession", p.requires_session) +
+    el("DefaultMessageTimeToLive", p.default_message_time_to_live) +
+    el_bool("DeadLetteringOnMessageExpiration", p.dead_lettering_on_message_expiration) +
+    el_bool("DeadLetteringOnFilterEvaluationExceptions", p.enable_dead_lettering_on_filter_evaluation_exceptions) +
+    default_rule + el_int("MaxDeliveryCount", p.max_delivery_count) + el_bool("EnableBatchedOperations", p.enable_batched_operations) +
+    el("Status", p.status) + el("ForwardTo", p.forward_to) + el("UserMetadata", p.user_metadata) +
+    el("ForwardDeadLetteredMessagesTo", p.forward_dead_lettered_messages_to) + el("AutoDeleteOnIdle", p.auto_delete_on_idle))
+}
+
+fn subscription_of(topic: Str, entry: xml.Element) -> SubscriptionPropertiesItem ! Str {
+  let d = description_of(entry, "SubscriptionDescription")?
+  Ok(SubscriptionPropertiesItem{topic_name: topic, subscription_name: title_of(entry), subscription_properties: SubscriptionProperties{
+    requires_session: opt_bool(d, "RequiresSession")?, dead_lettering_on_message_expiration: opt_bool(d, "DeadLetteringOnMessageExpiration")?,
+    enable_dead_lettering_on_filter_evaluation_exceptions: opt_bool(d, "DeadLetteringOnFilterEvaluationExceptions")?,
+    max_delivery_count: opt_int(d, "MaxDeliveryCount")?, forward_to: opt_text(d, "ForwardTo"),
+    forward_dead_lettered_messages_to: opt_text(d, "ForwardDeadLetteredMessagesTo"), user_metadata: opt_text(d, "UserMetadata"),
+    lock_duration: opt_text(d, "LockDuration"), default_message_time_to_live: opt_text(d, "DefaultMessageTimeToLive"),
+    enable_batched_operations: opt_bool(d, "EnableBatchedOperations")?, status: opt_text(d, "Status"),
+    auto_delete_on_idle: opt_text(d, "AutoDeleteOnIdle"),
+  }})
+}
+
+fn subscription_runtime_of(topic: Str, entry: xml.Element) -> SubscriptionRuntimePropertiesItem ! Str {
+  let d = description_of(entry, "SubscriptionDescription")?
+  let cd = counts_of(d, "subscription")?
+  Ok(SubscriptionRuntimePropertiesItem{topic_name: topic, subscription_name: title_of(entry), subscription_runtime_properties: SubscriptionRuntimeProperties{
+    total_message_count: int_or_zero(d, "MessageCount")?, active_message_count: int_or_zero(cd, "ActiveMessageCount")?,
+    dead_letter_message_count: int_or_zero(cd, "DeadLetterMessageCount")?, transfer_message_count: int_or_zero(cd, "TransferMessageCount")?,
+    transfer_dead_letter_message_count: int_or_zero(cd, "TransferDeadLetterMessageCount")?,
+    created_at: entity_time(d, "CreatedAt")?, updated_at: entity_time(d, "UpdatedAt")?, accessed_at: entity_time(d, "AccessedAt")?,
+  }})
+}
+
+fn (c: Client) put_subscription(topic: Str, name: Str, p: SubscriptionProperties, update: Bool) -> SubscriptionProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.put_entry(subscription_path(topic, name), subscription_xml(p), update, p.forward_to, p.forward_dead_lettered_messages_to)?
+  Ok(decoded(subscription_of(topic, entry))?.subscription_properties)
+}
+
+pub fn (c: Client) create_subscription(topic_name: Str, subscription_name: Str, properties: SubscriptionProperties = SubscriptionProperties{}) -> CreateSubscriptionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(CreateSubscriptionResponse{topic_name: topic_name, subscription_name: subscription_name, subscription_properties: c.put_subscription(topic_name, subscription_name, properties, false)?})
+}
+
+pub fn (c: Client) update_subscription(topic_name: Str, subscription_name: Str, properties: SubscriptionProperties) -> UpdateSubscriptionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(UpdateSubscriptionResponse{topic_name: topic_name, subscription_name: subscription_name, subscription_properties: c.put_subscription(topic_name, subscription_name, properties, true)?})
+}
+
+/// A subscription's properties; None when it does not exist.
+pub fn (c: Client) get_subscription(topic_name: Str, subscription_name: Str) -> GetSubscriptionResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry(subscription_path(topic_name, subscription_name))? ?? return Ok(None)
+  Ok(Some(GetSubscriptionResponse{topic_name: topic_name, subscription_name: subscription_name, subscription_properties: decoded(subscription_of(topic_name, entry))?.subscription_properties}))
+}
+
+pub fn (c: Client) get_subscription_runtime_properties(topic_name: Str, subscription_name: Str) -> GetSubscriptionRuntimePropertiesResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry(subscription_path(topic_name, subscription_name))? ?? return Ok(None)
+  Ok(Some(GetSubscriptionRuntimePropertiesResponse{topic_name: topic_name, subscription_name: subscription_name, subscription_runtime_properties: decoded(subscription_runtime_of(topic_name, entry))?.subscription_runtime_properties}))
+}
+
+pub fn (c: Client) delete_subscription(topic_name: Str, subscription_name: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.delete_entry(subscription_path(topic_name, subscription_name))
+}
+
+/// Pages of a topic's subscriptions. (Go's base path ends in a `?`, so
+/// its requests carry a stray `%3F=` parameter; these do not.)
+pub fn (c: Client) new_list_subscriptions_pager(topic_name: Str, max_page_size: Int = 0) -> EntityPager[SubscriptionPropertiesItem] {
+  c.pager("/${topic_name}/Subscriptions", max_page_size, fn(e: xml.Element) -> SubscriptionPropertiesItem ! Str { subscription_of(topic_name, e) })
+}
+
+pub fn (c: Client) new_list_subscriptions_runtime_properties_pager(topic_name: Str, max_page_size: Int = 0) -> EntityPager[SubscriptionRuntimePropertiesItem] {
+  c.pager("/${topic_name}/Subscriptions", max_page_size, fn(e: xml.Element) -> SubscriptionRuntimePropertiesItem ! Str { subscription_runtime_of(topic_name, e) })
+}

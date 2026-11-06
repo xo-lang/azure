@@ -1,0 +1,179 @@
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/messaging/azservicebus
+
+const NS: Str = "sb1.servicebus.example.test"
+const HOST: Str = "https://sb1.servicebus.example.test"
+const CONN: Str = "Endpoint=sb://sb1.servicebus.example.test/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=aW52ZW50ZWQta2V5"
+
+/// An entry as the service returns one (its shape from Go's testdata).
+const ENTRY: Str = "<entry xmlns=\"http://www.w3.org/2005/Atom\"><id>https://sb1/q1</id><title type=\"text\">q1</title><content type=\"application/xml\"><QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\" xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><LockDuration>PT1M</LockDuration><MaxSizeInMegabytes>1024</MaxSizeInMegabytes><RequiresSession>true</RequiresSession><SizeInBytes>12</SizeInBytes><MessageCount>3</MessageCount><AuthorizationRules><AuthorizationRule i:type=\"SharedAccessAuthorizationRule\"><ClaimType>SharedAccessKey</ClaimType><ClaimValue>None</ClaimValue><Rights><AccessRights>Listen</AccessRights></Rights><KeyName>k1</KeyName><CreatedTime>2026-01-02T03:04:05Z</CreatedTime></AuthorizationRule></AuthorizationRules><Status>Active</Status><CreatedAt>2026-01-02T03:04:05.1234567Z</CreatedAt><UpdatedAt>2026-01-02T03:04:06Z</UpdatedAt><AccessedAt>0001-01-01T00:00:00</AccessedAt><CountDetails xmlns:d2p1=\"http://schemas.microsoft.com/netservices/2011/06/servicebus\"><d2p1:ActiveMessageCount>2</d2p1:ActiveMessageCount><d2p1:DeadLetterMessageCount>1</d2p1:DeadLetterMessageCount></CountDetails></QueueDescription></content></entry>"
+
+fn client(net: testing.FakeNet, clock: Clock, rand: Rand) -> Client ! Str {
+  new_client_from_connection_string(net, clock, rand, CONN)
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "") -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(status, body)
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+/// The `sr=` audience of a SAS Authorization header.
+fn audience(r: http.Request, header: Str = "Authorization") -> Str {
+  let a = r.header(header) ?? ""
+  let start = (a.find("sr=") ?? 0) + 3
+  let rest = a[start..a.len()]
+  rest[0..(rest.find("&") ?? rest.len())]
+}
+
+test "create_queue writes Go's QueueDescription with forward tokens" {
+  let seen = capture(os.net, "PUT ${HOST}/q1", 201, ENTRY)
+  let c = client(os.net, os.clock, os.rand)?
+  let t = Time.parse_rfc3339("2026-01-02T03:04:05Z") ?? return Err("time")
+  let r = c.create_queue("q1", QueueProperties{
+    lock_duration: Some("PT30S"), max_size_in_megabytes: Some(2048), requires_duplicate_detection: Some(true),
+    requires_session: Some(false), default_message_time_to_live: Some("P1D"), dead_lettering_on_message_expiration: Some(true),
+    duplicate_detection_history_time_window: Some("PT10M"), max_delivery_count: Some(5), enable_batched_operations: Some(true),
+    status: Some(ENTITY_STATUS_ACTIVE), auto_delete_on_idle: Some("P10D"), enable_partitioning: Some(false), forward_to: Some("q2"),
+    forward_dead_lettered_messages_to: Some("q3"), user_metadata: Some("a<b&c"),
+    authorization_rules: [AuthorizationRule{access_rights: [ACCESS_RIGHT_LISTEN, ACCESS_RIGHT_SEND], key_name: Some("k1"), created_time: Some(t), primary_key: Some("cA==")}],
+    max_message_size_in_kilobytes: Some(1024),
+  })?
+  expect(r.queue_name) == "q1"
+  expect(r.queue_properties.lock_duration) == Some("PT1M")
+  let req = all(seen)[0]
+  // Go v1.11.0's request body, byte for byte.
+  expect(req.body.to_str_lossy()) == "<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\"><QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\"><LockDuration>PT30S</LockDuration><MaxSizeInMegabytes>2048</MaxSizeInMegabytes><RequiresDuplicateDetection>true</RequiresDuplicateDetection><RequiresSession>false</RequiresSession><DefaultMessageTimeToLive>P1D</DefaultMessageTimeToLive><DeadLetteringOnMessageExpiration>true</DeadLetteringOnMessageExpiration><DuplicateDetectionHistoryTimeWindow>PT10M</DuplicateDetectionHistoryTimeWindow><MaxDeliveryCount>5</MaxDeliveryCount><EnableBatchedOperations>true</EnableBatchedOperations><AuthorizationRules><AuthorizationRule xmlns:_XMLSchema-instance=\"http://www.w3.org/2001/XMLSchema-instance\" _XMLSchema-instance:type=\"SharedAccessAuthorizationRule\"><ClaimType>SharedAccessKey</ClaimType><ClaimValue>None</ClaimValue><Rights><AccessRights>Listen</AccessRights><AccessRights>Send</AccessRights></Rights><KeyName>k1</KeyName><CreatedTime>2026-01-02T03:04:05Z</CreatedTime><PrimaryKey>cA==</PrimaryKey></AuthorizationRule></AuthorizationRules><Status>Active</Status><AutoDeleteOnIdle>P10D</AutoDeleteOnIdle><EnablePartitioning>false</EnablePartitioning><ForwardTo>q2</ForwardTo><ForwardDeadLetteredMessagesTo>q3</ForwardDeadLetteredMessagesTo><UserMetadata>a&lt;b&amp;c</UserMetadata><MaxMessageSizeInKilobytes>1024</MaxMessageSizeInKilobytes></QueueDescription></content></entry>"
+  expect(req.header("Content-Type")) == Some("application/atom+xml;type=entry;charset=utf-8")
+  expect(req.header("If-Match")) == None
+  expect(audience(req)) == "https%3a%2f%2fsb1.servicebus.example.test%2fq1%3fapi-version%3d2024-05"
+  expect(audience(req, "ServiceBusSupplementaryAuthorization")) == "q2"
+  expect(audience(req, "ServiceBusDlqSupplementaryAuthorization")) == "q3"
+  // The signature is the client's own SAS for that URL.
+  let now = os.clock.now().unix()
+  let want = azservicebus.sign_sas("RootManageSharedAccessKey", Secret.new("aW52ZW50ZWQta2V5"), "${HOST}/q1?api-version=2024-05", now + 7200)
+  let got = req.header("Authorization") ?? ""
+  expect(got.starts_with(want[0..(want.find("&se=") ?? 0)])) == true
+}
+
+test "update_queue sends If-Match and an empty AuthorizationRules" {
+  let seen = capture(os.net, "PUT ${HOST}/q1", 200, ENTRY)
+  let c = client(os.net, os.clock, os.rand)?
+  c.update_queue("q1", QueueProperties{lock_duration: Some("PT1M")})?
+  let req = all(seen)[0]
+  expect(req.header("If-Match")) == Some("*")
+  expect(req.body.to_str_lossy()) == "<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\"><QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\"><LockDuration>PT1M</LockDuration><AuthorizationRules></AuthorizationRules></QueueDescription></content></entry>"
+  expect(req.header("ServiceBusSupplementaryAuthorization")) == None
+}
+
+test "get_queue reads the entry; a 404 or the empty feed is None" {
+  let _ = capture(os.net, "GET ${HOST}/q1", 200, ENTRY)
+  let _ = capture(os.net, "GET ${HOST}/gone", 404)
+  let _ = capture(os.net, "GET ${HOST}/empty", 200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">Publicly Listed Services</title></feed>")
+  let c = client(os.net, os.clock, os.rand)?
+  let q = c.get_queue("q1")? ?? return Err("no queue")
+  expect(q.queue_properties.lock_duration) == Some("PT1M")
+  expect(q.queue_properties.max_size_in_megabytes) == Some(1024)
+  expect(q.queue_properties.requires_session) == Some(true)
+  expect(q.queue_properties.requires_duplicate_detection) == None
+  expect(q.queue_properties.status) == Some("Active")
+  expect(q.queue_properties.authorization_rules.len()) == 1
+  expect(q.queue_properties.authorization_rules[0].access_rights) == ["Listen"]
+  expect(q.queue_properties.authorization_rules[0].key_name) == Some("k1")
+  expect(c.get_queue("gone")?.is_none()) == true
+  expect(c.get_queue("empty")?.is_none()) == true
+}
+
+test "get_queue_runtime_properties reads the counts and times" {
+  let _ = capture(os.net, "GET ${HOST}/q1", 200, ENTRY)
+  let c = client(os.net, os.clock, os.rand)?
+  let r = c.get_queue_runtime_properties("q1")? ?? return Err("no queue")
+  let p = r.queue_runtime_properties
+  expect(p.size_in_bytes) == 12
+  expect(p.total_message_count) == 3
+  expect(p.active_message_count) == 2
+  expect(p.dead_letter_message_count) == 1
+  expect(p.scheduled_message_count) == 0
+  expect(p.accessed_at) == None
+  expect(p.updated_at.map(fn(t: Time) -> Int { t.unix() })) == Some(1767323046)
+  expect(p.created_at.map(fn(t: Time) -> Int { t.unix_millis() })) == Some(1767323045123)
+}
+
+test "a 409 is a ResponseError" {
+  let _ = capture(os.net, "PUT ${HOST}/q1", 409, "<Error><Code>409</Code><Detail>exists</Detail></Error>")
+  let c = client(os.net, os.clock, os.rand)?
+  match c.create_queue("q1") {
+    Err(azcore.CallErr.Response(re)) => expect(re.status_code) == 409
+    _ => return Err("want a ResponseError")
+  }
+}
+
+test "the queue pager skips what came before and stops on a short page" {
+  let feed2 = "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">Queues</title>${ENTRY}${ENTRY}</feed>"
+  let seen = Mutex[List[http.Request]].new([])
+  os.net.handle("GET ${HOST}/$Resources/Queues", fn(req: http.Request) -> http.Response {
+    let n = seen.with(fn(var xs: List[http.Request]) -> Int {
+      xs.push(req)
+      xs.len()
+    })
+    if n == 1 { http.text(200, feed2) } else { http.text(200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">Queues</title>${ENTRY}</feed>") }
+  })
+  let c = client(os.net, os.clock, os.rand)?
+  var p = c.new_list_queues_pager(max_page_size: 2)
+  expect(p.more()) == true
+  let a = p.next_page()?
+  expect(a.len()) == 2
+  expect(a[0].queue_name) == "q1"
+  let b = p.next_page()?
+  expect(b.len()) == 1
+  expect(p.more()) == false
+  let reqs = all(seen)
+  expect(reqs.len()) == 2
+  // Go's url.Values.Encode: keys sorted, `$` escaped.
+  expect(audience(reqs[0])) == "https%3a%2f%2fsb1.servicebus.example.test%2f%24resources%2fqueues%3f%2524top%3d2%26api-version%3d2024-05"
+  expect(audience(reqs[1])) == "https%3a%2f%2fsb1.servicebus.example.test%2f%24resources%2fqueues%3f%2524skip%3d2%26%2524top%3d2%26api-version%3d2024-05"
+  var rp = c.new_list_queues_runtime_properties_pager()
+  let rs = rp.next_page()?
+  expect(rs[0].queue_runtime_properties.active_message_count) == 2
+}
+
+test "an empty page ends the pager" {
+  let _ = capture(os.net, "GET ${HOST}/$Resources/Queues", 200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">Queues</title></feed>")
+  let c = client(os.net, os.clock, os.rand)?
+  var p = c.new_list_queues_pager()
+  expect(p.next_page()?.len()) == 0
+  expect(p.more()) == false
+}
+
+test "delete_queue sends DELETE" {
+  let seen = capture(os.net, "DELETE ${HOST}/q1", 200)
+  let c = client(os.net, os.clock, os.rand)?
+  c.delete_queue("q1")?
+  expect(all(seen).len()) == 1
+}
+
+test "a signature from the connection string is sent as it is" {
+  let seen = capture(os.net, "DELETE ${HOST}/q1", 200)
+  let c = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=sb://${NS}/;SharedAccessSignature=SharedAccessSignature sr=x&sig=y&se=1&skn=k")?
+  c.delete_queue("q1")?
+  expect(all(seen)[0].header("Authorization")) == Some("SharedAccessSignature sr=x&sig=y&se=1&skn=k")
+}
+
+test "get_namespace_properties reads NamespaceInfo" {
+  let _ = capture(os.net, "GET ${HOST}/$namespaceinfo", 200, "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">sb1</title><content type=\"application/xml\"><NamespaceInfo xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\"><CreatedTime>2026-01-02T03:04:05Z</CreatedTime><MessagingSKU>Premium</MessagingSKU><MessagingUnits>2</MessagingUnits><ModifiedTime>2026-01-02T03:04:06Z</ModifiedTime><Name>sb1</Name></NamespaceInfo></content></entry>")
+  let c = client(os.net, os.clock, os.rand)?
+  let p = c.get_namespace_properties()?.namespace_properties
+  expect(p.name) == "sb1"
+  expect(p.sku) == "Premium"
+  expect(p.messaging_units) == Some(2)
+  expect(p.created_time.map(fn(t: Time) -> Int { t.unix() })) == Some(1767323045)
+}

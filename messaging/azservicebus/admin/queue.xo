@@ -1,0 +1,170 @@
+// Queues, as admin_client_queue.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). Durations are ISO 8601 strings (`PT1M`), as
+// Go keeps them.
+
+use std/xml
+use github.com/xo-lang/azure/azcore
+
+/// The settable properties of a queue; None leaves the service's default.
+pub struct QueueProperties {
+  /// How long a peek lock holds (ISO 8601, at most 5 minutes; 1 minute by default).
+  pub lock_duration: Str? = None
+  pub max_size_in_megabytes: Int? = None
+  pub requires_duplicate_detection: Bool? = None
+  pub requires_session: Bool? = None
+  pub default_message_time_to_live: Str? = None
+  pub dead_lettering_on_message_expiration: Bool? = None
+  pub duplicate_detection_history_time_window: Str? = None
+  pub max_delivery_count: Int? = None
+  pub enable_batched_operations: Bool? = None
+  pub status: EntityStatus? = None
+  pub auto_delete_on_idle: Str? = None
+  pub enable_partitioning: Bool? = None
+  /// The entity every message is forwarded to.
+  pub forward_to: Str? = None
+  /// The entity dead-lettered messages are forwarded to.
+  pub forward_dead_lettered_messages_to: Str? = None
+  pub user_metadata: Str? = None
+  pub authorization_rules: List[AuthorizationRule] = []
+  pub max_message_size_in_kilobytes: Int? = None
+}
+
+/// A queue's counts and times. A time is None when the service has the
+/// zero time (`0001-01-01T00:00:00`, an entity never accessed).
+pub struct QueueRuntimeProperties {
+  pub size_in_bytes: Int = 0
+  pub created_at: Time? = None
+  pub updated_at: Time? = None
+  pub accessed_at: Time? = None
+  pub total_message_count: Int = 0
+  pub active_message_count: Int = 0
+  pub dead_letter_message_count: Int = 0
+  pub scheduled_message_count: Int = 0
+  pub transfer_dead_letter_message_count: Int = 0
+  pub transfer_message_count: Int = 0
+}
+
+pub struct CreateQueueResponse {
+  pub queue_name: Str
+  pub queue_properties: QueueProperties
+}
+
+pub struct UpdateQueueResponse {
+  pub queue_name: Str
+  pub queue_properties: QueueProperties
+}
+
+pub struct GetQueueResponse {
+  pub queue_name: Str
+  pub queue_properties: QueueProperties
+}
+
+pub struct GetQueueRuntimePropertiesResponse {
+  pub queue_name: Str
+  pub queue_runtime_properties: QueueRuntimeProperties
+}
+
+pub struct QueueItem {
+  pub queue_name: Str
+  pub queue_properties: QueueProperties
+}
+
+pub struct QueueRuntimePropertiesItem {
+  pub queue_name: Str
+  pub queue_runtime_properties: QueueRuntimeProperties
+}
+
+/// The QueueDescription Go writes for `p`.
+fn queue_xml(p: QueueProperties) -> Str {
+  description("QueueDescription",
+    el("LockDuration", p.lock_duration) + el_int("MaxSizeInMegabytes", p.max_size_in_megabytes) +
+    el_bool("RequiresDuplicateDetection", p.requires_duplicate_detection) + el_bool("RequiresSession", p.requires_session) +
+    el("DefaultMessageTimeToLive", p.default_message_time_to_live) +
+    el_bool("DeadLetteringOnMessageExpiration", p.dead_lettering_on_message_expiration) +
+    el("DuplicateDetectionHistoryTimeWindow", p.duplicate_detection_history_time_window) +
+    el_int("MaxDeliveryCount", p.max_delivery_count) + el_bool("EnableBatchedOperations", p.enable_batched_operations) +
+    rules_xml(p.authorization_rules) + el("Status", p.status) + el("AutoDeleteOnIdle", p.auto_delete_on_idle) +
+    el_bool("EnablePartitioning", p.enable_partitioning) + el("ForwardTo", p.forward_to) +
+    el("ForwardDeadLetteredMessagesTo", p.forward_dead_lettered_messages_to) + el("UserMetadata", p.user_metadata) +
+    el_int("MaxMessageSizeInKilobytes", p.max_message_size_in_kilobytes))
+}
+
+fn queue_of(entry: xml.Element) -> QueueItem ! Str {
+  let d = description_of(entry, "QueueDescription")?
+  Ok(QueueItem{queue_name: title_of(entry), queue_properties: QueueProperties{
+    lock_duration: opt_text(d, "LockDuration"), max_size_in_megabytes: opt_int(d, "MaxSizeInMegabytes")?,
+    requires_duplicate_detection: opt_bool(d, "RequiresDuplicateDetection")?, requires_session: opt_bool(d, "RequiresSession")?,
+    default_message_time_to_live: opt_text(d, "DefaultMessageTimeToLive"),
+    dead_lettering_on_message_expiration: opt_bool(d, "DeadLetteringOnMessageExpiration")?,
+    duplicate_detection_history_time_window: opt_text(d, "DuplicateDetectionHistoryTimeWindow"),
+    max_delivery_count: opt_int(d, "MaxDeliveryCount")?, enable_batched_operations: opt_bool(d, "EnableBatchedOperations")?,
+    status: opt_text(d, "Status"), auto_delete_on_idle: opt_text(d, "AutoDeleteOnIdle"),
+    enable_partitioning: opt_bool(d, "EnablePartitioning")?, forward_to: opt_text(d, "ForwardTo"),
+    forward_dead_lettered_messages_to: opt_text(d, "ForwardDeadLetteredMessagesTo"), user_metadata: opt_text(d, "UserMetadata"),
+    authorization_rules: rules_of(d)?, max_message_size_in_kilobytes: opt_int(d, "MaxMessageSizeInKilobytes")?,
+  }})
+}
+
+/// The counts of an entity's CountDetails; an error without one, as Go's
+/// "invalid ... runtime properties: no CountDetails element".
+fn counts_of(d: xml.Element, kind: Str) -> xml.Element ! Str {
+  Ok(d.child("CountDetails") ?? return Err("invalid ${kind} runtime properties: no CountDetails element"))
+}
+
+fn queue_runtime_of(entry: xml.Element) -> QueueRuntimePropertiesItem ! Str {
+  let d = description_of(entry, "QueueDescription")?
+  let cd = counts_of(d, "queue")?
+  Ok(QueueRuntimePropertiesItem{queue_name: title_of(entry), queue_runtime_properties: QueueRuntimeProperties{
+    size_in_bytes: int_or_zero(d, "SizeInBytes")?, total_message_count: int_or_zero(d, "MessageCount")?,
+    active_message_count: int_or_zero(cd, "ActiveMessageCount")?, dead_letter_message_count: int_or_zero(cd, "DeadLetterMessageCount")?,
+    scheduled_message_count: int_or_zero(cd, "ScheduledMessageCount")?,
+    transfer_dead_letter_message_count: int_or_zero(cd, "TransferDeadLetterMessageCount")?,
+    transfer_message_count: int_or_zero(cd, "TransferMessageCount")?,
+    created_at: entity_time(d, "CreatedAt")?, updated_at: entity_time(d, "UpdatedAt")?, accessed_at: entity_time(d, "AccessedAt")?,
+  }})
+}
+
+fn decoded[T](r: Result[T, Str]) -> T ! azcore.CallErr {
+  r ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+fn (c: Client) put_queue(name: Str, p: QueueProperties, update: Bool) -> QueueProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.put_entry("/${name}", queue_xml(p), update, p.forward_to, p.forward_dead_lettered_messages_to)?
+  Ok(decoded(queue_of(entry))?.queue_properties)
+}
+
+/// Creates a queue (`properties` None takes every default).
+pub fn (c: Client) create_queue(queue_name: Str, properties: QueueProperties = QueueProperties{}) -> CreateQueueResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(CreateQueueResponse{queue_name: queue_name, queue_properties: c.put_queue(queue_name, properties, false)?})
+}
+
+/// Replaces a queue's properties (`If-Match: *`).
+pub fn (c: Client) update_queue(queue_name: Str, properties: QueueProperties) -> UpdateQueueResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(UpdateQueueResponse{queue_name: queue_name, queue_properties: c.put_queue(queue_name, properties, true)?})
+}
+
+/// A queue's properties; None when it does not exist.
+pub fn (c: Client) get_queue(queue_name: Str) -> GetQueueResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry("/${queue_name}")? ?? return Ok(None)
+  Ok(Some(GetQueueResponse{queue_name: queue_name, queue_properties: decoded(queue_of(entry))?.queue_properties}))
+}
+
+/// A queue's counts and times; None when it does not exist.
+pub fn (c: Client) get_queue_runtime_properties(queue_name: Str) -> GetQueueRuntimePropertiesResponse? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry("/${queue_name}")? ?? return Ok(None)
+  Ok(Some(GetQueueRuntimePropertiesResponse{queue_name: queue_name, queue_runtime_properties: decoded(queue_runtime_of(entry))?.queue_runtime_properties}))
+}
+
+pub fn (c: Client) delete_queue(queue_name: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.delete_entry("/${queue_name}")
+}
+
+/// Pages of the namespace's queues, `max_page_size` a page (0 for the
+/// service's own).
+pub fn (c: Client) new_list_queues_pager(max_page_size: Int = 0) -> EntityPager[QueueItem] {
+  c.pager("/$Resources/Queues", max_page_size, queue_of)
+}
+
+pub fn (c: Client) new_list_queues_runtime_properties_pager(max_page_size: Int = 0) -> EntityPager[QueueRuntimePropertiesItem] {
+  c.pager("/$Resources/Queues", max_page_size, queue_runtime_of)
+}

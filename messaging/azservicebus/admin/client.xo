@@ -1,0 +1,389 @@
+// The Service Bus administration client, as azservicebus's admin.Client
+// and the Atom entity manager under it (internal/atom: entity_manager.go,
+// per_retry_auth_policy.go, models.go) (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). Entities are Atom entries over HTTPS at
+// `https://<namespace>/<path>?api-version=2024-05`. Each try is
+// authorized with a token for its URL: a SAS signed over the URL, or the
+// credential's JWT as it is (Go sends no `Bearer` prefix). A forward
+// target gets its own token in a supplementary header.
+
+use std/http
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/messaging/azservicebus
+
+pub const VERSION: Str = "v0.1.0"
+
+/// The Atom API version Go v1.11.0 sends.
+pub const API_VERSION: Str = "2024-05"
+
+const ATOM_NS: Str = "http://www.w3.org/2005/Atom"
+const SB_NS: Str = "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"
+const XSI_NS: Str = "http://www.w3.org/2001/XMLSchema-instance"
+const ENTRY_CONTENT_TYPE: Str = "application/atom+xml;type=entry;charset=utf-8"
+/// The title of the empty feed the service returns for a GET of an
+/// entity that does not exist.
+const EMPTY_FEED_TITLE: Str = "Publicly Listed Services"
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// How requests are authorized.
+enum Auth {
+  /// A key: a SAS token per URL, valid for two hours.
+  Key(name: Str, key: Secret[Str])
+  /// A ready signature from the connection string, sent as it is.
+  Signature(sig: Secret[Str])
+  /// Entra ID tokens for `https://servicebus.azure.net//.default`.
+  Credential(c: azcore.TokenCredential)
+}
+
+/// The token for `uri`, as Go's sbauth.TokenProvider.GetToken.
+fn token_for(auth: Auth, clock: Clock, uri: Str) -> Str ! policy.SendErr uses (net.dial, clock, rand) {
+  match auth {
+    Auth.Key(name: n, key: k) => Ok(azservicebus.sign_sas(n, k, uri, clock.now().unix() + 7200))
+    Auth.Signature(sig) => Ok(sig.reveal())
+    Auth.Credential(cred) => {
+      let t = cred.get_token(azcore.TokenRequestOptions{scopes: ["https://servicebus.azure.net//.default"]}) ?? e => return Err(policy.SendErr.Auth(e.display()))
+      Ok(t.token.reveal())
+    }
+  }
+}
+
+/// Sets Authorization to a token for the request's URL on every try
+/// (Go's perRetryAuthPolicy).
+struct AuthPolicy {
+  auth: Auth
+  clock: Clock
+}
+
+fn (p: AuthPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("Authorization", token_for(p.auth, p.clock, req.url)?))
+}
+
+/// A client of one namespace's entities.
+pub struct Client {
+  /// `https://<namespace>/`.
+  pub host: Str
+  auth: Auth
+  clock: Clock
+  pipeline: runtime.Pipeline
+}
+
+fn new_with(net: Net, clock: Clock, rand: Rand, namespace: Str, auth: Auth, opts: ClientOptions) -> Client {
+  let pl = runtime.new_pipeline("azsbadmin", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [AuthPolicy{auth: auth, clock: clock}]}, opts.client)
+  Client{host: "https://${namespace}/", auth: auth, clock: clock, pipeline: pl}
+}
+
+/// A client for the namespace (`<name>.servicebus.windows.net`) with an
+/// Entra ID credential (admin.NewClient).
+pub fn new_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, credential: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client {
+  new_with(net, clock, rand, fully_qualified_namespace, Auth.Credential(credential), options)
+}
+
+/// A client from a connection string with a key or a signature
+/// (admin.NewClientFromConnectionString).
+pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let p = azservicebus.parse_connection_string(connection_string)?
+  let auth = match (p.shared_access_signature, p.shared_access_key_name, p.shared_access_key) {
+    (Some(sig), _, _) => Auth.Signature(sig)
+    (None, Some(n), Some(k)) => Auth.Key(name: n, key: k)
+    _ => return Err("key \"SharedAccessKey\" or \"SharedAccessSignature\" cannot both be empty")
+  }
+  Ok(new_with(net, clock, rand, p.fully_qualified_namespace, auth, options))
+}
+
+/// The URL of `path` with `query` and the API version, keys sorted and
+/// escaped as Go's url.Values.Encode writes them.
+fn (c: Client) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
+  var q = query
+  q.push(("api-version", API_VERSION))
+  let parts = q.sort_by(fn(kv: (Str, Str)) -> Str { kv.0 }).map(fn(kv: (Str, Str)) -> Str { "${url.query_escape(kv.0)}=${url.query_escape(kv.1)}" })
+  "${c.host}${path.trim_start_chars("/")}?${parts.join("&")}"
+}
+
+/// Sends the request; a status of 400 or more is a ResponseError.
+fn (c: Client) execute(req: policy.Request) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status >= 400 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+/// The root element of a response body.
+fn root_of(resp: http.Response) -> xml.Element ! azcore.CallErr {
+  let text = resp.text() ?? return Err(azcore.CallErr.Decode("the response is not UTF-8"))
+  xml.parse(text) ?? e => Err(azcore.CallErr.Decode(e.display()))
+}
+
+/// GETs `path`'s entry; None when the entity does not exist (a 404, or
+/// the empty feed the service returns instead), as Go's mapATOMError.
+fn (c: Client) get_entry(path: Str) -> xml.Element? ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = match c.execute(policy.Request{method: "GET", url: c.url_for(path)}) {
+    Ok(r) => r
+    Err(azcore.CallErr.Response(re)) => if re.status_code == 404 { return Ok(None) } else { return Err(azcore.CallErr.Response(re)) }
+    Err(e) => return Err(e)
+  }
+  let root = root_of(resp)?
+  if root.name.local == "feed" {
+    if title_of(root) == EMPTY_FEED_TITLE {
+      return Ok(None)
+    }
+    return Err(azcore.CallErr.Decode("expected element type <entry> but have <feed>"))
+  }
+  Ok(Some(root))
+}
+
+/// PUTs an entry built around `description` (already XML) and returns the
+/// entry the service sends back. `forward_to` and
+/// `forward_dead_letter_to` get supplementary tokens; `update` sends
+/// `If-Match: *`.
+fn (c: Client) put_entry(path: Str, description: Str, update: Bool, forward_to: Str? = None, forward_dead_letter_to: Str? = None) -> xml.Element ! azcore.CallErr uses (net.dial, clock, rand) {
+  var hs: List[(Str, Str)] = [("Content-Type", ENTRY_CONTENT_TYPE)]
+  if update {
+    hs.push(("If-Match", "*"))
+  }
+  if let Some(f) = forward_to {
+    hs.push(("ServiceBusSupplementaryAuthorization", token_for(c.auth, c.clock, f) ?? e => return Err(azcore.CallErr.Send(e))))
+  }
+  if let Some(f) = forward_dead_letter_to {
+    hs.push(("ServiceBusDlqSupplementaryAuthorization", token_for(c.auth, c.clock, f) ?? e => return Err(azcore.CallErr.Send(e))))
+  }
+  let body = "<entry xmlns=\"${ATOM_NS}\"><content type=\"application/xml\">${description}</content></entry>"
+  let resp = c.execute(policy.Request{method: "PUT", url: c.url_for(path), headers: hs, body: body.bytes()})?
+  root_of(resp)
+}
+
+fn (c: Client) delete_entry(path: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.execute(policy.Request{method: "DELETE", url: c.url_for(path)})?
+  Ok(())
+}
+
+/// GETs one page of a feed: `$top` when `top` > 0, `$skip` when `skip` >
+/// 0, as Go's entityPager.Fetcher.
+fn (c: Client) get_feed(path: Str, top: Int, skip: Int) -> List[xml.Element] ! azcore.CallErr uses (net.dial, clock, rand) {
+  var q: List[(Str, Str)] = []
+  if top > 0 {
+    q.push(("$top", "${top}"))
+  }
+  if skip > 0 {
+    q.push(("$skip", "${skip}"))
+  }
+  let resp = c.execute(policy.Request{method: "GET", url: c.url_for(path, q)})?
+  Ok(root_of(resp)?.children_named("entry"))
+}
+
+/// Pages of a feed, as Go's entityPager: each page skips what came
+/// before; an empty page, or one shorter than the page size, is the last.
+pub struct EntityPager[T] {
+  client: Client
+  path: Str
+  top: Int
+  convert: fn(xml.Element) -> T ! Str
+  skip: Int = 0
+  eof: Bool = false
+}
+
+pub fn (p: EntityPager[T]) more() -> Bool {
+  !p.eof
+}
+
+/// The next page's items; an empty list once there are no more.
+pub fn (var p: EntityPager[T]) next_page() -> List[T] ! azcore.CallErr uses (net.dial, clock, rand) {
+  if p.eof {
+    return Ok([])
+  }
+  let entries = p.client.get_feed(p.path, p.top, p.skip) ?? e => {
+    p.eof = true
+    return Err(e)
+  }
+  if entries.is_empty() || entries.len() < p.top {
+    p.eof = true
+  }
+  p.skip += entries.len()
+  var items: List[T] = []
+  for e in entries {
+    items.push((p.convert)(e) ?? m => return Err(azcore.CallErr.Decode(m)))
+  }
+  Ok(items)
+}
+
+fn (c: Client) pager[T](path: Str, max_page_size: Int, convert: fn(xml.Element) -> T ! Str) -> EntityPager[T] {
+  EntityPager{client: c, path: path, top: max_page_size, convert: convert}
+}
+
+// Writing descriptions, in the order and with the omissions of Go's
+// encoding/xml.
+
+fn el(name: Str, v: Str?) -> Str {
+  match v {
+    Some(s) => "<${name}>${xml.escape(s)}</${name}>"
+    None => ""
+  }
+}
+
+fn el_bool(name: Str, v: Bool?) -> Str {
+  el(name, v.map(fn(b: Bool) -> Str { if b { "true" } else { "false" } }))
+}
+
+fn el_int(name: Str, v: Int?) -> Str {
+  el(name, v.map(fn(i: Int) -> Str { "${i}" }))
+}
+
+fn el_time(name: Str, v: Time?) -> Str {
+  el(name, v.map(fn(t: Time) -> Str { t.format_rfc3339() }))
+}
+
+/// `<name xmlns="...">inner</name>`, a description element.
+fn description(name: Str, inner: Str) -> Str {
+  "<${name} xmlns=\"${SB_NS}\">${inner}</${name}>"
+}
+
+// Reading entries.
+
+fn title_of(e: xml.Element) -> Str {
+  e.child("title").map(fn(t: xml.Element) -> Str { t.text() }) ?? ""
+}
+
+/// The description inside an entry's content (`QueueDescription`, ...).
+fn description_of(entry: xml.Element, name: Str) -> xml.Element ! Str {
+  let content = entry.child("content") ?? return Err("the entry has no content")
+  Ok(content.child(name) ?? return Err("the entry has no ${name}"))
+}
+
+fn opt_text(e: xml.Element, name: Str) -> Str? {
+  e.child(name).map(fn(x: xml.Element) -> Str { x.text() })
+}
+
+/// Go's strconv.ParseBool of the trimmed text.
+fn opt_bool(e: xml.Element, name: Str) -> Bool? ! Str {
+  let s = (opt_text(e, name) ?? return Ok(None)).trim()
+  match s {
+    "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(Some(true))
+    "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(Some(false))
+    _ => Err("strconv.ParseBool: parsing \"${s}\": invalid syntax")
+  }
+}
+
+fn opt_int(e: xml.Element, name: Str) -> Int? ! Str {
+  let s = (opt_text(e, name) ?? return Ok(None)).trim()
+  match Int.parse(s) {
+    Some(i) => Ok(Some(i))
+    None => Err("strconv.ParseInt: parsing \"${s}\": invalid syntax")
+  }
+}
+
+fn int_or_zero(e: xml.Element, name: Str) -> Int ! Str {
+  Ok(opt_int(e, name)? ?? 0)
+}
+
+/// An RFC 3339 time (time.Time's UnmarshalText).
+fn opt_time(e: xml.Element, name: Str) -> Time? ! Str {
+  let s = (opt_text(e, name) ?? return Ok(None)).trim()
+  match Time.parse_rfc3339(s) {
+    Some(t) => Ok(Some(t))
+    None => Err("parsing time \"${s}\" as RFC 3339")
+  }
+}
+
+/// Go's atom.StringToTime: RFC 3339, with `0001-01-01T00:00:00` (an
+/// entity never accessed) as None, Go's zero time.
+fn entity_time(e: xml.Element, name: Str) -> Time? ! Str {
+  let s = opt_text(e, name) ?? ""
+  if s == "0001-01-01T00:00:00" {
+    return Ok(None)
+  }
+  match Time.parse_rfc3339(s) {
+    Some(t) => Ok(Some(t))
+    None => Err("parsing time \"${s}\" as RFC 3339")
+  }
+}
+
+/// The status of an entity.
+pub type EntityStatus = Str
+
+pub const ENTITY_STATUS_ACTIVE: EntityStatus = "Active"
+pub const ENTITY_STATUS_DISABLED: EntityStatus = "Disabled"
+pub const ENTITY_STATUS_SEND_DISABLED: EntityStatus = "SendDisabled"
+pub const ENTITY_STATUS_RECEIVE_DISABLED: EntityStatus = "ReceiveDisabled"
+
+/// A right an authorization rule grants.
+pub type AccessRight = Str
+
+pub const ACCESS_RIGHT_MANAGE: AccessRight = "Manage"
+pub const ACCESS_RIGHT_SEND: AccessRight = "Send"
+pub const ACCESS_RIGHT_LISTEN: AccessRight = "Listen"
+
+/// A shared access authorization rule of an entity.
+pub struct AuthorizationRule {
+  pub access_rights: List[AccessRight] = []
+  pub key_name: Str? = None
+  pub created_time: Time? = None
+  pub modified_time: Time? = None
+  pub primary_key: Str? = None
+  pub secondary_key: Str? = None
+}
+
+/// `<AuthorizationRules>`, written even when empty as Go writes it.
+fn rules_xml(rules: List[AuthorizationRule]) -> Str {
+  var out = "<AuthorizationRules>"
+  for r in rules {
+    // Go's encoding/xml names the instance namespace's prefix from the
+    // URL's last segment, `_` first since it starts with "xml".
+    out = out + "<AuthorizationRule xmlns:_XMLSchema-instance=\"${XSI_NS}\" _XMLSchema-instance:type=\"SharedAccessAuthorizationRule\"><ClaimType>SharedAccessKey</ClaimType><ClaimValue>None</ClaimValue><Rights>"
+    for a in r.access_rights {
+      out = out + el("AccessRights", Some(a))
+    }
+    out = out + "</Rights>" + el("KeyName", r.key_name) + el_time("CreatedTime", r.created_time) + el_time("ModifiedTime", r.modified_time) + el("PrimaryKey", r.primary_key) + el("SecondaryKey", r.secondary_key) + "</AuthorizationRule>"
+  }
+  out + "</AuthorizationRules>"
+}
+
+fn rules_of(d: xml.Element) -> List[AuthorizationRule] ! Str {
+  let rs = d.child("AuthorizationRules") ?? return Ok([])
+  var out: List[AuthorizationRule] = []
+  for r in rs.children_named("AuthorizationRule") {
+    let rights = r.child("Rights").map(fn(x: xml.Element) -> List[AccessRight] { x.children_named("AccessRights").map(fn(a: xml.Element) -> AccessRight { a.text() }) }) ?? []
+    out.push(AuthorizationRule{
+      access_rights: rights, key_name: opt_text(r, "KeyName"),
+      created_time: opt_time(r, "CreatedTime")?, modified_time: opt_time(r, "ModifiedTime")?,
+      primary_key: opt_text(r, "PrimaryKey"), secondary_key: opt_text(r, "SecondaryKey"),
+    })
+  }
+  Ok(out)
+}
+
+/// The namespace's properties.
+pub struct NamespaceProperties {
+  pub created_time: Time? = None
+  pub modified_time: Time? = None
+  pub sku: Str = ""
+  pub messaging_units: Int? = None
+  pub name: Str = ""
+}
+
+pub struct GetNamespacePropertiesResponse {
+  pub namespace_properties: NamespaceProperties
+}
+
+/// The namespace's name, SKU, messaging units and times
+/// (GET `$namespaceinfo`).
+pub fn (c: Client) get_namespace_properties() -> GetNamespacePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let entry = c.get_entry("/$namespaceinfo")? ?? return Err(azcore.CallErr.Decode("the namespace info is empty"))
+  let props = namespace_of(entry) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(GetNamespacePropertiesResponse{namespace_properties: props})
+}
+
+fn namespace_of(entry: xml.Element) -> NamespaceProperties ! Str {
+  let d = description_of(entry, "NamespaceInfo")?
+  Ok(NamespaceProperties{
+    name: opt_text(d, "Name") ?? "", sku: opt_text(d, "MessagingSKU") ?? "",
+    messaging_units: opt_int(d, "MessagingUnits")?,
+    created_time: entity_time(d, "CreatedTime")?, modified_time: entity_time(d, "ModifiedTime")?,
+  })
+}

@@ -1,0 +1,141 @@
+// Topics, subscriptions and rules against the bodies Go v1.11.0 writes
+// for the same calls (captured from its admin client on a local test
+// server).
+
+use std/http
+
+const SB: Str = "xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\""
+const XSI: Str = "xmlns:_XMLSchema-instance=\"http://www.w3.org/2001/XMLSchema-instance\""
+
+fn wrap(inner: Str) -> Str {
+  "<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\">${inner}</content></entry>"
+}
+
+fn kv(k: Str, t: Str, v: Str) -> Str {
+  "<KeyValueOfstringanyType><Key>${k}</Key><Value _XMLSchema-instance:type=\"l28:${t}\" xmlns:l28=\"http://www.w3.org/2001/XMLSchema\">${v}</Value></KeyValueOfstringanyType>"
+}
+
+fn rule_reply(name: Str, filter: Str, action: Str = "<Action i:type=\"EmptyRuleAction\"/>") -> Str {
+  "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">${name}</title><content type=\"application/xml\"><RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\">${filter}${action}<Name>${name}</Name></RuleDescription></content></entry>"
+}
+
+fn body(seen: Mutex[List[http.Request]], i: Int) -> Str {
+  all(seen)[i].body.to_str_lossy()
+}
+
+test "create_topic writes Go's TopicDescription" {
+  let seen = capture(os.net, "PUT ${HOST}/t1", 201, "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">t1</title><content type=\"application/xml\"><TopicDescription ${SB}><SupportOrdering>true</SupportOrdering><SizeInBytes>5</SizeInBytes><SubscriptionCount>2</SubscriptionCount><CreatedAt>2026-01-02T03:04:05Z</CreatedAt><UpdatedAt>2026-01-02T03:04:05Z</UpdatedAt><AccessedAt>0001-01-01T00:00:00</AccessedAt><CountDetails><ScheduledMessageCount>4</ScheduledMessageCount></CountDetails></TopicDescription></content></entry>")
+  let c = client(os.net, os.clock, os.rand)?
+  let r = c.create_topic("t1", TopicProperties{
+    max_size_in_megabytes: Some(1024), requires_duplicate_detection: Some(true), default_message_time_to_live: Some("P1D"),
+    duplicate_detection_history_time_window: Some("PT5M"), enable_batched_operations: Some(true), status: Some(ENTITY_STATUS_ACTIVE),
+    auto_delete_on_idle: Some("P7D"), enable_partitioning: Some(false), support_ordering: Some(true), user_metadata: Some("m"),
+    max_message_size_in_kilobytes: Some(256),
+  })?
+  expect(r.topic_properties.support_ordering) == Some(true)
+  expect(body(seen, 0)) == wrap("<TopicDescription ${SB}><DefaultMessageTimeToLive>P1D</DefaultMessageTimeToLive><MaxSizeInMegabytes>1024</MaxSizeInMegabytes><RequiresDuplicateDetection>true</RequiresDuplicateDetection><DuplicateDetectionHistoryTimeWindow>PT5M</DuplicateDetectionHistoryTimeWindow><EnableBatchedOperations>true</EnableBatchedOperations><AuthorizationRules></AuthorizationRules><Status>Active</Status><UserMetadata>m</UserMetadata><SupportOrdering>true</SupportOrdering><AutoDeleteOnIdle>P7D</AutoDeleteOnIdle><EnablePartitioning>false</EnablePartitioning><MaxMessageSizeInKilobytes>256</MaxMessageSizeInKilobytes></TopicDescription>")
+  let _ = capture(os.net, "GET ${HOST}/t1", 200, "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">t1</title><content type=\"application/xml\"><TopicDescription ${SB}><SizeInBytes>5</SizeInBytes><SubscriptionCount>2</SubscriptionCount><CreatedAt>2026-01-02T03:04:05Z</CreatedAt><UpdatedAt>2026-01-02T03:04:05Z</UpdatedAt><AccessedAt>0001-01-01T00:00:00</AccessedAt><CountDetails><ScheduledMessageCount>4</ScheduledMessageCount></CountDetails></TopicDescription></content></entry>")
+  let rt = c.get_topic_runtime_properties("t1")? ?? return Err("no topic")
+  expect(rt.topic_runtime_properties.size_in_bytes) == 5
+  expect(rt.topic_runtime_properties.subscription_count) == 2
+  expect(rt.topic_runtime_properties.scheduled_message_count) == 4
+}
+
+// Go v1.11.0 leaves Status out of the body (newSubscriptionEnvelope
+// does not copy it); this sends it where the description has it.
+test "create_subscription writes the default rule and forward tokens" {
+  let seen = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1", 201, "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title type=\"text\">s1</title><content type=\"application/xml\"><SubscriptionDescription ${SB}><RequiresSession>true</RequiresSession></SubscriptionDescription></content></entry>")
+  let c = client(os.net, os.clock, os.rand)?
+  let r = c.create_subscription("t1", "s1", SubscriptionProperties{
+    lock_duration: Some("PT1M"), requires_session: Some(true), default_message_time_to_live: Some("P1D"),
+    dead_lettering_on_message_expiration: Some(true), enable_dead_lettering_on_filter_evaluation_exceptions: Some(false),
+    max_delivery_count: Some(7), status: Some(ENTITY_STATUS_ACTIVE), auto_delete_on_idle: Some("P7D"), forward_to: Some("q2"),
+    forward_dead_lettered_messages_to: Some("q3"), enable_batched_operations: Some(true), user_metadata: Some("m"),
+    default_rule: Some(RuleProperties{name: "r0", filter: Some(RuleFilter.Sql(expression: "a = @p", parameters: {"@p": SqlParam.Str("x")})), action: Some(RuleAction.Sql(expression: "SET b = 1", parameters: {}))}),
+  })?
+  expect(r.topic_name) == "t1"
+  expect(r.subscription_name) == "s1"
+  expect(r.subscription_properties.requires_session) == Some(true)
+  expect(body(seen, 0)) == wrap("<SubscriptionDescription ${SB}><LockDuration>PT1M</LockDuration><RequiresSession>true</RequiresSession><DefaultMessageTimeToLive>P1D</DefaultMessageTimeToLive><DeadLetteringOnMessageExpiration>true</DeadLetteringOnMessageExpiration><DeadLetteringOnFilterEvaluationExceptions>false</DeadLetteringOnFilterEvaluationExceptions><DefaultRuleDescription><Filter ${XSI} _XMLSchema-instance:type=\"SqlFilter\"><SqlExpression>a = @p</SqlExpression><Parameters>${kv("@p", "string", "x")}</Parameters></Filter><Action ${XSI} _XMLSchema-instance:type=\"SqlRuleAction\"><SqlExpression>SET b = 1</SqlExpression></Action><Name>r0</Name></DefaultRuleDescription><MaxDeliveryCount>7</MaxDeliveryCount><EnableBatchedOperations>true</EnableBatchedOperations><Status>Active</Status><ForwardTo>q2</ForwardTo><UserMetadata>m</UserMetadata><ForwardDeadLetteredMessagesTo>q3</ForwardDeadLetteredMessagesTo><AutoDeleteOnIdle>P7D</AutoDeleteOnIdle></SubscriptionDescription>")
+  expect(audience(all(seen)[0], "ServiceBusSupplementaryAuthorization")) == "q2"
+  expect(audience(all(seen)[0])) == "https%3a%2f%2fsb1.servicebus.example.test%2ft1%2fsubscriptions%2fs1%3fapi-version%3d2024-05"
+  c.create_subscription("t1", "s1")?
+  expect(body(seen, 1)) == wrap("<SubscriptionDescription ${SB}></SubscriptionDescription>")
+}
+
+test "rules write Go's filters, actions and typed parameters" {
+  let seen = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1/Rules/r1", 201, rule_reply("r1", "<Filter i:type=\"TrueFilter\"><SqlExpression>1=1</SqlExpression></Filter>"))
+  let seen2 = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1/Rules/r2", 201, rule_reply("r2", "<Filter i:type=\"FalseFilter\"><SqlExpression>1=0</SqlExpression></Filter>"))
+  let seen3 = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1/Rules/r3", 201, rule_reply("r3", "<Filter i:type=\"SqlFilter\"><SqlExpression>a = @f</SqlExpression><CompatibilityLevel>20</CompatibilityLevel><Parameters><KeyValueOfstringanyType><Key>@f</Key><Value xmlns:d6p1=\"http://www.w3.org/2001/XMLSchema\" i:type=\"d6p1:double\">1.5</Value></KeyValueOfstringanyType><KeyValueOfstringanyType><Key>@t</Key><Value xmlns:d6p1=\"http://www.w3.org/2001/XMLSchema\" i:type=\"d6p1:dateTime\">2026-01-02T03:04:05.6Z</Value></KeyValueOfstringanyType></Parameters></Filter>", "<Action i:type=\"SqlRuleAction\"><SqlExpression>SET z = 1</SqlExpression></Action>"))
+  let seen4 = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1/Rules/r4", 201, rule_reply("r4", "<Filter i:type=\"CorrelationFilter\"><CorrelationId>cid</CorrelationId><Label>subj</Label><Properties><KeyValueOfstringanyType><Key>k</Key><Value xmlns:d6p1=\"http://www.w3.org/2001/XMLSchema\" i:type=\"d6p1:string\">v</Value></KeyValueOfstringanyType></Properties></Filter>"))
+  let c = client(os.net, os.clock, os.rand)?
+  let r1 = c.create_rule("t1", "s1", RuleProperties{name: "r1"})?
+  expect(r1.rule_properties.filter) == Some(RuleFilter.True)
+  expect(r1.rule_properties.action) == None
+  expect(body(seen, 0)) == wrap("<RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Filter ${XSI} _XMLSchema-instance:type=\"TrueFilter\"><SqlExpression>1=1</SqlExpression></Filter><Name>r1</Name></RuleDescription>")
+  c.update_rule("t1", "s1", RuleProperties{name: "r1", filter: Some(RuleFilter.True)})?
+  expect(all(seen)[1].header("If-Match")) == Some("*")
+  expect(body(seen, 1)) == body(seen, 0)
+  let r2 = c.create_rule("t1", "s1", RuleProperties{name: "r2", filter: Some(RuleFilter.False)})?
+  expect(r2.rule_properties.filter) == Some(RuleFilter.False)
+  expect(body(seen2, 0)) == wrap("<RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Filter ${XSI} _XMLSchema-instance:type=\"FalseFilter\"><SqlExpression>1=0</SqlExpression></Filter><Name>r2</Name></RuleDescription>")
+  let t = Time.parse_rfc3339("2026-01-02T03:04:05.6Z") ?? return Err("time")
+  let r3 = c.create_rule("t1", "s1", RuleProperties{name: "r3",
+    filter: Some(RuleFilter.Sql(expression: "a = @s AND b = @b AND c = @i AND d = @f AND e = @t", parameters: {"@s": SqlParam.Str("x<y"), "@b": SqlParam.Bool(true), "@i": SqlParam.Int(42), "@f": SqlParam.Float(1.5), "@t": SqlParam.Time(t)})),
+    action: Some(RuleAction.Sql(expression: "SET z = @z", parameters: {"@z": SqlParam.Int(9)})),
+  })?
+  // Go's fragments; its map order varies, these are in key order.
+  expect(body(seen3, 0)) == wrap("<RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Filter ${XSI} _XMLSchema-instance:type=\"SqlFilter\"><SqlExpression>a = @s AND b = @b AND c = @i AND d = @f AND e = @t</SqlExpression><Parameters>${kv("@b", "boolean", "true")}${kv("@f", "double", "1.500000")}${kv("@i", "int", "42")}${kv("@s", "string", "x&lt;y")}${kv("@t", "dateTime", "2026-01-02T03:04:05.6Z")}</Parameters></Filter><Action ${XSI} _XMLSchema-instance:type=\"SqlRuleAction\"><SqlExpression>SET z = @z</SqlExpression><Parameters>${kv("@z", "int", "9")}</Parameters></Action><Name>r3</Name></RuleDescription>")
+  match r3.rule_properties.filter {
+    Some(RuleFilter.Sql(expression: e, parameters: ps)) => {
+      expect(e) == "a = @f"
+      expect(ps.get("@f")) == Some(SqlParam.Float(1.5))
+      expect(ps.get("@t")) == Some(SqlParam.Time(t))
+    }
+    _ => return Err("want a SQL filter")
+  }
+  expect(r3.rule_properties.action) == Some(RuleAction.Sql(expression: "SET z = 1", parameters: {}))
+  let r4 = c.create_rule("t1", "s1", RuleProperties{name: "r4", filter: Some(RuleFilter.Correlation(CorrelationFilter{
+    content_type: Some("ct"), correlation_id: Some("cid"), message_id: Some("mid"), reply_to: Some("rt"), reply_to_session_id: Some("rts"),
+    session_id: Some("sid"), subject: Some("subj"), to: Some("to"), application_properties: {"k": SqlParam.Str("v")},
+  }))})?
+  expect(body(seen4, 0)) == wrap("<RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Filter ${XSI} _XMLSchema-instance:type=\"CorrelationFilter\"><CorrelationId>cid</CorrelationId><MessageId>mid</MessageId><To>to</To><ReplyTo>rt</ReplyTo><Label>subj</Label><SessionId>sid</SessionId><ReplyToSessionId>rts</ReplyToSessionId><ContentType>ct</ContentType><Properties>${kv("k", "string", "v")}</Properties></Filter><Name>r4</Name></RuleDescription>")
+  match r4.rule_properties.filter {
+    Some(RuleFilter.Correlation(cf)) => {
+      expect(cf.subject) == Some("subj")
+      expect(cf.application_properties.get("k")) == Some(SqlParam.Str("v"))
+    }
+    _ => return Err("want a correlation filter")
+  }
+}
+
+test "an unknown filter and action keep their XML as Go shows it, and go back well formed" {
+  let _ = capture(os.net, "GET ${HOST}/t1/Subscriptions/s1/Rules/r9", 200, rule_reply("r9", "<Filter i:type=\"FutureFilter\" extra=\"e\"><Thing xmlns:q=\"urn:q\" q:x=\"1\">one &amp; two</Thing></Filter>", "<Action i:type=\"FutureAction\"><Other>2</Other></Action>"))
+  let seen = capture(os.net, "PUT ${HOST}/t1/Subscriptions/s1/Rules/$Default", 201, rule_reply("$Default", "<Filter i:type=\"TrueFilter\"/>"))
+  let c = client(os.net, os.clock, os.rand)?
+  let g = c.get_rule("t1", "s1", "r9")? ?? return Err("no rule")
+  // Go's UnknownRuleFilter.RawXML and UnknownRuleAction.RawXML.
+  expect(g.rule_properties.filter) == Some(RuleFilter.Unknown(type_name: "FutureFilter", raw_xml: "<Filter extra=\"e\" i:type=\"FutureFilter\"><Thing xmlns:q=\"urn:q\" q:x=\"1\">one &amp; two</Thing></Filter>"))
+  expect(g.rule_properties.action) == Some(RuleAction.Unknown(type_name: "FutureAction", raw_xml: "<Action i:type=\"FutureAction\"><Other>2</Other></Action>"))
+  c.create_rule("t1", "s1", RuleProperties{
+    filter: Some(RuleFilter.Unknown(type_name: "FutureFilter", raw_xml: "<Filter xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\" i:type=\"FutureFilter\"><Thing>1</Thing></Filter>")),
+    action: Some(RuleAction.Unknown(type_name: "FutureAction", raw_xml: "<Action xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\" i:type=\"FutureAction\"><Other a=\"b\">2</Other></Action>")),
+  })?
+  expect(body(seen, 0)) == wrap("<RuleDescription ${SB} xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\"><Filter ${XSI} _XMLSchema-instance:type=\"FutureFilter\"><Thing>1</Thing></Filter><Action ${XSI} _XMLSchema-instance:type=\"FutureAction\"><Other a=\"b\">2</Other></Action><Name>$Default</Name></RuleDescription>")
+}
+
+test "the rule and subscription pagers use Go's paths" {
+  let rules = capture(os.net, "GET ${HOST}/t1/Subscriptions/s1/Rules/", 200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Rules</title></feed>")
+  let subs = capture(os.net, "GET ${HOST}/t1/Subscriptions", 200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Subscriptions</title><entry><title type=\"text\">s1</title><content type=\"application/xml\"><SubscriptionDescription ${SB}><MessageCount>3</MessageCount><CreatedAt>2026-01-02T03:04:05Z</CreatedAt><UpdatedAt>2026-01-02T03:04:05Z</UpdatedAt><AccessedAt>2026-01-02T03:04:05Z</AccessedAt><CountDetails><ActiveMessageCount>3</ActiveMessageCount></CountDetails></SubscriptionDescription></content></entry></feed>")
+  let c = client(os.net, os.clock, os.rand)?
+  var rp = c.new_list_rules_pager("t1", "s1", max_page_size: 5)
+  expect(rp.next_page()?.len()) == 0
+  expect(audience(all(rules)[0])) == "https%3a%2f%2fsb1.servicebus.example.test%2ft1%2fsubscriptions%2fs1%2frules%2f%3f%2524top%3d5%26api-version%3d2024-05"
+  var sp = c.new_list_subscriptions_runtime_properties_pager("t1", max_page_size: 5)
+  let items = sp.next_page()?
+  expect(items[0].topic_name) == "t1"
+  expect(items[0].subscription_name) == "s1"
+  expect(items[0].subscription_runtime_properties.active_message_count) == 3
+  expect(sp.more()) == false
+  expect(audience(all(subs)[0])) == "https%3a%2f%2fsb1.servicebus.example.test%2ft1%2fsubscriptions%3f%2524top%3d5%26api-version%3d2024-05"
+}
