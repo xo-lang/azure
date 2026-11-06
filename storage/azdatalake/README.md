@@ -3,7 +3,7 @@
 Azure Data Lake Storage Gen2 for Xo, a port of Go's
 `sdk/storage/azdatalake` v1.7.1 (over azblob v1.8.3, REST API version
 2026-12-06). In progress: the service, file system, directory and file
-clients' path and ACL calls are ported; file data, leases and SAS
+clients' path, ACL and file data calls are ported; leases and SAS
 follow.
 
 What it does:
@@ -47,6 +47,14 @@ What it does:
   `continue_on_failure`, stopping with no error after the first page
   with failures. A failed request returns the totals so far with the
   error (`AccessControlRecursiveErr`).
+- A file's data calls: `append_data` and `flush_data` on the dfs URL
+  (Go's defaults: a flush always sends `close` and
+  `retainUncommittedData`, false when unset), `upload_buffer` (appends
+  of `chunk_size`, 100 MiB by default, then a flush at the length; with
+  an encryption context it creates the file first and deletes it if an
+  append fails), and `download_stream` and `download_buffer`, azblob's
+  on the blob URL, with a download's encryption context and ACL read
+  from the same response.
 - A dfs response header that does not parse (a bool, a number, a date)
   fails the call, as Go's generated handlers do, with Go's error text.
 - Every error code as Go's `ConvertToDFSError` renames it (`blob` to
@@ -88,9 +96,23 @@ Where it differs from Go v1.7.1:
   the part after it that names the element.
 - Rename rebuilds a source URL's SAS as Go does, except that a query Go
   parses only in part (a bad escape, a `;`) is dropped whole here.
-- Not ported yet: file data (append, flush, uploads, downloads), leases,
-  `GetUserDelegationCredential`, `GetSASURL`, `ParseURL` and
-  `datalakeerror`.
+- The file data calls take and return bytes, as azblob's and azfile's
+  do: `download_buffer` returns the bytes rather than filling a buffer,
+  and `upload_buffer` and `download_buffer` send their chunks one at a
+  time in order (Go's run in parallel, so after a failed chunk Go may
+  already have sent later ones; the requests are the same). `UploadFile`,
+  `UploadStream`, `DownloadFile`, progress callbacks, concurrency, the
+  retry reader and transactional validation (CRC64, structured
+  messages) are not ported. A download's body is read whole, as in
+  azblob.
+- As in Go, `upload_buffer` of an empty buffer is an error: its one
+  empty append fails. A negative `chunk_size` is an error here (Go
+  would try to make that many chunks).
+- A flush leaves out `HTTPHeaders.content_language`, as Go's does (its
+  TODO for Azure/azure-sdk-for-go#27522). Go's `CPKScopeInfo` on a
+  download is left out: its blob download drops it.
+- Not ported yet: leases, `GetUserDelegationCredential`, `GetSASURL`,
+  `ParseURL` and `datalakeerror`.
 - Go names that are Xo keywords: a failed ACL entry's `Type` is
   `entry_type`.
 

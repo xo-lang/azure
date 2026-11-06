@@ -1,5 +1,14 @@
 # azdatalake changes
 
+## v0.3.0
+
+File data, at Go azdatalake v1.7.1 parity on captured vectors.
+
+- `FileClient.append_data`, `flush_data`, `upload_buffer`,
+  `download_stream` and `download_buffer`, with Go's lease actions
+  (`LEASE_ACTION_*`), `MAX_APPEND_BYTES` and `MAX_FILE_SIZE`.
+- Needs azblob v0.5.0 (`download_stream_with_response`).
+
 ## v0.2.0
 
 Paths and ACLs, at Go azdatalake v1.7.1 parity on captured vectors.

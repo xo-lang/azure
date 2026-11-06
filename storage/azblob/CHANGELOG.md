@@ -1,5 +1,12 @@
 # azblob changes
 
+## v0.5.0
+
+- `BlobClient.download_stream_with_response`: the download and the
+  response it was read from (a 304's too), for a client that reads
+  more of its headers (azdatalake's file download reads its encryption
+  context and ACL from it).
+
 ## v0.4.0
 
 - `BlobClient.get_properties_with_response`: the properties and the

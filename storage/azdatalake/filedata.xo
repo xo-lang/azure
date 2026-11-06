@@ -1,0 +1,306 @@
+// The file client's data calls: append, flush, the chunked buffer
+// upload and the downloads, as azdatalake v1.7.1's file/client.go,
+// file/models.go and file/responses.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), with the requests of its generated
+// PathClient.AppendData and FlushData. A download is azblob's on the
+// file's blob URL, as Go's is. Only the bytes forms are here, as in
+// azblob and azfile: no UploadFile, UploadStream or DownloadFile.
+
+use std/base64
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob
+
+/// Go's MaxAppendBytes: the largest chunk one append sends (100 MiB).
+pub const MAX_APPEND_BYTES: Int = 100 * 1024 * 1024
+/// Go's MaxFileSize: 4 TiB.
+pub const MAX_FILE_SIZE: Int = 4 * 1024 * 1024 * 1024 * 1024
+
+/// The lease actions of an append or flush (Go's LeaseAction).
+pub const LEASE_ACTION_ACQUIRE: Str = "acquire"
+pub const LEASE_ACTION_RELEASE: Str = "release"
+pub const LEASE_ACTION_ACQUIRE_RELEASE: Str = "acquire-release"
+pub const LEASE_ACTION_RENEW: Str = "auto-renew"
+
+pub type HTTPRange = azblob.HTTPRange
+
+fn h_bool(name: Str, v: Bool?) -> List[(Str, Str)] {
+  match v {
+    Some(b) => [(name, if b { "true" } else { "false" })]
+    None => []
+  }
+}
+
+fn h_int(name: Str, v: Int?) -> List[(Str, Str)] {
+  match v {
+    Some(n) => [(name, "${n}")]
+    None => []
+  }
+}
+
+/// A base64 header, decoded strictly (Go's base64 CorruptInputError).
+fn s_b64(resp: http.Response, name: Str) -> Bytes? ! azcore.CallErr {
+  let v = r_str(resp, name) ?? return Ok(None)
+  match base64.decode(v) {
+    Ok(b) => Ok(Some(b))
+    Err(e) => Err(azcore.CallErr.Decode(e.display()))
+  }
+}
+
+fn lease_hs(action: Str?, duration: Int?, lease_id: Str?, proposed: Str?) -> List[(Str, Str)] {
+  h_str("x-ms-lease-action", action) + h_int("x-ms-lease-duration", duration) + h_str("x-ms-lease-id", lease_id) + h_str("x-ms-proposed-lease-id", proposed)
+}
+
+// Append.
+
+/// Go's AppendDataOptions. `lease_id` is its LeaseAccessConditions.
+/// (Transactional validation is not ported.)
+pub struct AppendDataOptions {
+  pub lease_id: Str? = None
+  pub lease_action: Str? = None
+  /// Seconds, or -1 for a lease that never expires.
+  pub lease_duration: Int? = None
+  pub proposed_lease_id: Str? = None
+  pub cpk_info: CPKInfo? = None
+  /// Flushes the file after the append.
+  pub flush: Bool? = None
+}
+
+pub struct AppendDataResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub lease_renewed: Bool? = None
+  pub structured_body_type: Str? = None
+}
+
+/// Appends `body` at `offset` (uncommitted until a flush).
+pub fn (f: FileClient) append_data(offset: Int, body: Bytes, options: AppendDataOptions = AppendDataOptions{}) -> AppendDataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  if offset < 0 {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: offset must be >= 0 and body must not be nil"))
+  }
+  if body.is_empty() {
+    return Err(azcore.CallErr.InvalidInput("invalid argument: body must contain readable data whose size is > 0"))
+  }
+  let query = [("action", "append")] + h_bool("flush", o.flush) + [("position", "${offset}")]
+  let hs = cpk_hs(o.cpk_info) + lease_hs(o.lease_action, o.lease_duration, o.lease_id, o.proposed_lease_id) + [("Content-Type", "application/octet-stream")]
+  let req = dfs_request("PATCH", f.core.dfs_url, query, hs) with {body: body}
+  let resp = dfs_send(f.core.pipeline, req, [202])?
+  Ok(AppendDataResponse{
+    response: strict_response(resp)?, content_crc64: s_b64(resp, "x-ms-content-crc64")?, content_md5: s_b64(resp, "Content-MD5")?,
+    etag: r_str(resp, "ETag"), encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    is_server_encrypted: s_bool(resp, "x-ms-request-server-encrypted")?, lease_renewed: s_bool(resp, "x-ms-lease-renewed")?,
+    structured_body_type: r_str(resp, "x-ms-structured-body"),
+  })
+}
+
+// Flush.
+
+/// Go's FlushDataOptions. `close` and `retain_uncommitted_data` are sent
+/// as false when unset, as Go sends them.
+pub struct FlushDataOptions {
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  /// Sent as the file's headers, except `content_language`, which Go's
+  /// flush leaves out (its TODO for Azure/azure-sdk-for-go#27522).
+  pub http_headers: HTTPHeaders? = None
+  pub close: Bool? = None
+  pub retain_uncommitted_data: Bool? = None
+  pub lease_action: Str? = None
+  pub lease_duration: Int? = None
+  pub proposed_lease_id: Str? = None
+}
+
+pub struct FlushDataResponse {
+  pub response: Response
+  pub content_length: Int? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub lease_renewed: Bool? = None
+}
+
+fn flush_http_hs(h: HTTPHeaders?) -> List[(Str, Str)] {
+  match h {
+    Some(x) => {
+      let md5 = x.content_md5.map(fn(b: Bytes) -> Str { base64.encode(b) })
+      h_str("x-ms-cache-control", x.cache_control) + h_str("x-ms-content-disposition", x.content_disposition) + h_str("x-ms-content-encoding", x.content_encoding) + h_str("x-ms-content-md5", md5) + h_str("x-ms-content-type", x.content_type)
+    }
+    None => []
+  }
+}
+
+/// Commits the data appended up to `offset`, the file's new length.
+pub fn (f: FileClient) flush_data(offset: Int, options: FlushDataOptions = FlushDataOptions{}) -> FlushDataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let c = o.conditions
+  let query = [("action", "flush"), ("close", if o.close ?? false { "true" } else { "false" }), ("position", "${offset}"), ("retainUncommittedData", if o.retain_uncommitted_data ?? false { "true" } else { "false" })]
+  let hs = h_str("If-Match", c.if_match) + h_time("If-Modified-Since", c.if_modified_since) + h_str("If-None-Match", c.if_none_match) + h_time("If-Unmodified-Since", c.if_unmodified_since) + flush_http_hs(o.http_headers) + cpk_hs(o.cpk_info) + lease_hs(o.lease_action, o.lease_duration, c.lease_id, o.proposed_lease_id)
+  let resp = dfs_send(f.core.pipeline, dfs_request("PATCH", f.core.dfs_url, query, hs), [200])?
+  Ok(FlushDataResponse{
+    response: strict_response(resp)?, content_length: s_int(resp, "Content-Length")?, etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), is_server_encrypted: s_bool(resp, "x-ms-request-server-encrypted")?,
+    last_modified: s_time(resp, "Last-Modified")?, lease_renewed: s_bool(resp, "x-ms-lease-renewed")?,
+  })
+}
+
+// Upload.
+
+/// Go's UploadBufferOptions. (Progress, concurrency and transactional
+/// validation are not ported.)
+pub struct UploadBufferOptions {
+  /// The bytes each append sends (0 is MAX_APPEND_BYTES).
+  pub chunk_size: Int = 0
+  /// The lease goes on each append; all of it on the flush.
+  pub conditions: AccessConditions = AccessConditions{}
+  /// The file's headers, set by the flush.
+  pub http_headers: HTTPHeaders? = None
+  pub cpk_info: CPKInfo? = None
+  /// When set, the file is created first with it, and deleted again if
+  /// an append fails.
+  pub encryption_context: Str? = None
+}
+
+/// Writes `buffer` to the file: appends of `chunk_size` from offset 0,
+/// one at a time in order (Go sends them in parallel; each request is
+/// the same), then a flush at its length. An empty buffer is an error,
+/// as in Go, whose one empty append fails.
+pub fn (f: FileClient) upload_buffer(buffer: Bytes, options: UploadBufferOptions = UploadBufferOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let size = buffer.len()
+  if size > MAX_FILE_SIZE {
+    return Err(azcore.CallErr.InvalidInput("buffer is too large to upload to a file"))
+  }
+  if o.chunk_size < 0 {
+    return Err(azcore.CallErr.InvalidInput("ChunkSize cannot be negative"))
+  }
+  let chunk = if o.chunk_size == 0 { MAX_APPEND_BYTES } else { o.chunk_size }
+  if let Some(ec) = o.encryption_context {
+    f.create(CreateFileOptions{encryption_context: Some(ec)})?
+  }
+  let append_options = AppendDataOptions{lease_id: o.conditions.lease_id, cpk_info: o.cpk_info}
+  // DoBatchTransfer's chunk count: one chunk for an empty buffer.
+  let chunks = if size == 0 { 1 } else { (size - 1) / chunk + 1 }
+  var n = 0
+  while n < chunks {
+    let offset = n * chunk
+    let len = if n == chunks - 1 { size - offset } else { chunk }
+    match f.append_data(offset, buffer[offset..offset + len], append_options) {
+      Ok(_) => {}
+      Err(e) => {
+        if o.encryption_context.is_some() {
+          f.delete()?
+        }
+        return Err(e)
+      }
+    }
+    n += 1
+  }
+  f.flush_data(size, FlushDataOptions{conditions: o.conditions, http_headers: o.http_headers, cpk_info: o.cpk_info})?
+  Ok(())
+}
+
+// Downloads.
+
+/// Go's file DownloadStreamOptions. (Go's CPKScopeInfo is dropped by its
+/// blob download, so it is left out.)
+pub struct DownloadStreamOptions {
+  pub range_get_content_md5: Bool? = None
+  pub range: HTTPRange = HTTPRange{}
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// A file download (Go's DownloadResponse): the blob download's fields
+/// a file has, plus its encryption context and ACL. A 304 Not Modified
+/// comes back with `error_code` set, as Go returns it.
+pub struct DownloadStreamResponse {
+  pub response: Response
+  pub body: Bytes = b""
+  pub error_code: Str? = None
+  pub accept_ranges: Str? = None
+  /// The `x-ms-acl` header.
+  pub access_control_list: Str? = None
+  pub cache_control: Str? = None
+  pub content_crc64: Bytes? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_range: Str? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub encryption_context: Str? = None
+  pub immutability_policy_expires_on: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub is_current_version: Bool? = None
+  pub is_sealed: Bool? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_accessed: Time? = None
+  pub last_modified: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub legal_hold: Bool? = None
+  pub metadata: Map[Str, Str]? = None
+  pub object_replication_policy_id: Str? = None
+  pub object_replication_rules: Map[Str, Str]? = None
+  pub tag_count: Int? = None
+  pub version_id: Str? = None
+}
+
+fn file_download_of(r: azblob.DownloadStreamResponse, raw: http.Response) -> DownloadStreamResponse {
+  DownloadStreamResponse{
+    response: r.response, body: r.body, error_code: r.error_code, accept_ranges: r.accept_ranges, access_control_list: r_str(raw, "x-ms-acl"),
+    cache_control: r.cache_control, content_crc64: r.content_crc64, content_disposition: r.content_disposition, content_encoding: r.content_encoding,
+    content_language: r.content_language, content_length: r.content_length, content_md5: r.content_md5, content_range: r.content_range,
+    content_type: r.content_type, copy_completion_time: r.copy_completion_time, copy_id: r.copy_id, copy_progress: r.copy_progress,
+    copy_source: r.copy_source, copy_status: r.copy_status, copy_status_description: r.copy_status_description, etag: r.etag,
+    encryption_key_sha256: r.encryption_key_sha256, encryption_scope: r.encryption_scope, encryption_context: r_str(raw, "x-ms-encryption-context"),
+    immutability_policy_expires_on: r.immutability_policy_expires_on, immutability_policy_mode: r.immutability_policy_mode,
+    is_current_version: r.is_current_version, is_sealed: r.is_sealed, is_server_encrypted: r.is_server_encrypted, last_accessed: r.last_accessed,
+    last_modified: r.last_modified, lease_duration: r.lease_duration, lease_state: r.lease_state, lease_status: r.lease_status,
+    legal_hold: r.legal_hold, metadata: r.metadata, object_replication_policy_id: r.object_replication_policy_id,
+    object_replication_rules: r.object_replication_rules, tag_count: r.tag_count, version_id: r.version_id,
+  }
+}
+
+/// Downloads the file, or `options.range` of it, from its blob URL.
+pub fn (f: FileClient) download_stream(options: DownloadStreamOptions = DownloadStreamOptions{}) -> DownloadStreamResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let bo = azblob.DownloadStreamOptions{range_get_content_md5: o.range_get_content_md5, range: o.range, conditions: blob_conditions(o.conditions), cpk_info: o.cpk_info}
+  let (r, raw) = f.core.blob.download_stream_with_response(bo) ?? e => return Err(to_dfs_error(e))
+  Ok(file_download_of(r, raw))
+}
+
+/// Go's file DownloadBufferOptions. (Progress, concurrency, the retry
+/// reader and transactional validation are not ported.)
+pub struct DownloadBufferOptions {
+  pub range: HTTPRange = HTTPRange{}
+  /// The size of each request's range (0 is azblob's 4 MiB).
+  pub chunk_size: Int = 0
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+}
+
+/// Downloads the file (or `options.range` of it) in chunks with azblob's
+/// download_buffer, and returns the bytes rather than filling a buffer.
+pub fn (f: FileClient) download_buffer(options: DownloadBufferOptions = DownloadBufferOptions{}) -> Bytes ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let bo = azblob.DownloadBufferOptions{range: o.range, block_size: o.chunk_size, conditions: blob_conditions(o.conditions), cpk_info: o.cpk_info}
+  f.core.blob.download_buffer(bo) ?? e => Err(to_dfs_error(e))
+}

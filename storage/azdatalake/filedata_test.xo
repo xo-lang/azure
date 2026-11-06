@@ -1,0 +1,248 @@
+// The file data calls against a fake that answers as the Go program's
+// fake does (filedatavectors_test.xo).
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+const FILEDATA_GO_DATE: Str = "Fri, 06 Nov 2026 15:28:45 GMT"
+const FILE_CONTENT: Str = "0123456789abcdefghij"
+
+fn filedata_answer(req: http.Request) -> http.Response {
+  let q = fn(k: Str) -> Str { req.url.query.get(k) ?? "" }
+  let p = req.url.path
+  let last = match p.rfind("/") {
+    Some(i) => p[i + 1..p.len()]
+    None => p
+  }
+  let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-06-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let stamp = [("ETag", "\"0x8D9\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let empty = fn(status: Int, hs: List[(Str, Str)]) -> http.Response { with_hs(http.empty(status), common + hs) }
+  let fail = fn(status: Int, code: Str) -> http.Response { empty(status, [("x-ms-error-code", code)]) }
+  if p.contains("missing") {
+    return fail(404, "BlobNotFound")
+  }
+  let m = req.method
+  if q("action") == "append" {
+    let pos = q("position")
+    if (last == "failc.txt" && pos == "8") || last == "ctxfail.txt" || last == "delfail.txt" {
+      return fail(409, "LeaseIdMissing")
+    }
+    let md5 = if last == "bad64.txt" { "AQ!D" } else { "AQID" }
+    let renewed = if last == "badbool.txt" { "maybe" } else { "false" }
+    let status = if last == "s200.txt" { 200 } else { 202 }
+    return empty(status, [
+      ("ETag", "\"0xA1\""), ("x-ms-request-server-encrypted", "true"), ("x-ms-encryption-key-sha256", "k256"),
+      ("x-ms-content-crc64", "AAECAwQFBgc="), ("Content-MD5", md5), ("x-ms-lease-renewed", renewed),
+    ])
+  }
+  if q("action") == "flush" {
+    let enc = if last == "badbool.txt" { "nope" } else { "true" }
+    let status = if last == "s201.txt" { 201 } else { 200 }
+    return empty(status, stamp + [("Content-Length", "0"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-request-server-encrypted", enc), ("x-ms-lease-renewed", "true")])
+  }
+  if m == "PUT" {
+    return empty(201, stamp + [("Content-Length", "0"), ("x-ms-request-server-encrypted", "true")])
+  }
+  if m == "DELETE" {
+    if last == "delfail.txt" {
+      return fail(500, "InternalError")
+    }
+    return empty(200, [("x-ms-deletion-id", "132")])
+  }
+  if m == "GET" {
+    if last == "nm.txt" {
+      return empty(304, [("x-ms-encryption-context", "c304"), ("x-ms-acl", "user::r--"), ("x-ms-error-code", "ConditionNotMet")])
+    }
+    if last == "chg.txt" && req.header("If-Match").is_some() && (req.header("x-ms-range") ?? "").starts_with("bytes=18-") {
+      return fail(412, "ConditionNotMet")
+    }
+    let data = if last == "empty.txt" { "" } else { FILE_CONTENT }
+    let hs = common + stamp + [
+      ("x-ms-acl", "user::rw-,group::r--,other::---"), ("x-ms-encryption-context", "ec9"), ("x-ms-meta-color", "blue"),
+      ("x-ms-blob-type", "BlockBlob"), ("x-ms-lease-state", "available"), ("x-ms-lease-status", "unlocked"),
+      ("x-ms-server-encrypted", "true"), ("x-ms-creation-time", "Mon, 02 Nov 2026 01:02:03 GMT"), ("x-ms-tag-count", "2"),
+      ("Accept-Ranges", "bytes"), ("Content-Type", "application/octet-stream"),
+    ]
+    let rg = req.header("x-ms-range") ?? ""
+    if rg == "" {
+      return with_hs(http.text(200, data), hs + [("Content-Length", "${data.len()}")])
+    }
+    let spec = rg[6..rg.len()]
+    let dash = spec.find("-") ?? 0
+    let start = Int.parse(spec[0..dash]) ?? 0
+    var end = data.len() - 1
+    if dash + 1 < spec.len() {
+      end = Int.parse(spec[dash + 1..spec.len()]) ?? end
+    }
+    if start >= data.len() {
+      return fail(416, "InvalidRange")
+    }
+    if end > data.len() - 1 {
+      end = data.len() - 1
+    }
+    let md5 = if (req.header("x-ms-range-get-content-md5") ?? "") == "true" { [("Content-MD5", "AQID")] } else { [] }
+    return with_hs(http.text(206, data[start..end + 1]), hs + [("Content-Range", "bytes ${start}-${end}/${data.len()}"), ("Content-Length", "${end - start + 1}")] + md5)
+  }
+  empty(400, [])
+}
+
+fn append_dump(x: AppendDataResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentCRC64", x.content_crc64)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.b("LeaseRenewed", x.lease_renewed)
+  d.s("StructuredBodyType", x.structured_body_type)
+  d
+}
+
+fn flush_dump(x: FlushDataResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("ContentLength", x.content_length)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.b("LeaseRenewed", x.lease_renewed)
+  d
+}
+
+fn download_lines(name: Str, r: Result[DownloadStreamResponse, azcore.CallErr]) -> List[Str] {
+  let x = match r {
+    Ok(x) => x
+    Err(e) => return err_lines(name, e)
+  }
+  var d = Dump{}
+  d.r(x.response)
+  d.s("AcceptRanges", x.accept_ranges)
+  d.s("AccessControlList", x.access_control_list)
+  d.s("CacheControl", x.cache_control)
+  d.q("ContentCRC64", x.content_crc64)
+  d.s("ContentDisposition", x.content_disposition)
+  d.s("ContentEncoding", x.content_encoding)
+  d.s("ContentLanguage", x.content_language)
+  d.i("ContentLength", x.content_length)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ContentRange", x.content_range)
+  d.s("ContentType", x.content_type)
+  d.t("CopyCompletionTime", x.copy_completion_time)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyProgress", x.copy_progress)
+  d.s("CopySource", x.copy_source)
+  d.s("CopyStatus", x.copy_status)
+  d.s("CopyStatusDescription", x.copy_status_description)
+  d.s("ETag", x.etag)
+  d.s("EncryptionContext", x.encryption_context)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.s("ErrorCode", x.error_code)
+  d.t("ImmutabilityPolicyExpiresOn", x.immutability_policy_expires_on)
+  d.s("ImmutabilityPolicyMode", x.immutability_policy_mode)
+  d.b("IsCurrentVersion", x.is_current_version)
+  d.b("IsSealed", x.is_sealed)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastAccessed", x.last_accessed)
+  d.t("LastModified", x.last_modified)
+  d.s("LeaseDuration", x.lease_duration)
+  d.s("LeaseState", x.lease_state)
+  d.s("LeaseStatus", x.lease_status)
+  d.b("LegalHold", x.legal_hold)
+  d.m("Metadata", x.metadata)
+  d.s("ObjectReplicationPolicyID", x.object_replication_policy_id)
+  d.m("ObjectReplicationRules", x.object_replication_rules)
+  d.i("TagCount", x.tag_count)
+  d.s("VersionID", x.version_id)
+  d.show(name) + ["  body=${goq_bytes(x.body)}"]
+}
+
+fn buffer_lines(name: Str, r: Result[Bytes, azcore.CallErr]) -> List[Str] {
+  match r {
+    Ok(b) => ["== ${name}", "  n=${b.len()}", "  data=${goq_bytes(b)}"]
+    Err(e) => err_lines(name, e)
+  }
+}
+
+test "the file data calls send what Go sends and read what Go reads" {
+  let log = serve(os.net, filedata_answer)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let opts = go_options(FILEDATA_GO_DATE)
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let t1 = at("2026-11-01T02:03:04Z")
+  let t2 = at("2026-11-02T02:03:04Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("e1"), if_none_match: Some("e2"), if_modified_since: Some(t1), if_unmodified_since: Some(t2)}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let hh = HTTPHeaders{cache_control: Some("no-cache"), content_disposition: Some("inline"), content_encoding: Some("gzip"), content_language: Some("en"), content_md5: Some(b"\x01\x02\x03"), content_type: Some("text/plain")}
+  let fc = fn(name: Str) -> FileClient { new_file_client_with_shared_key_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d/${name}", cred, opts) }
+  let f = fc("f.txt")
+
+  // AppendData.
+  out = out + add(shown("AppendData nil", f.append_data(0, b"abc"), append_dump))
+  let afull = AppendDataOptions{lease_id: Some("l1"), lease_action: Some(LEASE_ACTION_ACQUIRE), lease_duration: Some(15), proposed_lease_id: Some("pl1"), cpk_info: Some(cpk), flush: Some(true)}
+  out = out + add(shown("AppendData full", f.append_data(5, b"hello", afull), append_dump))
+  out = out + add(shown("AppendData flush false", f.append_data(7, b"x", AppendDataOptions{flush: Some(false), lease_action: Some(LEASE_ACTION_RENEW)}), append_dump))
+  out = out + add(shown("AppendData negative offset", f.append_data(-1, b"x"), append_dump))
+  out = out + add(shown("AppendData empty", f.append_data(0, b""), append_dump))
+  out = out + add(shown("AppendData bad base64", fc("bad64.txt").append_data(0, b"x"), append_dump))
+  out = out + add(shown("AppendData bad bool", fc("badbool.txt").append_data(0, b"x"), append_dump))
+  out = out + add(shown("AppendData missing", fc("missing").append_data(0, b"x"), append_dump))
+  out = out + add(shown("AppendData status 200", fc("s200.txt").append_data(0, b"x"), append_dump))
+
+  // FlushData.
+  out = out + add(shown("FlushData nil", f.flush_data(3), flush_dump))
+  let ffull = FlushDataOptions{
+    conditions: ac, cpk_info: Some(cpk), http_headers: Some(hh), close: Some(true), retain_uncommitted_data: Some(true),
+    lease_action: Some(LEASE_ACTION_RELEASE), lease_duration: Some(-1), proposed_lease_id: Some("pl2"),
+  }
+  out = out + add(shown("FlushData full", f.flush_data(10, ffull), flush_dump))
+  out = out + add(shown("FlushData close false", f.flush_data(0, FlushDataOptions{close: Some(false), lease_action: Some(LEASE_ACTION_ACQUIRE_RELEASE)}), flush_dump))
+  out = out + add(shown("FlushData bad bool", fc("badbool.txt").flush_data(1), flush_dump))
+  out = out + add(shown("FlushData missing", fc("missing").flush_data(1), flush_dump))
+  out = out + add(shown("FlushData status 201", fc("s201.txt").flush_data(1), flush_dump))
+
+  // UploadBuffer.
+  out = out + add(quiet("UploadBuffer nil", f.upload_buffer(b"hey")))
+  out = out + add(quiet("UploadBuffer chunks full", f.upload_buffer(b"0123456789", UploadBufferOptions{chunk_size: 4, conditions: ac, http_headers: Some(hh), cpk_info: Some(cpk)})))
+  out = out + add(quiet("UploadBuffer exact chunks", f.upload_buffer(b"abcdefgh", UploadBufferOptions{chunk_size: 4})))
+  out = out + add(quiet("UploadBuffer empty", f.upload_buffer(b"")))
+  out = out + add(quiet("UploadBuffer last chunk fails", fc("failc.txt").upload_buffer(b"0123456789", UploadBufferOptions{chunk_size: 4})))
+  let ec = UploadBufferOptions{encryption_context: Some("ec1")}
+  out = out + add(quiet("UploadBuffer encryption context", fc("ctx.txt").upload_buffer(b"data", ec)))
+  out = out + add(quiet("UploadBuffer encryption context append fails", fc("ctxfail.txt").upload_buffer(b"data", ec)))
+  out = out + add(quiet("UploadBuffer encryption context delete fails", fc("delfail.txt").upload_buffer(b"data", ec)))
+  out = out + add(quiet("UploadBuffer encryption context create fails", fc("missing").upload_buffer(b"data", ec)))
+  out = out + add(quiet("UploadBuffer lease only", fc("failc.txt").upload_buffer(b"0123", UploadBufferOptions{chunk_size: 4, conditions: AccessConditions{lease_id: Some("l7")}})))
+
+  // DownloadStream.
+  out = out + add(download_lines("DownloadStream nil", f.download_stream()))
+  out = out + add(download_lines("DownloadStream full", f.download_stream(DownloadStreamOptions{range: HTTPRange{offset: 2, count: 5}, range_get_content_md5: Some(true), conditions: ac, cpk_info: Some(cpk)})))
+  out = out + add(download_lines("DownloadStream offset only", f.download_stream(DownloadStreamOptions{range: HTTPRange{offset: 15}})))
+  out = out + add(download_lines("DownloadStream not modified", fc("nm.txt").download_stream(DownloadStreamOptions{conditions: AccessConditions{if_none_match: Some("\"0x8D9\"")}})))
+  out = out + add(download_lines("DownloadStream missing", fc("missing").download_stream()))
+
+  // DownloadBuffer.
+  out = out + add(buffer_lines("DownloadBuffer nil", f.download_buffer()))
+  out = out + add(buffer_lines("DownloadBuffer chunks", f.download_buffer(DownloadBufferOptions{chunk_size: 6})))
+  out = out + add(buffer_lines("DownloadBuffer range", f.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 3, count: 10}, chunk_size: 4})))
+  out = out + add(buffer_lines("DownloadBuffer offset only", f.download_buffer(DownloadBufferOptions{range: HTTPRange{offset: 15}, chunk_size: 4})))
+  out = out + add(buffer_lines("DownloadBuffer conditions", f.download_buffer(DownloadBufferOptions{chunk_size: 10, conditions: ac, cpk_info: Some(cpk)})))
+  out = out + add(buffer_lines("DownloadBuffer empty", fc("empty.txt").download_buffer()))
+  out = out + add(buffer_lines("DownloadBuffer changed", fc("chg.txt").download_buffer(DownloadBufferOptions{chunk_size: 6})))
+  out = out + add(buffer_lines("DownloadBuffer missing", fc("missing").download_buffer()))
+  out = out + drain(log)
+  expect(out) == FILEDATA_OUTPUT
+}
+
+test "an upload's chunk size may not be negative" {
+  let _ = serve(os.net, filedata_answer)
+  let f = new_file_client_with_no_credential(os.net, os.clock, os.rand, "${DEP}/fs1/d/f.txt", go_options(""))
+  let r = f.upload_buffer(b"abc", UploadBufferOptions{chunk_size: -1})
+  expect(r.is_err()) == true
+  if let Err(e) = r {
+    expect(e.display()) == "invalid input: ChunkSize cannot be negative"
+  }
+}

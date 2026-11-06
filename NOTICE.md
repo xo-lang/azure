@@ -31,8 +31,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   v1.7.1 (the service, file system, directory and file clients, their
   options and responses, the dfs and blob URL mapping and the DFS error
   code rename, over azblob's clients; its generated list, path and
-  access control calls and models, and its sas.URLParts rebuild of a
-  rename's URL; requests checked against its own),
+  access control calls and models, its sas.URLParts rebuild of a
+  rename's URL, and a file's append, flush, chunked upload and
+  downloads; requests checked against its own),
   `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,
   SAS, connection strings, XML models and error codes, hand written;
