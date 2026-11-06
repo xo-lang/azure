@@ -1,0 +1,191 @@
+// CloudEvents, as azcore's messaging/cloud_event.go (azcore v1.23.0;
+// MIT, Copyright (c) Microsoft Corporation; NOTICE.md): an event in the
+// CloudEvents 1.0 JSON format (https://cloudevents.io), as Event Grid
+// and other services take it.
+
+use std/json
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+/// An event's payload (Go's `Data any`).
+pub enum CloudEventData {
+  /// Sent base64 encoded as `data_base64` (Go's `[]byte`). A received
+  /// `data` is this too, its JSON text, as Go's.
+  Bytes(b: Bytes)
+  /// Sent as `data`, this JSON value (any other Go value, marshaled).
+  Value(v: json.Value)
+} derive Json
+
+/// A CloudEvent (messaging.CloudEvent).
+pub struct CloudEvent {
+  /// Identifies the event, unique per source.
+  pub id: Str
+  /// Where the event happened: a URI reference.
+  pub source: Str
+  /// The CloudEvents version: "1.0".
+  pub spec_version: Str
+  /// The kind of event.
+  pub type_: Str
+  pub data: CloudEventData? = None
+  /// The content type of `data`.
+  pub data_content_type: Str? = None
+  /// The schema `data` follows.
+  pub data_schema: Str? = None
+  /// Attributes beyond the standard ones, by name.
+  pub extensions: Map[Str, json.Value] = {}
+  /// The subject of the event, within the source.
+  pub subject: Str? = None
+  /// When it happened.
+  pub time: azcore.DateTime? = None
+} derive Json(via: json.Value, to: cloud_event_json, from: parse_cloud_event)
+
+/// The optional attributes of `new_cloud_event`.
+pub struct CloudEventOptions {
+  pub data_content_type: Str? = None
+  pub data_schema: Str? = None
+  pub extensions: Map[Str, json.Value] = {}
+  pub subject: Str? = None
+  /// The current time, in UTC, when None.
+  pub time: azcore.DateTime? = None
+}
+
+/// An event from `source` of type `event_type`, with a new UUID and
+/// spec version 1.0 (NewCloudEvent).
+pub fn new_cloud_event(rand: Rand, clock: Clock, source: Str, event_type: Str, data: CloudEventData? = None, options: CloudEventOptions = CloudEventOptions{}) -> CloudEvent ! Str uses (clock, rand) {
+  if source == "" {
+    return Err("source cannot be empty")
+  }
+  if event_type == "" {
+    return Err("eventType cannot be empty")
+  }
+  Ok(CloudEvent{
+    id: uuid.v4(rand).display(), source: source, spec_version: "1.0", type_: event_type, data: data,
+    data_content_type: options.data_content_type, data_schema: options.data_schema, extensions: options.extensions, subject: options.subject,
+    time: Some(options.time ?? azcore.utc_date_time(clock.now())),
+  })
+}
+
+fn put(fs: List[(Str, json.Value)], k: Str, v: json.Value) -> List[(Str, json.Value)] {
+  fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != k }) + [(k, v)]
+}
+
+/// The event's JSON object, as Go's MarshalJSON builds its map: the
+/// standard attributes, then the extensions (which replace a standard
+/// one of the same name), then `subject` and `time`; keys sorted.
+fn cloud_event_json(ce: CloudEvent) -> json.Value {
+  var fs: List[(Str, json.Value)] = [("id", json.Value.Str(ce.id)), ("source", json.Value.Str(ce.source)), ("specversion", json.Value.Str(ce.spec_version)), ("type", json.Value.Str(ce.type_))]
+  match ce.data {
+    Some(CloudEventData.Bytes(b)) => fs = put(fs, "data_base64", json.Value.Str(b.to_base64()))
+    Some(CloudEventData.Value(v)) => fs = put(fs, "data", v)
+    None => {}
+  }
+  if let Some(v) = ce.data_content_type {
+    fs = put(fs, "datacontenttype", json.Value.Str(v))
+  }
+  if let Some(v) = ce.data_schema {
+    fs = put(fs, "dataschema", json.Value.Str(v))
+  }
+  for (k, v) in ce.extensions {
+    fs = put(fs, k, v)
+  }
+  if let Some(v) = ce.subject {
+    fs = put(fs, "subject", json.Value.Str(v))
+  }
+  if let Some(t) = ce.time {
+    fs = put(fs, "time", json.Value.Str(azcore.date_time_text(t)))
+  }
+  json.Value.Object(fs.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+}
+
+/// Go's name for a JSON value's kind, as its unmarshal errors say it.
+fn kind(v: json.Value) -> Str {
+  match v {
+    json.Value.Null => "null"
+    json.Value.Bool(_) => "bool"
+    json.Value.Int(_) => "number"
+    json.Value.Num(_) => "number"
+    json.Value.Str(_) => "string"
+    json.Value.List(_) => "array"
+    json.Value.Object(_) => "object"
+    json.Value.Trusted(_, _) => "string"
+  }
+}
+
+fn fail(msg: Str) -> json.DecodeErr {
+  json.DecodeErr{path: "$", msg: msg}
+}
+
+fn field_err(k: Str, msg: Str) -> json.DecodeErr {
+  fail("failed to deserialize \"${k}\": ${msg}")
+}
+
+/// A string attribute: null leaves it as it was, as Go's Unmarshal.
+fn str_of(k: Str, v: json.Value, cur: Str) -> Str ! json.DecodeErr {
+  match v {
+    json.Value.Str(s) => Ok(s)
+    json.Value.Null => Ok(cur)
+    _ => Err(field_err(k, "json: cannot unmarshal ${kind(v)} into Go value of type string"))
+  }
+}
+
+fn opt_str_of(k: Str, v: json.Value) -> Str? ! json.DecodeErr {
+  match v {
+    json.Value.Str(s) => Ok(Some(s))
+    json.Value.Null => Ok(None)
+    _ => Err(field_err(k, "json: cannot unmarshal ${kind(v)} into Go value of type string"))
+  }
+}
+
+/// An event from its JSON object, as Go's UnmarshalJSON: `data` is kept
+/// as its JSON text (Bytes), `data_base64` decoded, any other attribute
+/// an extension; id, source, specversion and type are required.
+fn parse_cloud_event(v: json.Value) -> CloudEvent ! json.DecodeErr {
+  let fields = match v {
+    json.Value.Object(fs) => fs
+    json.Value.Null => []
+    _ => return Err(fail("json: cannot unmarshal ${kind(v)} into Go value of type map[string]json.RawMessage"))
+  }
+  var ce = CloudEvent{id: "", source: "", spec_version: "", type_: ""}
+  for (k, x) in fields {
+    if k == "id" {
+      ce.id = str_of(k, x, ce.id)?
+    } else if k == "source" {
+      ce.source = str_of(k, x, ce.source)?
+    } else if k == "specversion" {
+      ce.spec_version = str_of(k, x, ce.spec_version)?
+    } else if k == "type" {
+      ce.type_ = str_of(k, x, ce.type_)?
+    } else if k == "data" {
+      ce.data = Some(CloudEventData.Bytes(x.encode().bytes()))
+    } else if k == "datacontenttype" {
+      ce.data_content_type = opt_str_of(k, x)?
+    } else if k == "dataschema" {
+      ce.data_schema = opt_str_of(k, x)?
+    } else if k == "data_base64" {
+      let s = str_of(k, x, "")?
+      let b = Bytes.from_base64(s) ?? return Err(field_err(k, "illegal base64 data"))
+      ce.data = Some(CloudEventData.Bytes(b))
+    } else if k == "subject" {
+      ce.subject = opt_str_of(k, x)?
+    } else if k == "time" {
+      let s = str_of(k, x, "")?
+      let t = azcore.parse_date_time(s) ?? e => return Err(field_err(k, "parsing time \"${s}\": ${e}"))
+      ce.time = Some(t)
+    } else {
+      ce.extensions.put(k, x)
+    }
+  }
+  if ce.id == "" {
+    return Err(fail("required field 'id' was not present, or was empty"))
+  }
+  if ce.source == "" {
+    return Err(fail("required field 'source' was not present, or was empty"))
+  }
+  if ce.spec_version == "" {
+    return Err(fail("required field 'specversion' was not present, or was empty"))
+  }
+  if ce.type_ == "" {
+    return Err(fail("required field 'type' was not present, or was empty"))
+  }
+  Ok(ce)
+}

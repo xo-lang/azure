@@ -1,0 +1,83 @@
+// Go's CloudEvent JSON (cloudeventvectors_test.xo) written and read
+// again here: every text, field and error must be Go's.
+
+use std/json
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
+
+fn ps(s: Str?) -> Str {
+  match s {
+    Some(v) => "[${v}]"
+    None => "<nil>"
+  }
+}
+
+fn ce_text(ce: CloudEvent) -> Str {
+  let data = match ce.data {
+    Some(CloudEventData.Bytes(b)) => "bytes:${b.to_str_lossy()}"
+    Some(CloudEventData.Value(v)) => "value:${v.encode()}"
+    None => "<nil>"
+  }
+  let tm = match ce.time {
+    Some(t) => azcore.date_time_text(t)
+    None => "<nil>"
+  }
+  var ks: List[Str] = []
+  for (k, v) in ce.extensions {
+    ks.push("${k}=${v.encode()}")
+  }
+  "id=${ce.id} source=${ce.source} spec=${ce.spec_version} type=${ce.type_} data=${data} dct=${ps(ce.data_content_type)} ds=${ps(ce.data_schema)} subject=${ps(ce.subject)} time=${tm} ext={${ks.sort().join(",")}}"
+}
+
+fn at(s: Str) -> azcore.DateTime {
+  azcore.parse_date_time(s).or_fault("time")
+}
+
+fn base() -> CloudEvent {
+  CloudEvent{id: "1", source: "s", spec_version: "1.0", type_: "t"}
+}
+
+test "CloudEvents are written, read and made as Go's" {
+  let t = at("2026-11-06T10:00:00.5+01:00")
+  var got: List[Str] = []
+  for (name, ce) in [
+    ("minimal", base()),
+    ("bytes", base() with {data: Some(CloudEventData.Bytes(b"hi<>&"))}),
+    ("value", base() with {data: Some(CloudEventData.Value(json.Value.Object([("a", json.Value.Str("x<y")), ("b", json.Value.Int(1))]))), data_content_type: Some("application/json"), data_schema: Some("https://schema.example.test")}),
+    ("all", CloudEvent{id: "1", source: "/src", spec_version: "1.0", type_: "t", data: Some(CloudEventData.Value(json.Value.Str("str"))), subject: Some("sub"), time: Some(t), extensions: {"zext": json.Value.Num(1.5), "aext": json.Value.Bool(true), "source": json.Value.Str("ext-wins"), "subject": json.Value.Str("loses"), "time": json.Value.Str("loses")}}),
+    ("utc", base() with {time: Some(at("2026-01-02T03:04:05Z"))}),
+  ] {
+    got.push("MARSHAL ${name}: ${runtime.marshal_json(ce).to_str_lossy()} <nil>")
+  }
+  for line in CE_GO {
+    if let Some(rest) = line.cut_prefix("UNMARSHAL ") {
+      // the input is up to the ": " before Go's result
+      let i = rest.find("}: ") ?? rest.find("]: ") ?? rest.find("null: ") ?? 0
+      let end = if rest[i..rest.len()].starts_with("null: ") { i + 4 } else { i + 1 }
+      let input = rest[0..end]
+      match json.decode_str[CloudEvent](input) {
+        Ok(ce) => got.push("UNMARSHAL ${input}: ${ce_text(ce)}")
+        Err(e) => got.push("UNMARSHAL ${input}: error ${e.msg.cut_prefix("at $: ") ?? e.msg}")
+      }
+    }
+  }
+  got.push("NEW empty source: error ${new_cloud_event(os.rand, os.clock, "", "t").err() ?? "none"}")
+  got.push("NEW empty type: error ${new_cloud_event(os.rand, os.clock, "s", "").err() ?? "none"}")
+  let full = new_cloud_event(os.rand, os.clock, "s", "t", Some(CloudEventData.Value(json.Value.Object([("k", json.Value.Str("v"))]))), CloudEventOptions{subject: Some("sub"), time: Some(t), extensions: {"e": json.Value.Str("x")}})?
+  got.push("NEW full: ok ${runtime.marshal_json(full with {id: "fixed"}).to_str_lossy()}")
+  expect(got.len()) == CE_GO.len()
+  for i in 0..got.len() {
+    expect(got[i]) == CE_GO[i]
+  }
+}
+
+test "a new event has a version 4 UUID, spec version 1.0 and the clock's time in UTC" {
+  os.clock.set(time.parse("2026-11-06T09:00:00Z", time.RFC3339, time.utc())?)
+  let ce = new_cloud_event(os.rand, os.clock, "s", "t")?
+  expect(ce.id.len()) == 36
+  expect(ce.id[14..15]) == "4"
+  expect(ce.spec_version) == "1.0"
+  expect(ce.time.map(azcore.date_time_text)) == Some("2026-11-06T09:00:00Z")
+  expect(ce.data.is_none()) == true
+}

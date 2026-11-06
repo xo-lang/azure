@@ -8,6 +8,23 @@ version has been tagged since.
 
 ## Unreleased
 
+Added, for `messaging/eventgrid/azeventgrid` (checked against Go's
+azcore v1.23.0 by a Go program's JSON texts and requests):
+
+- `azcore.KeyCredential` and `azcore.SASCredential`
+  (`new_key_credential`, `new_sas_credential`, `update`, `get`): a key
+  shared by every copy and replaced in place.
+- `runtime.KeyCredentialPolicy` and `runtime.SASCredentialPolicy`: the
+  credential in a header (a key with an optional prefix), only over
+  HTTPS unless allowed (Go's `authorized requests are not permitted for
+  non-TLS protected (https) endpoints`, not retried).
+- `azcore/messaging`: `CloudEvent`, `CloudEventData` (`Bytes` is sent
+  as `data_base64`, `Value` as `data`), `CloudEventOptions` and
+  `new_cloud_event`, written and read as Go's (extensions replace a
+  standard attribute but `subject` and `time`; a read `data` is kept as
+  its JSON text; the required attributes checked with Go's messages).
+  A decode error's text is prefixed `at $: ` by the JSON reader.
+
 **Behavior fix** in every generated module (ARM, Key Vault and
 azappconfig's generated layer; regenerated): an empty 2xx response
 body decodes as Go's UnmarshalAsJSON leaves it, the zero value (a

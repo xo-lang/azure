@@ -7,7 +7,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
 
 - github.com/Azure/azure-sdk-for-go: `sdk/azcore` (cloud, policy, arm,
   runtime: the pipeline, retry, telemetry, request ID and bearer token
-  policies, pagers, pollers, ResponseError, TokenCredential),
+  policies, the key and SAS credential policies, pagers, pollers,
+  ResponseError, TokenCredential, KeyCredential, SASCredential;
+  messaging: CloudEvent),
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
@@ -75,6 +77,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   policy, the audience error policy, query normalization, and the
   pagers of `internal/generated/custom_client.go`, hand written over
   the generated layer; requests and signatures checked against its
+  own), `sdk/messaging/eventgrid/azeventgrid` v1.0.0 (its client,
+  models and serialization, hand written; requests checked against its
   own), and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's

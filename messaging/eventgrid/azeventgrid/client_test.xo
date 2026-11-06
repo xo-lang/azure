@@ -1,0 +1,108 @@
+// Go's calls (clientvectors_test.xo) made again here against the same
+// fake: every request, token scope and result must be Go's.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/azcore/messaging
+use github.com/xo-lang/azure/policy
+
+const EP: Str = "https://topic1.westus-1.eventgrid.example.test/api/events"
+
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[List[Int]]
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  let q = req.raw_query()
+  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let st = f.next.with(fn(var l: List[Int]) -> Int {
+    let x = l.get(0) ?? return 200
+    l = l[1..l.len()]
+    x
+  })
+  if st == 200 {
+    return http.Response{status: 200, headers: {}, body: b""}
+  }
+  http.Response{status: st, headers: {"x-ms-error-code": "Bad"}, body: b"{\"error\":{\"code\":\"Bad\",\"message\":\"no\"}}"}
+}
+
+fn out[T](f: Fake, name: Str, r: Result[T, azcore.CallErr]) {
+  let text = match r {
+    Ok(_) => "ok"
+    Err(azcore.CallErr.Response(re)) => "response error ${re.status_code} ${re.error_code}"
+    Err(e) => "error ${e.display()}"
+  }
+  note(f, "OUT ${name}: ${text}")
+}
+
+fn opts() -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+test "every call sends and returns what Go's does" {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([])}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  os.net.handle("POST https://topic1.westus-1.eventgrid.example.test/api/events", h)
+  os.net.handle("POST http://topic1.example.test/api/events", h)
+  let t = azcore.parse_date_time("2026-11-06T10:00:00+01:00").or_fault("time")
+  let ce = messaging.CloudEvent{id: "c1", source: "/s", spec_version: "1.0", type_: "t", data: Some(messaging.CloudEventData.Bytes(b"\x01\x02")), time: Some(t)}
+  let ev = Event{id: Some("e1"), event_type: Some("t"), subject: Some("s<"), data_version: Some("1.0"), event_time: Some(t), data: Some(json.Value.Object([("x", json.Value.Int(1))]))}
+
+  let c = new_client(os.net, os.clock, os.rand, EP, Cred{log: f.log}, opts())
+  out(f, "bearer cloud events", c.publish_cloud_events([ce]))
+  out(f, "bearer cloud events channel", c.publish_cloud_events([ce, ce], PublishCloudEventsOptions{aeg_channel_name: Some("ch1")}))
+  out(f, "bearer events", c.publish_events([ev, Event{}]))
+  out(f, "bearer custom", c.publish_custom_event_events([json.Value.Object([("a", json.Value.Str("<b>"))]), json.Value.Str("s"), json.Value.Num(1.5), json.Value.Null]))
+  out(f, "bearer events empty", c.publish_events([]))
+  f.next.with(fn(var l: List[Int]) { l = [400] })
+  out(f, "bearer 400", c.publish_events([ev]))
+  f.next.with(fn(var l: List[Int]) { l = [201] })
+  out(f, "bearer 201", c.publish_events([ev]))
+
+  let key = azcore.new_key_credential("key-1")
+  let kc = new_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}?x=1&a=b%20c", key, opts())
+  out(f, "key cloud events", kc.publish_cloud_events([ce]))
+  key.update("key-2")
+  out(f, "key updated", kc.publish_events([ev]))
+
+  let sas = azcore.new_sas_credential("r=x&sig=y")
+  let sc = new_client_with_sas(os.net, os.clock, os.rand, EP, sas, opts())
+  out(f, "sas custom", sc.publish_custom_event_events([json.Value.Object([("k", json.Value.Int(1))])]))
+  sas.update("r=z&sig=w")
+  out(f, "sas updated", sc.publish_cloud_events([ce]))
+
+  let hc = new_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://topic1.example.test/api/events", key, opts())
+  out(f, "key http", hc.publish_events([ev]))
+  let hs = new_client_with_sas(os.net, os.clock, os.rand, "http://topic1.example.test/api/events", sas, opts())
+  out(f, "sas http", hs.publish_events([ev]))
+
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for i in 0..(if got.len() < CLIENT_GO.len() { got.len() } else { CLIENT_GO.len() }) {
+    expect(got[i]) == CLIENT_GO[i]
+  }
+  expect(got.len()) == CLIENT_GO.len()
+}

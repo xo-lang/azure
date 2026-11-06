@@ -1,0 +1,132 @@
+// Event Grid's publisher client for basic topics, as Go's
+// `sdk/messaging/eventgrid/azeventgrid` v1.0.0 (client.go,
+// client_custom.go, models.go, models_serde.go, options.go, responses.go;
+// MIT, Copyright (c) Microsoft Corporation; NOTICE.md): events in the
+// Event Grid, CloudEvents 1.0 or a custom schema, POSTed to a topic.
+
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/azcore/messaging
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const MODULE: Str = "azeventgrid"
+pub const VERSION: Str = "v1.0.0"
+pub const API_VERSION: Str = "2018-01-01"
+
+/// Go's token scope for Event Grid.
+const TOKEN_SCOPE: Str = "https://eventgrid.azure.net/.default"
+
+/// Options of the constructors.
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// Publishes events to one Event Grid topic.
+pub struct Client {
+  pipeline: runtime.Pipeline
+  endpoint: Str
+}
+
+fn client_with(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy, options: ClientOptions) -> Client {
+  // Go names its pipeline's module "azeventgrid.Client" (User-Agent)
+  let pl = runtime.new_pipeline("${MODULE}.Client", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options.client)
+  Client{pipeline: pl, endpoint: endpoint}
+}
+
+/// A client for the topic at `endpoint`
+/// (`https://<topic>.<region>-1.eventgrid.azure.net/api/events`),
+/// authorized by Entra ID tokens (NewClient).
+pub fn new_client(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client {
+  client_with(net, clock, rand, endpoint, runtime.new_bearer_token_policy(cred, [TOKEN_SCOPE], clock), options)
+}
+
+/// A client sending the topic's access key in `aeg-sas-key`
+/// (NewClientWithSharedKeyCredential).
+pub fn new_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, endpoint: Str, key: azcore.KeyCredential, options: ClientOptions = ClientOptions{}) -> Client {
+  client_with(net, clock, rand, endpoint, runtime.new_key_credential_policy(key, "aeg-sas-key"), options)
+}
+
+/// A client sending a shared access signature in `aeg-sas-token`
+/// (NewClientWithSAS).
+pub fn new_client_with_sas(net: Net, clock: Clock, rand: Rand, endpoint: Str, sas: azcore.SASCredential, options: ClientOptions = ClientOptions{}) -> Client {
+  client_with(net, clock, rand, endpoint, runtime.new_sas_credential_policy(sas, "aeg-sas-token"), options)
+}
+
+/// An event in the Event Grid schema (Go's Event).
+pub struct Event {
+  /// The payload, any JSON.
+  pub data as "data,omitempty": json.Value? = None
+  /// The schema version of `data`.
+  pub data_version as "dataVersion,omitempty": Str? = None
+  /// When the event was generated.
+  pub event_time as "eventTime,omitempty": azcore.DateTime? = None
+  /// The kind of event.
+  pub event_type as "eventType,omitempty": Str? = None
+  /// A unique identifier of the event.
+  pub id as "id,omitempty": Str? = None
+  /// Set by Event Grid.
+  pub metadata_version as "metadataVersion,omitempty": Str? = None
+  /// The path of the event's subject, publisher defined.
+  pub subject as "subject,omitempty": Str? = None
+  /// The full resource path of the source; Event Grid sets it if empty.
+  pub topic as "topic,omitempty": Str? = None
+} derive Json
+
+pub struct PublishCloudEventsOptions {
+  /// The partner topic channel (`aeg-channel-name`).
+  pub aeg_channel_name: Str? = None
+}
+
+pub struct PublishCloudEventsResponse {}
+
+pub struct PublishCustomEventEventsOptions {}
+
+pub struct PublishCustomEventEventsResponse {}
+
+pub struct PublishEventsOptions {}
+
+pub struct PublishEventsResponse {}
+
+/// The endpoint with `api-version` set, its query encoded sorted, as
+/// Go's `reqQP.Set` then `Encode`.
+fn (c: Client) url() -> Str {
+  let (base, q) = c.endpoint.cut("?") ?? (c.endpoint, "")
+  var vs = url.parse_query(q) ?? _ => url.values()
+  vs.set("api-version", API_VERSION)
+  "${base}?${vs.encode()}"
+}
+
+fn (c: Client) post(req: policy.Request) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status != 200 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(())
+}
+
+/// Publishes CloudEvents (`application/cloudevents-batch+json`;
+/// PublishCloudEvents).
+pub fn (c: Client) publish_cloud_events(events: List[messaging.CloudEvent], options: PublishCloudEventsOptions = PublishCloudEventsOptions{}) -> PublishCloudEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var headers: List[(Str, Str)] = []
+  if let Some(v) = options.aeg_channel_name {
+    headers.push(("aeg-channel-name", v))
+  }
+  headers.push(("Content-Type", "application/cloudevents-batch+json; charset=utf-8"))
+  c.post(policy.Request{method: "POST", url: c.url(), headers: headers, body: runtime.marshal_json(events)})?
+  Ok(PublishCloudEventsResponse{})
+}
+
+/// Publishes events in a custom schema: each value as it is
+/// (PublishCustomEventEvents).
+pub fn (c: Client) publish_custom_event_events(events: List[json.Value], options: PublishCustomEventEventsOptions = PublishCustomEventEventsOptions{}) -> PublishCustomEventEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.post(policy.Request{method: "POST", url: c.url(), headers: [("Content-Type", "application/json")], body: runtime.marshal_json(events)})?
+  Ok(PublishCustomEventEventsResponse{})
+}
+
+/// Publishes events in the Event Grid schema (PublishEvents).
+pub fn (c: Client) publish_events(events: List[Event], options: PublishEventsOptions = PublishEventsOptions{}) -> PublishEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.post(policy.Request{method: "POST", url: c.url(), headers: [("Content-Type", "application/json")], body: runtime.marshal_json(events)})?
+  Ok(PublishEventsResponse{})
+}
