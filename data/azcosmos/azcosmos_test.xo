@@ -10,6 +10,7 @@ use std/crypto
 use std/http
 use std/testing
 use std/json
+use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
 const EP: Str = "https://acct1.documents.example.test:443"
@@ -308,4 +309,21 @@ test "query items are kept as the service wrote them, each one, spacing inside k
   expect(raw_elements(text, "Documents").ok()) == Some(["{\"a\": 1.50}", "{\"b\":[2,{\"c\":null}]}"])
   expect(raw_elements("{\"Documents\":[]}", "Documents").ok()) == Some([])
   expect(raw_elements("{\"x\":1}", "Documents").ok()) == Some([])
+}
+
+test "a query pager whose fetch fails is done, and returns that error again without a request (azcore v1.23.0)" {
+  let log = serve(os.net)
+  let cred = new_key_credential(KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, opts)
+  let ct = c.new_database("db1")?.new_container("missing")?
+  var ip = ct.new_query_items_pager("SELECT * FROM c", new_partition_key_string("a"))
+  expect(ip.more()) == true
+  let first = ip.next_page().err().map(fn(e: azcore.CallErr) -> Str { e.display() }) ?? "ok"
+  let sent = log.with_read(fn(l: List[Str]) -> Int { l.len() })
+  expect(first.contains("RESPONSE 404: 404 Not Found")) == true
+  expect(ip.more()) == false
+  let again = ip.next_page().err().map(fn(e: azcore.CallErr) -> Str { e.display() }) ?? "ok"
+  expect(again) == first
+  expect(log.with_read(fn(l: List[Str]) -> Int { l.len() })) == sent
 }

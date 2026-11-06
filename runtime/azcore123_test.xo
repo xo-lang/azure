@@ -1,0 +1,148 @@
+// azcore v1.23.0's root changes since v1.21.0 replayed against the lines
+// of a Go program (azcore123vectors_test.xo): the same inputs here give
+// the same lines.
+
+use std/http
+use std/json
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+fn q(s: Str) -> Str {
+  marshal_json(s).to_str_lossy()
+}
+
+fn go_lines(prefix: Str) -> List[Str] {
+  AZCORE123_GO.filter(fn(l: Str) -> Bool { l.starts_with(prefix) })
+}
+
+test "join_paths is azcore v1.23.0's JoinPaths, a segment's query first" {
+  let cases = [
+    ("https://h.example.test", "a"),
+    ("https://h.example.test/", "/a"),
+    ("https://h.example.test/r", "?x=1"),
+    ("https://h.example.test/r/", "?x=1"),
+    ("https://h.example.test/r?k=v", "?x=1"),
+    ("https://h.example.test/r?k=v", "a/b?x=1"),
+    ("https://h.example.test/r?k=v", "a/b"),
+    ("https://h.example.test/r?k=v", "a/b/"),
+    ("https://h.example.test/r", "a//b/../c"),
+    ("https://h.example.test/r", ""),
+    ("https://h.example.test/r?k=v", ""),
+    ("https://h.example.test/r?k=v?z", "a"),
+    ("https://h.example.test", "?"),
+    ("https://h.example.test/r", "./?x=1"),
+  ]
+  let got = cases.map(fn(c: (Str, Str)) -> Str { "JOIN ${q(c.0)} ${q(c.1)} => ${q(join_paths(c.0, c.1))}" })
+  expect(got) == go_lines("JOIN ")
+}
+
+struct ErrCase {
+  method: Str
+  url: Str
+  status: Int
+  code: Str
+  body: Str
+}
+
+test "a ResponseError's text is Go's, the URL's query and user info left out" {
+  let cases = [
+    ErrCase{method: "GET", url: "https://h.example.test/p", status: 404, code: "NotFound", body: ""},
+    ErrCase{method: "PUT", url: "https://u:pw@h.example.test:8443/a%2Fb/c d/é?sig=secret&api-version=1#frag", status: 400, code: "", body: "{\"error\":{\"code\":\"Bad\",\"message\":\"no <x>\"}}"},
+    ErrCase{method: "DELETE", url: "https://h.example.test", status: 500, code: "", body: "not json"},
+    ErrCase{method: "GET", url: "https://h.example.test/a(b)!*'/x$y,z;w=1:@", status: 409, code: "", body: "  [1, {\"a\": [] , \"b\":{}}]  "},
+    ErrCase{method: "GET", url: "https://h.example.test/%7Ea%20b?x", status: 503, code: "", body: "<Error><Code>Busy</Code></Error>"},
+    ErrCase{method: "GET", url: "https://h.example.test/x/", status: 418, code: "", body: "{\"a\":1}\n"},
+  ]
+  var got: List[Str] = []
+  for c in cases {
+    var resp = http.text(c.status, c.body)
+    if c.code != "" {
+      resp = resp.with_header("x-ms-error-code", c.code)
+    }
+    got.push("ERROR ${c.method} ${q(c.url)}:")
+    let text = azcore.response_error(c.method, c.url, resp).display()
+    for l in text.trim_end_chars("\n").split("\n") {
+      got.push("| ${l}")
+    }
+  }
+  let want = AZCORE123_GO.filter(fn(l: Str) -> Bool { l.starts_with("ERROR ") || l.starts_with("| ") })
+  expect(got) == want
+}
+
+test "a pager whose fetch fails is done, and returns that error again without a request" {
+  let calls = Mutex[Int].new(0)
+  os.net.handle("GET https://h.example.test/pages", fn(req: http.Request) -> http.Response {
+    let n = calls.with(fn(var c: Int) -> Int {
+      c = c + 1
+      c
+    })
+    if n == 2 { http.text(404, "") } else { http.text(200, "${n}") }
+  })
+  let pl = new_pipeline("t", "v0", os.net, os.clock, os.rand, PipelineOptions{}, policy.ClientOptions{})
+  let first = policy.Request{method: "GET", url: "https://h.example.test/pages"}
+  var p = new_pager_with(pl, first, fn(r: http.Response) -> Int ! Str { Ok(Int.parse(r.body.to_str_lossy()) ?? 0) }, fn(prev: policy.Request, page: Int) -> policy.Request? { Some(prev) })
+  var got: List[Str] = []
+  for _ in 0..4 {
+    let more = p.more()
+    let (page, e) = match p.next_page() {
+      Ok(v) => (v, "<nil>")
+      Err(_) => (0, "fail")
+    }
+    got.push("PAGER more=${more} page=${page} err=${e} calls=${os.net.requests().len()}")
+  }
+  expect(got) == go_lines("PAGER ")
+}
+
+test "DateTimeRFC7231 writes GMT and reads as Go's datetime.RFC7231" {
+  let t = Time.parse_rfc3339("2026-11-06T10:04:05.000000123+01:00")?
+  let text = rfc7231_text_of(t)
+  var got = ["RFC7231 json=${json.encode_str(azcore.DateTimeRFC7231(t))} text=${text} string=${text}"]
+  for input in [
+    "\"Fri, 06 Nov 2026 09:04:05 GMT\"",
+    "\"fri, 06 nov 2026 09:04:05 gmt\"",
+    "\"Fri, 06 Nov 2026 09:04:05 UTC\"",
+    "\"Fri, 06 Nov 2026 10:04:05 CET\"",
+    "\"Fri, 06 Nov 2026 10:04:05 +0100\"",
+    "\"Fri, 06 Nov 2026 10:04:05 PDT\"",
+    "\"Fri, 06 Nov 2026 10:04:05 ABCDT\"",
+    "\"Fri,  6 Nov 2026 10:04:05 GMT\"",
+    "\"Fri, 6 Nov 2026 10:04:05 GMT\"",
+    "\"Mon, 06 Nov 2026 10:04:05 GMT\"",
+    "\"Fri, 31 Nov 2026 10:04:05 GMT\"",
+    "\"2026-11-06T09:04:05Z\"",
+    "\"\"",
+  ] {
+    match json.decode_str[azcore.DateTimeRFC7231](input) {
+      Ok(v) => got.push("RFC7231 parse ${input} => ${time.format(v.0, time.utc(), time.RFC3339)}")
+      Err(_) => got.push("RFC7231 parse ${input} => error")
+    }
+  }
+  expect(got) == go_lines("RFC7231 ")
+}
+
+fn rfc7231_text_of(t: Time) -> Str {
+  azcore.rfc7231_text(azcore.DateTimeRFC7231(t))
+}
+
+test "new_request_for_next_link is Go's NewRequestForNextLink" {
+  let cases = [
+    ("https://h.example.test", "https://other.example.test/next?a=b c&$skip=2"),
+    ("https://h.example.test", "/items?$skiptoken=a+b;c&x=%2F"),
+    ("https://h.example.test/base", "items?page=2"),
+    ("https://h.example.test/base?api-version=1", "items?page=2"),
+    ("https://h.example.test/", "?page=2"),
+    ("https://h.example.test", "items"),
+    ("https://h.example.test", "HTTP://H.example.test/x"),
+    ("https://h.example.test", "ftp://f.example.test/x"),
+    ("https://h.example.test", "//h2.example.test/x"),
+    ("https://h.example.test", "next?a=%zz"),
+  ]
+  let got = cases.map(fn(c: (Str, Str)) -> Str {
+    match new_request_for_next_link("GET", c.0, c.1) {
+      Ok(r) => "NEXT ${q(c.0)} ${q(c.1)} => ${q(r.url)}"
+      Err(e) => "NEXT ${q(c.0)} ${q(c.1)} => error ${e}"
+    }
+  })
+  expect(got) == go_lines("NEXT ")
+}

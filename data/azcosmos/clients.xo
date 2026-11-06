@@ -84,13 +84,33 @@ pub struct QueryPager[T] {
   continuation_of: fn(T) -> Str?
   started: Bool = false
   next_token: Str? = None
+  /// A failed fetch: the terminal state of azcore v1.23.0's Pager, which
+  /// Go's QueryItems pager is.
+  failed: azcore.CallErr? = None
 }
 
 pub fn (p: QueryPager[T]) more() -> Bool {
-  !p.started || p.next_token.is_some()
+  p.failed.is_none() && (!p.started || p.next_token.is_some())
 }
 
+/// The next page; once a fetch fails, that error again with no request.
 pub fn (var p: QueryPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(e) = p.failed {
+    return Err(e)
+  }
+  if p.started && p.next_token.is_none() {
+    return Err(azcore.CallErr.InvalidInput("no more pages"))
+  }
+  match p.fetch() {
+    Ok(page) => Ok(page)
+    Err(e) => {
+      p.failed = Some(e)
+      Err(e)
+    }
+  }
+}
+
+fn (var p: QueryPager[T]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
   var call = p.call
   if p.started {
     let tok = p.next_token ?? return Err(azcore.CallErr.InvalidInput("no more pages"))

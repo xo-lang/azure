@@ -4,6 +4,7 @@
 use std/http
 use std/json
 use std/regexp
+use std/url
 use github.com/xo-lang/azure/policy
 
 pub struct ResponseError {
@@ -49,12 +50,157 @@ pub fn error_code_of(resp: http.Response) -> Str {
   }
 }
 
+const SEPARATOR: Str = "--------------------------------------------------------------------------------"
+
+/// The text of azcore v1.23.0's ResponseError.Error: the request's
+/// method, scheme, host and escaped path (no user info, query or
+/// fragment, as v1.21.1 redacts them), the status, the error code and
+/// the body, indented when it is JSON. The status text is net/http's
+/// StatusText, as a service's reason phrase reads (Go prints the one
+/// on the wire).
 pub fn (e: ResponseError) display() -> Str {
-  var s = "${e.method} ${e.url}\nRESPONSE ${e.status_code}\nERROR CODE: ${if e.error_code == "" { "UNAVAILABLE" } else { e.error_code }}"
-  if !e.response.body.is_empty() {
-    s = "${s}\n${e.response.body.to_str_lossy()}"
+  let code = if e.error_code == "" { "ERROR CODE UNAVAILABLE" } else { "ERROR CODE: ${e.error_code}" }
+  let raw = e.response.body.to_str_lossy()
+  let body = if raw == "" { "Response contained no body\n" } else {
+    // Go's json.Indent keeps the text's trailing white space
+    let shown = match json.indent(raw) {
+      Ok(t) => t + raw[raw.trim_end().len()..raw.len()]
+      Err(_) => raw
+    }
+    "${shown}\n"
   }
-  s
+  "${e.method} ${redacted_url(e.url)}\n${SEPARATOR}\nRESPONSE ${e.status_code}: ${e.status_code} ${status_text(e.status_code)}\n${code}\n${SEPARATOR}\n${body}${SEPARATOR}\n"
+}
+
+/// `scheme://host` and the escaped path of `u`, as Go prints
+/// `URL.Scheme`, `URL.Host` and `URL.EscapedPath()`.
+pub fn redacted_url(u: Str) -> Str {
+  let (scheme, rest) = u.cut("://") ?? return escaped_path(u)
+  var end = rest.len()
+  for c in ["/", "?", "#"] {
+    if let Some(i) = rest.find(c) {
+      if i < end {
+        end = i
+      }
+    }
+  }
+  var host = rest[0..end]
+  if let Some(i) = host.rfind("@") {
+    host = host[i + 1..host.len()]
+  }
+  var path = rest[end..rest.len()]
+  for c in ["?", "#"] {
+    if let Some(i) = path.find(c) {
+      path = path[0..i]
+    }
+  }
+  "${scheme.to_lower()}://${host}${escaped_path(path)}"
+}
+
+/// Go's URL.EscapedPath for a raw path: the path as written when it is
+/// a valid encoding, else its decoded form escaped again.
+pub fn escaped_path(raw: Str) -> Str {
+  if valid_encoded(raw) {
+    return raw
+  }
+  let p = url.path_unescape(raw) ?? _ => return raw
+  let b = p.bytes()
+  var out = ""
+  for (i, c) in b.indexed() {
+    if path_keeps(Int(c)) {
+      out = out + p[i..i + 1]
+    } else {
+      out = out + "%" + b[i..i + 1].to_hex().to_upper()
+    }
+  }
+  out
+}
+
+/// A byte Go's shouldEscape(c, encodePath) leaves as it is: letters,
+/// digits and `-_.~$&+,/:;=@`.
+fn path_keeps(c: Int) -> Bool {
+  (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || [45, 95, 46, 126, 36, 38, 43, 44, 47, 58, 59, 61, 64].contains(c)
+}
+
+/// Go's validEncoded(s, encodePath): what path_keeps keeps and
+/// `!'()*[]%`.
+fn valid_encoded(s: Str) -> Bool {
+  for c in s.bytes() {
+    let n = Int(c)
+    if !path_keeps(n) && ![33, 39, 40, 41, 42, 91, 93, 37].contains(n) {
+      return false
+    }
+  }
+  true
+}
+
+/// net/http's StatusText.
+pub fn status_text(code: Int) -> Str {
+  match code {
+    100 => "Continue"
+    101 => "Switching Protocols"
+    102 => "Processing"
+    103 => "Early Hints"
+    200 => "OK"
+    201 => "Created"
+    202 => "Accepted"
+    203 => "Non-Authoritative Information"
+    204 => "No Content"
+    205 => "Reset Content"
+    206 => "Partial Content"
+    207 => "Multi-Status"
+    208 => "Already Reported"
+    226 => "IM Used"
+    300 => "Multiple Choices"
+    301 => "Moved Permanently"
+    302 => "Found"
+    303 => "See Other"
+    304 => "Not Modified"
+    305 => "Use Proxy"
+    307 => "Temporary Redirect"
+    308 => "Permanent Redirect"
+    400 => "Bad Request"
+    401 => "Unauthorized"
+    402 => "Payment Required"
+    403 => "Forbidden"
+    404 => "Not Found"
+    405 => "Method Not Allowed"
+    406 => "Not Acceptable"
+    407 => "Proxy Authentication Required"
+    408 => "Request Timeout"
+    409 => "Conflict"
+    410 => "Gone"
+    411 => "Length Required"
+    412 => "Precondition Failed"
+    413 => "Request Entity Too Large"
+    414 => "Request URI Too Long"
+    415 => "Unsupported Media Type"
+    416 => "Requested Range Not Satisfiable"
+    417 => "Expectation Failed"
+    418 => "I'm a teapot"
+    421 => "Misdirected Request"
+    422 => "Unprocessable Entity"
+    423 => "Locked"
+    424 => "Failed Dependency"
+    425 => "Too Early"
+    426 => "Upgrade Required"
+    428 => "Precondition Required"
+    429 => "Too Many Requests"
+    431 => "Request Header Fields Too Large"
+    451 => "Unavailable For Legal Reasons"
+    500 => "Internal Server Error"
+    501 => "Not Implemented"
+    502 => "Bad Gateway"
+    503 => "Service Unavailable"
+    504 => "Gateway Timeout"
+    505 => "HTTP Version Not Supported"
+    506 => "Variant Also Negotiates"
+    507 => "Insufficient Storage"
+    508 => "Loop Detected"
+    510 => "Not Extended"
+    511 => "Network Authentication Required"
+    _ => ""
+  }
 }
 
 /// Why a call failed: what pagers, pollers and generated operations

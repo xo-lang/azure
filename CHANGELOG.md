@@ -8,6 +8,31 @@ version has been tagged since.
 
 ## Unreleased
 
+Go's azcore v1.21.1 to v1.23.0 (each checked against the lines a Go
+program prints with azcore v1.23.0, `runtime/azcore123vectors_test.xo`):
+
+- **Behavior change**: `ResponseError.display` is Go's
+  `ResponseError.Error` text: separator lines, `RESPONSE <code>: <code>
+  <status text>` (net/http's StatusText, where Go prints the reason
+  phrase on the wire), `ERROR CODE UNAVAILABLE` without a colon, and a
+  JSON body indented with its trailing white space kept. The request
+  line has the scheme, host and escaped path only: the query (a SAS
+  signature among it), user info and fragment are left out (v1.21.1).
+- `runtime.join_paths`: a root's query goes after the segment's own
+  query with `&`, and no slash is added before a segment that is only a
+  query (v1.21.1).
+- `runtime.Pager` (and azcosmos's query pager, which Go builds on it):
+  a failed fetch is terminal, `more` false and every later `next_page`
+  the same error with no request sent (v1.23.0).
+- `runtime.new_request_for_next_link` and `runtime.has_scheme`: Go's
+  NewRequestForNextLink (v1.23.0), the link's query encoded with `%20`
+  for a space and a relative link joined to the endpoint.
+- `azcore.DateTimeRFC7231` (`rfc7231_text`, `parse_rfc7231`): Go's
+  `datetime.RFC7231` (v1.22.0), written in GMT, read case
+  insensitively with any zone abbreviation at offset 0 and the weekday
+  not checked against the date, as Go's time.Parse reads them. Go's
+  UnmarshalText (an empty text is no value) is not ported.
+
 Added, for `messaging/eventgrid/azeventgrid` (checked against Go's
 azcore v1.23.0 by a Go program's JSON texts and requests):
 

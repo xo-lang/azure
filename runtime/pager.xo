@@ -29,6 +29,9 @@ pub struct Pager[T] {
   /// A first page already in hand (a pageable long-running operation's
   /// final response), returned before any request.
   seed: T? = None
+  /// The error of a failed fetch: the pager's terminal state (azcore
+  /// v1.23.0), `more` false and every later `next_page` this error.
+  failed: azcore.CallErr? = None
 }
 
 /// The pager with `page` as its first page, fetched by its first
@@ -72,13 +75,17 @@ pub fn new_marker_pager[T](pipeline: Pipeline, first: policy.Request, decode: fn
   })
 }
 
-/// Whether another page can be fetched.
+/// Whether another page can be fetched: false once a fetch failed.
 pub fn (p: Pager[T]) more() -> Bool {
-  !p.started || p.pending.is_some()
+  p.failed.is_none() && (!p.started || p.pending.is_some())
 }
 
-/// The next page.
+/// The next page. A failed fetch is returned again by every later call,
+/// with no request sent, as azcore v1.23.0's Pager does.
 pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+  if let Some(e) = p.failed {
+    return Err(e)
+  }
   if !p.started {
     if let Some(page) = p.seed {
       p.started = true
@@ -90,14 +97,24 @@ pub fn (var p: Pager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock
   let req = if !p.started { p.first } else {
     p.pending ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
   }
+  let page = match p.fetch(req) {
+    Ok(v) => v
+    Err(e) => {
+      p.failed = Some(e)
+      return Err(e)
+    }
+  }
+  p.started = true
+  p.pending = (p.next)(req, page)
+  Ok(page)
+}
+
+fn (p: Pager[T]) fetch(req: policy.Request) -> T ! azcore.CallErr uses (net.dial, clock, rand) {
   let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if resp.status != 200 && !p.ok_status.contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }
-  let page = (p.decode)(resp) ?? e => return Err(azcore.CallErr.Decode(e))
-  p.started = true
-  p.pending = (p.next)(req, page)
-  Ok(page)
+  (p.decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
 }
 
 /// `link` with its query re-encoded (sorted, escaped), as azcore's

@@ -9,7 +9,7 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   runtime: the pipeline, retry, telemetry, request ID and bearer token
   policies, the key and SAS credential policies, pagers, pollers,
   ResponseError, TokenCredential, KeyCredential, SASCredential;
-  messaging: CloudEvent),
+  messaging: CloudEvent; runtime/datetime: RFC7231),
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`

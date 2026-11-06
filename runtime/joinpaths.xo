@@ -1,11 +1,16 @@
-// azcore's runtime.JoinPaths with one path (runtime/request.go of azcore
-// v1.21.0; MIT, Copyright (c) Microsoft Corporation; NOTICE.md).
+// azcore's runtime.JoinPaths with one path and NewRequestForNextLink
+// (internal/exported/request.go of azcore v1.23.0; MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md).
 
 use std/json
 use std/path
+use std/url
+use github.com/xo-lang/azure/policy
 
 /// `root` with `segment` joined to its path, cleaned as Go's path.Join
-/// cleans it (a trailing slash kept), and root's query kept after it.
+/// cleans it (a trailing slash kept), and root's query kept after it:
+/// after the segment's own query with `&`, and with no slash before a
+/// segment that is only a query (azcore v1.21.1).
 pub fn join_paths(root: Str, segment: Str) -> Str {
   var r = root
   var qps = ""
@@ -20,14 +25,59 @@ pub fn join_paths(root: Str, segment: Str) -> Str {
     p = p + "/"
   }
   if qps != "" {
-    p = "${p}?${qps}"
+    p = if p.contains("?") { "${p}&${qps}" } else { "${p}?${qps}" }
   }
   if r.ends_with("/") && p.starts_with("/") {
     r = r[0..r.len() - 1]
-  } else if !r.ends_with("/") && !p.starts_with("/") {
+  } else if !r.ends_with("/") && !p.starts_with("/") && !p.starts_with("?") {
     p = "/" + p
   }
   r + p
+}
+
+/// Whether `s` starts with a URL scheme and its colon, as Go's
+/// url.Parse reads one.
+pub fn has_scheme(s: Str) -> Bool {
+  for (i, c) in s.bytes().indexed() {
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) {
+      continue
+    }
+    if c == 58 {
+      return i > 0
+    }
+    if i == 0 {
+      return false
+    }
+    if (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 46 {
+      continue
+    }
+    return false
+  }
+  false
+}
+
+/// The request for a pageable operation's next link (azcore v1.23.0's
+/// NewRequestForNextLink): the link's query encoded as EncodeQueryParams
+/// encodes it with a space as `%20`, an absolute link sent as it is and
+/// a relative one joined to `endpoint` with `join_paths`. A query that
+/// does not decode, or a scheme other than http or https, is an error.
+pub fn new_request_for_next_link(method: Str, endpoint: Str, next_link: Str) -> policy.Request ! Str {
+  var link = next_link
+  if let Some((before, after)) = next_link.cut("?") {
+    let q = url.parse_query(after.replace(";", "%3B")) ?? e => return Err(e.display())
+    link = "${before}?${q.encode().replace("+", "%20")}"
+  }
+  if has_scheme(link) {
+    let (scheme, rest) = link.cut(":") ?? ("", link)
+    let s = scheme.to_lower()
+    if s != "http" && s != "https" {
+      return Err("unsupported protocol scheme ${s}")
+    }
+    link = "${s}:${rest}"
+  } else {
+    link = join_paths(endpoint, link)
+  }
+  Ok(policy.Request{method: method, url: link})
 }
 
 /// `v` as azcore's MarshalAsJSON writes a request body: Go's
