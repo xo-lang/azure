@@ -72,8 +72,8 @@ Where admin differs from Go v1.11.0, each a Go bug:
 - The subscription pagers send no stray `%3F=` parameter.
 - A rule with no name is put to `.../Rules/$Default`, the name its body
   carries (Go puts it to `.../Rules/`).
-- An unknown filter or action goes back as well formed XML (Go repeats
-  its type attribute).
+- An unknown filter or action whose XML declares `xmlns:i` goes back
+  well formed (Go writes its type attribute twice).
 
 Durations stay ISO 8601 strings, as Go keeps them. A runtime time is
 None where Go has its zero time (an entity never accessed).
