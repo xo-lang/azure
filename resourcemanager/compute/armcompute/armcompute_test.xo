@@ -1,0 +1,127 @@
+// The generated armcompute clients against a fake Resource Manager
+// (invented hosts): a VM's create long-running operation through
+// Azure-AsyncOperation, its $expand enum, the power-off query flag, the
+// list pager, and a disk at its own api-version.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const RG: Str = "${EP}/subscriptions/${SUB}/resourceGroups/rg1/providers/Microsoft.Compute"
+const VM: Str = "{\"name\":\"vm1\",\"location\":\"westus\",\"properties\":{\"hardwareProfile\":{\"vmSize\":\"Standard_D2s_v3\"},\"provisioningState\":\"Succeeded\"}}"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn all(seen: Mutex[List[http.Request]]) -> List[http.Request] {
+  seen.with_read(fn(xs: List[http.Request]) -> List[http.Request] { xs })
+}
+
+fn vms(net: testing.FakeNet, clock: Clock, rand: Rand) -> VirtualMachinesClient ! Str {
+  new_virtual_machines_client(net, clock, rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})
+}
+
+test "begin_create_or_update PUTs the VM, polls Azure-AsyncOperation, then GETs the VM" {
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.Compute/locations/westus/operations/op1"
+  let creating = VM.replace("\"Succeeded\"", "\"Creating\"")
+  let put = capture(os.net, "PUT ${RG}/virtualMachines/vm1", 201, creating, [("Azure-AsyncOperation", op), ("Retry-After", "0")])
+  let polls = Atomic[Int].new(0)
+  os.net.handle("GET ${op}", fn(req: http.Request) -> http.Response {
+    if polls.add(1) < 2 {
+      return http.text(200, "{\"status\":\"InProgress\"}")
+    }
+    http.text(200, "{\"status\":\"Succeeded\"}")
+  })
+  let got = capture(os.net, "GET ${RG}/virtualMachines/vm1", 200, VM)
+  let c = vms(os.net, os.clock, os.rand)?
+  let vm = VirtualMachine{location: Some("westus"), properties: Some(VirtualMachineProperties{hardware_profile: Some(HardwareProfile{vm_size: Some(VIRTUAL_MACHINE_SIZE_TYPES_STANDARD_D2S_V3)})})}
+  var p = c.begin_create_or_update("rg1", "vm1", vm)?
+  expect(p.done()) == false
+  let r = p.poll_until_done(os.clock, frequency: 1s)?
+  let props = r.virtual_machine.properties ?? VirtualMachineProperties{}
+  expect(props.provisioning_state) == Some("Succeeded")
+  expect(props.hardware_profile.and_then(fn(h: HardwareProfile) -> VirtualMachineSizeTypes? { h.vm_size })) == Some(VIRTUAL_MACHINE_SIZE_TYPES_STANDARD_D2S_V3)
+  expect(polls.get()) == 2
+  expect(all(got).len()) == 1
+  let req = all(put)[0]
+  expect(req.url.query.get("api-version")) == Some(API_VERSION)
+  let sent = json.parse_value(req.body.to_str_lossy())?
+  let size = sent.get("properties").and_then(fn(v: json.Value) -> json.Value? { v.get("hardwareProfile") }).and_then(fn(v: json.Value) -> json.Value? { v.get("vmSize") })
+  expect(size) == Some(json.Value.Str("Standard_D2s_v3"))
+  expect(sent.get("name")) == None
+}
+
+test "a failed asynchronous operation is the caller's error" {
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.Compute/locations/westus/operations/op2"
+  capture(os.net, "PUT ${RG}/virtualMachines/vm2", 201, VM, [("Azure-AsyncOperation", op), ("Retry-After", "0")])
+  capture(os.net, "GET ${op}", 200, "{\"status\":\"Failed\",\"error\":{\"code\":\"QuotaExceeded\",\"message\":\"Operation could not be completed as it results in exceeding approved quota.\"}}")
+  let c = vms(os.net, os.clock, os.rand)?
+  var p = c.begin_create_or_update("rg1", "vm2", VirtualMachine{location: Some("westus")})?
+  match p.poll_until_done(os.clock, frequency: 1s) {
+    Err(e) => expect("${e}".contains("QuotaExceeded")) == true
+    other => expect("${other:?}") == "a QuotaExceeded error"
+  }
+}
+
+test "get sends $expand from InstanceViewTypes" {
+  let seen = capture(os.net, "GET ${RG}/virtualMachines/vm1", 200, VM)
+  let c = vms(os.net, os.clock, os.rand)?
+  expect(c.get("rg1", "vm1", VirtualMachinesClientGetOptions{expand: Some(INSTANCE_VIEW_TYPES_INSTANCE_VIEW)})?.virtual_machine.name) == Some("vm1")
+  expect(all(seen)[0].url.query.get("$expand")) == Some("instanceView")
+}
+
+test "begin_power_off sends skipShutdown and finishes on Location" {
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.Compute/locations/westus/operations/off1"
+  let post = capture(os.net, "POST ${RG}/virtualMachines/vm1/powerOff", 202, "", [("Location", op), ("Retry-After", "0")])
+  capture(os.net, "GET ${op}", 200)
+  let c = vms(os.net, os.clock, os.rand)?
+  var p = c.begin_power_off("rg1", "vm1", VirtualMachinesClientBeginPowerOffOptions{skip_shutdown: Some(true)})?
+  p.poll_until_done(os.clock, frequency: 1s)?
+  expect(p.done()) == true
+  expect(all(post)[0].url.query.get("skipShutdown")) == Some("true")
+}
+
+test "the VM list pager follows nextLink" {
+  capture(os.net, "GET ${RG}/virtualMachines", 200, "{\"value\":[{\"name\":\"a\"},{\"name\":\"b\"}],\"nextLink\":\"${RG}/virtualMachinespage2\"}")
+  capture(os.net, "GET ${RG}/virtualMachinespage2", 200, "{\"value\":[{\"name\":\"c\"}]}")
+  let c = vms(os.net, os.clock, os.rand)?
+  var p = c.new_list_pager("rg1")?
+  var names: List[Str] = []
+  while p.more() {
+    for v in p.next_page()?.virtual_machine_list_result.value ?? [] {
+      names.push(v.name ?? "")
+    }
+  }
+  expect(names) == ["a", "b", "c"]
+}
+
+test "a disk is read at the disk api-version, not the package's" {
+  let seen = capture(os.net, "GET ${RG}/disks/d1", 200, "{\"name\":\"d1\",\"location\":\"westus\",\"properties\":{\"diskSizeGB\":128,\"timeCreated\":\"2026-11-05T03:04:05.1234567Z\"}}")
+  let c = new_disks_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  let d = c.get("rg1", "d1")?.disk
+  let props = d.properties ?? DiskProperties{}
+  expect(props.disk_size_gb) == Some(128)
+  expect(props.time_created.map(fn(t: azcore.DateTime) -> Int { t.0.unix() })) == Some(1793847845)
+  expect(all(seen)[0].url.query.get("api-version")) == Some("2024-03-02")
+  expect(API_VERSION) == "2024-11-01"
+}

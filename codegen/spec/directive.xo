@@ -11,6 +11,9 @@ use std/yaml
 
 /// One assignment: the definition, the keys inside it, the value.
 pub struct Assign {
+  /// The file it applies to (`diskRPCommon.json`), empty for every file
+  /// (`from: swagger-document`).
+  pub from: Str = ""
   pub definition: Str
   pub keys: List[Str]
   pub value: json.Value
@@ -51,6 +54,10 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
             Some(m) => m[1] ?? m[2] ?? ""
             None => ""
           }
+          let from = match d.get("from") {
+            Some(json.Value.Str(f)) => if f == "swagger-document" { "" } else { f }
+            _ => ""
+          }
           let tr = match d.get("transform") {
             Some(json.Value.Str(s)) => s
             _ => ""
@@ -64,7 +71,7 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
                 Some(b) => json.Value.Bool(b == "true")
                 None => json.Value.Str(m[2] ?? m[3] ?? "")
               }
-              out.assigns.push(Assign{definition: def, keys: keys, value: value})
+              out.assigns.push(Assign{from: from, definition: def, keys: keys, value: value})
               n += 1
             }
           }
@@ -76,7 +83,8 @@ pub fn go_directives(readme_go: Str) -> Directives ! Str {
       } else {
         // A block applies to Go when it has no condition or names $(go).
         let cond = t[3..t.len()].trim().trim_prefix("yaml").trim()
-        inside = t[3..t.len()].trim().starts_with("yaml") && (cond == "" || cond.contains("$(go)"))
+        // ...and is not for track 1 (`$(go) && !$(track2)`).
+        inside = t[3..t.len()].trim().starts_with("yaml") && (cond == "" || cond.contains("$(go)")) && !cond.contains("!$(track2)")
       }
       continue
     }
@@ -114,11 +122,15 @@ pub fn set_at(v: json.Value, keys: List[Str], value: json.Value) -> json.Value {
   json.Value.Object(out)
 }
 
-/// `doc` with the assignments to its definitions applied, and how many.
-pub fn apply(doc: json.Value, assigns: List[Assign]) -> (json.Value, Int) {
+/// `doc` (the file `file`) with the assignments to its definitions
+/// applied, and how many.
+pub fn apply(doc: json.Value, file: Str, assigns: List[Assign]) -> (json.Value, Int) {
   var d = doc
   var n = 0
   for a in assigns {
+    if a.from != "" && !file.ends_with("/${a.from}") {
+      continue
+    }
     if d.get("definitions").and_then(fn(x: json.Value) -> json.Value? { x.get(a.definition) }).is_some() {
       d = set_at(d, ["definitions", a.definition] + a.keys, a.value)
       n += 1
