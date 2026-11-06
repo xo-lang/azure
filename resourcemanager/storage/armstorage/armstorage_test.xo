@@ -1,0 +1,88 @@
+// The generated armstorage clients against a fake Resource Manager.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/azcore
+
+const EP: Str = "https://management.example.test"
+const SUB: Str = "sub-test"
+const ACC: Str = "${EP}/subscriptions/${SUB}/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/acct1"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn capture(net: testing.FakeNet, pattern: Str, status: Int, body: Str = "", headers: List[(Str, Str)] = []) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    var r = http.text(status, body)
+    for (k, v) in headers {
+      r = r.with_header(k, v)
+    }
+    r
+  })
+  seen
+}
+
+fn first(seen: Mutex[List[http.Request]]) -> http.Request {
+  seen.with_read(fn(xs: List[http.Request]) -> http.Request { xs[0] })
+}
+
+fn accounts(net: testing.FakeNet, clock: Clock, rand: Rand) -> AccountsClient ! Str {
+  new_accounts_client(net, clock, rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})
+}
+
+test "begin_create PUTs the account and polls Location until the account is there" {
+  let op = "${EP}/subscriptions/${SUB}/providers/Microsoft.Storage/locations/westus/asyncoperations/op1"
+  let put = capture(os.net, "PUT ${ACC}", 202, "", [("Location", op), ("Retry-After", "0")])
+  let polls = Atomic[Int].new(0)
+  os.net.handle("GET ${op}", fn(req: http.Request) -> http.Response {
+    if polls.add(1) < 2 {
+      return http.text(202, "").with_header("Location", op)
+    }
+    http.text(200, "{\"name\":\"acct1\",\"kind\":\"StorageV2\",\"location\":\"westus\",\"properties\":{\"provisioningState\":\"Succeeded\"}}")
+  })
+  let c = accounts(os.net, os.clock, os.rand)?
+  var p = c.begin_create("rg1", "acct1", AccountCreateParameters{sku: Some(SKU{name: Some(SKU_NAME_STANDARD_LRS)}), kind: Some(KIND_STORAGE_V2), location: Some("westus")})?
+  let r = p.poll_until_done(os.clock, frequency: 1s)?
+  expect(r.account.name) == Some("acct1")
+  expect(r.account.kind) == Some(KIND_STORAGE_V2)
+  let req = first(put)
+  expect(req.url.query.get("api-version")) == Some(API_VERSION)
+  let sent = json.parse_value(req.body.to_str_lossy())?
+  expect(sent.get("sku").and_then(fn(s: json.Value) -> json.Value? { s.get("name") })) == Some(json.Value.Str("Standard_LRS"))
+  expect(sent.get("kind")) == Some(json.Value.Str("StorageV2"))
+}
+
+test "get_properties sends $expand from its enum; list_keys POSTs" {
+  let get = capture(os.net, "GET ${ACC}", 200, "{\"name\":\"acct1\"}")
+  capture(os.net, "POST ${ACC}/listKeys", 200, "{\"keys\":[{\"keyName\":\"key1\",\"value\":\"invented-key-value\",\"permissions\":\"Full\"}]}")
+  let c = accounts(os.net, os.clock, os.rand)?
+  c.get_properties("rg1", "acct1", AccountsClientGetPropertiesOptions{expand: Some(STORAGE_ACCOUNT_EXPAND_GEO_REPLICATION_STATS)})?
+  expect(first(get).url.query.get("$expand")) == Some("geoReplicationStats")
+  let keys = c.list_keys("rg1", "acct1")?.account_list_keys_result.keys ?? []
+  expect(keys.map(fn(k: AccountKey) -> Str { k.key_name ?? "" })) == ["key1"]
+  expect(keys[0].permissions) == Some(KEY_PERMISSION_FULL)
+}
+
+test "a sealed single value path parameter is a constant: blobServices/default" {
+  let seen = capture(os.net, "GET ${ACC}/blobServices/default", 200, "{\"name\":\"default\",\"properties\":{\"isVersioningEnabled\":true}}")
+  let c = new_blob_services_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  let r = c.get_service_properties("rg1", "acct1")?
+  expect(r.blob_service_properties.name) == Some("default")
+  expect(first(seen).url.path.ends_with("/blobServices/default")) == true
+}
+
+test "the storage error body keeps its code" {
+  capture(os.net, "GET ${ACC}", 404, "{\"error\":{\"code\":\"ResourceNotFound\",\"message\":\"The Resource was not found.\"}}")
+  let c = accounts(os.net, os.clock, os.rand)?
+  match c.get_properties("rg1", "acct1") {
+    Err(azcore.CallErr.Response(e)) => expect(e.error_code) == "ResourceNotFound"
+    other => expect("${other:?}") == "a ResourceNotFound response error"
+  }
+}

@@ -1,0 +1,128 @@
+// The directives of a readme.go.md (autorest's swagger-document
+// transforms) that are plain assignments: `where: $.definitions.X` (or
+// `$.definitions["X"]`) with `transform: $['a']['b'] = 'v'` statements,
+// or `set:` on such a path. They rename enums and fields for Go
+// (decision 0002, amendment 2). Any other directive is reported, not
+// applied.
+
+use std/json
+use std/regexp
+use std/yaml
+
+/// One assignment: the definition, the keys inside it, the value.
+pub struct Assign {
+  pub definition: Str
+  pub keys: List[Str]
+  pub value: json.Value
+}
+
+pub struct Directives {
+  pub assigns: List[Assign] = []
+  /// Directives not applied, as their `where` text.
+  pub skipped: List[Str] = []
+}
+
+/// The Go directives in `readme_go`: every yaml block without a
+/// condition or whose condition names `$(go)`.
+pub fn go_directives(readme_go: Str) -> Directives ! Str {
+  let where_re = regexp.compile("^\\$\\.definitions(?:\\.([A-Za-z0-9_]+)|\\[['\"]([^'\"]+)['\"]\\])$") ?? e => return Err(e.display())
+  let stmt = regexp.compile("\\$((?:\\[['\"][^'\"]+['\"]\\])+)\\s*=\\s*(?:'([^']*)'|\"([^\"]*)\"|(true|false))") ?? e => return Err(e.display())
+  let key = regexp.compile("\\[['\"]([^'\"]+)['\"]\\]") ?? e => return Err(e.display())
+  var out = Directives{}
+  var block = ""
+  var inside = false
+  for raw in readme_go.split("\n") {
+    let t = raw.trim()
+    if t.starts_with("```") {
+      if inside {
+        inside = false
+        let doc = json.parse_value(yaml.to_json(block) ?? e => return Err(e.display())) ?? e => return Err(e.display())
+        let ds = match doc.get("directive") {
+          Some(json.Value.List(xs)) => xs
+          Some(x) => [x]
+          None => []
+        }
+        for d in ds {
+          let w = match d.get("where") {
+            Some(json.Value.Str(s)) => s
+            _ => ""
+          }
+          let def = match where_re.captures(w) {
+            Some(m) => m[1] ?? m[2] ?? ""
+            None => ""
+          }
+          let tr = match d.get("transform") {
+            Some(json.Value.Str(s)) => s
+            _ => ""
+          }
+          var n = 0
+          if def != "" && tr != "" {
+            for whole in stmt.find_all(tr) {
+              let m = stmt.captures(whole) ?? continue
+              let keys = key.find_all(m[1] ?? "").map(fn(k: Str) -> Str { key.captures(k).and_then(fn(c: List[Str?]) -> Str? { c[1] }) ?? "" })
+              let value = match m[4] {
+                Some(b) => json.Value.Bool(b == "true")
+                None => json.Value.Str(m[2] ?? m[3] ?? "")
+              }
+              out.assigns.push(Assign{definition: def, keys: keys, value: value})
+              n += 1
+            }
+          }
+          if n == 0 {
+            out.skipped.push(if w != "" { w } else { "a directive without where" })
+          }
+        }
+        block = ""
+      } else {
+        // A block applies to Go when it has no condition or names $(go).
+        let cond = t[3..t.len()].trim().trim_prefix("yaml").trim()
+        inside = t[3..t.len()].trim().starts_with("yaml") && (cond == "" || cond.contains("$(go)"))
+      }
+      continue
+    }
+    if inside {
+      block = "${block}${raw}\n"
+    }
+  }
+  Ok(out)
+}
+
+/// `v` with `keys` set to `value` (objects made on the way).
+pub fn set_at(v: json.Value, keys: List[Str], value: json.Value) -> json.Value {
+  if keys.is_empty() {
+    return value
+  }
+  let fs = match v {
+    json.Value.Object(fs) => fs
+    _ => []
+  }
+  let k = keys[0]
+  let rest = keys[1..keys.len()]
+  var out: List[(Str, json.Value)] = []
+  var found = false
+  for (name, x) in fs {
+    if name == k {
+      out.push((name, set_at(x, rest, value)))
+      found = true
+    } else {
+      out.push((name, x))
+    }
+  }
+  if !found {
+    out.push((k, set_at(json.Value.Object([]), rest, value)))
+  }
+  json.Value.Object(out)
+}
+
+/// `doc` with the assignments to its definitions applied, and how many.
+pub fn apply(doc: json.Value, assigns: List[Assign]) -> (json.Value, Int) {
+  var d = doc
+  var n = 0
+  for a in assigns {
+    if d.get("definitions").and_then(fn(x: json.Value) -> json.Value? { x.get(a.definition) }).is_some() {
+      d = set_at(d, ["definitions", a.definition] + a.keys, a.value)
+      n += 1
+    }
+  }
+  (d, n)
+}

@@ -116,7 +116,10 @@ What the first generated module (armresources) showed:
   and `x-ms-parameter-location` are next; the report lists every spec
   feature not handled yet.
 
-## Amendment 2 (proposed by Xo Azure 1, 2026-11-05; for the owner's review)
+## Amendment 2
+
+Status: Accepted (owner, 2026-11-05, through the Xo Lead; proposed by Xo
+Azure 1, 2026-11-05)
 
 What the first TypeSpec module (azsecrets v1.4.0, api-version 7.6) showed:
 

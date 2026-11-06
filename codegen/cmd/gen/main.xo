@@ -24,6 +24,8 @@ struct Service {
   pub go_module: Str = ""
   pub go_version: Str = ""
   pub version: Str
+  /// autorest.md's `modelerfour: seal-single-value-enum-by-default`.
+  pub seal_single_value_enums: Bool = false
 } derive Json
 
 struct Services {
@@ -64,7 +66,7 @@ fn main(os: Os) -> () ! Error {
   let name = dir.split("/").last() ?? dir
   let custom_path = "codegen/custom/${name}.toml"
   let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
-  var custom = gen.Custom{field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only}
+  var custom = gen.Custom{field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only, seal_single_value_enums: svc.seal_single_value_enums}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -98,6 +100,19 @@ fn main(os: Os) -> () ! Error {
     }
     files[f] = doc
   }
+  // readme.go.md's assignments (enum and field renames for Go).
+  var skipped: List[Str] = []
+  if svc.openapi == "" {
+    let go_md = "${base}/${svc.spec}/readme.go.md"
+    if os.fs.exists(go_md)? {
+      let ds = spec.go_directives(os.fs.read_text(go_md)?)?
+      for (f, doc) in files {
+        let (d, _) = spec.apply(doc, ds.assigns)
+        files[f] = d
+      }
+      skipped = ds.skipped
+    }
+  }
   var b = gen.builder(files, name, custom)
   let api = b.build(inputs)
   let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty}
@@ -111,6 +126,9 @@ fn main(os: Os) -> () ! Error {
   os.stdio.println("${name}: ${api.ops.len()} operations, ${api.models.len()} models, ${api.enums.len()} enums, api-version ${api.api_version}")
   for r in api.report {
     os.stdio.println("  not handled: ${r}")
+  }
+  for w in skipped {
+    os.stdio.println("  readme.go.md directive not applied: ${w}")
   }
   Ok(())
 }
