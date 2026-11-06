@@ -1,0 +1,183 @@
+// The sas package, the clients' get_sas_url and parse_url's SAS against
+// the Go program's output (sasvectors_test.xo): every query string and
+// URL as Go writes it, every error as Go words it.
+
+use std/crypto
+use std/http
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/storage/azfile/sas
+
+const UDK: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>oid-1</SignedOid><SignedTid>tid-1</SignedTid><SignedStart>2026-11-05T00:00:00Z</SignedStart><SignedExpiry>2026-11-07T00:00:00Z</SignedExpiry><SignedService>f</SignedService><SignedVersion>2026-06-06</SignedVersion><Value>dWRrLWtleQ==</Value><SignedDelegatedUserTid>dtid-1</SignedDelegatedUserTid></UserDelegationKey>"
+
+const UDK_NO_TID: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>oid-2</SignedOid><SignedTid>tid-2</SignedTid><SignedStart>2026-11-05T00:00:00Z</SignedStart><SignedExpiry>2026-11-07T00:00:00Z</SignedExpiry><SignedService>f</SignedService><SignedVersion>2026-06-06</SignedVersion><Value>dWRrLWtleQ==</Value></UserDelegationKey>"
+
+/// Every `sig=` value replaced by a short sha256 of it, as the vectors
+/// keep it.
+fn hide_sig(l: Str) -> Str {
+  var out = ""
+  var rest = l
+  while {
+    let i = rest.find("sig=") ?? break
+    out = out + rest[0..i + 4]
+    rest = rest[i + 4..rest.len()]
+    var j = 0
+    for c in rest.runes() {
+      if c == '&' || c == ' ' || c == '#' {
+        break
+      }
+      j = j + "${c}".len()
+    }
+    out = out + "sha256:${crypto.sha256(rest[0..j].bytes()).to_hex()[0..16]}"
+    rest = rest[j..rest.len()]
+  }
+  out + rest
+}
+
+fn sas_line(name: Str, r: Result[Str, Str]) -> List[Str] {
+  match r {
+    Ok(s) => ["== ${name}", "  ${s}"]
+    Err(e) => ["== ${name}", "  error ${e}"]
+  }
+}
+
+fn qline(name: Str, r: Result[sas.QueryParameters, Str]) -> List[Str] {
+  sas_line(name, r.map(fn(p: sas.QueryParameters) -> Str { p.encode() }))
+}
+
+fn ts(t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { go_time(x) }) ?? "zero"
+}
+
+fn parts_lines(name: Str, u: Str) -> List[Str] {
+  let up = match parse_url(u) {
+    Ok(x) => x
+    Err(e) => return ["== ${name}", "  error ${e}"]
+  }
+  let s = up.sas
+  ["== ${name}"] + [
+    "Scheme=${up.scheme}", "Host=${up.host}", "IPAccount=${up.ip_account_name}",
+    "ShareName=${up.share_name}", "Path=${up.directory_or_file_path}", "ShareSnapshot=${up.share_snapshot}",
+    "Unparsed=${up.unparsed_params}",
+    "sv=${s.version}", "ss=${s.services}", "srt=${s.resource_types}", "spr=${s.protocol}",
+    "st=${ts(s.start)}", "se=${ts(s.expiry)}", "sharesnapshot=${ts(s.share_snapshot)}",
+    "sip=${s.ip_range}", "si=${s.identifier}", "sr=${s.resource}",
+    "sp=${s.permissions}", "sig=${s.signature.reveal()}", "ses=${s.encryption_scope}",
+    "rscc=${s.cache_control}", "rscd=${s.content_disposition}", "rsce=${s.content_encoding}",
+    "rscl=${s.content_language}", "rsct=${s.content_type}",
+    "sduoid=${s.signed_delegated_user_object_id}", "skdutid=${s.signed_delegated_user_tenant_id}",
+    "Encode=${s.encode()}", "String=${up.to_url()}",
+  ].map(fn(l: Str) -> Str { "  ${l}" })
+}
+
+test "SAS query strings, SAS URLs and parsed SAS URLs are Go's" {
+  let log = Mutex[List[Str]].new([])
+  os.net.handle("POST https://acct1.file.example.test/", fn(req: http.Request) -> http.Response {
+    let body = req.body
+    log.with(fn(var l: List[Str]) {
+      l.push("REQ POST /?comp=userdelegationkey&restype=service")
+      l.push("  body=${body.quote()}")
+    })
+    xml_resp(200, if body.to_str_lossy().contains("DelegatedUserTid") { UDK } else { UDK_NO_TID })
+  })
+  let take = fn() -> List[Str] {
+    log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+  }
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let st = Time.parse_rfc3339("2026-11-05T01:02:03Z")?
+  let se = Time.parse_rfc3339("2026-11-06T01:02:03.5Z")?
+  let ip = "198.51.100.10-198.51.100.20"
+  var out: List[Str] = []
+
+  out = out + qline("a1 account SAS, every field, letters out of order", sas.AccountSignatureValues{protocol: sas.PROTOCOL_HTTPS, start: Some(st), expiry: Some(se), permissions: "lcdwr", ip_range: ip, resource_types: "osc", encryption_scope: "scope 1"}.sign_with_shared_key(cred))
+  out = out + qline("a2 account SAS, a version and one IPv6 address", sas.AccountSignatureValues{version: "2020-02-10", expiry: Some(se), permissions: "r", resource_types: "o", ip_range: "2001:db8::1"}.sign_with_shared_key(cred))
+  out = out + qline("a3 account SAS, an unknown permission", sas.AccountSignatureValues{expiry: Some(se), permissions: "rx", resource_types: "o"}.sign_with_shared_key(cred))
+  out = out + qline("a4 account SAS, an unknown resource type", sas.AccountSignatureValues{expiry: Some(se), permissions: "r", resource_types: "b"}.sign_with_shared_key(cred))
+  out = out + qline("a5 account SAS, no expiry", sas.AccountSignatureValues{permissions: "r", resource_types: "o"}.sign_with_shared_key(cred))
+  out = out + qline("a6 account SAS, no permissions", sas.AccountSignatureValues{expiry: Some(se), resource_types: "o"}.sign_with_shared_key(cred))
+  out = out + qline("a7 account SAS, no resource types", sas.AccountSignatureValues{expiry: Some(se), permissions: "r"}.sign_with_shared_key(cred))
+  out = out + qline("a8 account SAS, a non-ASCII permission", sas.AccountSignatureValues{expiry: Some(se), permissions: "ré", resource_types: "o"}.sign_with_shared_key(cred))
+
+  let hdrs = sas.SignatureValues{cache_control: "max-age=60", content_disposition: "attachment; filename=\"a b.txt\"", content_encoding: "gzip", content_language: "en-US", content_type: "text/plain; charset=utf-8"}
+  out = out + qline("s1 share SAS, every field", (hdrs with {protocol: sas.PROTOCOL_HTTPS_AND_HTTP, start: Some(st), expiry: Some(se), permissions: "ldwcr", ip_range: ip, identifier: "pol1", share_name: "s1"}).sign_with_shared_key(cred))
+  out = out + qline("s2 file SAS, backslashes and a leading one", sas.SignatureValues{expiry: Some(se), permissions: "dwcr", share_name: "s1", file_path: "\\d1\\a b\\f.txt"}.sign_with_shared_key(cred))
+  out = out + qline("s3 file SAS, a leading slash", sas.SignatureValues{expiry: Some(se), permissions: "r", share_name: "s1", file_path: "/d1/f.txt"}.sign_with_shared_key(cred))
+  out = out + qline("s4 share SAS, a stored policy only", sas.SignatureValues{identifier: "pol1", share_name: "s1"}.sign_with_shared_key(cred))
+  out = out + qline("s5 share SAS, no expiry", sas.SignatureValues{permissions: "r", share_name: "s1"}.sign_with_shared_key(cred))
+  out = out + qline("s6 share SAS, an unknown permission", sas.SignatureValues{expiry: Some(se), permissions: "ra", share_name: "s1"}.sign_with_shared_key(cred))
+  out = out + qline("s7 file SAS, list is a share permission", sas.SignatureValues{expiry: Some(se), permissions: "rl", share_name: "s1", file_path: "f"}.sign_with_shared_key(cred))
+  out = out + qline("s8 share SAS, a snapshot time (neither signed nor encoded)", sas.SignatureValues{expiry: Some(se), permissions: "r", share_name: "s1", snapshot: Some(Time.parse_rfc3339("2026-11-05T01:00:00.0012345Z")?)}.sign_with_shared_key(cred))
+  out = out + qline("s9 share SAS, a version; user delegation fields are dropped", sas.SignatureValues{version: "2019-02-02", expiry: Some(se), permissions: "r", share_name: "s1", authorized_object_id: "a1", correlation_id: "c1", signed_delegated_user_object_id: "d1"}.sign_with_shared_key(cred))
+  out = out + qline("s10 share SAS, a stored policy and an unknown permission", sas.SignatureValues{identifier: "pol1", share_name: "s1", permissions: "rq"}.sign_with_shared_key(cred))
+
+  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+  let svc_tok = new_service_client_with_no_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/", opts)
+  let udc = svc_tok.get_user_delegation_credential(KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-07T00:00:00Z"), delegated_user_tenant_id: Some("dtid-1")})?
+  out = out + take()
+  let u = hdrs with {
+    protocol: sas.PROTOCOL_HTTPS, start: Some(st), expiry: Some(se), permissions: "wr", ip_range: ip, share_name: "s1", file_path: "d1/f.txt",
+    authorized_object_id: "aoid-1", unauthorized_object_id: "uoid-1", correlation_id: "cid-1", signed_delegated_user_object_id: "duoid-1", identifier: "pol1",
+    snapshot: Some(Time.parse_rfc3339("2026-11-05T01:00:00Z")?),
+  }
+  out = out + qline("u1 user delegation file SAS, every field, a delegated tenant", u.sign_with_user_delegation(udc))
+  let udc2 = svc_tok.get_user_delegation_credential(KeyInfo{expiry: Some("2026-11-07T00:00:00Z")})?
+  out = out + take()
+  out = out + qline("u2 user delegation share SAS, no delegated tenant", sas.SignatureValues{expiry: Some(se), permissions: "lr", share_name: "s1"}.sign_with_user_delegation(udc2))
+  out = out + qline("u3 user delegation SAS, a stored policy is not enough", sas.SignatureValues{identifier: "pol1", share_name: "s1"}.sign_with_user_delegation(udc2))
+  out = out + qline("u4 user delegation file SAS, an unknown permission", sas.SignatureValues{expiry: Some(se), permissions: "rl", share_name: "s1", file_path: "f"}.sign_with_user_delegation(udc2))
+
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test", cred, opts)
+  out = out + sas_line("g1 service SAS URL", svc.get_sas_url("so", "rl", se, Some(st)))
+  let svc2 = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/?comp=list#frag", cred, opts)
+  out = out + sas_line("g2 service SAS URL, a query and a fragment", svc2.get_sas_url("c", "cdw", se))
+  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/s1", cred, opts)
+  out = out + sas_line("g3 share SAS URL", sh.get_sas_url("rlw", se, Some(st)))
+  out = out + sas_line("g4 share snapshot SAS URL", sh.with_snapshot("2026-11-05T01:00:00.0000000Z")?.get_sas_url("r", se))
+  out = out + sas_line("g5 share SAS URL, a snapshot that is not a time", sh.with_snapshot("not-a-time")?.get_sas_url("r", se))
+  let fc = sh.new_directory_client("d1/a b").new_file_client("f+1.txt")
+  out = out + sas_line("g6 file SAS URL, a space and a plus", fc.get_sas_url("rcwd", se, Some(st)))
+  let ip1 = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://192.0.2.7:10000/acct1/s1", cred, opts)
+  out = out + sas_line("g7 share SAS URL, an IP host", ip1.get_sas_url("r", se))
+  let nok = new_share_client_with_no_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/s1", opts)
+  out = out + sas_line("g8 share SAS URL, no key", nok.get_sas_url("r", se))
+  out = out + ["== g9 service SAS URL, no key"] + match svc_tok.get_sas_url("s", "r", se) {
+    Ok(_) => ["  "]
+    Err(e) => ["  error ${e}"]
+  }
+  let nf = new_file_client_with_no_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/s1/f")
+  out = out + ["== g10 file SAS URL, no key"] + match nf.get_sas_url("r", se) {
+    Ok(_) => ["  "]
+    Err(e) => ["  error ${e}"]
+  }
+  out = out + sas_line("g11 share SAS URL, no permissions", sh.get_sas_url("", se))
+
+  out = out + parts_lines("p1 a file SAS URL", "https://acct1.file.example.test/s1/d1/a%20b/f.txt?sv=2026-06-06&st=2026-11-05T01%3A02%3A03Z&se=2026-11-06T01%3A02%3A03Z&sr=f&sp=rcwd&sig=c2lnbmF0dXJl&spr=https&sip=198.51.100.10-198.51.100.20&si=pol1&rscc=max-age%3D60&rscd=inline&rsce=gzip&rscl=en&rsct=text%2Fplain&ses=sc1&comp=range&x=1")
+  out = out + parts_lines("p2 a user delegation SAS, upper case keys, a snapshot", "https://acct1.file.example.test/s1?ShareSnapshot=2026-11-05T01%3A00%3A00.0000000Z&SV=2026-06-06&sr=s&sp=rl&se=2026-11-06&skoid=o1&sktid=t1&skt=2026-11-05&ske=2026-11-07&sks=f&skv=2026-06-06&saoid=a&suoid=u&scid=c&sduoid=d&skdutid=dt&sig=eA%3D%3D")
+  out = out + parts_lines("p3 an account SAS on an IP host", "https://192.0.2.7:10000/acct1?sv=2026-06-06&ss=f&srt=sco&sp=rwdlc&se=2026-11-06T01%3A02Z&st=2026-11-05T01%3A02%3A03.1234567Z&sig=eA%3D%3D")
+  out = out + parts_lines("p4 times and addresses that do not parse", "https://acct1.file.example.test/s1?st=garbage&se=2027-02-29&sip=1.2.3&sig=eA%3D%3D&sp=r")
+  out = out + parts_lines("p5 a fraction on the second format, a short hour, an IPv6 range", "https://acct1.file.example.test/s1?st=2026-11-05T01%3A02%3A03.5Z&se=2026-11-05T1%3A02%3A03Z&sip=2001:db8::1-::ffff:198.51.100.1")
+  out = out + parts_lines("p6 a delegation key with no times", "https://acct1.file.example.test/s1?skoid=o1&sig=eA%3D%3D")
+  out = out + parts_lines("p7 repeated keys and a SAS with no share", "https://acct1.file.example.test/?sp=r&sp=w&a=2&a=1&b=")
+  out = out + parts_lines("p8 a time with an offset and a 2-digit fraction", "https://acct1.file.example.test/s1?st=2026-11-05T01%3A02%3A03%2B01%3A00&se=2026-11-05T01%3A02%3A03.12Z&sip=192.0.2.01")
+  out = out + parts_lines("p9 ten fraction digits, a bad start address, a lower case snapshot", "https://acct1.file.example.test/s1?st=2026-11-05T01%3A02%3A03.1234567891Z&sip=bad-198.51.100.1&sharesnapshot=2026-11-05T01%3A00%3A00.0000000Z")
+  let snap_q = sas.SignatureValues{expiry: Some(se), permissions: "r", share_name: "s1", snapshot: Some(Time.parse_rfc3339("2026-11-05T01:00:00.0012345Z")?)}.sign_with_shared_key(cred)?
+  out = out + ["== x1 URL parts given a signed SAS with a snapshot", "  ${(parse_url("https://acct1.file.example.test/s1/f?comp=x")? with {sas: snap_q}).to_url()}"]
+  expect(out.map(hide_sig)) == SAS_OUTPUT
+}
+
+test "a SAS time is read in the first layout that takes it and written back in it" {
+  let (t, f) = sas.parse_time("2026-11-05T01:02:03.1234567Z")
+  expect(f) == sas.TIME_FORMAT_FRACTION
+  expect(sas.format_time(t, f)) == "2026-11-05T01:02:03.1234567Z"
+  expect(sas.parse_time("2026-11-05T01:02:03,1234567Z").1) == sas.TIME_FORMAT_FRACTION
+  expect(sas.parse_time("2026-11-05T01:02:03.12345678Z").1) == sas.TIME_FORMAT
+  expect(sas.parse_time("2026-11-05T01:02Z").1) == sas.TIME_FORMAT_MINUTES
+  expect(sas.parse_time("2028-02-29").1) == sas.TIME_FORMAT_DATE
+  expect(sas.parse_time("2026-13-01").0.is_none()) == true
+  expect(sas.parse_time("2026-11-05T24:00:00Z").0.is_none()) == true
+  expect(sas.parse_time("2026-11-05T01:02:03").0.is_none()) == true
+  expect(sas.format_time(None, sas.TIME_FORMAT_DATE)) == "0001-01-01"
+}

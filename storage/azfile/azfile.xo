@@ -11,6 +11,7 @@ use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
 use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azfile/sas
 
 pub const VERSION: Str = "v0.1.0"
 
@@ -273,8 +274,9 @@ pub struct URLParts {
   pub share_name: Str = ""
   pub directory_or_file_path: Str = ""
   pub share_snapshot: Str = ""
-  /// The rest of the query (a SAS included), encoded as Go's
-  /// url.Values.Encode writes it.
+  /// The SAS in the query.
+  pub sas: sas.QueryParameters = sas.QueryParameters{}
+  /// The rest of the query, encoded as Go's url.Values.Encode writes it.
   pub unparsed_params: Str = ""
 }
 
@@ -307,18 +309,21 @@ pub fn parse_url(u: Str) -> URLParts ! Str {
     None => (path, "")
   }
   var q = url.parse_query(raw).ok() ?? url.values()
+  // The snapshot is matched without case but only `sharesnapshot` is
+  // removed, as Go does: `ShareSnapshot` is then read into the SAS.
   var snapshot = ""
   for k in q.keys() {
     if k.to_lower() == "sharesnapshot" && snapshot == "" {
       snapshot = q.get(k) ?? ""
-      q.remove(k)
     }
   }
-  Ok(URLParts{scheme: p.scheme, host: host, ip_account_name: account, share_name: share, directory_or_file_path: rest, share_snapshot: snapshot, unparsed_params: q.encode()})
+  q.remove("sharesnapshot")
+  let (qp, unparsed) = sas.new_query_parameters(q)
+  Ok(URLParts{scheme: p.scheme, host: host, ip_account_name: account, share_name: share, directory_or_file_path: rest, share_snapshot: snapshot, sas: qp, unparsed_params: unparsed.encode()})
 }
 
 /// The URL again (URLParts.String): the snapshot after the other
-/// parameters.
+/// parameters, then the SAS.
 pub fn (up: URLParts) to_url() -> Str {
   var path = ""
   if is_ip(up.host.split(":")[0]) && up.ip_account_name != "" {
@@ -331,8 +336,13 @@ pub fn (up: URLParts) to_url() -> Str {
     }
   }
   var query = up.unparsed_params
-  if up.share_snapshot != "" {
-    query = "${if query == "" { "" } else { query + "&" }}sharesnapshot=${up.share_snapshot}"
+  let snapshot = if up.share_snapshot == "" { up.sas.share_snapshot.map(fn(t: Time) -> Str { sas.format_snapshot(t) }) ?? "" } else { up.share_snapshot }
+  if snapshot != "" {
+    query = "${if query == "" { "" } else { query + "&" }}sharesnapshot=${snapshot}"
+  }
+  let encoded = up.sas.encode()
+  if encoded != "" {
+    query = "${if query == "" { "" } else { query + "&" }}${encoded}"
   }
   let base = "${up.scheme}://${up.host}${escape_path(path)}"
   if query == "" { base } else { "${base}?${query}" }

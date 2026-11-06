@@ -56,8 +56,22 @@ What it does:
   not the service's, as Go's generated clients send it; the trailing dot
   options on directory calls.
 - `fileerror`: the error codes and `has_code`.
+- `sas`: account SAS for the File service (`rwdlc`, `sco`), share and
+  file SAS (`rcwdl`, `rcwd`) signed with the account key or a user
+  delegation key (the delegated user's tenant as `skdutid`), and
+  `new_query_parameters`, which reads a SAS out of a query as Go does: the
+  first value of each key matched without case, each time in the first
+  of Go's four layouts that reads it (and written back in it), each
+  address as Go's net.ParseIP keeps it. `get_sas_url` on the service,
+  share and file clients signs with the client's key and appends the
+  SAS as Go does (an account URL gets a trailing slash; a query and a
+  fragment are kept). A share snapshot is not signed: the File service's
+  string to sign has no snapshot field (only Blob's has one since
+  2018-11-09), so a snapshot URL keeps its `sharesnapshot` beside the
+  SAS, as Go writes it.
 - `parse_url` splits a file service URL (an IP host's first segment is
-  the account, as Azurite's) and `to_url` writes it back.
+  the account, as Azurite's), with its SAS in `sas`, and `to_url` writes
+  it back.
 
 Each request is Go's byte for byte: the test replays a Go program's
 calls against the same fake service and compares every request
@@ -89,4 +103,12 @@ Where it differs from Go v1.7.1:
 - Lease `Break` is `break_lease` (`break` is a keyword). A lease client
   always holds an ID, so Go's "leaseID cannot be nil" errors cannot
   occur.
-- Not ported yet: SAS.
+- SAS permissions and resource types are letters (put in the
+  service's order; an unknown one is Go's parse error), not Go's flag
+  structs, and an IP range is a string. `sign_with_user_delegation`
+  takes a credential, so Go's nil credential error cannot occur.
+- `new_query_parameters` reads keys in the query's order: when `st` and
+  `skt` (or `se` and `ske`) are in different layouts, the last one read
+  sets the layout both are written in. Go reads them in map order, so
+  its choice varies from run to run. A time outside the range of
+  Xo's Time reads as no time, where Go keeps it.

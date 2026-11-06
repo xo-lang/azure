@@ -1,0 +1,61 @@
+// SAS URLs from the clients' account key (GetSASURL on azfile's service,
+// share and file clients, and the storage internal sasurl package; MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md). No protocol is
+// signed, as Go sets none.
+
+use github.com/xo-lang/azure/storage/azfile/fileerror
+use github.com/xo-lang/azure/storage/azfile/sas
+
+/// `url` and its fragment (`#...`, kept apart).
+fn cut_fragment(u: Str) -> (Str, Str) {
+  match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+}
+
+/// `query` added to `u`'s query, before its fragment (sasurl.Append).
+fn append_sas(u: Str, query: Str) -> Str {
+  if query == "" {
+    return u
+  }
+  let (base, fragment) = cut_fragment(u)
+  "${base}${if base.contains("?") { "&" } else { "?" }}${query}${fragment}"
+}
+
+/// As append_sas, the path given a trailing slash first
+/// (sasurl.AppendToAccountURL).
+fn append_sas_to_account_url(u: Str, query: Str) -> Str {
+  let (base, fragment) = cut_fragment(u)
+  let (path, raw) = match base.find("?") {
+    Some(i) => (base[0..i], base[i..base.len()])
+    None => (base, "")
+  }
+  let p = if path.ends_with("/") { path } else { "${path}/" }
+  append_sas("${p}${raw}", query) + fragment
+}
+
+/// An account SAS URL for the File service: `resource_types` letters of
+/// `sco`, `permissions` letters of `rwdlc`.
+pub fn (s: ServiceClient) get_sas_url(resource_types: Str, permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = s.core.cred ?? return Err(fileerror.MISSING_SHARED_KEY_CREDENTIAL)
+  let qps = sas.AccountSignatureValues{version: sas.VERSION, permissions: permissions, resource_types: resource_types, start: start, expiry: Some(expiry)}.sign_with_shared_key(cred)?
+  Ok(append_sas_to_account_url(s.url, qps.encode()))
+}
+
+/// A share SAS URL (letters of `rcwdl`); a snapshot in the URL stays in
+/// it, unsigned, as the File service's string to sign has no snapshot.
+pub fn (s: ShareClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = s.core.cred ?? return Err(fileerror.MISSING_SHARED_KEY_CREDENTIAL)
+  let parts = parse_url(s.url)?
+  let qps = sas.SignatureValues{version: sas.VERSION, share_name: parts.share_name, permissions: permissions, start: start, expiry: Some(expiry)}.sign_with_shared_key(cred)?
+  Ok(append_sas(s.url, qps.encode()))
+}
+
+/// A file SAS URL (letters of `rcwd`).
+pub fn (f: FileClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = f.core.cred ?? return Err(fileerror.MISSING_SHARED_KEY_CREDENTIAL)
+  let parts = parse_url(f.url)?
+  let qps = sas.SignatureValues{version: sas.VERSION, share_name: parts.share_name, file_path: parts.directory_or_file_path, permissions: permissions, start: start, expiry: Some(expiry)}.sign_with_shared_key(cred)?
+  Ok(append_sas(f.url, qps.encode()))
+}

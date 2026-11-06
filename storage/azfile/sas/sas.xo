@@ -1,0 +1,477 @@
+// Shared access signatures for Azure Files, as azfile's sas package
+// (account.go, service.go, query_params.go; MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): account SAS for the File service,
+// share and file SAS signed with the account key or a user delegation
+// key, and the reading of a SAS out of a URL's query (NewQueryParameters).
+// Permissions are letters, put in the service's order; an unknown letter
+// is Go's error, its rune printed as a number.
+
+use std/netip
+use std/time
+use std/url
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// The service version signed into a SAS when none is given (azfile's
+/// sas.Version, its REST version).
+pub const VERSION: Str = "2026-06-06"
+
+pub const PROTOCOL_HTTPS: Str = "https"
+pub const PROTOCOL_HTTPS_AND_HTTP: Str = "https,http"
+
+/// Permission letters in the order each SAS kind writes them.
+pub const ACCOUNT_PERMISSIONS: Str = "rwdlc"
+pub const ACCOUNT_RESOURCE_TYPES: Str = "sco"
+pub const SHARE_PERMISSIONS: Str = "rcwdl"
+pub const FILE_PERMISSIONS: Str = "rcwd"
+
+/// The time layouts a SAS is read in, tried in this order (Go's
+/// timeFormats); a time is written back in the one it was read in.
+pub const TIME_FORMAT_FRACTION: Str = "2006-01-02T15:04:05.0000000Z"
+pub const TIME_FORMAT: Str = "2006-01-02T15:04:05Z"
+pub const TIME_FORMAT_MINUTES: Str = "2006-01-02T15:04Z"
+pub const TIME_FORMAT_DATE: Str = "2006-01-02"
+
+/// `s`'s letters in `order`'s order; a letter outside it is an error.
+fn normalize(s: Str, order: Str, what: Str) -> Str ! Str {
+  for c in s.runes() {
+    if !order.contains("${c}") {
+      return Err("invalid ${what}: '${Int(c)}'")
+    }
+  }
+  var out = ""
+  for c in order.runes() {
+    if s.contains("${c}") {
+      out = out + "${c}"
+    }
+  }
+  Ok(out)
+}
+
+/// `t` in `layout` (one of the TIME_FORMAT constants, "" for
+/// TIME_FORMAT); no time is Go's zero time, year 1.
+pub fn format_time(t: Time?, layout: Str = "") -> Str {
+  let (date, clock, minutes, frac) = match t {
+    Some(x) => (time.format(x, time.utc(), "{year}-{month}-{day}"), time.format(x, time.utc(), "{hour}:{minute}"), time.format(x, time.utc(), "{second}"), time.format(x, time.utc(), "{frac:7}"))
+    None => ("0001-01-01", "00:00", "00", ".0000000")
+  }
+  if layout == TIME_FORMAT_DATE {
+    date
+  } else if layout == TIME_FORMAT_MINUTES {
+    "${date}T${clock}Z"
+  } else if layout == TIME_FORMAT_FRACTION {
+    "${date}T${clock}:${minutes}${frac}Z"
+  } else {
+    "${date}T${clock}:${minutes}Z"
+  }
+}
+
+fn opt_time(t: Time?) -> Str {
+  if t.is_none() { "" } else { format_time(t) }
+}
+
+/// A share snapshot time as Go's SnapshotTimeFormat writes a UTC time.
+pub fn format_snapshot(t: Time) -> Str {
+  format_time(Some(t), TIME_FORMAT_FRACTION)
+}
+
+// Reading times as Go's time.Parse reads these four layouts.
+
+struct Scan {
+  cs: List[Str]
+  i: Int = 0
+}
+
+fn (s: Scan) digit() -> Int? {
+  if s.i < s.cs.len() { Int.parse(s.cs[s.i]) } else { None }
+}
+
+fn (var s: Scan) lit(x: Str) -> Bool {
+  if s.i < s.cs.len() && s.cs[s.i] == x {
+    s.i = s.i + 1
+    return true
+  }
+  false
+}
+
+/// `n` digits exactly.
+fn (var s: Scan) fixed(n: Int) -> Int? {
+  var v = 0
+  for _ in 0..n {
+    let d = s.digit() ?? return None
+    v = v * 10 + d
+    s.i = s.i + 1
+  }
+  Some(v)
+}
+
+/// One digit, or two (Go's hour `15`).
+fn (var s: Scan) loose() -> Int? {
+  var v = s.digit() ?? return None
+  s.i = s.i + 1
+  if let Some(d) = s.digit() {
+    v = v * 10 + d
+    s.i = s.i + 1
+  }
+  Some(v)
+}
+
+/// Digits after a `.` or `,` as nanoseconds (Go's parseNanoseconds: the
+/// first nine count): `exact` of them, or all there are when it is 0.
+fn (var s: Scan) nanos(exact: Int) -> Int? {
+  if !(s.lit(".") || s.lit(",")) {
+    return None
+  }
+  var n = 0
+  var v = 0
+  while {
+    if exact > 0 && n == exact {
+      break
+    }
+    let d = s.digit() ?? break
+    if n < 9 {
+      v = v * 10 + d
+    }
+    n = n + 1
+    s.i = s.i + 1
+  }
+  if n == 0 || (exact > 0 && n != exact) {
+    return None
+  }
+  for _ in n..9 {
+    v = v * 10
+  }
+  Some(v)
+}
+
+fn parse_layout(val: Str, layout: Str) -> Time? {
+  var cs: List[Str] = []
+  for c in val.runes() {
+    cs.push("${c}")
+  }
+  var s = Scan{cs: cs}
+  let year = s.fixed(4)?
+  if !s.lit("-") { return None }
+  let month = s.fixed(2)?
+  if !s.lit("-") { return None }
+  let day = s.fixed(2)?
+  var hour = 0
+  var minute = 0
+  var second = 0
+  var nanos = 0
+  if layout != TIME_FORMAT_DATE {
+    if !s.lit("T") { return None }
+    hour = s.loose()?
+    if !s.lit(":") { return None }
+    minute = s.fixed(2)?
+    if layout != TIME_FORMAT_MINUTES {
+      if !s.lit(":") { return None }
+      second = s.fixed(2)?
+      if layout == TIME_FORMAT_FRACTION {
+        nanos = s.nanos(7)?
+      } else if s.i + 1 < s.cs.len() && (s.cs[s.i] == "." || s.cs[s.i] == ",") && Int.parse(s.cs[s.i + 1]).is_some() {
+        nanos = s.nanos(0)?
+      }
+    }
+    if !s.lit("Z") { return None }
+  }
+  if s.i != s.cs.len() || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59 {
+    return None
+  }
+  let d = time.date(year, month, day).ok()?
+  time.instant(d, time.ClockTime{hour: hour, minute: minute, second: second, nanos: nanos}, time.utc()).ok()
+}
+
+/// The time and the layout it was read in (Go's parseTime); None when no
+/// layout reads it, which Go keeps as its zero time.
+pub fn parse_time(val: Str) -> (Time?, Str) {
+  for layout in [TIME_FORMAT_FRACTION, TIME_FORMAT, TIME_FORMAT_MINUTES, TIME_FORMAT_DATE] {
+    if let Some(t) = parse_layout(val, layout) {
+      return (Some(t), layout)
+    }
+  }
+  (None, "")
+}
+
+/// An address as Go's net.ParseIP and IP.String give it back: "" when it
+/// is not one, IPv4 in an IPv6 form as IPv4.
+fn ip(s: Str) -> Str {
+  match netip.parse_addr(s) {
+    Ok(a) => if a.zone != "" { "" } else if a.is_4in6() { a.unmap().display() } else { a.display() }
+    Err(_) => ""
+  }
+}
+
+/// A `start-end` range as Go reads it into an IPRange and writes it back.
+fn ip_range(val: Str) -> Str {
+  match val.find("-") {
+    Some(i) => {
+      let start = ip(val[0..i])
+      let end = ip(val[i + 1..val.len()])
+      if start == "" { "" } else if end == "" { start } else { "${start}-${end}" }
+    }
+    None => ip(val)
+  }
+}
+
+/// An account SAS for the File service.
+pub struct AccountSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Letters of `rwdlc`.
+  pub permissions: Str = ""
+  /// `start` or `start-end` (IP addresses).
+  pub ip_range: Str = ""
+  /// Letters of `sco`.
+  pub resource_types: Str = ""
+  pub encryption_scope: Str = ""
+}
+
+pub fn (v: AccountSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  let expiry = v.expiry ?? return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  if v.permissions == "" || v.resource_types == "" {
+    return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  }
+  let version = if v.version == "" { VERSION } else { v.version }
+  let perms = normalize(v.permissions, ACCOUNT_PERMISSIONS, "permission character")?
+  let rt = normalize(v.resource_types, ACCOUNT_RESOURCE_TYPES, "resource type character")?
+  let sts = [cred.account_name, perms, "f", rt, opt_time(v.start), format_time(Some(expiry)), v.ip_range, v.protocol, version, v.encryption_scope, ""].join("\n")
+  Ok(QueryParameters{
+    version: version, protocol: v.protocol, start: v.start, expiry: Some(expiry), permissions: perms,
+    ip_range: v.ip_range, encryption_scope: v.encryption_scope, services: "f", resource_types: rt,
+    signature: Secret.new(cred.compute_hmac_sha256(sts)),
+  })
+}
+
+/// A service SAS for a share (`file_path` "") or a file in it.
+pub struct SignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Kept in the QueryParameters; neither signed nor encoded (the File
+  /// service's string to sign has no snapshot field).
+  pub snapshot: Time? = None
+  /// Letters of `rcwdl` for a share, `rcwd` for a file.
+  pub permissions: Str = ""
+  pub ip_range: Str = ""
+  /// A stored access policy's name (`si`).
+  pub identifier: Str = ""
+  pub share_name: Str = ""
+  /// `directory/file`; backslashes are slashes and a leading one is
+  /// dropped.
+  pub file_path: Str = ""
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  /// User delegation only (saoid, suoid, scid, sduoid).
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  pub signed_delegated_user_object_id: Str = ""
+}
+
+/// The signed resource (`sr`) and the normalized permissions.
+fn (v: SignatureValues) resource() -> (Str, Str) ! Str {
+  if v.file_path == "" {
+    Ok(("s", normalize(v.permissions, SHARE_PERMISSIONS, "permission")?))
+  } else {
+    Ok(("f", normalize(v.permissions, FILE_PERMISSIONS, "permission")?))
+  }
+}
+
+fn canonical_name(account: Str, share: Str, file_path: Str) -> Str {
+  if file_path == "" {
+    return "/file/${account}/${share}"
+  }
+  let p = file_path.replace("\\", "/")
+  "/file/${account}/${share}/${if p.starts_with("/") { p[1..p.len()] } else { p }}"
+}
+
+fn (v: SignatureValues) query(version: Str, resource: Str, perms: Str, sig: Str) -> QueryParameters {
+  QueryParameters{
+    version: version, protocol: v.protocol, start: v.start, expiry: v.expiry, permissions: perms,
+    ip_range: v.ip_range, resource: resource, identifier: v.identifier, cache_control: v.cache_control,
+    content_disposition: v.content_disposition, content_encoding: v.content_encoding,
+    content_language: v.content_language, content_type: v.content_type, share_snapshot: v.snapshot,
+    signature: Secret.new(sig),
+  }
+}
+
+pub fn (v: SignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  if v.identifier == "" && (v.expiry.is_none() || v.permissions == "") {
+    return Err("service SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let (resource, perms) = v.resource()?
+  let version = if v.version == "" { VERSION } else { v.version }
+  let sts = [
+    perms, opt_time(v.start), opt_time(v.expiry), canonical_name(cred.account_name, v.share_name, v.file_path),
+    v.identifier, v.ip_range, v.protocol, version,
+    v.cache_control, v.content_disposition, v.content_encoding, v.content_language, v.content_type,
+  ].join("\n")
+  Ok(v.query(version, resource, perms, cred.compute_hmac_sha256(sts)))
+}
+
+pub fn (v: SignatureValues) sign_with_user_delegation(cred: exported.UserDelegationCredential) -> QueryParameters ! Str {
+  if v.expiry.is_none() || v.permissions == "" {
+    return Err("user delegation SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let (resource, perms) = v.resource()?
+  let version = if v.version == "" { VERSION } else { v.version }
+  let k = cred.key
+  let sts = [
+    perms, opt_time(v.start), opt_time(v.expiry), canonical_name(cred.account_name, v.share_name, v.file_path),
+    k.signed_oid, k.signed_tid, format_time(Some(k.signed_start)), format_time(Some(k.signed_expiry)), k.signed_service, k.signed_version,
+    v.authorized_object_id, v.unauthorized_object_id, v.correlation_id, k.signed_delegated_user_tenant_id, v.signed_delegated_user_object_id,
+    v.ip_range, v.protocol, version, resource, "", "",
+    v.cache_control, v.content_disposition, v.content_encoding, v.content_language, v.content_type,
+  ].join("\n")
+  let sig = cred.compute_hmac_sha256(sts)?
+  Ok(v.query(version, resource, perms, sig) with {
+    authorized_object_id: v.authorized_object_id, unauthorized_object_id: v.unauthorized_object_id,
+    correlation_id: v.correlation_id, signed_delegated_user_object_id: v.signed_delegated_user_object_id,
+    signed_oid: k.signed_oid, signed_tid: k.signed_tid, signed_start: Some(k.signed_start), signed_expiry: Some(k.signed_expiry),
+    signed_service: k.signed_service, signed_version: k.signed_version,
+    signed_delegated_user_tenant_id: k.signed_delegated_user_tenant_id,
+  })
+}
+
+/// A SAS, signed or read from a URL; `encode` gives the query string.
+/// The signature is a Secret: it never shows in logs or Debug output.
+pub struct QueryParameters {
+  pub version: Str = ""
+  pub services: Str = ""
+  pub resource_types: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Never encoded; URLParts writes it when the URL has no snapshot.
+  pub share_snapshot: Time? = None
+  pub ip_range: Str = ""
+  pub identifier: Str = ""
+  pub resource: Str = ""
+  pub permissions: Str = ""
+  pub signature: Secret[Str] = Secret.new("")
+  pub encryption_scope: Str = ""
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  pub signed_oid: Str = ""
+  pub signed_tid: Str = ""
+  pub signed_start: Time? = None
+  pub signed_expiry: Time? = None
+  pub signed_service: Str = ""
+  pub signed_version: Str = ""
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  pub signed_delegated_user_object_id: Str = ""
+  pub signed_delegated_user_tenant_id: Str = ""
+  /// The layouts `st` and `se` were read in ("" is TIME_FORMAT); `skt`
+  /// and `ske` are written in them too, as Go writes them.
+  pub start_format: Str = ""
+  pub expiry_format: Str = ""
+}
+
+/// The query string, keys sorted, as azfile's QueryParameters.Encode.
+pub fn (p: QueryParameters) encode() -> Str {
+  var pairs: List[(Str, Str)] = [
+    ("sv", p.version), ("ss", p.services), ("srt", p.resource_types), ("spr", p.protocol),
+    ("st", if p.start.is_none() { "" } else { format_time(p.start, p.start_format) }),
+    ("se", if p.expiry.is_none() { "" } else { format_time(p.expiry, p.expiry_format) }),
+    ("sip", p.ip_range), ("si", p.identifier), ("sr", p.resource), ("sp", p.permissions),
+    ("sig", p.signature.reveal()), ("ses", p.encryption_scope), ("rscc", p.cache_control),
+    ("rscd", p.content_disposition), ("rsce", p.content_encoding), ("rscl", p.content_language),
+    ("rsct", p.content_type),
+  ]
+  var v = url.values()
+  for (k, x) in pairs {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
+  if p.signed_oid != "" {
+    v.add("skoid", p.signed_oid)
+    v.add("sktid", p.signed_tid)
+    v.add("skt", format_time(p.signed_start, p.start_format))
+    v.add("ske", format_time(p.signed_expiry, p.expiry_format))
+    v.add("sks", p.signed_service)
+    v.add("skv", p.signed_version)
+  }
+  for (k, x) in [("saoid", p.authorized_object_id), ("suoid", p.unauthorized_object_id), ("scid", p.correlation_id), ("sduoid", p.signed_delegated_user_object_id), ("skdutid", p.signed_delegated_user_tenant_id)] {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
+  v.encode()
+}
+
+/// The SAS in `values` (keys matched without case, the first value of
+/// each), and `values` without its SAS keys (NewQueryParameters with
+/// deleteSASParametersFromValues). A time no layout reads is no time,
+/// an address that is not one is "".
+pub fn new_query_parameters(values: url.Values) -> (QueryParameters, url.Values) {
+  var p = QueryParameters{}
+  var rest = values
+  for k in values.keys() {
+    let val = values.get(k) ?? ""
+    var known = true
+    match k.to_lower() {
+      "sv" => { p.version = val }
+      "ss" => { p.services = val }
+      "srt" => { p.resource_types = val }
+      "spr" => { p.protocol = val }
+      "sharesnapshot" => { p.share_snapshot = parse_layout(val, TIME_FORMAT_FRACTION) }
+      "st" => {
+        let (t, f) = parse_time(val)
+        p.start = t
+        p.start_format = f
+      }
+      "se" => {
+        let (t, f) = parse_time(val)
+        p.expiry = t
+        p.expiry_format = f
+      }
+      "sip" => { p.ip_range = ip_range(val) }
+      "si" => { p.identifier = val }
+      "sr" => { p.resource = val }
+      "sp" => { p.permissions = val }
+      "sig" => { p.signature = Secret.new(val) }
+      "ses" => { p.encryption_scope = val }
+      "rscc" => { p.cache_control = val }
+      "rscd" => { p.content_disposition = val }
+      "rsce" => { p.content_encoding = val }
+      "rscl" => { p.content_language = val }
+      "rsct" => { p.content_type = val }
+      "skoid" => { p.signed_oid = val }
+      "sktid" => { p.signed_tid = val }
+      "skt" => {
+        let (t, f) = parse_time(val)
+        p.signed_start = t
+        p.start_format = f
+      }
+      "ske" => {
+        let (t, f) = parse_time(val)
+        p.signed_expiry = t
+        p.expiry_format = f
+      }
+      "sks" => { p.signed_service = val }
+      "skv" => { p.signed_version = val }
+      "saoid" => { p.authorized_object_id = val }
+      "suoid" => { p.unauthorized_object_id = val }
+      "scid" => { p.correlation_id = val }
+      "sduoid" => { p.signed_delegated_user_object_id = val }
+      "skdutid" => { p.signed_delegated_user_tenant_id = val }
+      _ => { known = false }
+    }
+    if known {
+      rest.remove(k)
+    }
+  }
+  (p, rest)
+}

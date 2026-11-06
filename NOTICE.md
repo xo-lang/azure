@@ -22,8 +22,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `queueerror`, hand written over azblob's Shared Key; requests checked
   against its own), `sdk/storage/azfile` v1.7.1 (the ServiceClient,
   ShareClient, DirectoryClient and FileClient, the lease clients, SMB and NFS properties, their options, responses and XML models, connection
-  strings, URL parts and `fileerror`, hand written over azblob's Shared
-  Key; requests checked against its own), `sdk/data/aztables` v1.4.1 (the ServiceClient and
+  strings, URL parts, the `sas` package and GetSASURL, and `fileerror`,
+  hand written over azblob's Shared Key; requests checked against its
+  own; the storage internal `sasurl` helpers), `sdk/data/aztables` v1.4.1 (the ServiceClient and
   Client, the SharedKeyLite and Cosmos policies, entities, transactions,
   SAS, connection strings, XML models and error codes, hand written;
   requests checked against its own), `sdk/data/azcosmos` v1.5.0 (the Client,
