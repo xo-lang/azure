@@ -1,0 +1,81 @@
+// The generated azcertificates client against a fake vault that answers
+// a request without a token with Key Vault's challenge (invented hosts,
+// invented certificate bytes).
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+const VAULT: Str = "https://kv1.vault.example.test"
+const CHALLENGE: Str = "Bearer authorization=\"https://login.example.test/tenant-a\", resource=\"https://vault.example.test\""
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+fn route(net: testing.FakeNet, pattern: Str, status: Int, body: Str) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    if req.header("Authorization").is_none() {
+      return http.text(401, "").with_header("WWW-Authenticate", CHALLENGE)
+    }
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(status, body)
+  })
+  seen
+}
+
+fn first(seen: Mutex[List[http.Request]]) -> http.Request {
+  seen.with_read(fn(xs: List[http.Request]) -> http.Request { xs[0] })
+}
+
+test "create_certificate POSTs the policy and returns the pending operation" {
+  let seen = route(os.net, "POST ${VAULT}/certificates/c1/create", 202, "{\"id\":\"${VAULT}/certificates/c1/pending\",\"issuer\":{\"name\":\"Self\"},\"csr\":\"AQID\",\"status\":\"inProgress\"}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let policy = CertificatePolicy{issuer_parameters: Some(IssuerParameters{name: Some("Self")}), x509_certificate_properties: Some(X509CertificateProperties{subject: Some("CN=app.example.test"), validity_in_months: Some(12)})}
+  let op = c.create_certificate("c1", CreateCertificateParameters{certificate_policy: Some(policy)})?.certificate_operation
+  expect(op.status) == Some("inProgress")
+  expect(op.csr) == Some(b"\x01\x02\x03")
+  expect((op.id ?? ID("")).name()) == "c1"
+  let req = first(seen)
+  expect(req.url.query.get("api-version")) == Some("2025-07-01")
+  let sent = json.parse_value(req.body.to_str_lossy())?
+  let x509 = sent.get("policy").and_then(fn(p: json.Value) -> json.Value? { p.get("x509_props") })
+  expect(x509.and_then(fn(x: json.Value) -> json.Value? { x.get("subject") })) == Some(json.Value.Str("CN=app.example.test"))
+}
+
+test "a failed operation's error is ErrorInfo: its code, and the whole object as error()" {
+  route(os.net, "GET ${VAULT}/certificates/c1/pending", 200, "{\"id\":\"${VAULT}/certificates/c1/pending\",\"status\":\"failed\",\"error\":{\"code\":\"BadParameter\",\"message\":\"The subject is not valid.\"}}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let e = c.get_certificate_operation("c1")?.certificate_operation.error ?? ErrorInfo{}
+  expect(e.code) == "BadParameter"
+  expect(e.error()) == "{\"code\":\"BadParameter\",\"message\":\"The subject is not valid.\"}"
+  expect(json.encode_str(e)) == e.error()
+}
+
+test "get_certificate with an empty version returns the latest, its kid and sid as IDs" {
+  route(os.net, "GET ${VAULT}/certificates/c1/", 200, "{\"id\":\"${VAULT}/certificates/c1/v2\",\"kid\":\"${VAULT}/keys/c1/v2\",\"sid\":\"${VAULT}/secrets/c1/v2\",\"cer\":\"AQID\",\"x5t\":\"-_8\"}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let cert = c.get_certificate("c1", "")?.certificate
+  expect((cert.kid ?? ID("")).version()) == "v2"
+  expect((cert.sid ?? ID("")).name()) == "c1"
+  expect(cert.cer) == Some(b"\x01\x02\x03")
+  expect(cert.x509_thumbprint.map(fn(b: azcore.Base64URL) -> Bytes { b.0 })) == Some(b"\xfb\xff")
+}
+
+test "the certificate properties pager follows nextLink" {
+  route(os.net, "GET ${VAULT}/certificates", 200, "{\"value\":[{\"id\":\"${VAULT}/certificates/a\"}],\"nextLink\":\"${VAULT}/certificatespage2\"}")
+  route(os.net, "GET ${VAULT}/certificatespage2", 200, "{\"value\":[{\"id\":\"${VAULT}/certificates/b\"}]}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  var p = c.new_list_certificate_properties_pager()?
+  var names: List[Str] = []
+  while p.more() {
+    for x in p.next_page()?.certificate_properties_list_result.value ?? [] {
+      names.push((x.id ?? ID("")).name())
+    }
+  }
+  expect(names) == ["a", "b"]
+}

@@ -11,7 +11,7 @@ every module and fails on any difference.
 Each rule below was found by diffing a generated module's names with
 Go's (armresources v1.2.0, armstorage v1.8.1, armcompute v6.4.0,
 armnetwork v8.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
-azsecrets v1.4.0: every method, model, enum, interface, options and
+azsecrets v1.4.0, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armnetwork's `Error` and armkeyvault's
 `Secret`, which are `ErrorModel` and `SecretModel` by the last rule).
 
@@ -64,7 +64,10 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   or for the row's tag apply first (armnetwork's
   `SecurityPerimeterResource`), unreported when they cannot.
 - `custom/<module>.toml: models` gives modelerfour's path-hashed names
-  for inline schemas (`Components1Jq1T4I...`).
+  for inline schemas (`Components1Jq1T4I...`) and Go transforms' type
+  renames (`DeletedKeyBundle` is `DeletedKey`); `drop_values` deletes
+  enum values Go's transforms delete (`SignatureAlgorithmRSNULL`); a
+  `field_types` key may name one model's field (`"certificate.id"`).
 - TypeSpec modules take Go's `@@clientName`/`@clientName` renames from
   the .tsp files, and `custom/<module>.toml` mirrors Go's own
   post-generation transforms.

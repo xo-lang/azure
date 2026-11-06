@@ -1,0 +1,91 @@
+// The generated azkeys client against a fake vault that answers a
+// request without a token with Key Vault's challenge (invented hosts,
+// invented key material).
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+const VAULT: Str = "https://kv1.vault.example.test"
+const CHALLENGE: Str = "Bearer authorization=\"https://login.example.test/tenant-a\", resource=\"https://vault.example.test\""
+const KEY: Str = "{\"key\":{\"kid\":\"https://kv1.vault.example.test/keys/k1/v3\",\"kty\":\"RSA\",\"key_ops\":[\"sign\",\"verify\"],\"n\":\"AQAB\",\"e\":\"AQAB\"},\"attributes\":{\"enabled\":true,\"created\":1793847845,\"recoveryLevel\":\"Recoverable\"}}"
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+/// A vault route: 401 with the challenge without a token, else `status`
+/// and `body`. It records the authorized requests.
+fn route(net: testing.FakeNet, pattern: Str, status: Int, body: Str) -> Mutex[List[http.Request]] {
+  let seen = Mutex[List[http.Request]].new([])
+  net.handle(pattern, fn(req: http.Request) -> http.Response {
+    if req.header("Authorization").is_none() {
+      return http.text(401, "").with_header("WWW-Authenticate", CHALLENGE)
+    }
+    seen.with(fn(var xs: List[http.Request]) { xs.push(req) })
+    http.text(status, body)
+  })
+  seen
+}
+
+fn first(seen: Mutex[List[http.Request]]) -> http.Request {
+  seen.with_read(fn(xs: List[http.Request]) -> http.Request { xs[0] })
+}
+
+test "create_key POSTs to /create with api-version 2025-07-01 and decodes the JSON web key" {
+  let seen = route(os.net, "POST ${VAULT}/keys/k1/create", 200, KEY)
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let r = c.create_key("k1", CreateKeyParameters{kty: Some(KEY_TYPE_RSA), key_size: Some(2048)})?
+  let jwk = r.key_bundle.key ?? JSONWebKey{}
+  let kid = jwk.kid ?? ID("")
+  expect(kid.name()) == "k1"
+  expect(kid.version()) == "v3"
+  expect(jwk.n.map(fn(b: azcore.Base64URL) -> Bytes { b.0 })) == Some(b"\x01\x00\x01")
+  expect(r.key_bundle.attributes.and_then(fn(a: KeyAttributes) -> Str? { a.recovery_level })) == Some("Recoverable")
+  let req = first(seen)
+  expect(req.url.query.get("api-version")) == Some("2025-07-01")
+  let sent = json.parse_value(req.body.to_str_lossy())?
+  expect(sent.get("kty")) == Some(json.Value.Str("RSA"))
+  expect(sent.get("key_size")) == Some(json.Value.Int(2048))
+}
+
+test "sign sends the digest as base64url and returns the signature" {
+  let seen = route(os.net, "POST ${VAULT}/keys/k1/v3/sign", 200, "{\"kid\":\"https://kv1.vault.example.test/keys/k1/v3\",\"value\":\"-_8\"}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let r = c.sign("k1", "v3", SignParameters{algorithm: Some(SIGNATURE_ALGORITHM_RS256), value: Some(azcore.Base64URL(b"\xfb\xff"))})?
+  expect(r.key_operation_result.result.map(fn(b: azcore.Base64URL) -> Bytes { b.0 })) == Some(b"\xfb\xff")
+  expect(first(seen).body) == b"{\"alg\":\"RS256\",\"value\":\"-_8\"}"
+}
+
+test "get_key with an empty version asks for the latest; delete_key returns DeletedKey" {
+  route(os.net, "GET ${VAULT}/keys/k1/", 200, KEY)
+  route(os.net, "DELETE ${VAULT}/keys/k1", 200, KEY.replace("\"attributes\"", "\"recoveryId\":\"https://kv1.vault.example.test/deletedkeys/k1\",\"deletedDate\":1793847845,\"attributes\""))
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  expect(c.get_key("k1", "")?.key_bundle.key.and_then(fn(k: JSONWebKey) -> KeyType? { k.kty })) == Some(KEY_TYPE_RSA)
+  let d = c.delete_key("k1")?.deleted_key
+  expect(d.recovery_id) == Some("https://kv1.vault.example.test/deletedkeys/k1")
+  expect(d.deleted_date.map(fn(t: azcore.UnixTime) -> Int { t.0.unix() })) == Some(1793847845)
+}
+
+test "the key properties pager follows nextLink" {
+  route(os.net, "GET ${VAULT}/keys", 200, "{\"value\":[{\"kid\":\"${VAULT}/keys/a\"},{\"kid\":\"${VAULT}/keys/b\"}],\"nextLink\":\"${VAULT}/keyspage2\"}")
+  route(os.net, "GET ${VAULT}/keyspage2", 200, "{\"value\":[{\"kid\":\"${VAULT}/keys/c\"}],\"nextLink\":null}")
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  var p = c.new_list_key_properties_pager()?
+  var names: List[Str] = []
+  while p.more() {
+    for k in p.next_page()?.key_properties_list_result.value ?? [] {
+      names.push((k.kid ?? ID("")).name())
+    }
+  }
+  expect(names) == ["a", "b", "c"]
+}
+
+test "Go's dropped values are gone: RSNULL and export" {
+  expect(possible_signature_algorithm_values().contains(SignatureAlgorithm("RSNULL"))) == false
+  expect(possible_key_operation_values().contains(KeyOperation("export"))) == false
+  expect(possible_key_operation_values().contains(KEY_OPERATION_SIGN)) == true
+}

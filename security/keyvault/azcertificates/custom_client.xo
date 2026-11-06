@@ -1,0 +1,79 @@
+// The hand written part of azsecrets, as Go's custom_client.go
+// (azcertificates v1.5.0; MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): the client, its options, the ID type and ErrorInfo. The rest of
+// the package is generated (client.xo, models.xo).
+
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/security/keyvault/internal
+
+/// Options of new_client.
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+  /// Accept a challenge resource that is not a parent of the vault's
+  /// host. See https://aka.ms/azsdk/blog/vault-uri.
+  pub disable_challenge_resource_verification: Bool = false
+  /// Send tokens over plain HTTP too (tests against a local fake only).
+  pub insecure_allow_http: Bool = false
+}
+
+struct Setup {
+  pipeline: runtime.Pipeline
+  endpoint: Str
+}
+
+/// Client: the operations of one vault's certificates.
+pub struct Client {
+  setup: Setup
+}
+
+/// A client for the vault at `vault_url` (`https://<name>.vault.azure.net`),
+/// authorized by Key Vault's challenge policy.
+pub fn new_client(net: Net, clock: Clock, rand: Rand, vault_url: Str, cred: azcore.TokenCredential, opts: ClientOptions = ClientOptions{}) -> Client {
+  let auth = internal.new_challenge_policy(cred, clock, internal.ChallengePolicyOptions{disable_challenge_resource_verification: opts.disable_challenge_resource_verification, insecure_allow_http: opts.insecure_allow_http})
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  Client{setup: Setup{pipeline: pl, endpoint: vault_url.trim_end_chars("/")}}
+}
+
+/// A secret's ID: `https://<vault>/secrets/<name>/<version>`.
+pub type ID struct(Str)
+
+/// The secret's name.
+pub fn (i: ID) name() -> Str {
+  internal.parse_id(i.0).1 ?? ""
+}
+
+/// The secret's version, empty when the ID has none.
+pub fn (i: ID) version() -> Str {
+  internal.parse_id(i.0).2 ?? ""
+}
+
+/// ErrorInfo: a certificate operation's error, its code and, as Go's
+/// ErrorInfo keeps it, the whole error object for error().
+pub struct ErrorInfo {
+  /// A machine readable error code.
+  pub code: Str = ""
+  data: Str = ""
+} derive Json(via: json.Value, to: error_info_json, from: parse_error_info)
+
+fn error_info_json(e: ErrorInfo) -> json.Value {
+  match json.parse_value(e.data) {
+    Ok(v) => v
+    Err(_) => json.Value.Object([("code", json.Value.Str(e.code))])
+  }
+}
+
+fn parse_error_info(v: json.Value) -> ErrorInfo {
+  let code = match v.get("code") {
+    Some(json.Value.Str(c)) => c
+    _ => ""
+  }
+  ErrorInfo{code: code, data: v.encode()}
+}
+
+/// The whole error object as JSON text (Go's Error()).
+pub fn (e: ErrorInfo) error() -> Str {
+  e.data
+}
