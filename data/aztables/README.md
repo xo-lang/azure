@@ -41,9 +41,9 @@ Where it differs from Go v1.4.1:
   `&`, U+2028 and U+2029 escaped, as Go's re-encoding writes them.
 - A table SAS sends its key range. Go signs `spk`, `srk`, `epk` and
   `erk` but leaves them out of the query, so the service cannot verify
-  the signature.
+  the signature (Azure/azure-sdk-for-go#27957).
 - `get_table_sas_url` puts a `/` before the table name (Go writes
-  `https://acct.table.core.windows.nett1`).
+  `https://acct.table.core.windows.nett1`, Azure/azure-sdk-for-go#27958).
 - A key with a `'` is doubled in a transaction too, as the single
   entity calls double it (Go leaves it as it is in a batch, which ends
   the key literal early).

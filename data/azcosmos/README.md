@@ -83,12 +83,13 @@ Where it differs from Go v1.5.0:
 - A partition key string is written as JSON. Go uses
   strconv.QuoteToASCII, which writes `\U0001f600` and `\x01`, neither
   of them JSON; here they are `\ud83d\ude00` and `\u0001` (the rest is
-  the same bytes).
+  the same bytes; Azure/azure-sdk-for-go#27960).
 - Database and container ids and patch conditions are JSON strings.
   Go writes them into its JSON with `%s`, so one with a quote fails to
-  marshal and the call returns an error.
+  marshal and the call returns an error (Azure/azure-sdk-for-go#27961).
 - A response error's `error_code` is the service's code (`NotFound`).
-  Go's is the HTTP status text (`404 Not Found`).
+  Go's is the HTTP status text (`404 Not Found`,
+  Azure/azure-sdk-for-go#27959).
 - Batch operation ids are JSON strings too (Go's `%s` again).
   `create_item` and `read_item` on a batch take no options; Go takes
   them and ignores them. `TransactionalBatchOptions` with
@@ -118,7 +119,7 @@ Where it differs from Go v1.5.0:
   where Go sums a float32.
 - A hierarchical key's prefix in ReadMany is queried as Go queries it:
   the missing levels as `IS_NULL(...)`, so only items whose lower levels
-  are JSON null match (an unfiled upstream draft).
+  are JSON null match (Azure/azure-sdk-for-go#27962).
 - When a change feed range stays gone after three refreshes, Go
   returns the pages read so far together with the error; a Result holds
   one of them, so here the call returns the error. A feed range that no
@@ -128,7 +129,7 @@ Where it differs from Go v1.5.0:
   Go's json.Unmarshal also takes them in another case.
 - A change feed range inside one physical partition is read as Go reads
   it: as the whole partition, with that partition's bounds in the token
-  (an unfiled upstream draft).
+  (Azure/azure-sdk-for-go#27963).
 - Throughput options' ETag conditions go on every request of the
   operation, the offer query included, as Go sends them. The offer
   replace writes the offer's strings as JSON strings (Go uses `%s`).

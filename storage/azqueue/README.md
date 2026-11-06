@@ -64,7 +64,7 @@ Where it differs from Go v1.0.1:
   for `ClientOptions.audience`, while `new_service_client`, and the
   queue clients a service client makes, use the plain bearer policy
   with Storage's scope whatever the audience (Go's NewServiceClient
-  ignores `Audience`). Go's challenge parser panics on an
+  ignores `Audience`, Azure/azure-sdk-for-go#27973). Go's challenge parser panics on an
   `authorization_uri` of three `/` parts (`https://login`); Xo reads
   the challenge, since Go never uses that tenant.
 - A date or time that does not parse gives Go's error text up to the

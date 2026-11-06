@@ -33,7 +33,8 @@ Where it differs from Go v1.8.3:
 - `BlobSignatureValues.signed_request_headers` and
   `signed_request_query_parameters` (`srh`, `srq`) are lists, signed in
   the caller's order. Go takes maps and signs them in map order, so with
-  two or more entries its SAS varies from run to run.
+  two or more entries its SAS varies from run to run
+  (Azure/azure-sdk-for-go#27964).
 - Not ported yet: `ClientOptions.ExpectContinueBehavior` (Go sends
   `Expect: 100-continue` for a minute after a 429, 500 or 503). It comes
   with Go's default once Xo's std can send that header.
@@ -45,10 +46,12 @@ Where it differs from Go v1.8.3:
 - A download reads its whole body, so there is no retry reader: a
   failed read is a failed send, which the retry policy repeats.
 - Go's `DownloadStreamResponse.ObjectReplicationRules` list is never
-  filled (its parser looks for `or-` after the prefix is gone);
+  filled (its parser looks for `or-` after the prefix is gone,
+  Azure/azure-sdk-for-go#27966);
   `object_replication_rules` here is the map of `x-ms-or-*` headers,
   as Go's generated response holds them. A download has no smart
-  access tier, as Go's public download response has no field for it.
+  access tier, as Go's public download response has no field for it
+  (Azure/azure-sdk-for-go#27965).
 - Container calls take `ContainerConditions` (the two dates), the ones
   Go's options pass on; container `set_metadata` sends only
   If-Modified-Since, as Go's does.

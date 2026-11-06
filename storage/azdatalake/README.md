@@ -90,7 +90,7 @@ Where it differs from Go v1.7.1:
   `SetFileSystemMetadataOptions`).
 - As in Go, a file system's blob calls ask for the default storage
   token scope even with `ClientOptions.audience` set: Go gives its
-  container client the pipeline options only.
+  container client the pipeline options only (Azure/azure-sdk-for-go#27967).
 - `ListHierarchyPathsOptions` is the options of both hierarchy lists
   (Go has `ListDirectoryPathsOptions` and `ListDeletedPathsOptions`,
   the same three fields), and every pager is a `DfsPager`, which maps
@@ -107,12 +107,12 @@ Where it differs from Go v1.7.1:
   fields). `set_http_headers` takes the conditions, not an options
   struct of one field.
 - As in Go, a recursive ACL change's totals do not say where it stopped
-  (upstream draft 24), and a directory's delete follows continuations
+  (Azure/azure-sdk-for-go#27968), and a directory's delete follows continuations
   while a file's returns its one.
 - A recursive ACL page without one of its three counts is an error with
-  the totals so far; Go panics there (upstream draft 25).
+  the totals so far; Go panics there (Azure/azure-sdk-for-go#27969).
 - As in Go, an expiry with a time but no type sends an empty
-  `x-ms-expiry-option` (upstream draft 26).
+  `x-ms-expiry-option` (Azure/azure-sdk-for-go#27970).
 - A dfs date header that does not parse gives Go's error text up to the
   layout (`parsing time "x" as "Mon, 02 Jan 2006 15:04:05 MST"`), not
   the part after it that names the element.
@@ -145,7 +145,8 @@ Where it differs from Go v1.7.1:
   (`t`) where azblob's puts `t` first: the REST docs fix no order, and
   .NET writes `t f` and Python `f t`.
 - As in Go, the service's `get_sas_url` keeps only the `rwdlacup`
-  letters (Go's option mapping drops `x`, `y`, `f`, `t` and `i`), and
+  letters (Go's option mapping drops `x`, `y`, `f`, `t` and `i`,
+  Azure/azure-sdk-for-go#27972), and
   signs with azblob's version (2026-12-06) and order; with only dropped
   letters it is the missing-permissions error.
 - As Go's, a Shared Key SAS needs its permissions even with a stored
