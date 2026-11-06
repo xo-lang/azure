@@ -69,9 +69,11 @@ What it does:
   string to sign has no snapshot field (only Blob's has one since
   2018-11-09), so a snapshot URL keeps its `sharesnapshot` beside the
   SAS, as Go writes it.
-- `parse_url` splits a file service URL (an IP host's first segment is
-  the account, as Azurite's), with its SAS in `sas`, and `to_url` writes
-  it back.
+- `parse_url` splits a file service URL as Go's sas.ParseURL does
+  (url.Parse's rules and errors; on an IP host, as IsIPEndpointStyle
+  sees one, the first segment is the account, as Azurite's), with its
+  SAS in `sas`, and `to_url` writes it back as url.URL does
+  (`urlvectors_test.xo`).
 
 Each request is Go's byte for byte: the test replays a Go program's
 calls against the same fake service and compares every request

@@ -1,5 +1,14 @@
 # azqueue changes
 
+## v0.3.0
+
+- `parse_url` reads the URL with azblob's Go url.Parse port (ports,
+  IPv6 literals, host bytes, user info, control bytes, fragments) and
+  the query as Go's URL.Query: one bad pair no longer drops them all.
+- Error texts quote a value as Go's strconv.Quote (a tab is `\t`);
+  azqueue's own copy of the quoting did not escape `\n`, `\t` or
+  `\r`, and now forwards to azblob's.
+
 ## v0.2.0
 
 Constructors and URLs, at Go azqueue v1.0.1 parity on captured

@@ -1,5 +1,22 @@
 # azblob changes
 
+## v0.9.0
+
+- `exported.parse_go_url` reads a URL as Go's url.Parse does, errors
+  included: a port must be digits; a bracketed host must be an IPv6
+  address (Go's netip error text), with its zone after `%25`; a
+  host's raw bytes must be ones Go keeps (`invalid character " " in
+  host name`); user info before the last `@` is checked
+  (`net/url: invalid userinfo`) and dropped; control bytes are
+  refused; a fragment's escapes are checked; `///x` with no scheme has
+  no host; and an error names the URL without its fragment.
+- `exported.go_query`: a query read as Go's URL.Query reads one. A
+  pair with a `;` or a bad escape is left out and the rest kept, and
+  more than 10000 pairs read as none (std's `url.parse_query` returns
+  only the error).
+- `exported.go_quote` writes control bytes as Go's strconv.Quote does
+  (`\a`, `\b`, `\f`, `\v`, `\xNN`), checked on every ASCII byte.
+
 ## v0.8.0
 
 - `exported.all_bytes`, `has_byte` and `is_unreserved` are public, for

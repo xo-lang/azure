@@ -1,5 +1,10 @@
 # azdatalake changes
 
+## v0.8.0
+
+- Error texts quote a value as Go's strconv.Quote, control bytes
+  included (azblob v0.9.0's `exported.go_quote`).
+
 ## v0.7.0
 
 - The dfs pipeline's token policy is the storage challenge policy
