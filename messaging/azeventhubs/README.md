@@ -66,6 +66,9 @@ What it does:
   returned at once.
 - Errors with Go's codes (`unauthorized`, `connlost`, `ownershiplost`)
   and the AMQP condition.
+- `custom_endpoint` in the client options (Go's CustomEndpoint): the
+  connection goes to that `host[:port]`, such as a TCP proxy, while the
+  AMQP Open's hostname and the token audiences name the namespace.
 
 Where it differs from Go v1.4.0:
 
@@ -84,12 +87,15 @@ Where it differs from Go v1.4.0:
   one after another within a round (Go: concurrently).
 - The in-memory store's errors are errors (Go's test store panics), and
   its lists hold only the asked hub and group.
-
 - `checkpoints.new_blob_store` takes an azblob `Client` and a container
   name (Go: a `container.Client`; this azblob has one client per
   account).
+- Over TLS, a custom endpoint's certificate is checked against the
+  endpoint's host; Go checks it against the namespace (go-amqp takes
+  the TLS server name from the Open's hostname). std/amqp's dial has no
+  separate server name yet.
 
-Not yet: web sockets and custom endpoints.
+Not yet: web sockets.
 
 Tests run against std/amqptest's in-process broker in its event hub
 mode on the test world's network (`xo test .`).

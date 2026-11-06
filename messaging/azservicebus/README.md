@@ -49,6 +49,9 @@ What it does:
   that went through is refused a second time without a request.
 - Errors with Go's codes (`unauthorized`, `notfound`, `locklost`,
   `timeout`, `connlost`, `closed`) and the AMQP condition.
+- `custom_endpoint` in the client options (Go's CustomEndpoint): the
+  connection goes to that `host[:port]`, such as a TCP proxy, while the
+  AMQP Open's hostname and the token audiences name the namespace.
 - The admin client (package `admin`, Go's `azservicebus/admin`): create,
   update, get, get runtime properties, delete and list pagers for
   queues, topics, subscriptions and rules, and the namespace's
@@ -68,6 +71,10 @@ Where the AMQP side differs from Go v1.11.0:
   background loop; the outcome is the same without a background task.
 - A link that names no max message size (AMQP's 0, no limit) gives a
   batch with no limit; Go would refuse every message.
+- Over TLS, a custom endpoint's certificate is checked against the
+  endpoint's host; Go checks it against the namespace (go-amqp takes
+  the TLS server name from the Open's hostname). std/amqp's dial has no
+  separate server name yet.
 
 Where admin differs from Go v1.11.0, each a Go bug:
 
