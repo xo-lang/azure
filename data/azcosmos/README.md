@@ -47,6 +47,12 @@ What it does:
   ranges again and retries, three times at most. Query documents, here
   and in the query pager, are Go's json.Marshal of each one (compact,
   HTML escaped).
+- Throughput: `read_throughput` and `replace_throughput` on databases
+  and containers (manual or autoscale with an increment), as Go: the
+  offer found by a query on the resource id, read by its self link
+  (signed with the lower-cased offer id), and replaced with its content
+  swapped; ETag conditions, the pending flag and the minimum throughput;
+  404 when the resource has no offer of its own.
 - The change feed: `read_change_feed` drains a feed range (or a
   continuation token) one physical partition at a time with Go's
   composite continuation token: each range's etag kept, a range with
@@ -69,7 +75,7 @@ normalized), and the body, and what is read back. Feed ranges replay
 15 cases of Go's requests and results against scripted feeds, and
 ReadMany 16 cases of Go's full requests (a 1000 item query body compared
 by SHA-256), and the change feed 13 cases of Go's full requests, tokens
-and responses.
+and responses, and throughput 7 cases of Go's full requests.
 
 Where it differs from Go v1.5.0:
 
@@ -122,7 +128,9 @@ Where it differs from Go v1.5.0:
 - A change feed range inside one physical partition is read as Go reads
   it: as the whole partition, with that partition's bounds in the token
   (an unfiled upstream draft).
-- Not ported yet: throughput read and replace (offers), and vector or
-  full text policies.
+- Throughput options' ETag conditions go on every request of the
+  operation, the offer query included, as Go sends them. The offer
+  replace writes the offer's strings as JSON strings (Go uses `%s`).
+- Not ported yet: vector and full text policies.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.

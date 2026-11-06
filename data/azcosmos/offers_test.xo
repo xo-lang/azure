@@ -1,0 +1,118 @@
+// ReadThroughput and ReplaceThroughput compared with Go's azcosmos v1.5.0
+// on the same fake account (offvectors_test.xo): every request in full
+// and what the caller gets.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const DB_OFFER: Str = "{\"resource\":\"dbs/dbRid1=/\",\"offerType\":\"Invalid\",\"offerResourceId\":\"dbRid1=\",\"offerVersion\":\"V2\",\"content\":{\"offerThroughput\":400,\"offerIsRUPerMinuteThroughputEnabled\":false},\"id\":\"OfR1\",\"_rid\":\"OfR1\",\"_self\":\"offers/OfR1/\",\"_etag\":\"\\\"e-o1\\\"\",\"_ts\":1762311845}"
+const COLL_OFFER: Str = "{\"resource\":\"dbs/dbRid1=/colls/cRid1=/\",\"offerType\":\"Invalid\",\"offerResourceId\":\"cRid1=\",\"offerVersion\":\"V2\",\"content\":{\"offerThroughput\":400,\"offerAutopilotSettings\":{\"maxThroughput\":4000,\"autoUpgradePolicy\":{\"throughputPolicy\":{\"incrementPercent\":10}}}},\"id\":\"Xy9a\",\"_rid\":\"Xy9a\",\"_self\":\"offers/Xy9a/\",\"_etag\":\"\\\"e-o2\\\"\",\"_ts\":1762311846}"
+
+struct OffFake {
+  log: Mutex[List[Str]]
+}
+
+fn (f: OffFake) answer(req: http.Request) -> http.Response {
+  let p = req.escaped_path()
+  if p == "/" {
+    return js_resp(200, "{\"id\":\"acct1\",\"writableLocations\":[],\"readableLocations\":[]}")
+  }
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "user-agent" || lk == "accept-encoding" || lk == "x-ms-client-request-id" {
+      continue
+    }
+    hs.push("${lk}=${if lk == "x-ms-activity-id" { "ACTIVITY" } else { v }}")
+  }
+  if req.body.len() > 0 { hs.push("content-length=${req.body.len()}") }
+  let body = req.body.to_str_lossy()
+  let lines = ["  REQ ${req.method} ${p}"] + hs.sort().map(fn(h: Str) -> Str { "    ${h}" }) + ["    body=${body}"]
+  f.log.with(fn(var l: List[Str]) { l = l + lines })
+  let ok = fn(text: Str) -> http.Response { js_resp(200, text).with_header("x-ms-request-charge", "1.5") }
+  if p == "/dbs/db1" {
+    return ok("{\"id\":\"db1\",\"_rid\":\"dbRid1=\"}")
+  }
+  if p == "/dbs/db1/colls/c1" || p == "/dbs/db1/colls/c2" {
+    let c = p.split("/")[4]
+    return ok("{\"id\":\"${c}\",\"_rid\":\"${if c == "c1" { "cRid1=" } else { "cRid2=" }}\",\"partitionKey\":{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}}")
+  }
+  if p == "/offers" && req.method == "POST" {
+    let offers = if body.contains("'dbRid1='") { DB_OFFER } else if body.contains("'cRid1='") { COLL_OFFER } else { "" }
+    return js_resp(200, "{\"_rid\":\"\",\"Offers\":[${offers}],\"_count\":${if offers == "" { 0 } else { 1 }}}").with_header("x-ms-request-charge", "2.25")
+  }
+  if p == "/offers/OfR1/" && req.method == "GET" {
+    return ok(DB_OFFER).with_header("x-ms-offer-replace-pending", "true").with_header("x-ms-cosmos-min-throughput", "400").with_header("etag", "\"e-o1\"")
+  }
+  if p == "/offers/Xy9a/" && req.method == "GET" {
+    return ok(COLL_OFFER).with_header("etag", "\"e-o2\"")
+  }
+  if p.starts_with("/offers/") && req.method == "PUT" {
+    return js_resp(200, body).with_header("etag", "\"e-new\"").with_header("x-ms-request-charge", "10")
+  }
+  js_resp(404, "{\"code\":\"NotFound\",\"message\":\"x\"}")
+}
+
+fn opt_go(v: Int?) -> Str {
+  match v {
+    Some(n) => "${n},true"
+    None => "0,false"
+  }
+}
+
+test "ReadThroughput and ReplaceThroughput send what Go sends and give what Go gives" {
+  let f = OffFake{log: Mutex[List[Str]].new([])}
+  let h = fn(req: http.Request) -> http.Response { f.answer(req) }
+  for m in ["GET", "POST", "PUT"] {
+    for path in ["/", "/{a}", "/{a}/{b}", "/{a}/{b}/", "/{a}/{b}/{c}/{d}"] {
+      os.net.handle("${m} ${EP}${path}", h)
+    }
+  }
+  let cred = new_key_credential(KEY)?
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}})
+  let db = c.new_database("db1")?
+  let c1 = db.new_container("c1")?
+  let c2 = db.new_container("c2")?
+  var out: List[Str] = []
+  let report = fn(name: Str, r: Result[ThroughputResponse, azcore.CallErr]) -> List[Str] {
+    var add = ["== ${name}"]
+    add = add + f.log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+    match r {
+      Ok(t) => {
+        let tp = t.throughput_properties
+        let min = match t.min_throughput {
+          Some(n) => "${n}"
+          None => "none"
+        }
+        add.push("  ok manual=${opt_go(tp.manual_throughput())} autoscale=${opt_go(tp.autoscale_max_throughput())} increment=${opt_go(tp.autoscale_increment())} pending=${t.is_replace_pending} min=${min} charge=${two_dp(t.response.request_charge)} etag=${tp.etag ?? "none"} resp_etag=${t.response.etag} ts=${tp.last_modified ?? 0}")
+      }
+      Err(azcore.CallErr.Response(e)) => add.push("  error status ${e.status_code}")
+      Err(e) => add.push("  error ${e.display()}")
+    }
+    add
+  }
+  let etag = Some("\"e-o2\"")
+  out = out + report("t1 a database's throughput", db.read_throughput())
+  out = out + report("t2 replace a database's throughput with manual 500", db.replace_throughput(new_manual_throughput_properties(500)))
+  out = out + report("t3 a container's autoscale throughput", c1.read_throughput())
+  out = out + report("t4 replace a container's with autoscale 5000 by 20 percent, if it matches", c1.replace_throughput(new_autoscale_throughput_properties_with_increment(5000, 20), ThroughputOptions{if_match_etag: etag}))
+  out = out + report("t5 a container without its own throughput", c2.read_throughput())
+  out = out + report("t6 read if none match", c1.read_throughput(ThroughputOptions{if_none_match_etag: etag}))
+  out = out + report("t7 replace with autoscale 6000", db.replace_throughput(new_autoscale_throughput_properties(6000)))
+  expect(out) == OFFERS_OUTPUT
+}
+
+test "an offer's content round-trips as Go writes it" {
+  let t = offer_of(parse_json(COLL_OFFER)?)
+  expect(t.content_json()) == "{\"offerThroughput\":400,\"offerAutopilotSettings\":{\"maxThroughput\":4000,\"autoUpgradePolicy\":{\"throughputPolicy\":{\"incrementPercent\":10}}}}"
+  let bare = offer_of(parse_json("{\"content\":{\"offerAutopilotSettings\":{\"autoUpgradePolicy\":{}}}}")?)
+  expect(bare.autoscale_max_throughput()) == Some(0)
+  expect(bare.autoscale_increment()) == None
+  expect(parse_bool_header("True")) == true
+  expect(parse_bool_header("yes")) == false
+}

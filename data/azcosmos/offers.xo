@@ -1,0 +1,156 @@
+// Reading and replacing provisioned throughput, as azcosmos's
+// cosmos_offers.go, throughput_properties.go, throughput_request_options.go
+// and throughput_response.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): the offer found by the database's or container's resource
+// id with a query, read by its self link, and replaced with new content.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+
+/// ETag conditions, sent on each of the operation's requests (Go sends
+/// them on the offer query too).
+pub struct ThroughputOptions {
+  pub if_match_etag: Str? = None
+  pub if_none_match_etag: Str? = None
+}
+
+pub struct ThroughputResponse {
+  /// The request charge is the whole operation's (query, read, replace).
+  pub response: Response
+  pub throughput_properties: ThroughputProperties
+  /// Whether a throughput change is still being applied
+  /// (x-ms-offer-replace-pending).
+  pub is_replace_pending: Bool = false
+  /// The lowest throughput the resource can be set to
+  /// (x-ms-cosmos-min-throughput).
+  pub min_throughput: Int? = None
+}
+
+/// The manual throughput, if the offer has one.
+pub fn (t: ThroughputProperties) manual_throughput() -> Int? {
+  t.manual
+}
+
+/// The autoscale maximum, if the offer is autoscale.
+pub fn (t: ThroughputProperties) autoscale_max_throughput() -> Int? {
+  t.autoscale_max
+}
+
+/// The autoscale increment percent, if the offer has an increment policy.
+pub fn (t: ThroughputProperties) autoscale_increment() -> Int? {
+  t.autoscale_increment_percent
+}
+
+/// The offer's content as Go's json.Marshal of its offer writes it.
+fn (t: ThroughputProperties) content_json() -> Str {
+  var parts: List[Str] = []
+  if let Some(n) = t.manual { parts.push("\"offerThroughput\":${n}") }
+  if t.autoscale_max.is_some() || t.autoscale_increment_percent.is_some() {
+    parts.push("\"offerAutopilotSettings\":${t.autoscale_json()}")
+  }
+  "{${parts.join(",")}}"
+}
+
+/// The offer as Go's ThroughputProperties.MarshalJSON writes it, field
+/// for field (strings as JSON strings, where Go uses `%s`).
+fn (t: ThroughputProperties) offer_json() -> Str {
+  var out = "{\"content\":${t.content_json()}"
+  if t.offer_resource_id != "" { out = out + ",\"offerResourceId\":${jstr(t.offer_resource_id)}" }
+  if t.offer_id != "" { out = out + ",\"id\":${jstr(t.offer_id)},\"_rid\":${jstr(t.offer_id)}" }
+  out = out + ",\"offerType\":${jstr(t.offer_type)},\"offerVersion\":${jstr(t.version)}"
+  if let Some(e) = t.etag { out = out + ",\"_etag\":${jstr(e)}" }
+  if t.self_link != "" { out = out + ",\"_self\":${jstr(t.self_link)}" }
+  if t.resource != "" { out = out + ",\"resource\":${jstr(t.resource)}" }
+  if let Some(ts) = t.last_modified { out = out + ",\"_ts\":${ts}" }
+  out + "}"
+}
+
+/// Go's ThroughputProperties.UnmarshalJSON.
+fn offer_of(v: json.Value) -> ThroughputProperties {
+  var t = ThroughputProperties{version: str_of(v, "offerVersion"), offer_type: str_of(v, "offerType"), offer_resource_id: str_of(v, "offerResourceId"), etag: opt_str(v, "_etag"), last_modified: int_of(v, "_ts"), offer_id: str_of(v, "id"), resource: str_of(v, "resource"), self_link: str_of(v, "_self")}
+  if let Some(c) = v.get("content") {
+    t = t with {manual: int_of(c, "offerThroughput")}
+    match c.get("offerAutopilotSettings") {
+      Some(json.Value.Object(_)) => {
+        let a = c.get("offerAutopilotSettings") ?? json.Value.Null
+        t = t with {autoscale_max: Some(int_of(a, "maxThroughput") ?? 0)}
+        let policy = (a.get("autoUpgradePolicy") ?? json.Value.Null).get("throughputPolicy")
+        if let Some(json.Value.Object(_)) = policy {
+          t = t with {autoscale_increment_percent: Some(int_of(policy ?? json.Value.Null, "incrementPercent") ?? 0)}
+        }
+      }
+      _ => ()
+    }
+  }
+  t
+}
+
+/// Go's strconv.ParseBool, false for anything it rejects.
+fn parse_bool_header(s: Str) -> Bool {
+  s == "1" || s == "t" || s == "T" || s == "TRUE" || s == "true" || s == "True"
+}
+
+fn throughput_response(resp: http.Response, extra_charge: Float) -> ThroughputResponse ! azcore.CallErr {
+  let props = decoded(resp, offer_of)?
+  let r = response_of(resp)
+  Ok(ThroughputResponse{response: r with {request_charge: r.request_charge + extra_charge}, throughput_properties: props, is_replace_pending: parse_bool_header(resp.header("x-ms-offer-replace-pending") ?? ""), min_throughput: Int.parse(resp.header("x-ms-cosmos-min-throughput") ?? "")})
+}
+
+fn (o: ThroughputOptions) headers() -> List[(Str, Str)] {
+  var hs: List[(Str, Str)] = []
+  if let Some(e) = o.if_match_etag { hs.push(("If-Match", e)) }
+  if let Some(e) = o.if_none_match_etag { hs.push(("If-None-Match", e)) }
+  hs
+}
+
+/// Go's ReadThroughputIfExists: 404 when the resource has no offer of
+/// its own.
+fn read_offer(core: Core, rid: Str, options: ThroughputOptions) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = options.headers()
+  let q = core.send(query_call("offers", "SELECT * FROM c WHERE c.offerResourceId = '${rid}'", [], hs))?
+  let v = parse_json(q.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+  let offers = list_of(v, "Offers").map(offer_of)
+  let query_charge = response_of(q).request_charge
+  if offers.is_empty() {
+    return Err(azcore.CallErr.Response(azcore.response_error("POST", join_url(core.endpoint, "offers"), q with {status: 404})))
+  }
+  let resp = core.send(Call{method: "GET", path: offers[0].self_link, headers: hs})?
+  throughput_response(resp, query_charge)
+}
+
+/// Go's ReplaceThroughputIfExists: the offer read, its content replaced.
+fn replace_offer(core: Core, rid: Str, properties: ThroughputProperties, options: ThroughputOptions) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let read = read_offer(core, rid, options)?
+  let offer = read.throughput_properties with {manual: properties.manual, autoscale_max: properties.autoscale_max, autoscale_increment_percent: properties.autoscale_increment_percent}
+  let resp = core.send(Call{method: "PUT", path: offer.self_link, write: true, headers: options.headers(), body: offer.offer_json().bytes(), content_type: "application/json"})?
+  throughput_response(resp, read.response.request_charge)
+}
+
+fn (db: DatabaseClient) rid() -> Str ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok((db.read()?.database_properties ?? return Err(azcore.CallErr.Decode("database properties response contained no properties"))).resource_id)
+}
+
+fn (c: ContainerClient) rid() -> Str ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok((c.read()?.container_properties ?? return Err(azcore.CallErr.Decode("container properties response contained no properties"))).resource_id)
+}
+
+/// The database's provisioned throughput (404 when it has none).
+pub fn (db: DatabaseClient) read_throughput(options: ThroughputOptions = ThroughputOptions{}) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  read_offer(db.core, db.rid()?, options)
+}
+
+/// Sets the database's throughput to `properties` (manual or autoscale).
+pub fn (db: DatabaseClient) replace_throughput(properties: ThroughputProperties, options: ThroughputOptions = ThroughputOptions{}) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  replace_offer(db.core, db.rid()?, properties, options)
+}
+
+/// The container's own provisioned throughput (404 when it has none).
+pub fn (c: ContainerClient) read_throughput(options: ThroughputOptions = ThroughputOptions{}) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  read_offer(c.core, c.rid()?, options)
+}
+
+/// Sets the container's throughput to `properties`.
+pub fn (c: ContainerClient) replace_throughput(properties: ThroughputProperties, options: ThroughputOptions = ThroughputOptions{}) -> ThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  replace_offer(c.core, c.rid()?, properties, options)
+}
