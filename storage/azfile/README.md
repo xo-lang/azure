@@ -29,6 +29,17 @@ What it does:
   as Go formats them: a directory's attributes get `|Directory`, and a
   permission key other than `inherit` or `preserve` sends the format
   as `Sddl`.
+- `FileClient` (from a directory, a URL or a connection string): create
+  (SMB or NFS properties, permissions, HTTP headers, Content-MD5),
+  delete, properties (a HEAD: HTTP headers, copy, lease and link
+  state), set HTTP headers, resize, metadata, start and abort copy (SMB
+  info with `source` values, or NFS copy modes), rename (with source and
+  destination leases), handles, and hard and symbolic links (NFS
+  shares). A file's create sends both a permission and a key when given
+  and defaults the format to `Sddl` for a permission alone; a symbolic
+  link sends its metadata only with NFS properties; the link calls send
+  no trailing dot header. Each response reads the headers Go's handler
+  for that call reads.
 - `ClientOptions.file_request_intent` (`backup`) on the share calls,
   not the service's, as Go's generated clients send it; the trailing dot
   options on directory calls.
@@ -54,4 +65,6 @@ Where it differs from Go v1.7.1:
   url.URL also leaves `$&+,;=:@` unescaped.
 - A response header that does not parse (a time, a number, a bool) reads
   as `None`; Go's generated client returns an error.
-- Not ported yet: files, leases, SAS.
+- Create has no optional body (Go's `OptionalBody` and `ContentLength`);
+  data goes through the range calls.
+- Not ported yet: ranges, uploads and downloads, leases, SAS.

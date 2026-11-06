@@ -1,0 +1,447 @@
+// The file client without its data calls (ranges, uploads, downloads),
+// as azfile's file/client.go and file/models.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md), with the requests of its generated
+// FileClient.
+
+use std/base64
+use std/http
+use github.com/xo-lang/azure/azcore
+
+/// A client of one file.
+pub struct FileClient {
+  pub url: Str
+  core: Core
+}
+
+fn file(c: Core) -> FileClient {
+  FileClient{url: c.url, core: c}
+}
+
+pub fn new_file_client(net: Net, clock: Clock, rand: Rand, file_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file(core_with_token(net, clock, rand, file_url, cred, options))
+}
+
+pub fn new_file_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, file_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file(core_with_shared_key(net, clock, rand, file_url, cred, options))
+}
+
+pub fn new_file_client_with_no_credential(net: Net, clock: Clock, rand: Rand, file_url: Str, options: ClientOptions = ClientOptions{}) -> FileClient {
+  file(core_with_no_credential(net, clock, rand, file_url, options))
+}
+
+/// A file client from a connection string; backslashes in `file_path`
+/// become slashes, and the path is joined unescaped, as Go's
+/// runtime.JoinPaths joins it.
+pub fn new_file_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, share_name: Str, file_path: Str, options: ClientOptions = ClientOptions{}) -> FileClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, share_name), file_path.replace("\\", "/"))
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_file_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_file_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The file `file_name` in the directory, the name escaped as one
+/// segment (its slashes too).
+pub fn (d: DirectoryClient) new_file_client(file_name: Str) -> FileClient {
+  file(d.core with {url: d.file_url(file_name)})
+}
+
+/// A file's standard HTTP properties (Go's ShareFileHTTPHeaders).
+pub struct HttpHeaders {
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+}
+
+fn http_headers(h: HttpHeaders?) -> List[(Str, Str)] {
+  let x = h ?? return []
+  let md5 = match x.content_md5 {
+    Some(b) => [("x-ms-content-md5", base64.encode(b))]
+    None => []
+  }
+  str_header("x-ms-cache-control", x.cache_control) + str_header("x-ms-content-disposition", x.content_disposition) + str_header("x-ms-content-encoding", x.content_encoding) + str_header("x-ms-content-language", x.content_language) + md5 + str_header("x-ms-content-type", x.content_type)
+}
+
+/// One file call: no `restype`, and the trailing dot header unless the
+/// call has none in Go (the link calls).
+fn file_call(c: Core, method: Str, ok: List[Int], query: List[(Str, Str)] = [], headers: List[(Str, Str)] = [], dots: Bool = true) -> Call {
+  Call{method: method, query: query, ok: ok, headers: (if dots { c.dot_headers() } else { [] }) + headers}
+}
+
+/// What a file call returns; each call fills the fields Go's handler for
+/// it reads.
+pub struct FileResponse {
+  pub response: Response
+  pub date: Time? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub client_request_id: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub file_attributes: Str? = None
+  pub file_permission_key: Str? = None
+  pub file_change_time: Time? = None
+  pub file_creation_time: Time? = None
+  pub file_last_write_time: Time? = None
+  pub id: Str? = None
+  pub parent_id: Str? = None
+  pub file_mode: Str? = None
+  pub group: Str? = None
+  pub owner: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub nfs_file_type: Str? = None
+  pub link_count: Int? = None
+  pub link_text: Str? = None
+  pub metadata: Map[Str, Str] = {}
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  /// `x-ms-type` (`File`).
+  pub file_type: Str? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+}
+
+struct FileReads {
+  etag: Bool = true
+  last_modified: Bool = true
+  /// Attributes and the permission key.
+  smb: Bool = false
+  /// The SMB times and the file and parent IDs.
+  times: Bool = false
+  nfs: Bool = false
+  /// `x-ms-request-server-encrypted` on writes, `x-ms-server-encrypted`
+  /// on reads, none when empty.
+  encrypted: Str = ""
+  link_count: Bool = false
+  file_type: Bool = false
+  metadata: Bool = false
+  content: Bool = false
+  /// Get properties: the HTTP headers, copy, lease and `x-ms-type`.
+  props: Bool = false
+  copy: Bool = false
+  client_request_id: Bool = false
+  link_text: Bool = false
+}
+
+fn header_md5(resp: http.Response, name: Str) -> Bytes? {
+  resp.header(name).and_then(fn(v: Str) -> Bytes? { base64.decode(v).ok() })
+}
+
+fn file_response(resp: http.Response, r: FileReads) -> FileResponse {
+  var f = FileResponse{response: response_of(resp), date: header_time(resp, "Date")}
+  if r.etag { f = f with {etag: header(resp, "ETag")} }
+  if r.last_modified { f = f with {last_modified: header_time(resp, "Last-Modified")} }
+  if r.smb { f = f with {file_attributes: header(resp, "x-ms-file-attributes"), file_permission_key: header(resp, "x-ms-file-permission-key")} }
+  if r.times {
+    f = f with {file_change_time: header_iso(resp, "x-ms-file-change-time"), file_creation_time: header_iso(resp, "x-ms-file-creation-time"), file_last_write_time: header_iso(resp, "x-ms-file-last-write-time"), id: header(resp, "x-ms-file-id"), parent_id: header(resp, "x-ms-file-parent-id")}
+  }
+  if r.nfs { f = f with {file_mode: header(resp, "x-ms-mode"), group: header(resp, "x-ms-group"), owner: header(resp, "x-ms-owner")} }
+  if r.encrypted != "" { f = f with {is_server_encrypted: header_bool(resp, r.encrypted)} }
+  if r.link_count { f = f with {link_count: header_int(resp, "x-ms-link-count")} }
+  if r.file_type { f = f with {nfs_file_type: header(resp, "x-ms-file-file-type")} }
+  if r.metadata { f = f with {metadata: metadata_of(resp)} }
+  if r.content { f = f with {content_length: header_int(resp, "Content-Length"), content_md5: header_md5(resp, "Content-MD5")} }
+  if r.props {
+    f = f with {
+      cache_control: header(resp, "Cache-Control"), content_disposition: header(resp, "Content-Disposition"), content_encoding: header(resp, "Content-Encoding"),
+      content_language: header(resp, "Content-Language"), content_type: header(resp, "Content-Type"),
+      copy_completion_time: header_time(resp, "x-ms-copy-completion-time"), copy_progress: header(resp, "x-ms-copy-progress"),
+      copy_source: header(resp, "x-ms-copy-source"), copy_status_description: header(resp, "x-ms-copy-status-description"),
+      file_type: header(resp, "x-ms-type"), lease_duration: header(resp, "x-ms-lease-duration"), lease_state: header(resp, "x-ms-lease-state"), lease_status: header(resp, "x-ms-lease-status"),
+    }
+  }
+  if r.props || r.copy { f = f with {copy_id: header(resp, "x-ms-copy-id"), copy_status: header(resp, "x-ms-copy-status")} }
+  if r.client_request_id { f = f with {client_request_id: header(resp, "x-ms-client-request-id")} }
+  if r.link_text { f = f with {link_text: header(resp, "x-ms-link-text")} }
+  f
+}
+
+pub struct CreateFileOptions {
+  pub smb_properties: SmbProperties? = None
+  pub nfs_properties: NfsProperties? = None
+  pub permissions: Permissions? = None
+  pub file_permission_format: Str? = None
+  pub http_headers: HttpHeaders? = None
+  pub lease_id: Str? = None
+  pub metadata: Map[Str, Str]? = None
+  /// `FILE_PROPERTY_SEMANTICS_NEW` or `_RESTORE` (SMB only).
+  pub file_property_semantics: Str? = None
+  /// The MD5 of the request (Content-MD5).
+  pub content_md5: Bytes? = None
+}
+
+/// Go's file create permissions: the permission and the key both sent
+/// when given; with a permission and no key the format defaults to Sddl.
+fn create_permission_headers(p: Permissions?, format: Str?) -> List[(Str, Str)] {
+  let (perm, key) = match p {
+    Some(x) => (x.permission, x.permission_key)
+    None => (None, None)
+  }
+  let f = if key.is_none() && perm.is_some() { Some(format ?? FILE_PERMISSION_FORMAT_SDDL) } else { None }
+  str_header("x-ms-file-permission", perm) + str_header("x-ms-file-permission-format", f) + str_header("x-ms-file-permission-key", key)
+}
+
+/// Creates the file, `file_content_length` bytes long (its content all
+/// zeros until written).
+pub fn (f: FileClient) create(file_content_length: Int, options: CreateFileOptions = CreateFileOptions{}) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let props = match o.nfs_properties {
+    Some(n) => nfs_headers(n)
+    None => smb_headers(o.smb_properties, false) + create_permission_headers(o.permissions, o.file_permission_format) + str_header("x-ms-file-property-semantics", o.file_property_semantics)
+  }
+  let md5 = match o.content_md5 {
+    Some(b) => if b.is_empty() { [] } else { [("Content-MD5", base64.encode(b))] }
+    None => []
+  }
+  let hs = md5 + props + meta_headers(o.metadata ?? {}) + http_headers(o.http_headers) + lease_header(o.lease_id) + [("x-ms-content-length", "${file_content_length}"), ("x-ms-type", "file")]
+  let resp = f.core.send(file_call(f.core, "PUT", [201], headers: hs))?
+  Ok(file_response(resp, FileReads{smb: true, times: true, nfs: true, encrypted: "x-ms-request-server-encrypted", file_type: true, content: true}))
+}
+
+pub fn (f: FileClient) delete(lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = f.core.send(file_call(f.core, "DELETE", [202], headers: lease_header(lease_id)))?
+  Ok(file_response(resp, FileReads{etag: false, last_modified: false, link_count: true}))
+}
+
+/// The file's metadata, HTTP headers and system properties (a HEAD).
+pub fn (f: FileClient) get_properties(share_snapshot: Str? = None, lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = f.core.send(file_call(f.core, "HEAD", [200], query: snapshot_query(share_snapshot), headers: lease_header(lease_id)))?
+  Ok(file_response(resp, FileReads{smb: true, times: true, nfs: true, encrypted: "x-ms-server-encrypted", link_count: true, file_type: true, metadata: true, content: true, props: true}))
+}
+
+pub struct SetHttpHeadersOptions {
+  /// Resizes the file.
+  pub file_content_length: Int? = None
+  pub smb_properties: SmbProperties? = None
+  pub nfs_properties: NfsProperties? = None
+  pub permissions: Permissions? = None
+  pub file_permission_format: Str? = None
+  pub http_headers: HttpHeaders? = None
+  pub lease_id: Str? = None
+}
+
+fn set_properties_response(resp: http.Response) -> FileResponse {
+  file_response(resp, FileReads{smb: true, times: true, nfs: true, encrypted: "x-ms-request-server-encrypted", link_count: true})
+}
+
+/// Sets the HTTP headers and the SMB or NFS properties (NFS ones sent
+/// instead of the SMB ones and permissions when given).
+pub fn (f: FileClient) set_http_headers(options: SetHttpHeadersOptions = SetHttpHeadersOptions{}) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = props_headers(o.smb_properties, o.nfs_properties, o.permissions, o.file_permission_format, "preserve", false) + int_header("x-ms-content-length", o.file_content_length) + http_headers(o.http_headers) + lease_header(o.lease_id)
+  let resp = f.core.send(file_call(f.core, "PUT", [200], query: [("comp", "properties")], headers: hs))?
+  Ok(set_properties_response(resp))
+}
+
+/// Resizes the file to `size` bytes (Go's Resize: set HTTP headers with
+/// only the length).
+pub fn (f: FileClient) resize(size: Int, lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = [("x-ms-content-length", "${size}")] + lease_header(lease_id)
+  let resp = f.core.send(file_call(f.core, "PUT", [200], query: [("comp", "properties")], headers: hs))?
+  Ok(set_properties_response(resp))
+}
+
+pub fn (f: FileClient) set_metadata(metadata: Map[Str, Str]? = None, lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = f.core.send(file_call(f.core, "PUT", [200], query: [("comp", "metadata")], headers: meta_headers(metadata ?? {}) + lease_header(lease_id)))?
+  Ok(file_response(resp, FileReads{encrypted: "x-ms-request-server-encrypted"}))
+}
+
+// Copies.
+
+pub const PERMISSION_COPY_MODE_SOURCE: Str = "source"
+pub const PERMISSION_COPY_MODE_OVERRIDE: Str = "override"
+pub const MODE_COPY_MODE_SOURCE: Str = "source"
+pub const MODE_COPY_MODE_OVERRIDE: Str = "override"
+pub const OWNER_COPY_MODE_SOURCE: Str = "source"
+pub const OWNER_COPY_MODE_OVERRIDE: Str = "override"
+
+/// A copied file's time: the source's, or one given for the destination.
+pub enum CopyFileTime {
+  Source
+  Destination(t: Time)
+}
+
+/// A copied file's attributes: the source's, or ones given for the
+/// destination.
+pub enum CopyFileAttributes {
+  Source
+  Destination(a: NtfsFileAttributes)
+}
+
+fn copy_time_header(name: Str, t: CopyFileTime?) -> List[(Str, Str)] {
+  match t {
+    Some(CopyFileTime.Source) => [(name, "source")]
+    Some(CopyFileTime.Destination(x)) => [(name, iso8601(x))]
+    None => []
+  }
+}
+
+/// The SMB properties of a copy (Go's CopyFileSMBInfo).
+pub struct CopyFileSmbInfo {
+  pub attributes: CopyFileAttributes? = None
+  pub change_time: CopyFileTime? = None
+  pub creation_time: CopyFileTime? = None
+  pub last_write_time: CopyFileTime? = None
+  /// `PERMISSION_COPY_MODE_SOURCE` or `_OVERRIDE`.
+  pub permission_copy_mode: Str? = None
+  pub ignore_read_only: Bool? = None
+  pub set_archive_attribute: Bool? = None
+}
+
+/// The NFS properties of a copy (Go's CopyFileNFSProperties).
+pub struct CopyFileNfsProperties {
+  pub creation_time: CopyFileTime? = None
+  pub last_write_time: CopyFileTime? = None
+  pub file_mode: Str? = None
+  pub owner: Str? = None
+  pub group: Str? = None
+  pub file_mode_copy_mode: Str? = None
+  pub file_owner_copy_mode: Str? = None
+}
+
+pub struct StartCopyFromUrlOptions {
+  pub metadata: Map[Str, Str]? = None
+  /// Sent with SMB copies only.
+  pub permissions: Permissions? = None
+  pub copy_file_smb_info: CopyFileSmbInfo? = None
+  /// When set, the SMB info and permissions are not sent.
+  pub copy_file_nfs_properties: CopyFileNfsProperties? = None
+  pub lease_id: Str? = None
+}
+
+fn smb_info_headers(i: CopyFileSmbInfo?) -> List[(Str, Str)] {
+  let x = i ?? return []
+  let attrs = match x.attributes {
+    Some(CopyFileAttributes.Source) => [("x-ms-file-attributes", "source")]
+    Some(CopyFileAttributes.Destination(a)) => [("x-ms-file-attributes", a.to_str())]
+    None => []
+  }
+  attrs + copy_time_header("x-ms-file-change-time", x.change_time) + copy_time_header("x-ms-file-creation-time", x.creation_time) + copy_time_header("x-ms-file-last-write-time", x.last_write_time) + str_header("x-ms-file-permission-copy-mode", x.permission_copy_mode) + bool_header("x-ms-file-copy-ignore-readonly", x.ignore_read_only) + bool_header("x-ms-file-copy-set-archive", x.set_archive_attribute)
+}
+
+fn copy_nfs_headers(n: CopyFileNfsProperties) -> List[(Str, Str)] {
+  copy_time_header("x-ms-file-creation-time", n.creation_time) + copy_time_header("x-ms-file-last-write-time", n.last_write_time) + str_header("x-ms-mode", n.file_mode) + str_header("x-ms-owner", n.owner) + str_header("x-ms-group", n.group) + str_header("x-ms-file-mode-copy-mode", n.file_mode_copy_mode) + str_header("x-ms-file-owner-copy-mode", n.file_owner_copy_mode)
+}
+
+/// Starts copying `copy_source` (a file or blob URL, with a SAS unless
+/// public) to this file.
+pub fn (f: FileClient) start_copy_from_url(copy_source: Str, options: StartCopyFromUrlOptions = StartCopyFromUrlOptions{}) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let props = match o.copy_file_nfs_properties {
+    Some(n) => copy_nfs_headers(n)
+    None => {
+      let (perm, key) = match o.permissions {
+        Some(p) => (p.permission, p.permission_key)
+        None => (None, None)
+      }
+      str_header("x-ms-file-permission", perm) + str_header("x-ms-file-permission-key", key) + smb_info_headers(o.copy_file_smb_info)
+    }
+  }
+  let hs = f.core.dot_headers(source: true) + [("x-ms-copy-source", copy_source)] + props + meta_headers(o.metadata ?? {}) + lease_header(o.lease_id)
+  let resp = f.core.send(file_call(f.core, "PUT", [202], headers: hs, dots: false))?
+  Ok(file_response(resp, FileReads{copy: true}))
+}
+
+/// Cancels the pending copy `copy_id`.
+pub fn (f: FileClient) abort_copy(copy_id: Str, lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = f.core.send(file_call(f.core, "PUT", [204], query: [("comp", "copy"), ("copyid", copy_id)], headers: [("x-ms-copy-action", "abort")] + lease_header(lease_id)))?
+  Ok(file_response(resp, FileReads{etag: false, last_modified: false}))
+}
+
+// Rename.
+
+pub struct RenameFileOptions {
+  pub smb_properties: SmbProperties? = None
+  pub permissions: Permissions? = None
+  pub file_permission_format: Str? = None
+  pub content_type: Str? = None
+  pub ignore_read_only: Bool? = None
+  pub metadata: Map[Str, Str]? = None
+  pub replace_if_exists: Bool? = None
+  pub source_lease_id: Str? = None
+  pub destination_lease_id: Str? = None
+}
+
+/// Renames the file to `destination_path` in the same share (a path from
+/// the share's root); the call goes to the destination, naming this file
+/// as its source.
+pub fn (f: FileClient) rename(destination_path: Str, options: RenameFileOptions = RenameFileOptions{}) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let to = dest_url(f.url, destination_path) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let dest = f.core with {url: to}
+  let hs = rename_headers(f.core, f.url, o.smb_properties, o.permissions, o.file_permission_format, o.ignore_read_only, o.replace_if_exists, o.metadata, o.destination_lease_id, false) + str_header("x-ms-content-type", o.content_type) + str_header("x-ms-source-lease-id", o.source_lease_id)
+  let resp = dest.send(file_call(dest, "PUT", [200], query: [("comp", "rename")], headers: hs))?
+  Ok(file_response(resp, FileReads{smb: true, times: true, encrypted: "x-ms-request-server-encrypted"}))
+}
+
+// Handles.
+
+pub struct ListFileHandlesOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub share_snapshot: Str? = None
+}
+
+pub fn (f: FileClient) list_handles(options: ListFileHandlesOptions = ListFileHandlesOptions{}) -> ListHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  list_handles(f.core, false, ListHandlesOptions{marker: options.marker, max_results: options.max_results, share_snapshot: options.share_snapshot})
+}
+
+pub struct ForceCloseFileHandlesOptions {
+  pub marker: Str? = None
+  pub share_snapshot: Str? = None
+}
+
+/// Closes the handle `handle_id` (`*` for all) open on the file.
+pub fn (f: FileClient) force_close_handles(handle_id: Str, options: ForceCloseFileHandlesOptions = ForceCloseFileHandlesOptions{}) -> ForceCloseHandlesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  force_close(f.core, handle_id, options.marker, None, options.share_snapshot)
+}
+
+// Links (NFS shares).
+
+/// Creates this file as a hard link to `target_file` (a path from the
+/// share's root).
+pub fn (f: FileClient) create_hard_link(target_file: Str, lease_id: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = [("x-ms-file-target-file", target_file)] + lease_header(lease_id) + [("x-ms-type", "file")]
+  let resp = f.core.send(file_call(f.core, "PUT", [201], query: [("restype", "hardlink")], headers: hs, dots: false))?
+  Ok(file_response(resp, FileReads{times: true, nfs: true, link_count: true, file_type: true, client_request_id: true}))
+}
+
+pub struct CreateSymbolicLinkOptions {
+  pub lease_id: Str? = None
+  /// The times, owner and group (not the mode).
+  pub nfs_properties: NfsProperties? = None
+  /// Sent only with `nfs_properties`, as Go does.
+  pub metadata: Map[Str, Str]? = None
+}
+
+/// Creates this file as a symbolic link with `link_text`.
+pub fn (f: FileClient) create_symbolic_link(link_text: Str, options: CreateSymbolicLinkOptions = CreateSymbolicLinkOptions{}) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let nfs = match o.nfs_properties {
+    Some(n) => time_header("x-ms-file-creation-time", n.creation_time) + time_header("x-ms-file-last-write-time", n.last_write_time) + str_header("x-ms-group", n.group) + str_header("x-ms-owner", n.owner) + meta_headers(o.metadata ?? {})
+    None => []
+  }
+  let hs = [("x-ms-link-text", link_text)] + nfs + lease_header(o.lease_id)
+  let resp = f.core.send(file_call(f.core, "PUT", [201], query: [("restype", "symboliclink")], headers: hs, dots: false))?
+  Ok(file_response(resp, FileReads{times: true, nfs: true, file_type: true, client_request_id: true}))
+}
+
+/// The text of the symbolic link this file is.
+pub fn (f: FileClient) get_symbolic_link(share_snapshot: Str? = None) -> FileResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = f.core.send(file_call(f.core, "GET", [200], query: [("restype", "symboliclink")] + snapshot_query(share_snapshot), dots: false))?
+  Ok(file_response(resp, FileReads{link_text: true, client_request_id: true}))
+}

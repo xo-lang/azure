@@ -87,7 +87,8 @@ pub fn canonicalized_headers(headers: List[(Str, Str)], plain_order: Bool = fals
 /// `/<account><escaped path>` and the query's parameters, lowercased
 /// and sorted, one `\nname:v1,v2` each with the values sorted.
 fn (c: SharedKeyCredential) canonicalized_resource(raw: Str) -> Str ! Str {
-  let (path, query) = split_url(raw)
+  let (raw_path, query) = split_url(raw)
+  let path = escaped_path(raw_path)
   var cr = "/${c.account_name}${if path == "" { "/" } else { path }}"
   if query != "" {
     let params = url.parse_query(query) ?? e => return Err("the query cannot be parsed: ${e.display()}")
@@ -218,4 +219,31 @@ fn (p: SharedKeyPolicy) send(req: policy.Request, next: policy.Next) -> http.Res
   let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", http_date(p.clock.now())) } else { req }
   let sts = p.credential.string_to_sign(dated, p.plain_header_order) ?? e => return Err(policy.SendErr.Auth("Shared Key: ${e}"))
   next.send(dated.with_header("Authorization", "SharedKey ${p.credential.account_name}:${p.credential.compute_hmac_sha256(sts)}"))
+}
+
+const UNRESERVED: Str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+/// Go's URL.EscapedPath: the path as written when it is a valid escaping
+/// (Go's validEncoded), else the unescaped path escaped as Go's
+/// encodePath escapes it (`$&+,/:;=@` kept), so a URL joined with a raw
+/// space signs `%20`, as it is sent.
+fn escaped_path(path: Str) -> Str {
+  let valid = UNRESERVED + "!$&'()*+,;=:@[]%/"
+  if path.runes().all(fn(c: Rune) -> Bool { valid.contains("${c}") }) {
+    return path
+  }
+  let plain = url.path_unescape(path).ok() ?? path
+  let keep = UNRESERVED + "$&+,/:;=@"
+  var out = ""
+  for c in plain.runes() {
+    if keep.contains("${c}") {
+      out = out + "${c}"
+    } else {
+      let h = "${c}".bytes().to_hex().to_upper()
+      for i in 0..h.len() / 2 {
+        out = out + "%${h[i * 2..i * 2 + 2]}"
+      }
+    }
+  }
+  out
 }
