@@ -1,6 +1,21 @@
 # azqueue changes
 
-## Unreleased
+## v0.2.0
+
+Constructors and URLs, at Go azqueue v1.0.1 parity on captured
+vectors (with the SAS and URL, challenge policy and response work
+below, all in this release).
+
+- `ServiceClient.new_queue_client` escapes the queue name
+  (url.PathEscape), as Go: `q 1` was sent unescaped.
+- Queue and message URLs are joined as azcore v1.21.0's
+  runtime.JoinPaths joins them: the path cleaned (`a/../b`), a
+  trailing `/` kept, and only the query part before a second `?`.
+- A message's URL is cleaned together with `messages`, as Go's
+  getMessageIDURL: an empty id is the messages URL.
+- A bad account key reads `decode account key: ...`, Go's text.
+- `queueerror`: `INVALID_MD5` and `MD5_MISMATCH`, the two codes that
+  were missing; a test checks every code against Go's list.
 
 SAS and URLs, at Go azqueue v1.0.1 parity on captured vectors.
 

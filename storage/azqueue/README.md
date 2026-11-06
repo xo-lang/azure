@@ -9,7 +9,11 @@ What it does:
   key (azblob's `SharedKeyCredential` and policy), no credential (a SAS
   in the URL), or a connection string (`AccountName` with
   `DefaultEndpointsProtocol` and `EndpointSuffix`, or `QueueEndpoint`;
-  `AccountKey` or `SharedAccessSignature`).
+  `AccountKey` or `SharedAccessSignature`). Each client's `url` is
+  Go's URL(). As in Go, a connection string's keys are case sensitive
+  and not trimmed, an empty `AccountName` or `AccountKey` gives a
+  client with no credential, and a queue URL from a service client
+  escapes the name while one from a connection string does not.
 - The service's properties (logging, hour and minute metrics, CORS),
   statistics, the queue list pager, and creating and deleting queues.
 - A queue's create, delete, metadata, properties (with the approximate
@@ -25,6 +29,10 @@ What it does:
   segment is the account, as Azurite's. Go's `SnapshotTime` getter is
   left out: Go never sets it.
 - `queueerror`: the error codes and `has_code`.
+
+Connection strings, client URLs, the queue URLs a service client or a
+connection string makes, message URLs and the account key's errors are
+checked against a Go program's output on the same inputs.
 
 Each request is Go's byte for byte: the test replays a Go program's
 calls against the same fake service and compares every request

@@ -5,6 +5,7 @@
 // option defaults its format() functions fill in.
 
 use std/http
+use std/url
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
@@ -160,7 +161,8 @@ pub fn (s: ServiceClient) new_list_queues_pager(options: ListQueuesOptions = Lis
 
 /// A client of the queue `queue_name` on the same pipeline.
 pub fn (s: ServiceClient) new_queue_client(queue_name: Str) -> QueueClient {
-  queue(s.core with {url: join_paths(s.url, queue_name)})
+  // Go escapes the name (url.PathEscape) before joining it.
+  queue(s.core with {url: join_paths(s.url, url.path_escape(queue_name))})
 }
 
 pub fn (s: ServiceClient) create_queue(queue_name: Str, options: CreateOptions = CreateOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
@@ -249,6 +251,13 @@ fn messages_url(q: QueueClient) -> Str {
   join_paths(q.url, "messages")
 }
 
+/// A message's URL, as Go's getMessageIDURL: runtime.JoinPaths(url,
+/// "messages", id), the two cleaned together (path.Join), so an empty
+/// id is the messages URL and `..` steps out of it.
+fn message_id_url(q: QueueClient, message_id: Str) -> Str {
+  join_paths(q.url, if message_id == "" { "messages" } else { "messages/${message_id}" })
+}
+
 pub fn (q: QueueClient) enqueue_message(content: Str, options: EnqueueMessageOptions = EnqueueMessageOptions{}) -> EnqueueMessagesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   var qp: List[(Str, Str)] = []
   if let Some(t) = options.time_to_live { qp.push(("messagettl", "${t}")) }
@@ -292,14 +301,14 @@ pub struct UpdateMessageResponse {
 /// seconds (0 by default, as Go's format() sets). The message id joins
 /// the path as given, as Go's JoinPaths does.
 pub fn (q: QueueClient) update_message(message_id: Str, pop_receipt: Str, content: Str, visibility_timeout: Int = 0) -> UpdateMessageResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let u = with_query(join_paths(messages_url(q), message_id), [("popreceipt", pop_receipt), ("visibilitytimeout", "${visibility_timeout}")])
+  let u = with_query(message_id_url(q, message_id), [("popreceipt", pop_receipt), ("visibilitytimeout", "${visibility_timeout}")])
   let resp = q.core.call("PUT", u, [204], body: Some(queue_message_xml(content)))?
   let r = strict_response(resp)?
   Ok(UpdateMessageResponse{response: r, pop_receipt: resp.header("x-ms-popreceipt"), time_next_visible: strict_time(resp, "x-ms-time-next-visible")?})
 }
 
 pub fn (q: QueueClient) delete_message(message_id: Str, pop_receipt: Str) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
-  strict_response(q.core.call("DELETE", with_query(join_paths(messages_url(q), message_id), [("popreceipt", pop_receipt)]), [204])?)
+  strict_response(q.core.call("DELETE", with_query(message_id_url(q, message_id), [("popreceipt", pop_receipt)]), [204])?)
 }
 
 pub struct PeekMessagesResponse {

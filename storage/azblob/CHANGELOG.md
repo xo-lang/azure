@@ -2,6 +2,8 @@
 
 ## v0.7.0
 
+- `new_shared_key_credential`: a key that is not base64 reads
+  `decode account key: ...`, Go's text in every storage module.
 - `sas`: the SAS time layouts (`TIME_FORMAT*`), `parse_time`,
   `parse_layout`, `format_time_layout`, `ip` and `ip_range`, as Go's
   storage sas packages read and write a SAS, shared by azqueue.

@@ -1,0 +1,141 @@
+// Connection strings, URL() and the queue URLs clients make, on the Go
+// program's inputs (connvectors_test.xo).
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/storage/azblob/exported
+
+const CKEY: Str = "aW52ZW50ZWQta2V5"
+
+fn cq(s: Str) -> Str {
+  exported.go_quote(s)
+}
+
+/// 2026-11-06T00:00:00Z.
+fn cexp() -> Time {
+  Time.from_unix_millis(1793923200000)
+}
+
+fn conn_case(net: Net, clock: Clock, rand: Rand, name: Str, cs: Str) -> List[Str] {
+  var out = ["== conn ${name}"]
+  match new_service_client_from_connection_string(net, clock, rand, cs) {
+    Ok(s) => {
+      let k = match s.get_sas_url("s", "r", cexp()) {
+        Ok(_) => "key"
+        Err(e) => "no key (${e})"
+      }
+      out.push("  service ${cq(s.url)} ${k}")
+    }
+    Err(e) => out.push("  service error ${e}")
+  }
+  match new_queue_client_from_connection_string(net, clock, rand, cs, "q1") {
+    Ok(q) => {
+      let k = match q.get_sas_url("r", cexp()) {
+        Ok(_) => "key"
+        Err(e) => "no key (${e})"
+      }
+      out.push("  queue ${cq(q.url)} ${k}")
+    }
+    Err(e) => out.push("  queue error ${e}")
+  }
+  out
+}
+
+test "connection strings, URLs and queue URLs read as Go's" {
+  let k = CKEY
+  var out: List[Str] = []
+  for (name, cs) in [
+    ("key", "DefaultEndpointsProtocol=https;AccountName=acct1;AccountKey=${k};EndpointSuffix=example.test"),
+    ("trailing semicolons", "AccountName=acct1;AccountKey=${k};;;"),
+    ("default suffix", "AccountName=acct1;AccountKey=${k}"),
+    ("http", "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${k};EndpointSuffix=example.test"),
+    ("endpoint", "QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;AccountName=devstoreaccount1;AccountKey=${k}"),
+    ("endpoint slash", "QueueEndpoint=https://q.example.test/;SharedAccessSignature=sv=2020-02-10&sig=x"),
+    ("sas", "AccountName=acct1;SharedAccessSignature=sv=2020-02-10&sp=r&sig=abc%2B;EndpointSuffix=example.test"),
+    ("key and sas", "AccountName=acct1;AccountKey=${k};SharedAccessSignature=sig=x;EndpointSuffix=example.test"),
+    ("no key no sas", "AccountName=acct1;EndpointSuffix=example.test"),
+    ("no account", "AccountKey=${k}"),
+    ("empty", ""),
+    ("no equals", "AccountName=acct1;junk"),
+    ("equals in value", "AccountName=acct1;AccountKey=${k};EndpointSuffix=a=b"),
+    ("duplicate", "AccountName=one;AccountName=acct1;AccountKey=${k};EndpointSuffix=example.test"),
+    ("empty name", "AccountName=;AccountKey=${k};EndpointSuffix=example.test"),
+    ("empty key", "AccountName=acct1;AccountKey=;EndpointSuffix=example.test"),
+    ("bad key", "AccountName=acct1;AccountKey=not*base64;EndpointSuffix=example.test"),
+    ("case", "accountname=acct1;AccountKey=${k}"),
+    ("spaces", " AccountName=acct1; AccountKey=${k}"),
+  ] {
+    out = out + conn_case(os.net, os.clock, os.rand, name, cs)
+  }
+  for root in ["https://acct1.queue.example.test/", "https://acct1.queue.example.test", "https://acct1.queue.example.test/?sv=x&sig=y", "https://acct1.queue.example.test/a/?x=1?y=2"] {
+    let s = new_service_client_with_no_credential(os.net, os.clock, os.rand, root)
+    out.push("== service ${cq(root)} url ${cq(s.url)}")
+    for n in ["q1", "q 1", "a/b", "a/../b", "", "q/", "%41", "?x", "a//b", "./q", "é"] {
+      out.push("  ${cq(n)} -> ${cq(s.new_queue_client(n).url)}")
+    }
+  }
+  for n in ["q1", "q 1", "a/b", "a/../b", "", "q/", "%41", "?x", "/q", "/q/", "//q"] {
+    match new_queue_client_from_connection_string(os.net, os.clock, os.rand, "QueueEndpoint=https://q.example.test/;SharedAccessSignature=sig=x", n) {
+      Ok(q) => out.push("== conn queue ${cq(n)} -> ${cq(q.url)}")
+      Err(e) => out.push("== conn queue ${cq(n)} error ${e}")
+    }
+  }
+  for key in ["", "not*base64", "YQ", CKEY] {
+    let e = match new_shared_key_credential("acct1", key) {
+      Ok(_) => "<nil>"
+      Err(m) => m
+    }
+    out.push("== key ${cq(key)} err=${e}")
+  }
+  expect(out) == CONN_OUTPUT
+}
+
+// The Go program's DeleteMessage request paths (local fake, no network).
+const MESSAGE_ID_OUTPUT: List[Str] = [
+  "== \"/q1\" \"m1\"", "  DELETE /q1/messages/m1?popreceipt=p1",
+  "== \"/q1\" \"\"", "  DELETE /q1/messages?popreceipt=p1",
+  "== \"/q1\" \"a/../b\"", "  DELETE /q1/messages/b?popreceipt=p1",
+  "== \"/q1\" \"a b\"", "  DELETE /q1/messages/a%20b?popreceipt=p1",
+  "== \"/q1\" \"../x\"", "  DELETE /q1/x?popreceipt=p1",
+  "== \"/q1\" \"m1/\"", "  DELETE /q1/messages/m1/?popreceipt=p1",
+  "== \"/q1/\" \"m1\"", "  DELETE /q1/messages/m1?popreceipt=p1",
+  "== \"/q1/\" \"\"", "  DELETE /q1/messages?popreceipt=p1",
+  "== \"/q1/\" \"a/../b\"", "  DELETE /q1/messages/b?popreceipt=p1",
+  "== \"/q1/\" \"a b\"", "  DELETE /q1/messages/a%20b?popreceipt=p1",
+  "== \"/q1/\" \"../x\"", "  DELETE /q1/x?popreceipt=p1",
+  "== \"/q1/\" \"m1/\"", "  DELETE /q1/messages/m1/?popreceipt=p1",
+  "== \"/q1?sv=x\" \"m1\"", "  DELETE /q1/messages/m1?popreceipt=p1&sv=x",
+  "== \"/q1?sv=x\" \"\"", "  DELETE /q1/messages?popreceipt=p1&sv=x",
+  "== \"/q1?sv=x\" \"a/../b\"", "  DELETE /q1/messages/b?popreceipt=p1&sv=x",
+  "== \"/q1?sv=x\" \"a b\"", "  DELETE /q1/messages/a%20b?popreceipt=p1&sv=x",
+  "== \"/q1?sv=x\" \"../x\"", "  DELETE /q1/x?popreceipt=p1&sv=x",
+  "== \"/q1?sv=x\" \"m1/\"", "  DELETE /q1/messages/m1/?popreceipt=p1&sv=x",
+]
+
+test "a message's URL is joined and cleaned as Go's" {
+  let host = "http://msgid.queue.example.test"
+  let log = Mutex[List[Str]].new([])
+  for p in ["/{q}", "/{q}/{a}", "/{q}/{a}/{b}", "/{q}/{a}/{b}/"] {
+    os.net.handle("DELETE ${host}${p}", fn(req: http.Request) -> http.Response {
+      var qv = url.values()
+      for k in req.url.query.keys().sort() {
+        qv.add(k, req.url.query.get(k) ?? "")
+      }
+      log.with(fn(var l: List[Str]) { l.push("  DELETE ${exported.go_escape_path(req.path)}?${qv.encode()}") })
+      http.text(204, "").with_header("Date", "Fri, 06 Nov 2026 15:52:15 GMT")
+    })
+  }
+  var out: List[Str] = []
+  for base in ["/q1", "/q1/", "/q1?sv=x"] {
+    let q = new_queue_client_with_no_credential(os.net, os.clock, os.rand, "${host}${base}", ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}})
+    for id in ["m1", "", "a/../b", "a b", "../x", "m1/"] {
+      log.reset(["== ${cq(base)} ${cq(id)}"])
+      if let Err(e) = q.delete_message(id, "p1") {
+        log.with(fn(var l: List[Str]) { l.push("  err: ${e.display()}") })
+      }
+      out = out + log.with_read(fn(l: List[Str]) -> List[Str] { l })
+    }
+  }
+  expect(out) == MESSAGE_ID_OUTPUT
+}
