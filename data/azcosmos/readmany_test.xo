@@ -1,0 +1,215 @@
+// ReadManyItems compared with Go's azcosmos v1.5.0 on the same fake
+// account (rmvectors_test.xo): every request in full and what the caller
+// gets.
+
+use std/crypto
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const RM_PKDEFS: Map[Str, Str] = {
+  "c1": "{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}",
+  "c2": "{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}",
+  "g1": "{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}",
+  "h1": "{\"paths\":[\"/a\",\"/b\"],\"kind\":\"MultiHash\",\"version\":2}",
+  "i1": "{\"paths\":[\"/id\"],\"kind\":\"Hash\",\"version\":2}",
+  "v1": "{\"paths\":[\"/pk\"],\"kind\":\"Hash\"}",
+  "n1": "{\"paths\":[\"/p/q\"],\"kind\":\"Hash\",\"version\":2}",
+  "n2": "{\"paths\":[\"/my-key\"],\"kind\":\"Hash\",\"version\":2}",
+  "g2": "{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2}",
+}
+
+struct RmFake {
+  log: Mutex[List[Str]]
+  gone: Mutex[Map[Str, Int]]
+  feed_reads: Mutex[Map[Str, Int]]
+}
+
+fn rm_rng(id: Str, lo: Str, hi: Str, parents: List[Str] = []) -> Str {
+  let p = if parents.is_empty() { "" } else { ",\"parents\":[\"${parents.join("\",\"")}\"]" }
+  "{\"id\":\"${id}\",\"minInclusive\":\"${lo}\",\"maxExclusive\":\"${hi}\"${p}}"
+}
+
+fn (f: RmFake) record(req: http.Request) {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "user-agent" || lk == "accept-encoding" || lk == "x-ms-client-request-id" {
+      continue
+    }
+    let val = if lk == "x-ms-activity-id" || lk == "x-ms-cosmos-correlated-activityid" { "ACTIVITY" } else { v }
+    hs.push("${lk}=${val}")
+  }
+  // Go's transport adds Content-Length on the wire; FakeNet hands the
+  // request over without it, so it is the body's length here.
+  if req.body.len() > 0 { hs.push("content-length=${req.body.len()}") }
+  let body = if req.body.len() > 400 { "len=${req.body.len()} sha256=${crypto.sha256(req.body).to_hex()}" } else { req.body.to_str_lossy() }
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let lines = ["  REQ ${req.method} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "    ${h}" }) + ["    body=${body}"]
+  f.log.with(fn(var l: List[Str]) { l = l + lines })
+}
+
+fn (f: RmFake) answer(req: http.Request) -> http.Response {
+  let p = req.escaped_path()
+  if p == "/" {
+    return js_resp(200, "{\"id\":\"acct1\",\"writableLocations\":[],\"readableLocations\":[]}")
+  }
+  f.record(req)
+  let c = p.split("/")[4]
+  if p.ends_with("/pkranges") {
+    if req.header("If-None-Match").is_some() {
+      return http.text(304, "").with_header("x-ms-request-charge", "1.5")
+    }
+    let n = f.feed_reads.with(fn(var m: Map[Str, Int]) -> Int {
+      let k = (m.get(c) ?? 0) + 1
+      m[c] = k
+      k
+    })
+    let split = if c == "v1" { "00000000000000000000000080" } else { "20" }
+    let body = if c == "g1" && n > 1 {
+      "{\"PartitionKeyRanges\":[${rm_rng("2", "", "10", ["0"])},${rm_rng("3", "10", "20", ["0"])},${rm_rng("1", "20", "FF")}]}"
+    } else {
+      "{\"PartitionKeyRanges\":[${rm_rng("0", "", split)},${rm_rng("1", split, "FF")}]}"
+    }
+    return js_resp(200, body).with_header("x-ms-request-charge", "1.5").with_header("etag", "\"e1\"")
+  }
+  if p.ends_with("/docs") {
+    let rid = req.header("x-ms-documentdb-partitionkeyrangeid") ?? ""
+    let first_gone = f.gone.with(fn(var m: Map[Str, Int]) -> Bool {
+      if c == "g1" && rid == "0" && (m.get(c) ?? 0) == 0 {
+        m[c] = 1
+        return true
+      }
+      false
+    })
+    if first_gone || c == "g2" {
+      return js_resp(410, "{\"code\":\"Gone\",\"message\":\"x\"}").with_header("x-ms-request-charge", "1.5").with_header("x-ms-substatus", "1002")
+    }
+    let cont = req.header("x-ms-continuation") ?? ""
+    let r = js_resp(200, "{\"_rid\":\"x\",\"Documents\":[{\"id\":\"${c}-${rid}${cont}\", \"n\": 1, \"h\": \"<b>&\"}],\"_count\":1}").with_header("x-ms-request-charge", "1.5")
+    return if c == "c2" && cont == "" { r.with_header("x-ms-continuation", "t1") } else { r }
+  }
+  js_resp(200, "{\"id\":\"${c}\",\"_rid\":\"rid-${c}\",\"partitionKey\":${RM_PKDEFS.get(c) ?? "{}"}}").with_header("x-ms-request-charge", "1.5")
+}
+
+fn rm_serve(net: testing.FakeNet) -> RmFake {
+  let f = RmFake{log: Mutex[List[Str]].new([]), gone: Mutex[Map[Str, Int]].new({}), feed_reads: Mutex[Map[Str, Int]].new({})}
+  let h = fn(req: http.Request) -> http.Response { f.answer(req) }
+  for m in ["GET", "POST"] {
+    for path in ["/", "/{a}/{b}/{c}/{d}", "/{a}/{b}/{c}/{d}/{e}"] {
+      net.handle("${m} ${EP}${path}", h)
+    }
+  }
+  f
+}
+
+fn two_dp(x: Float) -> Str {
+  let cents = Int(x * 100.0 + 0.5)
+  let frac = cents % 100
+  "${cents / 100}.${if frac < 10 { "0" } else { "" }}${frac}"
+}
+
+test "ReadManyItems sends what Go sends and gives the caller what Go gives" {
+  let f = rm_serve(os.net)
+  let cred = new_key_credential(KEY)?
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}})
+  var out: List[Str] = []
+  let run = fn(name: Str, ct: Str, items: List[ItemIdentity], o: ReadManyItemsOptions) -> List[Str] uses (net.dial, clock, rand) {
+    var add = ["== ${name}"]
+    let x = c.new_container("db1", ct) ?? e => fault("container: ${e.display()}")
+    let r = x.read_many_items(items, o)
+    add = add + f.log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+    match r {
+      Ok(resp) => {
+        for it in resp.items { add.push("  item ${it}") }
+        add.push("  ok charge=${two_dp(resp.request_charge)}")
+      }
+      Err(azcore.CallErr.Response(e)) => add.push("  error status ${e.status_code}")
+      Err(azcore.CallErr.InvalidInput(m)) => add.push("  error ${m}")
+      Err(e) => add.push("  error ${e.display()}")
+    }
+    add
+  }
+  let s = new_partition_key_string
+  let id = fn(i: Str, pk: PartitionKey) -> ItemIdentity { ItemIdentity{id: i, partition_key: pk} }
+  let none = ReadManyItemsOptions{}
+
+  out = out + run("r1 items across ranges, one query per range", "c1", [id("a", s("pa")), id("b", s("pb")), id("c", s("pc")), id("d", s("pd")), id("e", s("pa"))], none)
+  out = out + run("r2 one item", "c1", [id("a", s("pa"))], none)
+  out = out + run("r3 one logical partition", "c1", [id("a", s("pa")), id("b", s("pa")), id("c", s("pa"))], none)
+  out = out + run("r4 the id is the partition key", "i1", [id("a", s("a")), id("b", s("b"))], none)
+  out = out + run("r5 hierarchical keys, a prefix and a null", "h1", [id("a", s("t1").append_string("u1")), id("b", s("t1")), id("c", s("t2").append_null())], none)
+  out = out + run("r6 version 1 hashing, numbers and bools", "v1", [id("a", new_partition_key_number(1.5)), id("b", new_partition_key_number(2.0)), id("c", new_partition_key_bool(true)), id("d", new_partition_key().append_null())], none)
+  out = out + run("r7 options", "c1", [id("a", s("pa"))], ReadManyItemsOptions{session_token: Some("0:-1#5"), consistency_level: Some(CONSISTENCY_LEVEL_EVENTUAL), priority_level: Some(PRIORITY_LEVEL_LOW), throughput_bucket: Some(3)})
+  out = out + run("r8 a gone range refreshes the ranges and retries", "g1", [id("a", s("pa")), id("b", s("pb")), id("c", s("pc")), id("d", s("pd"))], none)
+  out = out + run("r9 no items", "c1", [], none)
+  out = out + run("r10 an empty id", "c1", [id("a", s("pa")), id("", s("pb"))], none)
+  out = out + run("r11 more components than paths", "c1", [id("a", s("pa").append_string("x"))], none)
+  var many: List[ItemIdentity] = []
+  for i in 0..1001 { many.push(id("i${i}", s("pa"))) }
+  out = out + run("r12 1001 items in one range are two queries", "c1", many, none)
+  out = out + run("r13 nested and quoted paths", "n1", [id("a", s("x"))], none)
+  out = out + run("r13b", "n2", [id("a", s("x"))], none)
+  out = out + run("r14 a query page with a continuation", "c2", [id("a", s("pa")), id("b", s("pb")), id("c", s("pc")), id("d", s("pd"))], none)
+  out = out + run("r15 a key with no values", "c1", [id("a", new_partition_key())], none)
+
+  expect(out) == READ_MANY_OUTPUT
+}
+
+test "a range is found for every effective partition key" {
+  let rs = [pr("0", "", "20"), pr("1", "20", "FF")]
+  expect(physical_range_of("", rs)) == Some("0")
+  expect(physical_range_of("1F", rs)) == Some("0")
+  expect(physical_range_of("20", rs)) == Some("1")
+  expect(physical_range_of("3F", rs)) == Some("1")
+  expect(physical_range_of("10", [pr("0", "", "08")])) == None
+  expect(physical_range_of("10", [pr("0", "05", "FF")])) == Some("0")
+  expect(physical_range_of("01", [pr("0", "05", "FF")])) == None
+}
+
+test "field expressions, as Go's queryBuilder" {
+  expect(field_expression("/pk")) == "c.pk"
+  expect(field_expression("/_x9")) == "c._x9"
+  expect(field_expression("/9x")) == "c[\"9x\"]"
+  expect(field_expression("/a/b")) == "c[\"a\"][\"b\"]"
+  expect(field_expression("/")) == "c"
+  expect(field_expression("/é")) == "c.é"
+}
+
+test "a range that stays gone is retried three times, then fails" {
+  let f = rm_serve(os.net)
+  let cred = new_key_credential(KEY)?
+  let c = new_client_with_key(os.net, os.clock, os.rand, "${EP}/", cred, ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}})
+  let r = c.new_container("db1", "g2")?.read_many_items([ItemIdentity{id: "a", partition_key: new_partition_key_string("pa")}])
+  let status = match r {
+    Err(azcore.CallErr.Response(e)) => e.status_code
+    _ => 0
+  }
+  expect(status) == 410
+  let count = fn(line: Str) -> Int { f.log.with_read(fn(l: List[Str]) -> Int { l.filter(fn(x: Str) -> Bool { x == line }).len() }) }
+  // Go's maxPKRangeGoneRetries: four tries, the container read before
+  // the first and again before each retry.
+  expect(count("  REQ POST /dbs/db1/colls/g2/docs")) == 4
+  expect(count("  REQ GET /dbs/db1/colls/g2")) == 4
+}
+
+test "a hierarchical key's prefix goes to every range under it" {
+  let def = PartitionKeyDefinition{kind: "MultiHash", paths: ["/a", "/b"], version: 2}
+  let e = effective_partition_key(new_partition_key_string("t1"), "MultiHash", 2)
+  let m = new_routing_map([pr("0", "", "${e}80"), pr("1", "${e}80", "FF")], "")
+  let prefix = ItemIdentity{id: "b", partition_key: new_partition_key_string("t1")}
+  let full = ItemIdentity{id: "a", partition_key: new_partition_key_string("t1").append_string("u1")}
+  let (order, groups) = group_by_range([prefix, full], def, m)?
+  expect(order) == ["0", "1"]
+  let has_b = fn(id: Str) -> Bool { (groups.get(id) ?? []).any(fn(i: ItemIdentity) -> Bool { i.id == "b" }) }
+  expect(has_b("0") && has_b("1")) == true
+  expect((groups.get("1") ?? []).len() + (groups.get("0") ?? []).len()) == 3
+  let (lo, hi) = epk_range(prefix.partition_key, def)?
+  expect(hi) == "${lo}FF"
+  expect(epk_range(new_partition_key_string("x"), PartitionKeyDefinition{kind: "Hash", paths: ["/a", "/b"], version: 2}).is_err()) == true
+}

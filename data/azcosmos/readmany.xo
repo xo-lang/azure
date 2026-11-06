@@ -1,0 +1,343 @@
+// Reading many items by id and partition key, as azcosmos's
+// cosmos_container_read_many.go, cosmos_query_builder.go and
+// cosmos_read_many_request_options.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): the items grouped by the physical partition
+// that holds them, one parameterized query per partition (up to 1000
+// items each), and the ranges read again when one is gone.
+
+use std/json
+use github.com/xo-lang/azure/azcore
+
+/// An item's id and partition key.
+pub struct ItemIdentity {
+  pub id: Str
+  pub partition_key: PartitionKey
+}
+
+pub struct ReadManyItemsOptions {
+  pub session_token: Str? = None
+  pub consistency_level: Str? = None
+  pub priority_level: Str? = None
+  pub throughput_bucket: Int? = None
+}
+
+pub struct ReadManyItemsResponse {
+  /// The request units of every query.
+  pub request_charge: Float = 0.0
+  /// Each item's JSON as Go's json.Marshal writes it (compact, HTML
+  /// escaped); items not found are left out.
+  pub items: List[Str] = []
+}
+
+const MAX_ITEMS_PER_QUERY: Int = 1000
+const MAX_PK_RANGE_GONE_RETRIES: Int = 3
+
+fn epk_value(v: json.Value) -> EpkValue {
+  match v {
+    Str(s) => EpkValue.Str(s: s)
+    Num(f) => EpkValue.Num(f: f)
+    Int(n) => EpkValue.Num(f: Float(n))
+    Bool(b) => EpkValue.Bool(b: b)
+    Null => EpkValue.Null
+    _ => EpkValue.Undefined
+  }
+}
+
+/// Go's computeEffectivePartitionKey: a key with no values hashes as
+/// undefined.
+fn effective_partition_key(pk: PartitionKey, kind: Str, version: Int) -> Str {
+  let values = if pk.values.is_empty() { [EpkValue.Undefined] } else { pk.values.map(epk_value) }
+  if version == 1 {
+    epk_v1(values)
+  } else if kind == "MultiHash" {
+    epk_v2_multi_routing(values)
+  } else {
+    epk_v2_routing(values)
+  }
+}
+
+/// Go's computeEPKRange: a point, or for a hierarchical key's prefix
+/// the range of every key under it.
+fn epk_range(pk: PartitionKey, def: PartitionKeyDefinition) -> (Str, Str) ! Str {
+  let version = if def.version == 0 { 1 } else { def.version }
+  let n = pk.values.len()
+  if n > 0 {
+    let paths = def.paths.len()
+    if n > paths {
+      return Err("more partition key components (${n}) than definition paths (${paths})")
+    }
+    if def.kind != "MultiHash" && n != paths {
+      return Err("non-MultiHash containers require exactly ${paths} components, got ${n}")
+    }
+  }
+  let e = effective_partition_key(pk, def.kind, version)
+  if n > 0 && def.kind == "MultiHash" && n < def.paths.len() {
+    return Ok((e, e + "FF"))
+  }
+  Ok((e, e))
+}
+
+/// Go's findPhysicalRangeForEPK.
+fn physical_range_of(epk: Str, ordered: List[PkRange]) -> Str? {
+  var i = 0
+  while i < ordered.len() && compare_epk(ordered[i].min_inclusive, epk) <= 0 { i += 1 }
+  if i == 0 {
+    return None
+  }
+  let r = ordered[i - 1]
+  if r.max_exclusive != "" && r.max_exclusive != "FF" && compare_epk(epk, r.max_exclusive) >= 0 {
+    return None
+  }
+  Some(r.id)
+}
+
+/// The items by range id, and the range ids in the order first seen
+/// (Go's groupItemsByPhysicalRange).
+fn group_by_range(items: List[ItemIdentity], def: PartitionKeyDefinition, m: RoutingMap) -> (List[Str], Map[Str, List[ItemIdentity]]) ! Str {
+  var order: List[Str] = []
+  var groups: Map[Str, List[ItemIdentity]] = {}
+  for item in items {
+    let (lo, hi) = epk_range(item.partition_key, def)?
+    let ids = if hi != "" && lo != hi {
+      let over = m.overlapping(lo, hi)
+      if over.is_empty() {
+        return Err("could not find physical partition range for item EPK range")
+      }
+      over.map(fn(r: PkRange) -> Str { r.id })
+    } else {
+      [physical_range_of(lo, m.ordered) ?? return Err("could not find physical partition range for item EPK")]
+    }
+    for id in ids {
+      if !groups.contains(id) {
+        order.push(id)
+      }
+      var g = groups.get(id) ?? []
+      g.push(item)
+      groups[id] = g
+    }
+  }
+  Ok((order, groups))
+}
+
+// The queries (Go's queryBuilder).
+
+fn is_simple_identifier(s: Str) -> Bool {
+  if s == "" {
+    return false
+  }
+  var first = true
+  for r in s.runes() {
+    let ok = if first { r.is_letter() || r == '_' } else { r.is_letter() || r.is_digit() || r == '_' }
+    if !ok {
+      return false
+    }
+    first = false
+  }
+  true
+}
+
+/// `c.name` for a simple path, else `c["a"]["b"]` (Go writes each part
+/// with `%s`, unescaped; so does the port).
+fn field_expression(path: Str) -> Str {
+  let trimmed = if path.starts_with("/") { path[1..path.len()] } else { path }
+  if trimmed == "" {
+    return "c"
+  }
+  let parts = trimmed.split("/")
+  if parts.len() == 1 && is_simple_identifier(parts[0]) {
+    return "c.${parts[0]}"
+  }
+  var out = "c"
+  for p in parts { out = out + "[\"${p}\"]" }
+  out
+}
+
+fn is_id_partition_key_query(items: List[ItemIdentity], def: PartitionKeyDefinition) -> Bool {
+  if items.is_empty() || def.paths != ["/id"] {
+    return false
+  }
+  items.all(fn(it: ItemIdentity) -> Bool {
+    it.partition_key.values.len() == 1 && match it.partition_key.values[0] {
+      Str(s) => s == it.id
+      _ => false
+    }
+  })
+}
+
+fn is_single_logical_partition_query(items: List[ItemIdentity]) -> Bool {
+  if items.len() <= 1 {
+    return false
+  }
+  let first = items[0].partition_key.to_json_string()
+  items.all(fn(it: ItemIdentity) -> Bool { it.partition_key.to_json_string() == first })
+}
+
+/// The key's value at `i`, None for null or missing (Go's nil).
+fn pk_component(pk: PartitionKey, i: Int) -> json.Value? {
+  if i >= pk.values.len() {
+    return None
+  }
+  match pk.values[i] {
+    Null => None
+    v => Some(v)
+  }
+}
+
+fn id_params(items: List[ItemIdentity]) -> (List[Str], List[QueryParameter]) {
+  var names: List[Str] = []
+  var params: List[QueryParameter] = []
+  for (i, it) in items.indexed() {
+    let name = "@param_id${i}"
+    names.push(name)
+    params.push(QueryParameter{name: name, value: json.Value.Str(it.id)})
+  }
+  (names, params)
+}
+
+fn read_many_query(items: List[ItemIdentity], def: PartitionKeyDefinition) -> (Str, List[QueryParameter]) {
+  if is_id_partition_key_query(items, def) {
+    let (names, params) = id_params(items)
+    return ("SELECT * FROM c WHERE c.id IN (${names.join(", ")})", params)
+  }
+  if is_single_logical_partition_query(items) {
+    var params: List[QueryParameter] = []
+    var conds: List[Str] = []
+    for (i, path) in def.paths.indexed() {
+      let f = field_expression(path)
+      match pk_component(items[0].partition_key, i) {
+        Some(v) => {
+          params.push(QueryParameter{name: "@pk${i}", value: v})
+          conds.push("${f} = @pk${i}")
+        }
+        None => conds.push("IS_NULL(${f})")
+      }
+    }
+    let (names, ps) = id_params(items)
+    return ("SELECT * FROM c WHERE ${conds.join(" AND ")} AND c.id IN (${names.join(", ")})", params + ps)
+  }
+  var params: List[QueryParameter] = []
+  var clauses: List[Str] = []
+  for (i, it) in items.indexed() {
+    params.push(QueryParameter{name: "@param_id${i}", value: json.Value.Str(it.id)})
+    var conds = ["c.id = @param_id${i}"]
+    for (j, path) in def.paths.indexed() {
+      let f = field_expression(path)
+      match pk_component(it.partition_key, j) {
+        Some(v) => {
+          params.push(QueryParameter{name: "@param_pk${i}${j}", value: v})
+          conds.push("${f} = @param_pk${i}${j}")
+        }
+        None => conds.push("IS_NULL(${f})")
+      }
+    }
+    clauses.push("(${conds.join(" AND ")})")
+  }
+  ("SELECT * FROM c WHERE ${clauses.join(" OR ")}", params)
+}
+
+struct QueryChunk {
+  query: Str
+  params: List[QueryParameter]
+  range_id: Str
+}
+
+fn chunks_for(order: List[Str], groups: Map[Str, List[ItemIdentity]], def: PartitionKeyDefinition) -> List[QueryChunk] {
+  var out: List[QueryChunk] = []
+  for id in order {
+    let items = groups.get(id) ?? []
+    var start = 0
+    while start < items.len() {
+      let end = if start + MAX_ITEMS_PER_QUERY > items.len() { items.len() } else { start + MAX_ITEMS_PER_QUERY }
+      let (q, ps) = read_many_query(items[start..end], def)
+      out.push(QueryChunk{query: q, params: ps, range_id: id})
+      start = end
+    }
+  }
+  out
+}
+
+// Sending.
+
+fn is_pk_range_gone(e: azcore.CallErr) -> Bool {
+  match e {
+    Response(re) => {
+      if re.status_code != 410 {
+        return false
+      }
+      let sub = re.response.header("x-ms-substatus") ?? ""
+      sub == "1002" || sub == "1007" || sub == "1008"
+    }
+    _ => false
+  }
+}
+
+/// One chunk's pages, following continuation tokens.
+fn (c: ContainerClient) run_chunk(chunk: QueryChunk, options: ReadManyItemsOptions) -> (List[Str], Float) ! azcore.CallErr uses (net.dial, clock, rand) {
+  var items: List[Str] = []
+  var charge = 0.0
+  var token = ""
+  while true {
+    var hs: List[(Str, Str)] = []
+    if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
+    if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }
+    if token != "" { hs.push(("x-ms-continuation", token)) }
+    hs = hs + [("x-ms-documentdb-populatequerymetrics", "true"), ("x-ms-documentdb-query-enablecrosspartition", "true"), ("x-ms-documentdb-partitionkeyrangeid", chunk.range_id)]
+    let call = query_call("${c.link}/docs", chunk.query, chunk.params, hs) with {priority_level: options.priority_level, throughput_bucket: options.throughput_bucket}
+    let resp = c.core.send(call)?
+    charge = charge + response_of(resp).request_charge
+    items = items + (documents(resp) ?? e => return Err(azcore.CallErr.Decode(e)))
+    token = continuation(resp) ?? ""
+    if token == "" {
+      break
+    }
+  }
+  Ok((items, charge))
+}
+
+/// Go's refreshPKRangeCache: the container read again, then its ranges
+/// from the start of the feed.
+fn (c: ContainerClient) refresh_ranges() -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.invalidate_properties()
+  let rid = c.container_rid()?
+  c.refresh_routing_map(rid, true)?
+  Ok(())
+}
+
+/// Reads the items in as few queries as their partitions allow: one per
+/// physical partition (1000 items at most each). Items that do not exist
+/// are left out of the response. Unlike Go, the queries run one after
+/// another.
+pub fn (c: ContainerClient) read_many_items(items: List[ItemIdentity], options: ReadManyItemsOptions = ReadManyItemsOptions{}) -> ReadManyItemsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if items.is_empty() {
+    return Ok(ReadManyItemsResponse{})
+  }
+  for (i, it) in items.indexed() {
+    if it.id == "" {
+      return Err(azcore.CallErr.InvalidInput("item identity at index ${i} has an empty ID"))
+    }
+  }
+  for attempt in 0..MAX_PK_RANGE_GONE_RETRIES + 1 {
+    let def = c.cached_properties()?.partition_key_definition
+    let m = c.routing_map()?
+    let (order, groups) = group_by_range(items, def, m) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+    var out = ReadManyItemsResponse{}
+    var gone = false
+    for chunk in chunks_for(order, groups, def) {
+      match c.run_chunk(chunk, options) {
+        Ok((xs, charge)) => out = out with {items: out.items + xs, request_charge: out.request_charge + charge}
+        Err(e) => {
+          if attempt < MAX_PK_RANGE_GONE_RETRIES && is_pk_range_gone(e) {
+            gone = true
+            break
+          }
+          return Err(e)
+        }
+      }
+    }
+    if !gone {
+      return Ok(out)
+    }
+    c.refresh_ranges()?
+  }
+  Err(azcore.CallErr.InvalidInput("exhausted retries for partition key range gone"))
+}

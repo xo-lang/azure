@@ -39,6 +39,14 @@ What it does:
   item as the service wrote it; `success` is false on 207 Multi-Status.
 - Priority-based execution and throughput buckets, for the client and
   for each item operation or batch.
+- Reading many items: `read_many_items` groups the ids by the physical
+  partition holding each key (a hierarchical prefix goes to every range
+  under it) and sends one parameterized query per partition, up to 1000
+  items each, with Go's three query shapes; a partition that is gone
+  (410 with substatus 1002, 1007 or 1008) reads the container and its
+  ranges again and retries, three times at most. Query documents, here
+  and in the query pager, are Go's json.Marshal of each one (compact,
+  HTML escaped).
 - Feed ranges: `read_feed_ranges` lists a container's partition key
   ranges, read through the pkranges change feed (each page's etag sent
   back until 304 Not Modified, a 429 page retried with Go's backoff)
@@ -51,7 +59,9 @@ Each request is Go's byte for byte: the test replays Go programs' 36
 requests against the same fake account and compares the host, path and
 query as sent, the headers with the master key signature (activity ids
 normalized), and the body, and what is read back. Feed ranges replay
-15 cases of Go's requests and results against scripted feeds.
+15 cases of Go's requests and results against scripted feeds, and
+ReadMany 16 cases of Go's full requests (a 1000 item query body compared
+by SHA-256).
 
 Where it differs from Go v1.5.0:
 
@@ -86,7 +96,15 @@ Where it differs from Go v1.5.0:
 - Go retries a throttled pkranges page until the call's context ends;
   here a page gets at most 100 tries. An invalidation waits for a
   refresh in progress instead of cancelling it.
-- Not ported yet: ReadMany, the change feed, throughput read and
+- ReadMany's queries run one after another; Go runs them on as many
+  goroutines as `MaxConcurrency` (default the CPU count), so there is
+  no `max_concurrency` option. `DedicatedGatewayRequestOptions` is not
+  ported (nor is it for item reads), and the request charge is a Float
+  where Go sums a float32.
+- A hierarchical key's prefix in ReadMany is queried as Go queries it:
+  the missing levels as `IS_NULL(...)`, so only items whose lower levels
+  are JSON null match (an unfiled upstream draft).
+- Not ported yet: the change feed, throughput read and
   replace (offers), and vector or full text policies.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.

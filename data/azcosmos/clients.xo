@@ -103,6 +103,16 @@ pub fn (var p: QueryPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, 
   Ok(page)
 }
 
+/// A query page's documents as Go's newQueryResponse gives them: each
+/// one re-marshaled by json.Marshal (compact, HTML escaped).
+fn documents(resp: http.Response) -> List[Str] ! Str {
+  var out: List[Str] = []
+  for raw in raw_elements(resp.body.to_str_lossy(), "Documents")? {
+    out.push(compact(raw)?)
+  }
+  Ok(out)
+}
+
 fn query_call(path: Str, query: Str, parameters: List[QueryParameter], headers: List[(Str, Str)]) -> Call {
   Call{method: "POST", path: path, headers: headers + [("x-ms-documentdb-query", "True")], body: query_body(query, parameters).bytes(), content_type: "application/query+json"}
 }
@@ -415,7 +425,8 @@ pub struct QueryOptions {
 pub struct QueryItemsResponse {
   pub response: Response
   pub continuation_token: Str? = None
-  /// Each item's JSON text as the service sent it.
+  /// Each item's JSON as Go's json.Marshal writes it (compact, HTML
+  /// escaped).
   pub items: List[Str] = []
   pub query_metrics: Str? = None
   pub index_metrics: Str? = None
@@ -437,6 +448,6 @@ pub fn (c: ContainerClient) new_query_items_pager(query: Str, partition_key: Par
   if !partition_key.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", partition_key.to_json_string())) }
   hs.push(("x-ms-cosmos-correlated-activityid", uuid.v4(c.core.rand).display()))
   QueryPager{core: c.core, call: query_call("${c.link}/docs", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryItemsResponse ! Str {
-    Ok(QueryItemsResponse{response: response_of(resp), continuation_token: continuation(resp), items: raw_elements(resp.body.to_str_lossy(), "Documents")?, query_metrics: resp.header("x-ms-documentdb-query-metrics"), index_metrics: resp.header("x-ms-cosmos-index-utilization")})
+    Ok(QueryItemsResponse{response: response_of(resp), continuation_token: continuation(resp), items: documents(resp)?, query_metrics: resp.header("x-ms-documentdb-query-metrics"), index_metrics: resp.header("x-ms-cosmos-index-utilization")})
   }, continuation_of: fn(r: QueryItemsResponse) -> Str? { r.continuation_token }}
 }
