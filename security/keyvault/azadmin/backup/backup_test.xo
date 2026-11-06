@@ -1,0 +1,138 @@
+// The backup Client against the Go program's fake Managed HSM: each
+// request, poll, resume token and result must be Go's
+// (govectors_test.xo). Full and pre backups use azcore's async poller;
+// the restores use Go's restorePoller (runtime.new_status_poller).
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
+
+const SAS_URI: Str = "https://st1.blob.example.test/backups"
+
+fn sas() -> SASTokenParameters {
+  SASTokenParameters{storage_resource_uri: Some(SAS_URI), token: Some("sv=2026-01-01&sig=test")}
+}
+
+fn op(job: Str, status: Str, extra: Str) -> Str {
+  "{\"status\":\"${status}\",\"statusDetails\":\"d\",\"startTime\":1793847845${extra},\"jobId\":\"${job}\"}"
+}
+
+fn began[T](f: Fake, label: Str, r: Result[runtime.Poller[T], azcore.CallErr]) -> runtime.Poller[T]? {
+  match r {
+    Ok(p) => {
+      note(f, "OUT ${label}: null")
+      Some(p)
+    }
+    Err(e) => {
+      note(f, "ERR ${label}: ${err_text(e)}")
+      None
+    }
+  }
+}
+
+/// Polls until done, each poll logged as the Go program logs it.
+fn poll_all[T](f: Fake, var p: runtime.Poller[T]) -> runtime.Poller[T] uses (net.dial, clock, rand) {
+  while !p.done() {
+    match p.poll() {
+      Ok(resp) => note(f, "POLL status=${resp.status} done=${p.done()}")
+      Err(e) => {
+        note(f, "ERR poll: ${err_text(e)}")
+        return p
+      }
+    }
+  }
+  p
+}
+
+test "backup: both poller kinds, resume tokens and errors are Go's" {
+  let f = serve(os.net)
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  let async_h = [("Azure-AsyncOperation", "${VAULT}/backup/j1/pending"), ("Retry-After", "0")]
+  add(f, "POST", "/backup", Reply{status: 202, headers: async_h, body: op("j1", "InProgress", "")})
+  add(f, "GET", "/backup/j1/pending", Reply{status: 200, body: op("j1", "InProgress", "")})
+  add(f, "GET", "/backup/j1/pending", Reply{status: 200, body: op("j1", "Succeeded", ",\"endTime\":1793847905,\"azureStorageBlobContainerUri\":\"https://st1.blob.example.test/backups/mhsm-1\"")})
+  var pb = began(f, "begin_full_backup", c.begin_full_backup(sas()))?
+  let tok = pb.resume_token()?
+  note(f, "TOKEN full_backup: ${tok}")
+  pb = poll_all(f, pb)
+  show(f, "full_backup_result", pb.result().map(fn(r: FullBackupResponse) -> FullBackupOperation { r.full_backup_operation }))
+
+  add(f, "GET", "/backup/j1/pending", Reply{status: 200, body: op("j1", "Succeeded", ",\"azureStorageBlobContainerUri\":\"https://st1.blob.example.test/backups/mhsm-2\"")})
+  if let Some(pr0) = began(f, "resume_full_backup", c.begin_full_backup(sas(), BeginFullBackupOptions{resume_token: tok})) {
+    var pr = pr0
+    show(f, "resume_full_backup_result", pr.poll_until_done(os.clock, 1s).map(fn(r: FullBackupResponse) -> FullBackupOperation { r.full_backup_operation }))
+  }
+
+  add(f, "POST", "/prebackup", Reply{status: 202, headers: [("Azure-AsyncOperation", "${VAULT}/backup/j2/pending")], body: op("j1", "InProgress", "")})
+  add(f, "GET", "/backup/j2/pending", Reply{status: 200, body: op("j1", "Succeeded", "")})
+  if let Some(ppb0) = began(f, "begin_pre_full_backup", c.begin_pre_full_backup(PreBackupOperationParameters{storage_resource_uri: Some(SAS_URI), use_managed_identity: Some(true)})) {
+    var ppb = ppb0
+    show(f, "pre_full_backup_result", ppb.poll_until_done(os.clock, 1s).map(fn(r: PreFullBackupResponse) -> FullBackupOperation { r.full_backup_operation }))
+  }
+
+  add(f, "PUT", "/restore", Reply{status: 202, headers: [("Azure-AsyncOperation", "${VAULT}/restore/r1/pending"), ("Location", "/restore/r1/loc")], body: op("r1", "InProgress", "")})
+  add(f, "GET", "/restore/r1/pending", Reply{status: 200, body: op("r1", "Running", "")})
+  add(f, "GET", "/restore/r1/pending", Reply{status: 200, body: op("r1", "Succeeded", ",\"endTime\":1793847905")})
+  if let Some(pfr0) = began(f, "begin_full_restore", c.begin_full_restore(RestoreOperationParameters{folder_to_restore: Some("mhsm-1"), sas_token_parameters: Some(sas())})) {
+    var pfr = pfr0
+    let rtok = pfr.resume_token()?
+    note(f, "TOKEN full_restore: ${rtok}")
+    pfr = poll_all(f, pfr)
+    show(f, "full_restore_result", pfr.result().map(fn(r: FullRestoreResponse) -> RestoreOperation { r.restore_operation }))
+    add(f, "GET", "/restore/r1/pending", Reply{status: 204})
+    if let Some(pres0) = began(f, "resume_full_restore", c.begin_full_restore(RestoreOperationParameters{}, BeginFullRestoreOptions{resume_token: rtok})) {
+      var pres = pres0
+      show(f, "resume_full_restore_204", pres.poll_until_done(os.clock, 1s).map(fn(r: FullRestoreResponse) -> RestoreOperation { r.restore_operation }))
+    }
+  }
+
+  // a selective key restore that fails
+  add(f, "PUT", "/keys/k1/restore", Reply{status: 202, headers: [("Azure-AsyncOperation", "${VAULT}/restore/r2/pending")], body: "{\"status\":\"InProgress\",\"jobId\":\"r2\"}"})
+  add(f, "GET", "/restore/r2/pending", Reply{status: 200, body: "{\"status\":\"Failed\",\"statusDetails\":\"bad\",\"error\":{\"code\":\"InvalidSas\",\"message\":\"the token is not valid\",\"innererror\":{\"code\":\"Expired\"}},\"jobId\":\"r2\"}"})
+  let body = SelectiveKeyRestoreOperationParameters{folder: Some("mhsm-1"), sas_token_parameters: Some(sas())}
+  if let Some(psk0) = began(f, "begin_selective_key_restore", c.begin_selective_key_restore("k1", body)) {
+    var psk = psk0
+    show(f, "selective_key_restore_result", psk.poll_until_done(os.clock, 1s).map(fn(r: SelectiveKeyRestoreResponse) -> SelectiveKeyRestoreOperation { r.selective_key_restore_operation }))
+  }
+  // one that succeeds with an error
+  add(f, "PUT", "/keys/k2/restore", Reply{status: 202, headers: [("Azure-AsyncOperation", "${VAULT}/restore/r3/pending")], body: "{\"status\":\"InProgress\",\"jobId\":\"r3\"}"})
+  add(f, "GET", "/restore/r3/pending", Reply{status: 200, body: "{\"status\":\"Succeeded\",\"error\":{\"code\":\"Partial\",\"message\":\"one key skipped\"},\"jobId\":\"r3\",\"endTime\":1793847905}"})
+  if let Some(psk20) = began(f, "begin_selective_key_restore2", c.begin_selective_key_restore("k2", body)) {
+    var psk2 = psk20
+    match psk2.poll_until_done(os.clock, 1s) {
+      Ok(r) => {
+        let o = r.selective_key_restore_operation
+        // Go's ErrorInfo marshals as its one exported field, `Code`; Xo's
+        // encodes the error object it read (README)
+        let xo_line = "OUT selective_key_restore2_result: ${go_json(json.to_value(o))}"
+        note(f, xo_line.replace("\"error\":{\"code\":\"Partial\",\"message\":\"one key skipped\"}", "\"error\":{\"Code\":\"Partial\"}"))
+        if let Some(e) = o.error {
+          note(f, "ERRINFO code=${e.code} error=${e.display()}")
+        }
+      }
+      Err(e) => note(f, "ERR selective_key_restore2_result: ${err_text(e)}")
+    }
+  }
+
+  // pre full restore: no Azure-AsyncOperation, a relative one, then a
+  // poll with no status, a 400 and an empty body
+  add(f, "PUT", "/prerestore", Reply{status: 202, body: "{\"status\":\"InProgress\",\"jobId\":\"r4\"}"})
+  began(f, "begin_pre_full_restore_noheader", c.begin_pre_full_restore(PreRestoreOperationParameters{folder_to_restore: Some("mhsm-1"), sas_token_parameters: Some(sas())}))
+  add(f, "PUT", "/prerestore", Reply{status: 202, headers: [("Azure-AsyncOperation", "/restore/r4/pending")], body: "{\"status\":\"InProgress\",\"jobId\":\"r4\"}"})
+  began(f, "begin_pre_full_restore_relative", c.begin_pre_full_restore(PreRestoreOperationParameters{folder_to_restore: Some("mhsm-1")}))
+  add(f, "PUT", "/prerestore", Reply{status: 202, headers: [("Azure-AsyncOperation", "${VAULT}/restore/r5/pending")]})
+  add(f, "GET", "/restore/r5/pending", Reply{status: 200, body: "{\"jobId\":\"r5\"}"})
+  if let Some(ppr0) = began(f, "begin_pre_full_restore", c.begin_pre_full_restore(PreRestoreOperationParameters{folder_to_restore: Some("mhsm-1")})) {
+    var ppr = ppr0
+    note(f, "TOKEN pre_full_restore: ${ppr.resume_token()?}")
+    show(f, "pre_full_restore_poll_nostatus", ppr.poll().map(fn(r: http.Response) -> Str { "" }))
+    add(f, "GET", "/restore/r5/pending", Reply{status: 400, body: "{\"error\":{\"code\":\"Boom\",\"message\":\"server\"}}"})
+    show(f, "pre_full_restore_poll_400", ppr.poll().map(fn(r: http.Response) -> Str { "" }))
+    add(f, "GET", "/restore/r5/pending", Reply{status: 200})
+    show(f, "pre_full_restore_poll_empty", ppr.poll().map(fn(r: http.Response) -> Str { "" }))
+  }
+  add(f, "POST", "/backup", Reply{status: 403, headers: [("Content-Type", "application/json")], body: "{\"error\":{\"code\":\"Forbidden\",\"message\":\"denied\"}}"})
+  began(f, "begin_full_backup_403", c.begin_full_backup(sas()))
+  check(f)
+}

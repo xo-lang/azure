@@ -49,6 +49,8 @@ struct CustomFile {
   pub allow_empty: List[Str] = []
   /// Other modules of this repository the hand written files use.
   pub needs as "requires": List[Str] = []
+  /// operationIds polled by runtime.new_status_poller (see gen.Custom).
+  pub status_pollers: List[Str] = []
 } derive Json
 
 fn main(os: Os) -> () ! Error {
@@ -72,7 +74,7 @@ fn main(os: Os) -> () ! Error {
   let name = dir.split("/").last() ?? dir
   let custom_path = "codegen/custom/${name}.toml"
   let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
-  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only, seal_single_value_enums: svc.seal_single_value_enums, data_plane: cf.data_plane}
+  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only, seal_single_value_enums: svc.seal_single_value_enums, data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() })}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -84,7 +86,7 @@ fn main(os: Os) -> () ! Error {
       }
     }
     let r = spec.renames(texts)?
-    custom = custom with {ops: r.ops, models: r.models, fields: r.fields, params: r.params}
+    custom = custom with {ops: r.ops, models: r.models, fields: r.fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types}
     source = "${svc.openapi} (from ${svc.spec})"
   } else {
     let root = "${base}/${svc.spec}"
@@ -126,7 +128,7 @@ fn main(os: Os) -> () ! Error {
   }
   var b = gen.builder(files, name, custom)
   let api = b.build(inputs)
-  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty}
+  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty, go_package: go_package(svc.go_module, name)}
   os.fs.create_dir_all(dir)?
   os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n" + cf.needs.map(fn(r: Str) -> Str { "require ${r} v0.1.0\n" }).join("")).bytes())?
   let m = gen.emit_models(p, api)
@@ -142,4 +144,29 @@ fn main(os: Os) -> () ! Error {
     os.stdio.println("  readme.go.md directive not applied: ${w}")
   }
   Ok(())
+}
+
+/// The Go import path of package `name` in module `module`: the module
+/// itself when it ends in the package (`.../armnetwork/v8`), else the
+/// package's directory under it (`.../azadmin/backup`).
+fn go_package(module: Str, name: Str) -> Str {
+  let parts = module.split("/")
+  var last = parts[parts.len() - 1]
+  if parts.len() > 1 && is_major_suffix(last) {
+    last = parts[parts.len() - 2]
+  }
+  if last == name { module } else { "${module}/${name}" }
+}
+
+/// A Go major version suffix: `v` and digits (`v8`).
+fn is_major_suffix(s: Str) -> Bool {
+  if s.len() < 2 || !s.starts_with("v") {
+    return false
+  }
+  for i in 1..s.len() {
+    if !"0123456789".contains(s[i..i + 1]) {
+      return false
+    }
+  }
+  true
 }

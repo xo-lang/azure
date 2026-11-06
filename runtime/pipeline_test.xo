@@ -153,3 +153,38 @@ test "the backoff doubles with jitter in [0.8, 1.3) and stops at max_retry_delay
   expect(delay(o, 10, 0.5)) == 60s
 }
 
+
+test "the marker pager's next page sets the marker with the query sorted, as Go's" {
+  os.net.handle("GET https://h.example.test/c", fn(req: http.Request) -> http.Response { http.text(200, if req.url.query.get("marker").is_some() { "" } else { "m 2" }) })
+  var p = new_marker_pager(new_pipeline("t", "v0", os.net, os.clock, os.rand, PipelineOptions{}, policy.ClientOptions{}), policy.Request{method: "GET", url: "https://h.example.test/c?restype=container&comp=list"}, fn(r: http.Response) -> Str ! Str { Ok(r.body.to_str_lossy()) }, "marker", fn(s: Str) -> Str? { Some(s) })
+  while p.more() {
+    p.next_page()?
+  }
+  expect(os.net.requests().map(fn(r: http.Request) -> Str { r.raw_query() })) == ["restype=container&comp=list", "comp=list&marker=m+2&restype=container"]
+}
+
+test "join_paths is azcore's JoinPaths with one path" {
+  // rows from a local Go program calling runtime.JoinPaths (azcore v1.21.0)
+  for (root, seg, want) in [
+    ("https://h.example.test", "//keys/providers/x", "https://h.example.test/keys/providers/x"),
+    ("https://h.example.test/", "/a/../b/", "https://h.example.test/b/"),
+    ("https://h.example.test/base", "keys/k1/", "https://h.example.test/base/keys/k1/"),
+    ("https://h.example.test/base?sv=1&sig=a", "/x", "https://h.example.test/base/x?sv=1&sig=a"),
+    ("https://h.example.test/base?a=1?b=2", "/x", "https://h.example.test/base/x?a=1"),
+    ("https://h.example.test", "", "https://h.example.test/"),
+    ("https://h.example.test", "/k%2F1/./v", "https://h.example.test/k%2F1/v"),
+  ] {
+    expect("${root} + ${seg} = ${join_paths(root, seg)}") == "${root} + ${seg} = ${want}"
+  }
+}
+
+struct Sas {
+  token as "token,omitempty": Str? = None
+  uri as "uri,omitempty": Str? = None
+} derive Json
+
+test "marshal_json escapes as Go's json.Marshal" {
+  // Go: json.Marshal(struct{...}{"sv=1&sig=<a>", ...})
+  expect(marshal_json(Sas{token: Some("sv=1&sig=<a>"), uri: Some("https://h.example.test/c")}).to_str_lossy()) == "{\"token\":\"sv=1\\u0026sig=\\u003ca\\u003e\",\"uri\":\"https://h.example.test/c\"}"
+  expect(marshal_json(Sas{}).to_str_lossy()) == "{}"
+}

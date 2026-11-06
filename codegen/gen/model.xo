@@ -79,6 +79,9 @@ pub struct Op {
   /// `Poller[*Pager[T]]`).
   pub paged_lro: Bool = false
   pub final_state: Str = ""
+  /// The operation's poller is runtime.new_status_poller (a Go
+  /// module's custom handler, such as azadmin's restorePoller).
+  pub status_poller: Bool = false
   pub doc: Str = ""
 }
 
@@ -110,6 +113,17 @@ pub struct Api {
 pub struct Custom {
   /// operationId (any case) to Go's operation name.
   pub ops: Map[Str, Str] = {}
+  /// A TypeSpec `@client` block's operations (operationId, lower case)
+  /// to Go's names; when set, the others are left out and these are on
+  /// the package's Client.
+  pub client_ops: Map[Str, Str] = {}
+  /// `Definition.property` to its type (TypeSpec's `@@alternateType`).
+  pub alt_fields: Map[Str, Str] = {}
+  /// Parameter wire name to its type (`@alternateType` on a parameter).
+  pub param_types: Map[Str, Str] = {}
+  /// Long-running operations (operationId, lower case) whose Go module
+  /// polls them with a custom handler that runtime.new_status_poller ports.
+  pub status_pollers: List[Str] = []
   /// definition name to Go's type name.
   pub models: Map[Str, Str] = {}
   /// `Definition.property` to Go's field name.
@@ -567,7 +581,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     seen.push(wire)
     let raw_client = str_of(prop.get("x-ms-client-name"))
     let client = b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
-    var typ = b.type_of(pf, prop, "${name}${pascal(wire)}")
+    var typ = b.custom.alt_fields.get("${def}.${wire}") ?? b.type_of(pf, prop, "${name}${pascal(wire)}")
     let go_name = if client != "" { client } else { wire }
     if typ == "Str" {
       // `Model.field` first (one model's), then the field in every model.
@@ -606,7 +620,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   } else if loc == "body" {
     b.type_of(f, p.get("schema") ?? json.Value.Object([]), pascal(wire))
   } else {
-    b.inline(f, p, pascal(wire))
+    b.custom.param_types.get(wire) ?? b.inline(f, p, pascal(wire))
   }
   let required = bool_of(p.get("required")) || loc == "path"
   let one = list_of(p.get("enum"))
@@ -623,7 +637,10 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   } else {
     None
   }
-  let go_name = b.custom.params.get(wire) ?? (if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { wire })
+  // TypeSpec's Go emitter camel-cases a quoted name (`setting-name` is
+  // settingName)
+  let plain = if b.custom.data_plane && wire.contains("-") { dash_camel(wire) } else { wire }
+  let go_name = b.custom.params.get(wire) ?? (if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { plain })
   let client = wire == "subscriptionId" || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
   Param{
     name: snake(go_name), go_name: go_name,
@@ -658,7 +675,10 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             Some(i) => (id[0..i], id[i + 1..id.len()])
             None => ("", id)
           }
-          let name = b.custom.ops.get(id.to_lower()) ?? raw_name
+          if !b.custom.client_ops.is_empty() && !b.custom.client_ops.contains(id.to_lower()) {
+            continue
+          }
+          let name = b.custom.client_ops.get(id.to_lower()) ?? b.custom.ops.get(id.to_lower()) ?? raw_name
           // Go drops the package name from a group too (StorageAccounts
           // is armstorage's Accounts), except a group named as the package.
           // An operation without a group is in the default one, named after
@@ -666,7 +686,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // a data-plane module keeps them on its Client.
           // Go's group names are case-folded (configurationPolicyGroups and
           // ConfigurationPolicyGroups are one client).
-          let group = part(b.unstutter(if raw_group == "" && !b.custom.data_plane { title } else { raw_group }))
+          let group = if !b.custom.client_ops.is_empty() { "" } else { part(b.unstutter(if raw_group == "" && !b.custom.data_plane { title } else { raw_group })) }
           var params: List[Param] = []
           for raw in shared + list_of(o.get("parameters")) {
             let p = b.param(file, raw)
@@ -711,7 +731,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           ops.push(Op{
             group: group, name: name, method: method.to_upper(), path: path, params: params, ok: okc.sort(), resp: resp,
             pageable: pg.is_some() && !lro, next_link: next, item_name: if item_name == "" { "value" } else { item_name },
-            lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, doc: doc_of(o),
+            lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, status_poller: lro && b.custom.status_pollers.contains(id.to_lower()), doc: doc_of(o),
           })
         }
       }
@@ -895,6 +915,16 @@ pub fn refs_of(file: Str, doc: json.Value) -> List[Str] {
       }
       _ => {}
     }
+  }
+  out
+}
+
+/// `setting-name` as `settingName`.
+fn dash_camel(s: Str) -> Str {
+  let parts = s.split("-")
+  var out = parts[0]
+  for w in parts[1..] {
+    out = out + (if w == "" { "" } else { w[0..1].to_upper() + w[1..] })
   }
   out
 }

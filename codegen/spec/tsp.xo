@@ -14,6 +14,38 @@ pub struct Renames {
   pub fields: Map[Str, Str] = {}
   /// parameter wire name to Go's name
   pub params: Map[Str, Str] = {}
+  /// A `@client({name: ...}, "go") interface` block: the operations it
+  /// lists (OpenAPI operationId, lower case) to Go's operation name. An
+  /// operation it does not list is not in Go's client.
+  pub client_ops: Map[Str, Str] = {}
+  /// `@@alternateType(Model.property, type, "go")`: `Model.property` to
+  /// the Xo type (`string` is Str).
+  pub field_types: Map[Str, Str] = {}
+  /// `@alternateType(Type, "go")` on a parameter: its wire name to Type.
+  pub param_types: Map[Str, Str] = {}
+}
+
+/// TypeSpec's scalar names as Xo types; a model or union keeps its name.
+fn xo_type(t: Str) -> Str {
+  match t {
+    "string" => "Str"
+    "boolean" => "Bool"
+    "int32" => "Int"
+    "int64" => "Int"
+    "float64" => "Float"
+    _ => t
+  }
+}
+
+/// `KeyVault.RoleDefinitions.delete` as its OpenAPI operationId,
+/// `RoleDefinitions_Delete` (the namespace dropped, the operation's first
+/// letter upper case, an interface its group).
+fn operation_id(target: Str) -> Str {
+  let parts = target.split(".")
+  let rest = if parts.len() > 1 { parts[1..parts.len()] } else { parts }
+  let op = rest.last() ?? ""
+  let up = if op == "" { "" } else { op[0..1].to_upper() + op[1..op.len()] }
+  if rest.len() > 1 { "${rest[0..rest.len() - 1].join("_")}_${up}" } else { up }
 }
 
 /// The Go renames in `texts` (the project's .tsp files).
@@ -21,8 +53,30 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let aug = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
   let inline = regexp.compile("(?:^|[^@])@clientName\\(\\s*\"([^\"]+)\"\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
   let loc = regexp.compile("@(?:path|query|header)\\(\\s*\"([^\"]+)\"") ?? e => return Err(e.display())
+  let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*,\\s*\"go\"\\s*\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
+  let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
+  let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
+  let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
   var r = Renames{}
   for text in texts {
+    for whole in client.find_all(text) {
+      let body = (client.captures(whole) ?? continue)[1] ?? ""
+      for m in member.find_all(body) {
+        let c = member.captures(m) ?? continue
+        let name = c[1] ?? ""
+        if name != "" {
+          r.client_ops[operation_id(c[2] ?? "").to_lower()] = name[0..1].to_upper() + name[1..name.len()]
+        }
+      }
+    }
+    for whole in alt_field.find_all(text) {
+      let m = alt_field.captures(whole) ?? continue
+      r.field_types[m[1] ?? ""] = xo_type(m[2] ?? "")
+    }
+    for whole in alt_param.find_all(text) {
+      let m = alt_param.captures(whole) ?? continue
+      r.param_types[m[2] ?? ""] = xo_type(m[1] ?? "")
+    }
     for whole in aug.find_all(text) {
       let m = aug.captures(whole) ?? continue
       let target = m[1] ?? ""

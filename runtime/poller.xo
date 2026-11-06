@@ -18,6 +18,10 @@ pub enum Kind {
   Body
   /// Done with the first response.
   Done
+  /// A custom handler that polls `Azure-AsyncOperation` and whose result
+  /// is the last status response, with no final GET (azadmin's
+  /// restorePoller; new_status_poller).
+  Status
 }
 
 fn kind_name(k: Kind) -> Str {
@@ -27,6 +31,7 @@ fn kind_name(k: Kind) -> Str {
     Loc => "loc"
     Body => "body"
     Done => "nop"
+    Status => "status"
   }
 }
 
@@ -39,8 +44,10 @@ pub const OPERATION_LOCATION: Str = "operation-location"
 pub struct Poller[T] {
   pub pipeline: Pipeline
   pub decode: fn(http.Response) -> T ! Str
-  /// The result type's name in resume tokens (Go's, such as
-  /// `armstorage.AccountsClientCreateResponse`).
+  /// The result type's name in resume tokens, as azcore's
+  /// getTokenTypeName writes it: the bare Go type name
+  /// (`AccountsClientCreateResponse`), or `*Pager[<import path>.<name>]`
+  /// for a paged operation.
   pub type_name: Str
   kind: Kind
   method: Str
@@ -84,6 +91,50 @@ pub fn new_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Respons
     return Ok(base with {kind: Kind.Body, poll_url: req.url, state: st})
   }
   Ok(base with {state: "Succeeded"})
+}
+
+/// The poller of `req`, started with `resp`, as azadmin's restorePoller
+/// (backup/internal/pollers of azadmin v1.5.0; MIT, Copyright (c)
+/// Microsoft Corporation; NOTICE.md): it polls the `Azure-AsyncOperation`
+/// URL, as sent, and the last status response is the result.
+pub fn new_status_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+  let a = header_of(resp, "Azure-AsyncOperation") ?? return Err(azcore.CallErr.InvalidInput("response is missing Azure-AsyncOperation header"))
+  if !is_absolute(a) {
+    return Err(azcore.CallErr.InvalidInput("invalid polling URL ${a}"))
+  }
+  let state = state_from_body(resp) ?? "InProgress"
+  Ok(Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Status, method: req.method, orig_url: req.url, poll_url: a, loc_url: header_of(resp, "Location") ?? "", final_state: final_state_via, state: if state == "" { "InProgress" } else { state }, last: Some(resp)})
+}
+
+/// A status poller from `token` (its resume_token, or Go's restorePoller's).
+pub fn resume_status_poller[T](pipeline: Pipeline, token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+  let doc = json.parse_value(token) ?? e => return Err(azcore.CallErr.InvalidInput("a resume token is JSON: ${e.display()}"))
+  let f = fn(v: json.Value?, k: Str) -> Str {
+    match v.and_then(fn(x: json.Value) -> json.Value? { x.get(k) }) {
+      Some(json.Value.Str(s)) => s
+      _ => ""
+    }
+  }
+  check_token_type(doc, type_name)?
+  let t = Some(doc.get("token") ?? return Err(azcore.CallErr.InvalidInput("missing token value")))
+  Ok(Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Status, method: f(t, "method"), orig_url: f(t, "origURL"), poll_url: f(t, "asyncURL"), loc_url: f(t, "locURL"), final_state: f(t, "finalState"), state: f(t, "state")})
+}
+
+/// Whether `s` has a scheme, as Go's `url.Parse(s).IsAbs()` (azcore's
+/// poller.IsValidURL).
+fn is_absolute(s: Str) -> Bool {
+  let i = s.find(":") ?? return false
+  if i == 0 {
+    return false
+  }
+  for j in 0..i {
+    let ch = s[j..j + 1]
+    let letter = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+    if !(letter || (j > 0 && ((ch >= "0" && ch <= "9") || ch == "+" || ch == "-" || ch == "."))) {
+      return false
+    }
+  }
+  true
 }
 
 /// `properties.provisioningState`, as the body poller reads it.
@@ -167,6 +218,20 @@ pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dia
         _ => return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
       }
     }
+    Status => {
+      if ![200, 201, 202, 204].contains(resp.status) {
+        p.last = Some(resp)
+        return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, resp)))
+      }
+      if resp.body.is_empty() {
+        return Err(azcore.CallErr.Decode("the response did not contain a body"))
+      }
+      let s = status_of(resp) ?? ""
+      if s == "" {
+        return Err(azcore.CallErr.Decode("the response did not contain a status"))
+      }
+      p.state = s
+    }
     Done => {}
   }
   p.last = Some(resp)
@@ -183,9 +248,19 @@ pub fn (var p: Poller[T]) result() -> T ! azcore.CallErr uses (net.dial, clock, 
   if !p.done() {
     return Err(azcore.CallErr.InvalidInput("the operation has not finished"))
   }
+  if p.kind is Kind.Status {
+    // restorePoller.Result: a 204 or an empty body is the zero result
+    if last.status == 204 || last.body.is_empty() {
+      return (p.decode)(http.text(200, "{}")) ?? e => Err(azcore.CallErr.Decode(e))
+    }
+    if ![200, 201, 202, 204].contains(last.status) {
+      return Err(azcore.CallErr.Response(azcore.response_error("GET", p.poll_url, last)))
+    }
+    return (p.decode)(last) ?? e => Err(azcore.CallErr.Decode(e))
+  }
   let url = match p.kind {
     Async | Op => final_url(p, last)
-    Loc | Body | Done => None
+    Loc | Body | Done | Status => None
   }
   let resp = match url {
     Some(u) => {
@@ -239,17 +314,21 @@ pub fn (var p: Poller[T]) poll_until_done(clock: Clock, frequency: Duration = 30
 /// azcore's resume token: `{"type": ..., "token": {...}}`.
 pub fn (p: Poller[T]) resume_token() -> Str ! Str {
   if p.done() {
-    return Err("the operation is done: there is nothing to resume")
+    return Err("poller is in a terminal state")
   }
-  var fields: List[(Str, json.Value)] = [("type", json.Value.Str(kind_name(p.kind)))]
-  match p.kind {
-    Async => fields = fields + [("asyncURL", json.Value.Str(p.poll_url)), ("locURL", json.Value.Str(p.loc_url)), ("origURL", json.Value.Str(p.orig_url)), ("method", json.Value.Str(p.method)), ("finalState", json.Value.Str(p.final_state)), ("state", json.Value.Str(p.state))]
-    Op => fields = fields + [("oplocURL", json.Value.Str(p.poll_url)), ("locURL", json.Value.Str(p.loc_url)), ("origURL", json.Value.Str(p.orig_url)), ("method", json.Value.Str(p.method)), ("finalState", json.Value.Str(p.final_state)), ("state", json.Value.Str(p.state))]
-    Loc => fields = fields + [("pollURL", json.Value.Str(p.poll_url)), ("state", json.Value.Str(p.state))]
-    Body => fields = fields + [("pollURL", json.Value.Str(p.poll_url)), ("state", json.Value.Str(p.state))]
-    Done => return Err("the operation is done: there is nothing to resume")
+  // each poller's own JSON, in its struct's field order: async and op
+  // have no `type` field (Go tells them apart by asyncURL and oplocURL)
+  let s = fn(v: Str) -> json.Value { json.Value.Str(v) }
+  let fields: List[(Str, json.Value)] = match p.kind {
+    Async | Status => [("asyncURL", s(p.poll_url)), ("locURL", s(p.loc_url)), ("origURL", s(p.orig_url)), ("method", s(p.method)), ("finalState", s(p.final_state)), ("state", s(p.state))]
+    Op => [("oplocURL", s(p.poll_url)), ("locURL", s(p.loc_url)), ("origURL", s(p.orig_url)), ("method", s(p.method)), ("finalState", s(p.final_state)), ("resultPath", s("")), ("state", s(p.state))]
+    Loc | Body => [("type", s(kind_name(p.kind))), ("pollURL", s(p.poll_url)), ("state", s(p.state))]
+    Done => return Err("poller is in a terminal state")
   }
-  Ok(json.Value.Object([("type", json.Value.Str(p.type_name)), ("token", json.Value.Object(fields))]).encode())
+  // encoding/json's Marshal escapes <, > and & in strings
+  var w = json.json_writer()
+  w.value(json.Value.Object([("type", json.Value.Str(p.type_name)), ("token", json.Value.Object(fields))])) ?? e => return Err(e.display())
+  Ok(w.finish().to_str_lossy())
 }
 
 /// A poller from `token` (resume_token's, or a Go program's).
@@ -261,16 +340,45 @@ pub fn resume_poller[T](pipeline: Pipeline, token: Str, type_name: Str, decode: 
       _ => ""
     }
   }
-  if f(Some(doc), "type") != type_name {
-    return Err(azcore.CallErr.InvalidInput("the resume token is for ${f(Some(doc), "type")}, not ${type_name}"))
-  }
-  let t = doc.get("token")
+  check_token_type(doc, type_name)?
+  let t = Some(doc.get("token") ?? return Err(azcore.CallErr.InvalidInput("missing token value")))
   let base = Poller{pipeline: pipeline, decode: decode, type_name: type_name, kind: Kind.Done, method: f(t, "method"), orig_url: f(t, "origURL"), loc_url: f(t, "locURL"), final_state: f(t, "finalState"), state: f(t, "state")}
-  match f(t, "type") {
-    "async" => Ok(base with {kind: Kind.Async, poll_url: f(t, "asyncURL")})
-    "op" => Ok(base with {kind: Kind.Op, poll_url: f(t, "oplocURL")})
-    "loc" => Ok(base with {kind: Kind.Loc, poll_url: f(t, "pollURL")})
-    "body" => Ok(base with {kind: Kind.Body, poll_url: f(t, "pollURL"), orig_url: f(t, "pollURL"), method: "PUT"})
-    other => Err(azcore.CallErr.InvalidInput("unknown poller kind ${other}"))
+  // azcore's NewPollerFromResumeToken order: async, body, loc, op
+  let has = fn(k: Str) -> Bool { t.and_then(fn(x: json.Value) -> json.Value? { x.get(k) }).is_some() }
+  if has("asyncURL") {
+    Ok(base with {kind: Kind.Async, poll_url: f(t, "asyncURL")})
+  } else if f(t, "type") == "body" {
+    Ok(base with {kind: Kind.Body, poll_url: f(t, "pollURL"), orig_url: f(t, "pollURL"), method: "PUT"})
+  } else if f(t, "type") == "loc" {
+    Ok(base with {kind: Kind.Loc, poll_url: f(t, "pollURL")})
+  } else if has("oplocURL") {
+    Ok(base with {kind: Kind.Op, poll_url: f(t, "oplocURL")})
+  } else {
+    Err(azcore.CallErr.InvalidInput("unhandled poller token ${t.map(fn(x: json.Value) -> Str { x.encode() }) ?? "null"}"))
+  }
+}
+
+/// azcore's IsTokenValid: the token's `type` must be `type_name`.
+fn check_token_type(doc: json.Value, type_name: Str) -> () ! azcore.CallErr {
+  match doc.get("type") {
+    Some(json.Value.Str(tt)) => if tt != type_name {
+      return Err(azcore.CallErr.InvalidInput("cannot resume from this poller token. token is for type ${tt}, not ${type_name}"))
+    }
+    Some(other) => return Err(azcore.CallErr.InvalidInput("invalid type format ${json_type_name(other)}"))
+    None => return Err(azcore.CallErr.InvalidInput("missing type value"))
+  }
+  Ok(())
+}
+
+/// The Go type that encoding/json gives a JSON value in a map[string]any.
+fn json_type_name(v: json.Value) -> Str {
+  match v {
+    json.Value.Null => "<nil>"
+    json.Value.Bool(_) => "bool"
+    json.Value.Int(_) | json.Value.Num(_) => "float64"
+    json.Value.Trusted(_, _) => "string"
+    json.Value.Str(_) => "string"
+    json.Value.List(_) => "[]interface {}"
+    json.Value.Object(_) => "map[string]interface {}"
   }
 }

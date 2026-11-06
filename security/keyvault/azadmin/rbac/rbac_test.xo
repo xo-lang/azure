@@ -1,0 +1,46 @@
+// The rbac Client against the Go program's fake Managed HSM: each
+// request and result must be Go's (govectors_test.xo).
+
+const DEF: Str = "{\"id\":\"Microsoft.KeyVault/providers/Microsoft.Authorization/roleDefinitions/d1\",\"name\":\"d1\",\"type\":\"Microsoft.Authorization/roleDefinitions\",\"properties\":{\"roleName\":\"Custom Reader\",\"description\":\"reads keys\",\"type\":\"CustomRole\",\"permissions\":[{\"actions\":[],\"notActions\":[],\"dataActions\":[\"Microsoft.KeyVault/managedHsm/keys/read/action\"],\"notDataActions\":[]}],\"assignableScopes\":[\"/\"]}}"
+const ASG: Str = "{\"id\":\"/providers/Microsoft.Authorization/roleAssignments/a1\",\"name\":\"a1\",\"type\":\"Microsoft.Authorization/roleAssignments\",\"properties\":{\"scope\":\"/keys\",\"roleDefinitionId\":\"Microsoft.KeyVault/providers/Microsoft.Authorization/roleDefinitions/d1\",\"principalId\":\"00000000-0000-0000-0000-000000000000\"}}"
+const DEFS: Str = "/providers/Microsoft.Authorization/roleDefinitions"
+const ASGS: Str = "/keys/providers/Microsoft.Authorization/roleAssignments"
+
+test "rbac: role definitions and assignments, and both pagers, are Go's" {
+  let f = serve(os.net)
+  let c = new_client(os.net, os.clock, os.rand, VAULT, Fixed{})
+  add(f, "PUT", "/keys${DEFS}/d1", Reply{status: 201, body: DEF})
+  let props = RoleDefinitionProperties{role_name: Some("Custom Reader"), description: Some("reads keys"), role_type: Some(ROLE_TYPE_CUSTOM_ROLE), permissions: Some([Permission{data_actions: Some([DATA_ACTION_READ_HSM_KEY])}]), assignable_scopes: Some([ROLE_SCOPE_GLOBAL])}
+  show(f, "create_or_update_role_definition", c.create_or_update_role_definition(ROLE_SCOPE_KEYS, "d1", RoleDefinitionCreateParameters{properties: Some(props)}).map(fn(r: CreateOrUpdateRoleDefinitionResponse) -> RoleDefinition { r.role_definition }))
+  add(f, "GET", "${DEFS}/d1", Reply{status: 200, body: DEF})
+  show(f, "get_role_definition", c.get_role_definition(ROLE_SCOPE_GLOBAL, "d1").map(fn(r: GetRoleDefinitionResponse) -> RoleDefinition { r.role_definition }))
+  add(f, "DELETE", "${DEFS}/d1", Reply{status: 200, body: DEF})
+  show(f, "delete_role_definition", c.delete_role_definition(ROLE_SCOPE_GLOBAL, "d1").map(fn(r: DeleteRoleDefinitionResponse) -> RoleDefinition { r.role_definition }))
+  add(f, "PUT", "${ASGS}/a1", Reply{status: 201, body: ASG})
+  let ap = RoleAssignmentProperties{principal_id: Some("00000000-0000-0000-0000-000000000000"), role_definition_id: Some("Microsoft.KeyVault/providers/Microsoft.Authorization/roleDefinitions/d1")}
+  show(f, "create_role_assignment", c.create_role_assignment(ROLE_SCOPE_KEYS, "a1", RoleAssignmentCreateParameters{properties: Some(ap)}).map(fn(r: CreateRoleAssignmentResponse) -> RoleAssignment { r.role_assignment }))
+  add(f, "GET", "${ASGS}/a1", Reply{status: 200, body: ASG})
+  show(f, "get_role_assignment", c.get_role_assignment(ROLE_SCOPE_KEYS, "a1").map(fn(r: GetRoleAssignmentResponse) -> RoleAssignment { r.role_assignment }))
+  add(f, "DELETE", "${ASGS}/a1", Reply{status: 200, body: ASG})
+  show(f, "delete_role_assignment", c.delete_role_assignment(ROLE_SCOPE_KEYS, "a1").map(fn(r: DeleteRoleAssignmentResponse) -> RoleAssignment { r.role_assignment }))
+  add(f, "GET", DEFS, Reply{status: 200, body: "{\"value\":[${DEF}],\"nextLink\":\"${VAULT}${DEFS}?%24skiptoken=p2&api-version=2025-07-01&%24filter=atScope%28%29\"}"})
+  add(f, "GET", DEFS, Reply{status: 200, body: "{\"value\":[],\"nextLink\":null}"})
+  var p1 = c.new_list_role_definitions_pager(ROLE_SCOPE_GLOBAL, ListRoleDefinitionsOptions{filter: Some("atScope()")})?
+  while p1.more() {
+    let pg = p1.next_page()
+    show(f, "list_role_definitions_page", pg.map(fn(r: ListRoleDefinitionsResponse) -> RoleDefinitionListResult { r.role_definition_list_result }))
+    if pg.is_err() {
+      break
+    }
+  }
+  add(f, "GET", ASGS, Reply{status: 200, body: "{\"value\":[${ASG}]}"})
+  var p2 = c.new_list_role_assignments_pager(ROLE_SCOPE_KEYS)?
+  while p2.more() {
+    let pg = p2.next_page()
+    show(f, "list_role_assignments_page", pg.map(fn(r: ListRoleAssignmentsResponse) -> RoleAssignmentListResult { r.role_assignment_list_result }))
+    if pg.is_err() {
+      break
+    }
+  }
+  check(f)
+}

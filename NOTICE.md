@@ -47,7 +47,11 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   requests checked against its own), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
   its tests, ParseID), `sdk/security/keyvault/azsecrets`, `azkeys` and `azcertificates`
   (their hand written clients, options and ID types, and
-  azcertificates' ErrorInfo; the rest is generated), `sdk/messaging/azservicebus`
+  azcertificates' ErrorInfo; the rest is generated),
+  `sdk/security/keyvault/azadmin` v1.5.0 (the backup, rbac and settings
+  clients, backup's ErrorInfo and the restorePoller of
+  `backup/internal/pollers`, in `runtime/poller.xo`; the rest is
+  generated), `sdk/messaging/azservicebus`
   v1.11.0 (the Client, Sender, MessageBatch, Receiver and message
   settlement, Message and ReceivedMessage and their AMQP mapping, the
   connection string parser and SAS signer, and the `$management`

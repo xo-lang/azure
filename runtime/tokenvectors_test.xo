@@ -1,0 +1,54 @@
+// Resume tokens against the output of a local Go program that makes a
+// poller of each kind with azcore v1.21.0's runtime.NewPoller and
+// resumes bad tokens with NewPollerFromResumeToken (invented hosts).
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const H: Str = "https://h.example.test"
+
+fn token_of(pipe: Pipeline, method: Str, url: Str, resp: http.Response, fsv: Str) -> Str ! Str {
+  let p = new_poller(pipe, policy.Request{method: method, url: url}, resp, fsv, "ActResponse", name_of) ?? e => return Err("${e:?}")
+  p.resume_token()
+}
+
+test "each poller kind's resume token is azcore's, byte for byte" {
+  expect(token_of(pl(os.net, os.clock, os.rand), "POST", "${H}/res/a/act?x=1&y=<2>", http.text(202, "").with_header("Azure-AsyncOperation", "${H}/ops/7").with_header("Location", "${H}/loc/7"), LOCATION)?) == "{\"type\":\"ActResponse\",\"token\":{\"asyncURL\":\"https://h.example.test/ops/7\",\"locURL\":\"https://h.example.test/loc/7\",\"origURL\":\"https://h.example.test/res/a/act?x=1\\u0026y=\\u003c2\\u003e\",\"method\":\"POST\",\"finalState\":\"location\",\"state\":\"InProgress\"}}"
+  expect(token_of(pl(os.net, os.clock, os.rand), "POST", "${H}/res/a/act", http.text(202, "").with_header("Operation-Location", "${H}/oploc/7").with_header("Location", "${H}/loc/7"), OPERATION_LOCATION)?) == "{\"type\":\"ActResponse\",\"token\":{\"oplocURL\":\"https://h.example.test/oploc/7\",\"locURL\":\"https://h.example.test/loc/7\",\"origURL\":\"https://h.example.test/res/a/act\",\"method\":\"POST\",\"finalState\":\"operation-location\",\"resultPath\":\"\",\"state\":\"InProgress\"}}"
+  expect(token_of(pl(os.net, os.clock, os.rand), "DELETE", "${H}/res/a", http.text(202, "").with_header("Location", "${H}/loc/8"), "")?) == "{\"type\":\"ActResponse\",\"token\":{\"type\":\"loc\",\"pollURL\":\"https://h.example.test/loc/8\",\"state\":\"InProgress\"}}"
+  expect(token_of(pl(os.net, os.clock, os.rand), "PUT", "${H}/res/b", http.text(201, "{\"properties\":{\"provisioningState\":\"Updating\"}}"), "")?) == "{\"type\":\"ActResponse\",\"token\":{\"type\":\"body\",\"pollURL\":\"https://h.example.test/res/b\",\"state\":\"Updating\"}}"
+  match token_of(pl(os.net, os.clock, os.rand), "PUT", "${H}/res/c", http.text(200, "{\"properties\":{\"provisioningState\":\"Succeeded\"}}"), "") {
+    Err(e) => expect(e) == "poller is in a terminal state"
+    Ok(t) => expect(t) == "an error"
+  }
+}
+
+fn resume_err(pipe: Pipeline, token: Str) -> Str {
+  match resume_poller(pipe, token, "ActResponse", name_of) {
+    Err(azcore.CallErr.InvalidInput(m)) => m
+    Err(e) => "${e:?}"
+    Ok(_) => "resumed"
+  }
+}
+
+test "a bad resume token fails with azcore's messages" {
+  expect(resume_err(pl(os.net, os.clock, os.rand), "{\"type\":\"Other\",\"token\":{\"asyncURL\":\"u\"}}")) == "cannot resume from this poller token. token is for type Other, not ActResponse"
+  expect(resume_err(pl(os.net, os.clock, os.rand), "{\"token\":{\"asyncURL\":\"u\"}}")) == "missing type value"
+  expect(resume_err(pl(os.net, os.clock, os.rand), "{\"type\":7,\"token\":{\"asyncURL\":\"u\"}}")) == "invalid type format float64"
+  expect(resume_err(pl(os.net, os.clock, os.rand), "{\"type\":\"ActResponse\",\"token\":{\"pollURL\":\"u\",\"state\":\"InProgress\"}}")) == "unhandled poller token {\"pollURL\":\"u\",\"state\":\"InProgress\"}"
+  expect(resume_err(pl(os.net, os.clock, os.rand), "{\"type\":\"ActResponse\"}")) == "missing token value"
+}
+
+test "Go's tokens of each kind resume as that kind" {
+  os.net.handle("GET ${H}/oploc/9", fn(r: http.Request) -> http.Response { http.text(200, "{\"status\":\"Succeeded\"}") })
+  os.net.handle("GET ${H}/loc/9", fn(r: http.Request) -> http.Response { http.text(200, "{\"name\":\"via-loc\"}") })
+  var op = resume_poller(pl(os.net, os.clock, os.rand), "{\"type\":\"ActResponse\",\"token\":{\"oplocURL\":\"https://h.example.test/oploc/9\",\"locURL\":\"https://h.example.test/loc/9\",\"origURL\":\"https://h.example.test/res/a/act\",\"method\":\"POST\",\"finalState\":\"location\",\"resultPath\":\"\",\"state\":\"InProgress\"}}", "ActResponse", name_of)?
+  expect(op.poll_until_done(os.clock)?) == "via-loc"
+  os.net.handle("GET ${H}/loc/10", fn(r: http.Request) -> http.Response { http.text(200, "{\"name\":\"gone\"}") })
+  var lp = resume_poller(pl(os.net, os.clock, os.rand), "{\"type\":\"ActResponse\",\"token\":{\"type\":\"loc\",\"pollURL\":\"https://h.example.test/loc/10\",\"state\":\"InProgress\"}}", "ActResponse", name_of)?
+  expect(lp.poll_until_done(os.clock)?) == "gone"
+  os.net.handle("GET ${H}/res/d", fn(r: http.Request) -> http.Response { http.text(200, "{\"name\":\"d\",\"properties\":{\"provisioningState\":\"Succeeded\"}}") })
+  var bp = resume_poller(pl(os.net, os.clock, os.rand), "{\"type\":\"ActResponse\",\"token\":{\"type\":\"body\",\"pollURL\":\"https://h.example.test/res/d\",\"state\":\"Updating\"}}", "ActResponse", name_of)?
+  expect(bp.poll_until_done(os.clock)?) == "d"
+}

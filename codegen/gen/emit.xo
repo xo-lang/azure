@@ -21,6 +21,9 @@ pub struct Package {
   pub data_plane: Bool = false
   /// Path parameters that may be empty (wire names).
   pub allow_empty: List[Str] = []
+  /// The Go package's import path, for a paged operation's resume token
+  /// type (`*Pager[<path>.<Response>]`, as reflect names it).
+  pub go_package: Str = ""
 }
 
 /// A string literal's contents.
@@ -102,11 +105,13 @@ pub fn emit_models(p: Package, api: Api) -> File {
     s = s + "    _ => Ok(${p.name}.${p.base}(json.from_value[${p.base}](v)?))\n  }\n}\n"
   }
   if !api.polys.is_empty() {
-    s = s + "\n/// `v` with its discriminator `key` set to `value`, as Go's\n/// MarshalJSON writes a subtype's.\nfn with_discriminator(v: json.Value, key: Str, value: Str) -> json.Value {\n  match v {\n    json.Value.Object(fs) => json.Value.Object(fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != key }) + [(key, json.Value.Str(value))])\n    other => other\n  }\n}\n"
+    s = s + "\n/// `v` with its discriminator `key` set to `value`, as Go's\n/// MarshalJSON writes a subtype's (its keys sorted).\nfn with_discriminator(v: json.Value, key: Str, value: Str) -> json.Value {\n  match v {\n    json.Value.Object(fs) => json.Value.Object((fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != key }) + [(key, json.Value.Str(value))]).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))\n    other => other\n  }\n}\n"
   }
   for m in api.models {
     s = s + "\n" + doc("", m.doc) + "pub struct ${m.name} {\n"
-    for f in m.fields {
+    // Go's MarshalJSON fills a map[string]any, so json.Marshal writes the
+    // keys sorted: the fields are declared in that order
+    for f in m.fields.sort_by(fn(f: Field) -> Str { f.wire }) {
       s = s + doc("  ", f.doc) + (if m.patch { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": json.Patch[${f.typ}] = json.Patch.Absent\n" } else { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n" })
     }
     s = s + "} derive Json\n"
@@ -212,7 +217,9 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
         None => to_text(api, x.typ, x.name)
       }
     }
-    if !p.allow_empty.contains(x.wire) && x.constant.is_none() {
+    // TypeSpec's Go emitter checks no reserved (unescaped) parameter
+    let reserved = p.data_plane && x.skip_encoding
+    if !p.allow_empty.contains(x.wire) && x.constant.is_none() && !reserved {
       s = s + "  if ${v} == \"\" {\n    return Err(azcore.CallErr.InvalidInput(\"parameter ${esc(if x.go_name != "" { x.go_name } else { x.wire })} cannot be empty\"))\n  }\n"
     }
     let enc = if x.skip_encoding { v } else { "url.path_escape(${v})" }
@@ -234,13 +241,17 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "body" }) {
     if x.required {
       s = s + "  headers.push((\"Content-Type\", \"application/json\"))\n"
-      body = "json.encode(${x.name})"
+      body = "runtime.marshal_json(${x.name})"
     } else {
-      s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n    headers.push((\"Content-Type\", \"application/json\"))\n    body = json.encode(v)\n  }\n"
+      s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n    headers.push((\"Content-Type\", \"application/json\"))\n    body = runtime.marshal_json(v)\n  }\n"
       body = "body"
     }
   }
-  s = s + "  let qs = q.encode()\n  Ok(policy.Request{method: \"${op.method}\", url: \"\${c.setup.endpoint}\${path}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
+  // a data plane module joins as Go's TypeSpec code does
+  // (runtime.JoinPaths, which cleans the path: `/{scope}/...` with scope
+  // `/keys` is `/keys/...`)
+  let base = if p.data_plane { "\${runtime.join_paths(c.setup.endpoint, path)}" } else { "\${c.setup.endpoint}\${path}" }
+  s = s + "  let qs = q.encode()\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
   let ok_list = if op.method == "HEAD" { "[${ok}, 404]" } else { "[${ok}]" }
   let call_args = req.map(fn(x: Param) -> Str { x.name }).join(", ")
@@ -266,18 +277,19 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     let paged = "fn(r: http.Response) -> runtime.Pager[${rn}] ! Str { Ok(runtime.new_pager(pipeline, req, ${handler}, ${next}).starting_with(${hname}(r)?)) }"
     s = s + "pub fn (c: ${cn}) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> runtime.Poller[runtime.Pager[${rn}]] ! azcore.CallErr uses (net.dial, clock, rand) {\n"
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n  let pipeline = c.setup.pipeline\n"
-    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_poller(c.setup.pipeline, options.resume_token, \"${p.name}.${rn}\", ${paged})\n  }\n"
+    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_poller(c.setup.pipeline, options.resume_token, \"*Pager[${p.go_package}.${rn}]\", ${paged})\n  }\n"
     s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
     s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  runtime.new_poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${p.name}.${rn}\", ${paged})\n}\n"
+    s = s + "  runtime.new_poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"*Pager[${p.go_package}.${rn}]\", ${paged})\n}\n"
   } else if op.lro {
     let fsv = if op.final_state != "" { op.final_state } else { "" }
     s = s + "pub fn (c: ${cn}) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> runtime.Poller[${rn}] ! azcore.CallErr uses (net.dial, clock, rand) {\n"
-    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_poller(c.setup.pipeline, options.resume_token, \"${p.name}.${rn}\", ${handler})\n  }\n"
+    let kind = if op.status_poller { "status_" } else { "" }
+    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_${kind}poller(c.setup.pipeline, options.resume_token, \"${rn}\", ${handler})\n  }\n"
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
     s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
     s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  runtime.new_poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${p.name}.${rn}\", ${handler})\n}\n"
+    s = s + "  runtime.new_${kind}poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${rn}\", ${handler})\n}\n"
   } else {
     s = s + "pub fn (c: ${cn}) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> ${rn} ! azcore.CallErr uses (net.dial, clock, rand) {\n"
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"

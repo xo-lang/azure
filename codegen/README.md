@@ -87,6 +87,22 @@ response type equal, except armnetwork's `Error` and armkeyvault's
 - TypeSpec modules take Go's `@@clientName`/`@clientName` renames from
   the .tsp files, and `custom/<module>.toml` mirrors Go's own
   post-generation transforms.
+- A TypeSpec module's `@client({...}, "go") interface X { name is
+  NS.Group.op; }` blocks name its Go operations: only the operations
+  listed are generated, under those names, on one `Client` (azadmin's
+  rbac). `@@alternateType(Model.prop, type, "go")` and an inline
+  `@alternateType(type, "go")` on a parameter give Go's type; a
+  `field_types` entry wins over it where Go's transforms undo it
+  (azcertificates' `CertificateOperation.error`).
+- `custom/<module>.toml: status_pollers` names the operations whose
+  poller is Go's hand written restorePoller (`runtime.new_status_poller`).
+- A model's fields are declared sorted by wire name, the order Go's
+  MarshalJSON writes them; a body is `runtime.marshal_json` (HTML
+  escaped, as json.Marshal). A data plane module joins its paths with
+  `runtime.join_paths`, checks no reserved path parameter for empty,
+  and names a quoted TypeSpec parameter (`setting-name`) as Go does
+  (`settingName`). A poller's resume token type is the Go type's name,
+  or `*Pager[<Go import path>.<name>]` for a paged operation.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
 - A Go name whose snake_case form is an Xo keyword or predeclared value

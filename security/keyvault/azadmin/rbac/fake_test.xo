@@ -1,0 +1,136 @@
+// The fake Managed HSM of the Go program behind govectors_test.xo: a
+// request without a token gets Key Vault's challenge, any other the next
+// reply queued for its method and path. Each request is logged as the Go
+// program logs it (invented hosts).
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+const VAULT: Str = "https://kv1.vault.example.test"
+const CHALLENGE: Str = "Bearer authorization=\"https://login.example.test/tenant-a\", resource=\"https://vault.example.test\""
+
+struct Fixed {}
+
+fn (c: Fixed) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok-test"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+struct Reply {
+  status: Int
+  headers: List[(Str, Str)] = []
+  body: Str = ""
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  queue: Mutex[List[(Str, Reply)]]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), queue: Mutex[List[(Str, Reply)]].new([])}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+    net.handle("${m} ${VAULT}/{rest...}", h)
+  }
+  f
+}
+
+/// Queues `r` for the next `method path` request.
+fn add(f: Fake, method: Str, path: Str, r: Reply) {
+  f.queue.with(fn(var q: List[(Str, Reply)]) { q.push(("${method} ${path}", r)) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length for a body; FakeNet hands the
+  // request over in process, so the recorder writes it
+  if !req.body.is_empty() {
+    hs.push("content-length=${req.body.len()}")
+  }
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  note(f, "REQ ${req.method} ${VAULT}${uri}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}")
+  if req.header("Authorization").is_none() {
+    return http.text(401, "").with_header("WWW-Authenticate", CHALLENGE)
+  }
+  let key = "${req.method} ${req.escaped_path()}"
+  let found = f.queue.with(fn(var q: List[(Str, Reply)]) -> Reply? {
+    for i in 0..q.len() {
+      if q[i].0 == key {
+        let r = q[i].1
+        q.remove_at(i)
+        return Some(r)
+      }
+    }
+    None
+  })
+  let r = found ?? Reply{status: 404, body: "{\"error\":{\"code\":\"NotFound\",\"message\":\"no route ${key}\"}}"}
+  var resp = http.text(r.status, r.body)
+  for (k, v) in r.headers {
+    resp = resp.with_header(k, v)
+  }
+  resp
+}
+
+/// `v` as Go's json.Marshal writes the response struct: keys sorted
+/// (as models_serde.go's MarshalJSON writes them), <, > and & escaped.
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer()
+  w.value(sorted(v)) ?? e => return "unencodable: ${e.display()}"
+  w.finish().to_str_lossy()
+}
+
+fn sorted(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { sorted(x) }))
+    other => other
+  }
+}
+
+/// The Go program's line for a call's result.
+fn show[T: Json](f: Fake, label: Str, r: Result[T, azcore.CallErr]) {
+  match r {
+    Ok(v) => note(f, "OUT ${label}: ${go_json(json.to_value(v))}")
+    Err(e) => note(f, "ERR ${label}: ${err_text(e)}")
+  }
+}
+
+/// Go's `%v` of an error, or the Go program's form of a response error.
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+/// Each logged line against Go's, the first difference reported.
+fn check(f: Fake) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.join("\n").split("\n") })
+  for i in 0..got.len() {
+    if i >= GO_OUT.len() {
+      expect(got[i]) == "(Go has no more lines)"
+      return
+    }
+    if got[i] != GO_OUT[i] {
+      expect("${i}: ${got[i]}") == "${i}: ${GO_OUT[i]}"
+      return
+    }
+  }
+  expect(got.len()) == GO_OUT.len()
+}
