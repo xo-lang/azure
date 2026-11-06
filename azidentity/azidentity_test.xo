@@ -170,3 +170,30 @@ test "the default chain skips what is not set up and uses the environment's secr
 test "the ARM scope keeps azcore's double slash" {
   expect(arm_scope(cloud.AZURE_PUBLIC)) == SCOPE
 }
+
+test "CAE: CP1 is sent as claims, CAE tokens are cached apart, and challenge claims skip the cache" {
+  let forms = Mutex[List[Str]].new([])
+  os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
+    forms.with(fn(var xs: List[Str]) { xs.push(req.body.to_str_lossy()) })
+    http.text(200, token_json("tok", 3600))
+  })
+  let c = new_client_secret_credential(TENANT, CLIENT, "invented-secret", os.net, os.clock, os.rand, opts())?
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE]})?
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE], enable_cae: true})?
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE], enable_cae: true})?
+  let challenge = "{\"access_token\":{\"nbf\":{\"essential\":true,\"value\":\"1726077595\"}}}"
+  c.get_token(azcore.TokenRequestOptions{scopes: [SCOPE], enable_cae: true, claims: challenge})?
+  let fs = forms.with_read(fn(xs: List[Str]) -> List[Str] { xs })
+  // plain, CAE, then the challenge: the second CAE call came from the cache
+  expect(fs.len()) == 3
+  expect(url.parse_query(fs[0])?.get("claims")) == None
+  expect(url.parse_query(fs[1])?.get("claims")) == Some("{\"access_token\":{\"xms_cc\":{\"values\":[\"CP1\"]}}}")
+  expect(url.parse_query(fs[2])?.get("claims")) == Some("{\"access_token\":{\"nbf\":{\"essential\":true,\"value\":\"1726077595\"},\"xms_cc\":{\"values\":[\"CP1\"]}}}")
+}
+
+test "merge_claims keeps other claims and replaces xms_cc" {
+  expect(merge_claims("", false)?) == ""
+  expect(merge_claims("{\"id_token\":{\"a\":1}}", true)?) == "{\"id_token\":{\"a\":1},\"access_token\":{\"xms_cc\":{\"values\":[\"CP1\"]}}}"
+  expect(merge_claims("{\"access_token\":{\"xms_cc\":{\"values\":[\"old\"]}}}", true)?) == "{\"access_token\":{\"xms_cc\":{\"values\":[\"CP1\"]}}}"
+  expect(merge_claims("not json", true).is_err()) == true
+}

@@ -4,7 +4,9 @@
 // its refresh time (or 5 minutes before it expires) by one call while
 // the others wait. Tokens are sent only over HTTPS unless allowed.
 
+use std/base64
 use std/http
+use std/regexp
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
@@ -30,25 +32,96 @@ fn (p: BearerTokenPolicy) current() -> azcore.AccessToken ! azcore.AuthErr uses 
         return Ok(have)
       }
     }
-    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes})?
+    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, enable_cae: true})?
     t = Some(fresh)
     Ok(fresh)
   })
 }
 
+/// A fresh token for a claims challenge; it replaces the cached one.
+fn (p: BearerTokenPolicy) for_claims(claims: Str) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  p.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+    let fresh = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, claims: claims, enable_cae: true})?
+    t = Some(fresh)
+    Ok(fresh)
+  })
+}
+
+fn (p: BearerTokenPolicy) authorize(req: policy.Request, t: azcore.AccessToken) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand) {
+  var r = req.with_header("Authorization", "Bearer ${t.token.reveal()}")
+  if !p.auxiliary_tenants.is_empty() {
+    var aux: List[Str] = []
+    for tenant in p.auxiliary_tenants {
+      let at = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, tenant_id: tenant, enable_cae: true}) ?? e => return Err(policy.SendErr.Auth(e.display()))
+      aux.push("Bearer ${at.token.reveal()}")
+    }
+    r = r.with_header("x-ms-authorization-auxiliary", aux.join(", "))
+  }
+  Ok(r)
+}
+
+/// Sends with a token; on a 401 the cached token is dropped, and a CAE
+/// challenge (`error="insufficient_claims"`, base64 `claims`) is answered
+/// once with a token for those claims, as azcore's handleChallenge.
 fn (p: BearerTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   if !req.url.starts_with("https://") && !p.insecure_allow_http {
     return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
   }
   let t = p.current() ?? e => return Err(policy.SendErr.Auth(e.display()))
-  var r = req.with_header("Authorization", "Bearer ${t.token.reveal()}")
-  if !p.auxiliary_tenants.is_empty() {
-    var aux: List[Str] = []
-    for tenant in p.auxiliary_tenants {
-      let at = p.credential.get_token(azcore.TokenRequestOptions{scopes: p.scopes, tenant_id: tenant}) ?? e => return Err(policy.SendErr.Auth(e.display()))
-      aux.push("Bearer ${at.token.reveal()}")
-    }
-    r = r.with_header("x-ms-authorization-auxiliary", aux.join(", "))
+  let resp = next.send(p.authorize(req, t)?)?
+  if resp.status != 401 {
+    return Ok(resp)
   }
-  next.send(r)
+  p.token.reset(None)
+  let claims = match cae_claims(resp) {
+    Ok(Some(c)) => c
+    Ok(None) => return Ok(resp)
+    Err(e) => return Err(policy.SendErr.Auth(e))
+  }
+  let fresh = p.for_claims(claims) ?? e => return Err(policy.SendErr.Auth(e.display()))
+  next.send(p.authorize(req, fresh)?)
+}
+
+/// An authentication challenge: its scheme and quoted parameters.
+pub struct Challenge {
+  pub scheme: Str
+  pub params: Map[Str, Str]
+}
+
+/// The challenges of every WWW-Authenticate header, as azcore's
+/// parseChallenges (quoted parameter values only).
+pub fn parse_challenges(resp: http.Response) -> List[Challenge] {
+  let outer = regexp.compile("(?:(\\w+) ((?:\\w+=\"[^\"]*\",?\\s*)+))") ?? _ => return []
+  let inner = regexp.compile("(\\w+)=\"([^\"]*)\"") ?? _ => return []
+  var out: List[Challenge] = []
+  for (k, h) in resp.headers {
+    if k.to_lower() != "www-authenticate" {
+      continue
+    }
+    for whole in outer.find_all(h) {
+      let m = outer.captures(whole) ?? continue
+      var params: Map[Str, Str] = {}
+      for kv in inner.find_all(m[2] ?? "") {
+        let pm = inner.captures(kv) ?? continue
+        params[pm[1] ?? ""] = pm[2] ?? ""
+      }
+      out.push(Challenge{scheme: m[1] ?? "", params: params})
+    }
+  }
+  out
+}
+
+/// The decoded claims of a CAE challenge, None when there is none, an
+/// error when its claims are not base64.
+pub fn cae_claims(resp: http.Response) -> Str? ! Str {
+  for c in parse_challenges(resp) {
+    if c.scheme == "Bearer" {
+      let claims = c.params.get("claims") ?? ""
+      if claims != "" && c.params.get("error") == Some("insufficient_claims") {
+        let b = base64.decode(claims) ?? _ => return Err("authentication challenge contains invalid claims: ${claims}")
+        return Ok(Some(b.to_str_lossy()))
+      }
+    }
+  }
+  Ok(None)
 }

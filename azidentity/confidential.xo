@@ -77,8 +77,12 @@ pub fn (c: Confidential) endpoint(tenant: Str) -> Str {
   "${c.authority_host}${tenant}/oauth2/v2.0/token"
 }
 
-/// A cached token for `opts`, if still fresh.
-pub fn (c: Confidential) cached(key: Str) -> azcore.AccessToken? uses clock {
+/// A cached token for `opts`, if still fresh; never for a request with
+/// claims (MSAL's WithClaims skips the cache).
+pub fn (c: Confidential) cached(key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses clock {
+  if opts.claims != "" {
+    return None
+  }
   let now = c.clock.now()
   c.cache.with_read(fn(xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken? {
     for (k, t) in xs {
@@ -92,10 +96,14 @@ pub fn (c: Confidential) cached(key: Str) -> azcore.AccessToken? uses clock {
 
 /// Asks the token endpoint of `tenant` with the grant's `fields`
 /// (client_secret, or client_assertion and its type), and caches it.
-pub fn (c: Confidential) request(tenant: Str, key: Str, scopes: List[Str], fields: List[(Str, Str)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  var form: List[Str] = ["client_id=${url.query_escape(c.client_id)}", "grant_type=client_credentials", "scope=${url.query_escape(scopes.join(" "))}"]
+pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  var form: List[Str] = ["client_id=${url.query_escape(c.client_id)}", "grant_type=client_credentials", "scope=${url.query_escape(opts.scopes.join(" "))}"]
   for (k, v) in fields {
     form.push("${k}=${url.query_escape(v)}")
+  }
+  let claims = merge_claims(opts.claims, opts.enable_cae) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e})
+  if claims != "" {
+    form.push("claims=${url.query_escape(claims)}")
   }
   let req = policy.Request{method: "POST", url: c.endpoint(tenant), headers: [("Content-Type", "application/x-www-form-urlencoded")], body: form.join("&").bytes()}
   let resp = c.pipeline.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display()})
@@ -149,7 +157,44 @@ pub fn parse_token_response(name: Str, resp: http.Response, now: Time) -> azcore
   Ok(azcore.AccessToken{token: Secret.new(token), expires_on: expires, refresh_on: refresh})
 }
 
-/// The cache key of a token request.
-pub fn key_of(tenant: Str, scopes: List[Str]) -> Str {
-  "${tenant} ${scopes.join(" ")}"
+/// The cache key of a token request; CAE tokens are kept apart, as
+/// azidentity keeps a CAE client and a plain one.
+pub fn key_of(tenant: Str, scopes: List[Str], cae: Bool = false) -> Str {
+  "${if cae { "cae " } else { "" }}${tenant} ${scopes.join(" ")}"
+}
+
+/// The `claims` parameter: the challenge's claims, with MSAL's `CP1`
+/// client capability under access_token.xms_cc when `cae`, as MSAL Go
+/// merges them; "" when there is neither.
+pub fn merge_claims(claims: Str, cae: Bool) -> Str ! Str {
+  if claims == "" && !cae {
+    return Ok("")
+  }
+  let doc = if claims == "" { json.Value.Object([]) } else { json.parse_value(claims) ?? e => return Err("the claims are not JSON: ${e.display()}") }
+  if !cae {
+    return Ok(doc.encode())
+  }
+  let fields = match doc {
+    json.Value.Object(fs) => fs
+    _ => return Err("the claims are not a JSON object")
+  }
+  let cc = ("xms_cc", json.Value.Object([("values", json.Value.List([json.Value.Str("CP1")]))]))
+  var out: List[(Str, json.Value)] = []
+  var had = false
+  for (k, v) in fields {
+    if k == "access_token" {
+      had = true
+      let inner = match v {
+        json.Value.Object(fs) => fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != "xms_cc" })
+        _ => []
+      }
+      out.push((k, json.Value.Object(inner + [cc])))
+    } else {
+      out.push((k, v))
+    }
+  }
+  if !had {
+    out.push(("access_token", json.Value.Object([cc])))
+  }
+  Ok(json.Value.Object(out).encode())
 }

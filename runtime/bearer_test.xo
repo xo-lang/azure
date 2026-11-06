@@ -61,3 +61,60 @@ test "auxiliary tenants' tokens go in x-ms-authorization-auxiliary" {
   new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bp]}, policy.ClientOptions{}).send(policy.Request{method: "GET", url: ARM})?
   expect(seen.with_read(fn(xs: List[http.Request]) -> Str { xs[0].header("x-ms-authorization-auxiliary") ?? "" })) == "Bearer tok-t1-2, Bearer tok-t2-3"
 }
+
+/// A credential that records each request's claims and CAE flag.
+struct Recording {
+  seen: Mutex[List[Str]]
+}
+
+fn (c: Recording) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = c.seen.with(fn(var xs: List[Str]) -> Int {
+    xs.push("cae=${opts.enable_cae} claims=${opts.claims}")
+    xs.len()
+  })
+  Ok(azcore.AccessToken{token: Secret.new("tok-${n}"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+// {"access_token":{"nbf":{"essential":true,"value":"1726077595"}}}
+const CHALLENGE_CLAIMS: Str = "eyJhY2Nlc3NfdG9rZW4iOnsibmJmIjp7ImVzc2VudGlhbCI6dHJ1ZSwidmFsdWUiOiIxNzI2MDc3NTk1In19fQ=="
+
+test "a CAE challenge gets a token for its claims and the request is sent once more" {
+  let n = Atomic[Int].new(0)
+  let auths = Mutex[List[Str]].new([])
+  os.net.handle("PUT ${ARM}", fn(req: http.Request) -> http.Response {
+    auths.with(fn(var xs: List[Str]) { xs.push("${req.header("Authorization") ?? ""} ${req.body.to_str_lossy()}") })
+    if n.add(1) == 1 {
+      return http.text(401, "").with_header("WWW-Authenticate", "Bearer realm=\"\", authorization_uri=\"https://login.example.test/common/oauth2/authorize\", error=\"insufficient_claims\", claims=\"${CHALLENGE_CLAIMS}\"")
+    }
+    http.text(200, "ok")
+  })
+  let cred = Recording{seen: Mutex.new([])}
+  let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock)]}, policy.ClientOptions{})
+  let resp = p.send(policy.Request{method: "PUT", url: ARM, body: b"{\"a\":1}"})?
+  expect(resp.status) == 200
+  expect(cred.seen.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == ["cae=true claims=", "cae=true claims={\"access_token\":{\"nbf\":{\"essential\":true,\"value\":\"1726077595\"}}}"]
+  expect(auths.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == ["Bearer tok-1 {\"a\":1}", "Bearer tok-2 {\"a\":1}"]
+  // the challenge's token is the one kept
+  p.send(policy.Request{method: "PUT", url: ARM})?
+  expect(cred.seen.with_read(fn(xs: List[Str]) -> Int { xs.len() })) == 2
+}
+
+test "a 401 without a CAE challenge is returned and drops the cached token" {
+  let n = Atomic[Int].new(0)
+  os.net.handle("GET ${ARM}", fn(req: http.Request) -> http.Response {
+    if n.add(1) == 1 { http.text(401, "").with_header("WWW-Authenticate", "Bearer authorization_uri=\"https://login.example.test/t\"") } else { http.text(200, "") }
+  })
+  let cred = Recording{seen: Mutex.new([])}
+  let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock)]}, policy.ClientOptions{})
+  expect(p.send(policy.Request{method: "GET", url: ARM})?.status) == 401
+  expect(p.send(policy.Request{method: "GET", url: ARM})?.status) == 200
+  expect(cred.seen.with_read(fn(xs: List[Str]) -> Int { xs.len() })) == 2
+}
+
+test "challenge parsing: several challenges, and claims that are not base64 are an error" {
+  let r = http.text(401, "").with_header("WWW-Authenticate", "PoP realm=\"x\", nonce=\"n\", Bearer error=\"insufficient_claims\", claims=\"e30=\"")
+  let cs = parse_challenges(r)
+  expect(cs.map(fn(c: Challenge) -> Str { c.scheme })) == ["PoP", "Bearer"]
+  expect(cae_claims(r)?) == Some("{}")
+  expect(cae_claims(http.text(401, "").with_header("WWW-Authenticate", "Bearer error=\"insufficient_claims\", claims=\"!!\"")).is_err()) == true
+}
