@@ -8,11 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
-The generator handles TypeSpec-emitted data plane specs as Go's
-TypeSpec emitter does (for `data/azappconfig`, `reachable_only`
-packages), and two of its fixes reach ARM modules. Checked by
-comparing each generated request with Go's code and by azappconfig's
-Go vectors:
+The generator writes Go's response handling more closely, for the
+packages generated with `reachable_only` (the TypeSpec ones: Key
+Vault's azsecrets, azkeys, azcertificates and azadmin, and
+azappconfig's generated layer; also armkeyvault), and the Accept fix
+for every package. Checked by comparing each generated request with
+Go's code, by azappconfig's Go vectors, and by the existing tests of
+each regenerated module:
 
 - Accept is the operation's `produces` (without
   `application/json`), comma joined, as Go sends it; armcompute's
@@ -20,15 +22,16 @@ Go vectors:
   `application/x-rdp`, as Go's.
 - A response's documented headers are fields of its response type
   (`etag`, `sync_token`, `link`, `request_id`, ...; an integer header
-  that does not parse is Go's `strconv.ParseInt` error) in TypeSpec
-  packages, and in ARM operations that document them: armkeyvault's
+  that does not parse is Go's `strconv.ParseInt` error): armkeyvault's
   `PrivateEndpointConnectionsClient.put` and
   `MhsmPrivateEndpointConnectionsClient.put` responses gain
   `azure_async_operation` and `retry_after`, as Go's.
-- In a TypeSpec package an empty body decodes as the zero value (Go's
-  UnmarshalAsJSON; a 304 page), a list of enum values in the query is
-  comma joined, a `collectionFormat: multi` array is one parameter per
-  value, and a HEAD operation's response has no `success` field.
+- **Behavior fix:** an empty response body decodes as the zero value,
+  as Go's UnmarshalAsJSON leaves it (it was the decode error `the
+  response has no body`).
+- A list of enum values in the query is comma joined, a
+  `collectionFormat: multi` array is one parameter per value, and a
+  HEAD operation's response has no `success` field.
 - `runtime.header_value(resp, name)`: a header, None when missing or
   empty (Go's `if val := resp.Header.Get(...); val != ""`).
 
