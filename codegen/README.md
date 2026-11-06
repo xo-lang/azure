@@ -46,8 +46,13 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   `json.Patch.Null` sends an explicit `null`, Go's `azcore.NullValue`;
   `json.Patch.Absent` (the default) leaves the key out. A model a
   response also reaches (`VirtualMachineProperties` under
-  `VirtualMachineUpdate.properties`) keeps `T?`, so it cannot carry a
-  null yet; members of a polymorphic type keep `T?` too.
+  `VirtualMachineUpdate.properties`) keeps `T?`; a PATCH body holds its
+  patch twin instead (`VirtualMachinePropertiesPatch`, json.Patch
+  fields, and on through the models it holds directly), with
+  `patch()` on the model to make one. Go has no twins (its NullValue
+  is a sentinel of the field's own type), so the name is `<Name>Patch`.
+  A model in a list or a map is not twinned (merge patch replaces those
+  whole), nor is a polymorphic type's member.
 - Each operation's api-version is its own file's (`API_VERSION` when it
   is the package's); an api-version enum is not a type.
 - The package name dropped from the front of model and group names

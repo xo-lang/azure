@@ -21,6 +21,9 @@ pub struct Model {
   /// json.Patch[T], so a caller can send an explicit null (Go's
   /// azcore.NullValue), which JSON merge patch reads as "remove".
   pub patch: Bool = false
+  /// The model this is the patch twin of (`VirtualMachineProperties` for
+  /// `VirtualMachinePropertiesPatch`), "" for a spec model.
+  pub twin_of: Str = ""
 }
 
 /// An extensible string enum (x-ms-enum): a newtype with constants.
@@ -726,8 +729,65 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
     }
   }
   let patched = patch_only(ops, b.models, b.polys)
-  let models = b.models.map(fn(m: Model) -> Model { Model{name: m.name, fields: m.fields, doc: m.doc, patch: patched.contains(m.name)} })
+  let models = with_twins(b.models, patched, b.polys)
   Api{api_version: version, ops: ops, models: models, enums: b.enums, polys: b.polys, report: b.report}
+}
+
+/// The models with PATCH fields: those only PATCH bodies reach, and a
+/// patch twin (`<Name>Patch`) of each shared model one of them, or a
+/// twin, holds directly (not in a list or map, which merge patch
+/// replaces whole), so a nested field can be sent as null too. Fields
+/// that hold such a model hold its twin.
+fn with_twins(models: List[Model], patched: Set[Str], polys: List[Poly]) -> List[Model] {
+  var ms: Map[Str, Model] = {}
+  for m in models {
+    ms[m.name] = m
+  }
+  var poly_names: Set[Str] = #{}
+  for p in polys {
+    poly_names.add(p.name)
+  }
+  let direct = fn(t: Str) -> Bool { ms.contains(t) && !patched.contains(t) && !poly_names.contains(t) }
+  var twins: Set[Str] = #{}
+  var order: List[Str] = []
+  var stack: List[Str] = []
+  for m in models {
+    if patched.contains(m.name) {
+      for f in m.fields {
+        if direct(f.typ) {
+          stack.push(f.typ)
+        }
+      }
+    }
+  }
+  while let Some(n) = stack.pop() {
+    if twins.contains(n) {
+      continue
+    }
+    twins.add(n)
+    order.push(n)
+    for f in (ms.get(n) ?? Model{name: n, fields: []}).fields {
+      if direct(f.typ) {
+        stack.push(f.typ)
+      }
+    }
+  }
+  let retype = fn(fs: List[Field]) -> List[Field] {
+    fs.map(fn(f: Field) -> Field { if twins.contains(f.typ) { Field{name: f.name, wire: f.wire, typ: "${f.typ}Patch", doc: f.doc} } else { f } })
+  }
+  var out: List[Model] = []
+  for m in models {
+    if patched.contains(m.name) {
+      out.push(Model{name: m.name, fields: retype(m.fields), doc: m.doc, patch: true})
+    } else {
+      out.push(m)
+    }
+  }
+  for n in order.sort() {
+    let m = ms.get(n) ?? continue
+    out.push(Model{name: "${n}Patch", fields: retype(m.fields), doc: "${n}Patch: ${n} in a PATCH body, each field Absent (left out), Null (removed) or a value.", patch: true, twin_of: n})
+  }
+  out
 }
 
 /// The type names in a type (`Map[Str, List[Foo]]` has Map, Str, List
