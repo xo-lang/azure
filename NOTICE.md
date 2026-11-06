@@ -11,8 +11,10 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
-  (Shared Key; signing vectors captured from its code in
-  `storage/azblob/testdata`), and later the other data plane packages. Each ported file names its source in a header comment.
+  (Shared Key, the user delegation credential, and the `sas` package:
+  account, service and user delegation SAS; signing vectors captured
+  from its code in `storage/azblob/exported/testdata` and
+  `storage/azblob/sas/testdata`), and later the other data plane packages. Each ported file names its source in a header comment.
 - github.com/Azure/azure-rest-api-specs: the service specifications
   the generator reads (decision 0002), at the commit in
   `codegen/specs.lock`.

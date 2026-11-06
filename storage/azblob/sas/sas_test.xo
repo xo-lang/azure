@@ -1,0 +1,79 @@
+use std/json
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// Signed by azblob's sas package (testdata/sas_vectors.json has the source).
+const VECTORS: Str = embed("testdata/sas_vectors.json")
+
+/// Azurite's public development account and key; valid nowhere else.
+const DEV_ACCOUNT: Str = "devstoreaccount1"
+const DEV_KEY: Str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
+const ZERO_ID: Str = "00000000-0000-0000-0000-000000000000"
+
+fn s(v: json.Value, k: Str) -> Str {
+  match v.get(k) {
+    Some(json.Value.Str(x)) => x
+    _ => ""
+  }
+}
+
+fn t(v: json.Value, k: Str) -> Time? {
+  Time.parse_rfc3339(s(v, k))
+}
+
+fn blob_values(i: json.Value) -> BlobSignatureValues {
+  BlobSignatureValues{
+    protocol: s(i, "protocol"), start: t(i, "start"), expiry: t(i, "expiry"), snapshot: t(i, "snapshot"),
+    permissions: s(i, "permissions"), identifier: s(i, "identifier"), container_name: s(i, "container_name"),
+    blob_name: s(i, "blob_name"), directory: s(i, "directory"), cache_control: s(i, "cache_control"),
+    content_disposition: s(i, "content_disposition"), content_encoding: s(i, "content_encoding"),
+    content_language: s(i, "content_language"), content_type: s(i, "content_type"), blob_version: s(i, "blob_version"),
+    authorized_object_id: s(i, "authorized_object_id"), correlation_id: s(i, "correlation_id"),
+  }
+}
+
+test "SAS query strings match azblob's for every vector" {
+  let cred = exported.new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  let doc = json.parse_value(VECTORS)?
+  let udc = exported.new_user_delegation_credential(DEV_ACCOUNT, exported.UserDelegationKey{
+    signed_oid: ZERO_ID, signed_tid: ZERO_ID,
+    signed_start: Time.parse_rfc3339("2026-11-05T00:00:00Z") ?? Time.UNIX_EPOCH,
+    signed_expiry: Time.parse_rfc3339("2026-11-06T00:00:00Z") ?? Time.UNIX_EPOCH,
+    signed_service: "b", signed_version: "2025-05-05", value: Secret.new(s(doc, "udk_value")),
+  })
+  let vs = match doc.get("vectors") {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+  expect(vs.len()) == 8
+  for v in vs {
+    let i = v.get("input") ?? json.Value.Null
+    let got = match s(v, "kind") {
+      "account" => AccountSignatureValues{
+        protocol: s(i, "protocol"), start: t(i, "start"), expiry: t(i, "expiry"), permissions: s(i, "permissions"),
+        ip_range: s(i, "ip_range"), resource_types: s(i, "resource_types"), encryption_scope: s(i, "encryption_scope"),
+      }.sign_with_shared_key(cred)
+      "blob" => blob_values(i).sign_with_shared_key(cred)
+      _ => blob_values(i).sign_with_user_delegation(udc)
+    }
+    let want = s(v, "query")
+    let shown = match got {
+      Ok(q) => q.encode()
+      Err(_) => if want.starts_with("ERROR: ") { want } else { "an error" }
+    }
+    expect("${s(v, "name")}: ${shown}") == "${s(v, "name")}: ${want}"
+  }
+}
+
+test "permissions keep the service's order and refuse unknown letters" {
+  expect(normalize("lrw", ACCOUNT_PERMISSIONS, "p")?) == "rwl"
+  expect(normalize("rq", ACCOUNT_PERMISSIONS, "p").is_err()) == true
+  expect(format_snapshot(Time.parse_rfc3339("2026-11-05T03:04:05.000000100Z") ?? Time.UNIX_EPOCH)) == "2026-11-05T03:04:05.0000001Z"
+}
+
+test "a SAS needs an expiry and permissions, unless a stored policy names them" {
+  let cred = exported.new_shared_key_credential(DEV_ACCOUNT, DEV_KEY)?
+  expect(AccountSignatureValues{permissions: "r", resource_types: "o"}.sign_with_shared_key(cred).is_err()) == true
+  expect(BlobSignatureValues{container_name: "c"}.sign_with_shared_key(cred).is_err()) == true
+  expect(BlobSignatureValues{container_name: "c", identifier: "p"}.sign_with_shared_key(cred).is_ok()) == true
+}

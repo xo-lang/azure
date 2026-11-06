@@ -21,7 +21,11 @@ report() {
 hits=$(echo "$files" | xargs grep -n -I -i -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' 2>/dev/null | grep -v -E '00000000-0000-0000-0000-000000000000' )
 [ -n "$hits" ] && report "GUIDs (subscription, tenant or client ids?)" "$hits"
 
-hits=$(echo "$files" | xargs grep -n -I -E 'AccountKey=[A-Za-z0-9+/]{20}|SharedAccessKey=[A-Za-z0-9+/]{20}|[?&]sig=[A-Za-z0-9%+/]{20}' 2>/dev/null)
+# storage/azblob/sas/testdata/sas_vectors.json holds SAS signed with
+# Azurite's public development key (devstoreaccount1); its test signs
+# each one again with that key and fails on any other, so it is skipped
+# here (gitleaks still scans it)
+hits=$(echo "$files" | grep -v -x 'storage/azblob/sas/testdata/sas_vectors\.json' | xargs grep -n -I -E 'AccountKey=[A-Za-z0-9+/]{20}|SharedAccessKey=[A-Za-z0-9+/]{20}|(^|[?&"])sig=[A-Za-z0-9%+/]{20}' 2>/dev/null)
 [ -n "$hits" ] && report "keys, connection strings or SAS signatures" "$hits"
 
 hits=$(echo "$files" | xargs grep -n -I -E '/U''sers/|/h''ome/[a-z]' 2>/dev/null | grep -v '^scripts/check-public.sh:')

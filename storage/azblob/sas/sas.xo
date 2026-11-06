@@ -1,0 +1,225 @@
+// Shared access signatures for Blob Storage, as azblob's sas package
+// (account.go, service.go, query_params.go; MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): account SAS and service SAS signed
+// with the account key, and user delegation SAS signed with a key the
+// service gives an Entra ID identity. Permissions are normalized to the
+// service's order; unknown letters are an error.
+
+use std/time
+use std/url
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// The service version signed into a SAS when none is given (azblob's).
+pub const VERSION: Str = "2025-05-05"
+
+pub const PROTOCOL_HTTPS: Str = "https"
+pub const PROTOCOL_HTTPS_AND_HTTP: Str = "https,http"
+
+/// Permission letters in the order each SAS kind writes them.
+pub const ACCOUNT_PERMISSIONS: Str = "rwdxylacuptfi"
+pub const CONTAINER_PERMISSIONS: Str = "racwdxltfmeopi"
+pub const BLOB_PERMISSIONS: Str = "racwdxyltmeopi"
+pub const ACCOUNT_RESOURCE_TYPES: Str = "sco"
+
+/// `s`'s letters in `order`'s order; a letter outside it is an error.
+pub fn normalize(s: Str, order: Str, what: Str) -> Str ! Str {
+  for c in s.runes() {
+    if !order.contains("${c}") {
+      return Err("invalid ${what}: '${c}'")
+    }
+  }
+  var out = ""
+  for c in order.runes() {
+    if s.contains("${c}") {
+      out = out + "${c}"
+    }
+  }
+  Ok(out)
+}
+
+/// `yyyy-MM-ddTHH:mm:ssZ`, the SAS time format.
+pub fn format_time(t: Time) -> Str {
+  time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}Z")
+}
+
+/// A snapshot time with 7 fraction digits (`...05.1234567Z`).
+pub fn format_snapshot(t: Time) -> Str {
+  let frac = ((t - Time.UNIX_EPOCH).nanos() % 1000000000) / 100
+  "${time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}")}.${frac.to_str_width(7, zero: true)}Z"
+}
+
+fn opt_time(t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { format_time(x) }) ?? ""
+}
+
+/// An account SAS (Blob service only, as azblob signs it).
+pub struct AccountSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub permissions: Str = ""
+  /// `start` or `start-end` (IP addresses).
+  pub ip_range: Str = ""
+  pub resource_types: Str = ""
+  pub encryption_scope: Str = ""
+}
+
+pub fn (v: AccountSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  let expiry = v.expiry ?? return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  if v.permissions == "" || v.resource_types == "" {
+    return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  }
+  let version = if v.version == "" { VERSION } else { v.version }
+  let perms = normalize(v.permissions, ACCOUNT_PERMISSIONS, "permission character")?
+  let rt = normalize(v.resource_types, ACCOUNT_RESOURCE_TYPES, "resource type character")?
+  let sts = [cred.account_name, perms, "b", rt, opt_time(v.start), format_time(expiry), v.ip_range, v.protocol, version, v.encryption_scope, ""].join("\n")
+  Ok(QueryParameters{
+    version: version, protocol: v.protocol, start: v.start, expiry: Some(expiry), permissions: perms,
+    ip_range: v.ip_range, encryption_scope: v.encryption_scope, services: "b", resource_types: rt,
+    signature: Secret.new(cred.compute_hmac_sha256(sts)),
+  })
+}
+
+/// A service SAS for a container, blob, snapshot, version or directory.
+pub struct BlobSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub snapshot: Time? = None
+  pub permissions: Str = ""
+  pub ip_range: Str = ""
+  /// A stored access policy's name (`si`).
+  pub identifier: Str = ""
+  pub container_name: Str
+  /// "" for a container SAS.
+  pub blob_name: Str = ""
+  /// A directory SAS (`sr=d`, hierarchical namespace).
+  pub directory: Str = ""
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  pub blob_version: Str = ""
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  pub encryption_scope: Str = ""
+}
+
+/// The signed resource (`sr`) and the normalized permissions.
+fn (v: BlobSignatureValues) resource() -> (Str, Str) ! Str {
+  let r = if v.snapshot.is_some() { "bs" } else if v.blob_version != "" { "bv" } else if v.directory != "" { "d" } else if v.blob_name == "" { "c" } else { "b" }
+  let perms = if r == "c" { normalize(v.permissions, CONTAINER_PERMISSIONS, "permission")? } else { normalize(v.permissions, BLOB_PERMISSIONS, "permission")? }
+  Ok((r, perms))
+}
+
+fn canonical_name(account: Str, v: BlobSignatureValues) -> Str {
+  let tail = if v.directory != "" { "/${v.directory}" } else if v.blob_name != "" { "/${v.blob_name.replace("\\", "/")}" } else { "" }
+  "/blob/${account}/${v.container_name}${tail}"
+}
+
+fn directory_depth(d: Str) -> Str {
+  if d == "" { "" } else { "${d.split("/").len()}" }
+}
+
+fn (v: BlobSignatureValues) query(version: Str, resource: Str, perms: Str, sig: Str) -> QueryParameters {
+  QueryParameters{
+    version: version, protocol: v.protocol, start: v.start, expiry: v.expiry, permissions: perms,
+    ip_range: v.ip_range, encryption_scope: v.encryption_scope, resource: resource, identifier: v.identifier,
+    cache_control: v.cache_control, content_disposition: v.content_disposition, content_encoding: v.content_encoding,
+    content_language: v.content_language, content_type: v.content_type, snapshot: v.snapshot,
+    directory_depth: directory_depth(v.directory), authorized_object_id: v.authorized_object_id,
+    unauthorized_object_id: v.unauthorized_object_id, correlation_id: v.correlation_id, signature: Secret.new(sig),
+  }
+}
+
+pub fn (v: BlobSignatureValues) sign_with_shared_key(cred: exported.SharedKeyCredential) -> QueryParameters ! Str {
+  if v.identifier == "" && (v.expiry.is_none() || v.permissions == "") {
+    return Err("service SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let (resource, perms) = v.resource()?
+  let version = if v.version == "" { VERSION } else { v.version }
+  let sts = [
+    perms, opt_time(v.start), opt_time(v.expiry), canonical_name(cred.account_name, v), v.identifier,
+    v.ip_range, v.protocol, version, resource, v.snapshot.map(fn(t: Time) -> Str { format_snapshot(t) }) ?? "",
+    v.encryption_scope, v.cache_control, v.content_disposition, v.content_encoding, v.content_language, v.content_type,
+  ].join("\n")
+  Ok(v.query(version, resource, perms, cred.compute_hmac_sha256(sts)))
+}
+
+pub fn (v: BlobSignatureValues) sign_with_user_delegation(cred: exported.UserDelegationCredential) -> QueryParameters ! Str {
+  if v.expiry.is_none() || v.permissions == "" {
+    return Err("user delegation SAS is missing at least one of these: ExpiryTime or Permissions")
+  }
+  let (resource, perms) = v.resource()?
+  let version = if v.version == "" { VERSION } else { v.version }
+  let k = cred.key
+  let sts = [
+    perms, opt_time(v.start), opt_time(v.expiry), canonical_name(cred.account_name, v),
+    k.signed_oid, k.signed_tid, format_time(k.signed_start), format_time(k.signed_expiry), k.signed_service, k.signed_version,
+    v.authorized_object_id, v.unauthorized_object_id, v.correlation_id,
+    v.ip_range, v.protocol, version, resource, v.snapshot.map(fn(t: Time) -> Str { format_snapshot(t) }) ?? "",
+    v.encryption_scope, v.cache_control, v.content_disposition, v.content_encoding, v.content_language, v.content_type,
+  ].join("\n")
+  let sig = cred.compute_hmac_sha256(sts)?
+  Ok(v.query(version, resource, perms, sig) with {delegation: Some(k)})
+}
+
+/// A signed SAS; `encode` gives the query string. The signature is a
+/// Secret: it never shows in logs or Debug output.
+pub struct QueryParameters {
+  pub version: Str = ""
+  pub services: Str = ""
+  pub resource_types: Str = ""
+  pub protocol: Str = ""
+  pub start: Time? = None
+  pub expiry: Time? = None
+  pub snapshot: Time? = None
+  pub ip_range: Str = ""
+  pub identifier: Str = ""
+  pub resource: Str = ""
+  pub permissions: Str = ""
+  pub delegation: exported.UserDelegationKey? = None
+  pub signature: Secret[Str]
+  pub cache_control: Str = ""
+  pub content_disposition: Str = ""
+  pub content_encoding: Str = ""
+  pub content_language: Str = ""
+  pub content_type: Str = ""
+  pub directory_depth: Str = ""
+  pub authorized_object_id: Str = ""
+  pub unauthorized_object_id: Str = ""
+  pub correlation_id: Str = ""
+  pub encryption_scope: Str = ""
+}
+
+/// The query string, keys sorted, as azblob's QueryParameters.Encode.
+pub fn (p: QueryParameters) encode() -> Str {
+  var pairs: List[(Str, Str)] = [
+    ("sv", p.version), ("ss", p.services), ("srt", p.resource_types), ("spr", p.protocol),
+    ("st", opt_time(p.start)), ("se", opt_time(p.expiry)), ("sip", p.ip_range), ("si", p.identifier),
+    ("sr", p.resource), ("sp", p.permissions),
+  ]
+  if let Some(k) = p.delegation {
+    pairs = pairs + [
+      ("skoid", k.signed_oid), ("sktid", k.signed_tid), ("skt", format_time(k.signed_start)),
+      ("ske", format_time(k.signed_expiry)), ("sks", k.signed_service), ("skv", k.signed_version),
+    ]
+  }
+  pairs = pairs + [
+    ("sig", p.signature.reveal()), ("rscc", p.cache_control), ("rscd", p.content_disposition),
+    ("rsce", p.content_encoding), ("rscl", p.content_language), ("rsct", p.content_type),
+    ("sdd", p.directory_depth), ("saoid", p.authorized_object_id), ("suoid", p.unauthorized_object_id),
+    ("scid", p.correlation_id), ("ses", p.encryption_scope),
+  ]
+  var v = url.values()
+  for (k, x) in pairs {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
+  v.encode()
+}
