@@ -94,5 +94,8 @@ Where it differs from Go v1.4.0:
 
 Not yet: web sockets.
 
+Go names that are Xo keywords: none (Go's `Error.As` method is not
+ported; match on the error's code instead).
+
 Tests run against std/amqptest's in-process broker in its event hub
 mode on the test world's network (`xo test .`).

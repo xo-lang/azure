@@ -112,3 +112,5 @@ Where it differs from Go v1.7.1:
   sets the layout both are written in. Go reads them in map order, so
   its choice varies from run to run. A time outside the range of
   Xo's Time reads as no time, where Go keeps it.
+- Go names that are Xo keywords: the lease clients' `Break` is
+  `break_lease`.

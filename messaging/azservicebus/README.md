@@ -90,5 +90,8 @@ Where admin differs from Go v1.11.0, each a Go bug:
 Durations stay ISO 8601 strings, as Go keeps them. A runtime time is
 None where Go has its zero time (an entity never accessed).
 
+Go names that are Xo keywords: `UnknownRuleFilter.Type` and
+`UnknownRuleAction.Type` are the `type_name` of the `Unknown` variants.
+
 Tests run against std/amqptest's in-process broker on the test world's
 network (`xo test .`).

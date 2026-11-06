@@ -43,3 +43,4 @@ Where it differs from Go v1.0.1:
 - Bearer tokens use azcore's bearer token policy with the Storage scope;
   Go's storage challenge policy (a tenant from a 401 challenge) is not
   ported yet.
+- Go names that are Xo keywords: none.

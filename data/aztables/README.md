@@ -65,3 +65,5 @@ Where it differs from Go v1.4.1:
   `select_fields` (`select` is a keyword), permissions are structs with
   `display()` or letter strings, and errors are `azcore.CallErr`
   (`InvalidInput` for what Go returns as plain errors).
+- Go names that are Xo keywords: the options' `Select` is
+  `select_fields`.

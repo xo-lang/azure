@@ -30,5 +30,6 @@ Where it differs from Go v1.8.3:
 - Not ported yet: Go's container, blob, block blob, append blob, page
   blob and lease clients, batch, and the parallel and checksummed
   transfers.
+- Go names that are Xo keywords: none in what is ported.
 
 Changes: [CHANGELOG.md](CHANGELOG.md).

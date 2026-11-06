@@ -137,3 +137,4 @@ Where it differs from Go v1.5.0:
   `[]`, but a List has no nil, so here both are `null`.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.
+- Go names that are Xo keywords: `VectorIndex.Type` is `index_type`.

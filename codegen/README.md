@@ -89,3 +89,7 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   post-generation transforms.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
+- A Go name whose snake_case form is an Xo keyword or predeclared value
+  (`gen/names.xo` KEYWORDS) gets a trailing `_`: in the generated modules
+  `type_`, `select_`, `target_`, `interface_`, `match_` and `as_`
+  (`Type` is `type_`).
