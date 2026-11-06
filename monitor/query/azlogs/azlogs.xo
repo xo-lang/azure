@@ -1,0 +1,146 @@
+// Azure Monitor Logs queries, a port of Go's sdk/monitor/query/azlogs
+// v1.2.0 (client.go, custom_client.go, cloud_config.go; MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md): Kusto queries against Log
+// Analytics workspaces and Azure resources (REST API v1).
+
+use std/http
+use std/url
+use std/path
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const MODULE: Str = "azlogs"
+pub const VERSION: Str = "v0.1.0"
+/// The REST API version, a path segment of every request.
+pub const API_VERSION: Str = "v1"
+
+/// The key of this service in `cloud.Configuration.services` (Go's
+/// ServiceName).
+pub const SERVICE_NAME: Str = "query/azlogs"
+
+/// The Log Analytics endpoint of each Azure cloud, as Go's
+/// cloud_config.go adds them to azcore's clouds (also the audience).
+fn builtin_service(c: cloud.Configuration) -> cloud.ServiceConfiguration? {
+  let host = if c == cloud.AZURE_PUBLIC {
+    "https://api.loganalytics.io"
+  } else if c == cloud.AZURE_CHINA {
+    "https://api.loganalytics.azure.cn"
+  } else if c == cloud.AZURE_GOVERNMENT {
+    "https://api.loganalytics.us"
+  } else {
+    return None
+  }
+  Some(cloud.ServiceConfiguration{audience: host, endpoint: host})
+}
+
+/// Options of new_client.
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// Client queries Log Analytics workspaces and resources.
+pub struct Client {
+  pipeline: runtime.Pipeline
+  endpoint: Str
+}
+
+/// A client for the cloud in `opts`: its `SERVICE_NAME` entry gives the
+/// endpoint and token audience. Azure's three clouds have one built in;
+/// another cloud without one, or with an empty field, is Go's error.
+pub fn new_client(net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential, opts: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let c = opts.client.cloud
+  let svc = c.services.get(SERVICE_NAME) ?? builtin_service(c) ?? cloud.ServiceConfiguration{audience: "", endpoint: ""}
+  if svc.audience == "" || svc.endpoint == "" {
+    return Err("provided Cloud field is missing Azure Monitor Logs configuration")
+  }
+  let auth = runtime.new_bearer_token_policy(cred, ["${svc.audience}/.default"], clock)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  Ok(Client{pipeline: pl, endpoint: svc.endpoint})
+}
+
+/// Options of Client.query_workspace and Client.query_resource.
+pub struct QueryWorkspaceOptions {
+  /// The `Prefer` header: sent when set, even with nothing in it.
+  pub options: QueryOptions? = None
+}
+
+pub type QueryResourceOptions = QueryWorkspaceOptions
+
+/// Options of Client.query_batch (none yet).
+pub struct QueryBatchOptions {
+}
+
+fn (c: Client) query_request(url_path: Str, body: QueryBody, options: QueryOptions?) -> policy.Request {
+  var headers: List[(Str, Str)] = [("Accept", "application/json")]
+  if let Some(o) = options {
+    headers.push(("Prefer", o.prefer_header()))
+  }
+  headers.push(("Content-Type", "application/json"))
+  policy.Request{method: "POST", url: join_paths("${c.endpoint}/${API_VERSION}", url_path), headers: headers, body: body.to_json().bytes()}
+}
+
+fn (c: Client) send_query(req: policy.Request) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.send(req)?
+  parse_query_results(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type QueryResults: ${e}"))
+}
+
+fn (c: Client) send(req: policy.Request) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status != 200 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+/// Runs `body`'s query against workspace `workspace_id` (with any
+/// `additional_workspaces`). A partial failure is a success whose
+/// `error` is set.
+pub fn (c: Client) query_workspace(workspace_id: Str, body: QueryBody, options: QueryWorkspaceOptions = QueryWorkspaceOptions{}) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
+  if workspace_id == "" {
+    return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
+  }
+  c.send_query(c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+}
+
+/// Runs `body`'s query against the Azure resource `resource_id`
+/// (`/subscriptions/.../providers/...`). As Go, the ID is put in the path
+/// as it is, unescaped and unchecked.
+pub fn (c: Client) query_resource(resource_id: Str, body: QueryBody, options: QueryResourceOptions = QueryResourceOptions{}) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.send_query(c.query_request("/${resource_id}/query", body, options.options))
+}
+
+/// Runs several workspace queries in one request; each answer has its own
+/// status, and a failed one is not an error of the call.
+pub fn (c: Client) query_batch(body: BatchRequest, options: QueryBatchOptions = QueryBatchOptions{}) -> BatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = policy.Request{method: "POST", url: join_paths("${c.endpoint}/${API_VERSION}", "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes()}
+  let resp = c.send(req)?
+  parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+}
+
+/// `root` with `segment` joined to its path, its query kept after it
+/// (Go's runtime.JoinPaths with one path).
+fn join_paths(root: Str, segment: Str) -> Str {
+  var r = root
+  var qps = ""
+  if r.contains("?") {
+    // Go splits on every "?" and keeps the first two parts
+    let parts = r.split("?")
+    r = parts[0]
+    qps = parts[1]
+  }
+  var p = if segment == "" { "" } else { path.clean(segment) }
+  if segment.ends_with("/") && !p.ends_with("/") {
+    p = p + "/"
+  }
+  if qps != "" {
+    p = if p.contains("?") { "${p}&${qps}" } else { "${p}?${qps}" }
+  }
+  if r.ends_with("/") && p.starts_with("/") {
+    r = r[0..r.len() - 1]
+  } else if !r.ends_with("/") && !p.starts_with("/") && !p.starts_with("?") {
+    p = "/" + p
+  }
+  r + p
+}

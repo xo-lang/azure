@@ -61,7 +61,11 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   ReceivedEventData and their AMQP mapping, the connection string
   parser and SAS signer, and the `$management` READ requests of
   `mgmt.go`, hand written over std/amqp; the batch encoding checked
-  against its own), and later the other data plane packages. Each ported file names its source in a header comment.
+  against its own), `sdk/monitor/query/azlogs` v1.2.0,
+  `sdk/monitor/query/azmetrics` v1.3.0 and `sdk/monitor/ingestion/azlogs`
+  v1.1.0 (their clients, options, models, cloud configuration and
+  serialization, hand written; requests checked against their own), and
+  later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:
   initialisms, the package name dropped from type names, `Client` for

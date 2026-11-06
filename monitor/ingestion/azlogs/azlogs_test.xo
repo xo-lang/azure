@@ -1,0 +1,128 @@
+// The Client against a fake data collection endpoint that answers as
+// the Go program's fake does: each request must be Go's, byte for byte,
+// and each result must print as Go printed it (govectors_test.xo).
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const DCE: Str = "https://dce.example.test"
+
+/// Go's credential: each token request logged with its scopes.
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+/// Go's fake: what it answers next, and each request logged as Go logs it.
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[(Int, Str)]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[(Int, Str)].new((204, ""))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for p in ["/{a}/{b}/{c}/{d}", "/{a}/{b}/{c}/{d}/{e}"] {
+    net.handle("POST ${DCE}${p}", h)
+  }
+  f
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003); the
+    // last test checks it
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length on the wire; FakeNet hands the
+  // request over in process, so the recorder writes the body's length
+  hs.push("content-length=${req.body.len()}")
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} https://${req.url.host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  f.log.with(fn(var l: List[Str]) { l.push(line) })
+  let (st, body) = f.next.with(fn(var n: (Int, Str)) -> (Int, Str) { n })
+  http.text(st, body).with_header("Content-Type", "application/json")
+}
+
+fn set_next(f: Fake, st: Int, body: Str) {
+  f.next.with(fn(var n: (Int, Str)) { n = (st, body) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+/// Go's `%v` of an error: nil, the message of an invalid input, or the
+/// errText of a response error.
+fn err_v(r: Result[UploadResponse, azcore.CallErr]) -> Str {
+  match r {
+    Ok(_) => "<nil>"
+    Err(azcore.CallErr.InvalidInput(m)) => m
+    Err(azcore.CallErr.Response(re)) => "response error ${re.status_code} ${re.error_code}"
+    Err(e) => "error ${e.display()}"
+  }
+}
+
+fn opts(c: cloud.Configuration) -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{cloud: c, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+test "every upload sends Go's request and fails as Go's does" {
+  let f = serve(os.net)
+  let cred = Cred{log: f.log}
+  let ic = new_client(os.net, os.clock, os.rand, "${DCE}/", cred, opts(cloud.AZURE_PUBLIC))
+  note(f, "new ${if ic.is_ok() { "<nil>" } else { ic.err() ?? "" }}")
+  let c = ic?
+  note(f, "upload ${err_v(c.upload("dcr-1", "Custom-T_CL", "[{\"TimeGenerated\":\"2026-11-05T03:04:05Z\",\"Msg\":\"<a&b>\"}]".bytes()))}")
+  let gz = Bytes.from_hex("1f8b08") ?? return Err("hex")
+  note(f, "gzip ${err_v(c.upload("dcr 1/x", "Custom T", gz, UploadOptions{content_encoding: Some("gzip")}))}")
+  note(f, "empty rule ${err_v(c.upload("", "s", "".bytes()))}")
+  note(f, "empty stream ${err_v(c.upload("r", "", "".bytes()))}")
+  set_next(f, 400, "{\"error\":{\"code\":\"InvalidStream\",\"message\":\"no stream\"}}")
+  note(f, err_v(c.upload("r", "s", "[]".bytes())))
+  set_next(f, 200, "{}")
+  note(f, "status 200: ${err_v(c.upload("r", "s", "[]".bytes()))}")
+  set_next(f, 204, "")
+  let cc = new_client(os.net, os.clock, os.rand, "${DCE}/base?x=1", cred, opts(cloud.AZURE_CHINA))?
+  note(f, "china ${err_v(cc.upload("r", "s", "[]".bytes()))}")
+  let custom = new_client(os.net, os.clock, os.rand, DCE, cred, opts(cloud.Configuration{authority_host: "https://login.example.test/"}))
+  note(f, "custom cloud ${custom.err() ?? "<nil>"}")
+
+  let got = f.log.with(fn(var l: List[Str]) -> List[Str] { l }).join("\n").split("\n")
+  expect(got.len()) == GO_OUT.len()
+  for (i, want) in GO_OUT.indexed() {
+    expect(got[i]) == want
+  }
+}
+
+test "a custom cloud with the service's entry takes its audience" {
+  let f = serve(os.net)
+  let cred = Cred{log: f.log}
+  let c = cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "https://monitor.example.test", endpoint: ""}}}
+  new_client(os.net, os.clock, os.rand, DCE, cred, opts(c))?.upload("r", "s", "[]".bytes())?
+  expect(f.log.with(fn(var l: List[Str]) -> List[Str] { l })[0]) == "TOKEN https://monitor.example.test/.default"
+}
+
+test "each upload has a request ID, as Xo's pipeline sets one" {
+  let seen = Mutex[List[Str]].new([])
+  os.net.handle("POST ${DCE}/{a}/{b}/{c}/{d}", fn(req: http.Request) -> http.Response {
+    seen.with(fn(var l: List[Str]) { l.push(req.header("x-ms-client-request-id") ?? "") })
+    http.text(204, "")
+  })
+  let c = new_client(os.net, os.clock, os.rand, DCE, Cred{log: Mutex[List[Str]].new([])}, opts(cloud.AZURE_PUBLIC))?
+  c.upload("r", "s", "[]".bytes())?
+  let id = seen.with(fn(var l: List[Str]) -> List[Str] { l })[0]
+  expect(id.len()) == 36
+}

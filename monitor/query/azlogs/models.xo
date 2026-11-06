@@ -1,0 +1,424 @@
+// The models of Go's azlogs v1.2.0 (models.go, models_serde.go,
+// custom_client.go, constants.go), with Go's JSON: request bodies are
+// written as Go's populate and json.Marshal write a map (keys sorted,
+// an unset field left out, `<`, `>` and `&` escaped), and responses are
+// read as Go's UnmarshalJSON methods read them.
+
+use std/json
+use std/time
+
+/// The data type of a column (Go's ColumnType).
+pub type ColumnType struct(Str)
+pub const COLUMN_TYPE_BOOL: ColumnType = ColumnType("bool")
+pub const COLUMN_TYPE_DATETIME: ColumnType = ColumnType("datetime")
+pub const COLUMN_TYPE_DECIMAL: ColumnType = ColumnType("decimal")
+pub const COLUMN_TYPE_DYNAMIC: ColumnType = ColumnType("dynamic")
+pub const COLUMN_TYPE_GUID: ColumnType = ColumnType("guid")
+pub const COLUMN_TYPE_INT: ColumnType = ColumnType("int")
+pub const COLUMN_TYPE_LONG: ColumnType = ColumnType("long")
+pub const COLUMN_TYPE_REAL: ColumnType = ColumnType("real")
+pub const COLUMN_TYPE_STRING: ColumnType = ColumnType("string")
+pub const COLUMN_TYPE_TIMESPAN: ColumnType = ColumnType("timespan")
+
+/// The values of ColumnType this version knows; the service may send others.
+pub fn possible_column_type_values() -> List[ColumnType] {
+  [COLUMN_TYPE_BOOL, COLUMN_TYPE_DATETIME, COLUMN_TYPE_DECIMAL, COLUMN_TYPE_DYNAMIC, COLUMN_TYPE_GUID, COLUMN_TYPE_INT, COLUMN_TYPE_LONG, COLUMN_TYPE_REAL, COLUMN_TYPE_STRING, COLUMN_TYPE_TIMESPAN]
+}
+
+/// An ISO 8601 interval `start/end`, each an RFC 3339 time (Go's
+/// TimeInterval string).
+pub type TimeInterval struct(Str)
+
+const INTERVAL_TIME: Str = "{year}-{month}-{day}T{hour}:{minute}:{second}{offset}"
+
+/// The interval from `start` to `end`, each written in UTC to the second
+/// (Go's NewTimeInterval writes each time's own offset: new_time_interval_in).
+pub fn new_time_interval(start: Time, end: Time) -> TimeInterval {
+  new_time_interval_in(start, time.utc(), end, time.utc())
+}
+
+/// The interval from `start` to `end`, each written in its zone to the
+/// second, as Go's `t.Format(time.RFC3339)` writes a time in its location.
+pub fn new_time_interval_in(start: Time, start_zone: time.Zone, end: Time, end_zone: time.Zone) -> TimeInterval {
+  TimeInterval("${time.format(start, start_zone, INTERVAL_TIME)}/${time.format(end, end_zone, INTERVAL_TIME)}")
+}
+
+/// The interval's start and end, with Go's errors. Each must have an
+/// offset, as Go's time.Parse(time.RFC3339, ...) requires.
+pub fn (i: TimeInterval) values() -> (Time, Time) ! Str {
+  let parts = i.0.split("/")
+  if parts.len() != 2 {
+    return Err("time interval should be in format startISOTime/endISOTime")
+  }
+  let start = parse_rfc3339(parts[0]) ?? return Err("error parsing start time")
+  let end = parse_rfc3339(parts[1]) ?? return Err("error parsing end time")
+  Ok((start, end))
+}
+
+fn parse_rfc3339(s: Str) -> Time? {
+  let t = s.find("T") ?? return None
+  let rest = s[t..s.len()]
+  if !(s.ends_with("Z") || rest.contains("+") || rest.contains("-")) {
+    return None
+  }
+  time.parse(s, time.RFC3339, time.utc()).ok()
+}
+
+/// What the `Prefer` header asks for (Go's QueryOptions).
+pub struct QueryOptions {
+  /// Query execution statistics (`include-statistics=true`).
+  pub statistics: Bool? = None
+  /// Visualization data (`include-render=true`).
+  pub visualization: Bool? = None
+  /// The server timeout in seconds (`wait=N`; the service allows up to 600).
+  pub wait: Int? = None
+}
+
+fn (o: QueryOptions) prefer_header() -> Str {
+  var parts: List[Str] = []
+  if o.statistics == Some(true) {
+    parts.push("include-statistics=true")
+  }
+  if o.visualization == Some(true) {
+    parts.push("include-render=true")
+  }
+  if let Some(w) = o.wait {
+    parts.push("wait=${w}")
+  }
+  parts.join(",")
+}
+
+/// A Kusto query (Go's QueryBody).
+pub struct QueryBody {
+  /// The query to run; Go sends a body without one when it is unset.
+  pub query: Str? = None
+  /// The time span to query, applied with any in the query itself.
+  pub timespan: TimeInterval? = None
+  /// Workspaces to query besides the primary one (`workspaces`; left out
+  /// when empty, where Go writes `[]` for a non-nil empty slice).
+  pub additional_workspaces: List[Str] = []
+}
+
+fn (b: QueryBody) write(var w: json.JsonWriter) {
+  w.object_start()
+  if let Some(q) = b.query {
+    w.key("query")
+    w.str(q)
+  }
+  if let Some(t) = b.timespan {
+    w.key("timespan")
+    w.str(t.0)
+  }
+  if !b.additional_workspaces.is_empty() {
+    w.key("workspaces")
+    w.array_start()
+    for x in b.additional_workspaces {
+      w.str(x)
+    }
+    w.array_end()
+  }
+  w.object_end()
+}
+
+fn (b: QueryBody) to_json() -> Str {
+  var w = json.json_writer()
+  b.write(w)
+  w.finish().to_str_lossy()
+}
+
+/// One query of a batch (Go's BatchQueryRequest). Its method and path
+/// are always `POST` and `/query`, as Go writes them.
+pub struct BatchQueryRequest {
+  /// Unique within the batch; its answer has the same ID.
+  pub id: Str? = None
+  /// The primary workspace (`workspace`).
+  pub workspace_id: Str? = None
+  pub body: QueryBody? = None
+  /// The query's own headers, such as `Prefer` (left out when empty).
+  pub headers: Map[Str, Str] = {}
+}
+
+/// Several queries in one request (Go's BatchRequest).
+pub struct BatchRequest {
+  pub requests: List[BatchQueryRequest] = []
+}
+
+fn (b: BatchRequest) to_json() -> Str {
+  var w = json.json_writer()
+  w.object_start()
+  w.key("requests")
+  w.array_start()
+  for r in b.requests {
+    w.object_start()
+    if let Some(body) = r.body {
+      w.key("body")
+      body.write(w)
+    }
+    if !r.headers.is_empty() {
+      w.key("headers")
+      w.object_start()
+      for k in r.headers.keys().sort() {
+        w.key(k)
+        w.str(r.headers.get(k) ?? "")
+      }
+      w.object_end()
+    }
+    if let Some(id) = r.id {
+      w.key("id")
+      w.str(id)
+    }
+    w.key("method")
+    w.str("POST")
+    w.key("path")
+    w.str("/query")
+    if let Some(ws) = r.workspace_id {
+      w.key("workspace")
+      w.str(ws)
+    }
+    w.object_end()
+  }
+  w.array_end()
+  w.object_end()
+  w.finish().to_str_lossy()
+}
+
+/// A column of a table.
+pub struct Column {
+  pub name: Str? = None
+  pub type_: ColumnType? = None
+}
+
+/// One table of a query's results.
+pub struct Table {
+  pub name: Str? = None
+  pub columns: List[Column] = []
+  /// Each row's cells, in column order, as their JSON values: a `long`
+  /// keeps every digit (Go's `any` reads a number as a float64).
+  pub rows: List[List[json.Value]] = []
+}
+
+/// A query's error (Go's ErrorInfo): its code, and the whole error
+/// object's JSON as the service sent it, which is what it displays.
+pub struct ErrorInfo {
+  pub code: Str
+  pub data: Str
+}
+
+pub fn (e: ErrorInfo) display() -> Str {
+  e.data
+}
+
+/// A query's results (Go's QueryResults and BatchQueryResults).
+pub struct QueryResults {
+  pub tables: List[Table] = []
+  /// Set when the query failed in part (or, in a batch, at all).
+  pub error: ErrorInfo? = None
+  /// The `statistics` JSON as sent, when asked for.
+  pub statistics: Str? = None
+  /// The `render` JSON as sent, when asked for.
+  pub visualization: Str? = None
+}
+
+/// The answer to one query of a batch (Go's BatchQueryResponse).
+pub struct BatchQueryResponse {
+  pub id: Str? = None
+  pub status: Int? = None
+  /// The answer's headers (a null value is left out).
+  pub headers: Map[Str, Str]? = None
+  pub body: QueryResults? = None
+}
+
+/// The answers of a batch (Go's BatchResponse).
+pub struct BatchResponse {
+  pub responses: List[BatchQueryResponse] = []
+}
+
+// Reading responses: each object's members as their raw text, as Go's
+// map[string]json.RawMessage (the last of a repeated key wins), and
+// JSON null as an unset field.
+
+fn raw_fields(text: Str) -> List[(Str, Str)]? ! Str {
+  var r = json.tokens(text.bytes())
+  match r.next() ?? e => return Err(e.display()) {
+    Some(json.Token.ObjectStart) => {}
+    Some(json.Token.Null) => return Ok(None)
+    None => return Err("unexpected end of JSON input")
+    _ => return Err("expected an object")
+  }
+  var out: List[(Str, Str)] = []
+  while r.more() {
+    let k = match r.next() ?? e => return Err(e.display()) {
+      Some(json.Token.Key(k)) => k
+      _ => return Err("expected an object key")
+    }
+    let at = r.offset()
+    r.skip() ?? e => return Err(e.display())
+    let v = text[at..r.offset()].trim_start_chars(": \t\r\n")
+    out = out.filter(fn(f: (Str, Str)) -> Bool { f.0 != k })
+    out.push((k, v))
+  }
+  match r.next() ?? e => return Err(e.display()) {
+    Some(json.Token.ObjectEnd) => {}
+    _ => return Err("expected the end of an object")
+  }
+  if (r.next() ?? e => return Err(e.display())).is_some() {
+    return Err("invalid character after top-level value")
+  }
+  Ok(Some(out))
+}
+
+fn raw_items(text: Str) -> List[Str]? ! Str {
+  var r = json.tokens(text.bytes())
+  match r.next() ?? e => return Err(e.display()) {
+    Some(json.Token.ArrayStart) => {}
+    Some(json.Token.Null) => return Ok(None)
+    _ => return Err("expected an array")
+  }
+  var out: List[Str] = []
+  while r.more() {
+    let at = r.offset()
+    r.skip() ?? e => return Err(e.display())
+    out.push(text[at..r.offset()].trim_start_chars(", \t\r\n"))
+  }
+  Ok(Some(out))
+}
+
+fn value_of(field: Str, raw: Str) -> json.Value ! Str {
+  json.parse_value(raw) ?? e => Err("struct field ${field}: ${e.display()}")
+}
+
+fn str_of(field: Str, v: json.Value) -> Str? ! Str {
+  match v {
+    Null => Ok(None)
+    Str(s) => Ok(Some(s))
+    _ => Err("struct field ${field}: expected a string")
+  }
+}
+
+fn list_of(field: Str, v: json.Value) -> List[json.Value] ! Str {
+  match v {
+    Null => Ok([])
+    List(xs) => Ok(xs)
+    _ => Err("struct field ${field}: expected an array")
+  }
+}
+
+fn object_of(field: Str, v: json.Value) -> List[(Str, json.Value)]? ! Str {
+  match v {
+    Null => Ok(None)
+    Object(fs) => Ok(Some(fs))
+    _ => Err("struct field ${field}: expected an object")
+  }
+}
+
+fn column_of(v: json.Value) -> Column ! Str {
+  var c = Column{}
+  for (k, x) in object_of("Columns", v)? ?? [] {
+    if k == "name" {
+      c = c with {name: str_of("Name", x)?}
+    } else if k == "type" {
+      c = c with {type_: str_of("Type", x)?.map(fn(s: Str) -> ColumnType { ColumnType(s) })}
+    }
+  }
+  Ok(c)
+}
+
+fn table_of(v: json.Value) -> Table ! Str {
+  var t = Table{}
+  for (k, x) in object_of("Tables", v)? ?? [] {
+    if k == "name" {
+      t = t with {name: str_of("Name", x)?}
+    } else if k == "columns" {
+      var cols: List[Column] = []
+      for c in list_of("Columns", x)? {
+        cols.push(column_of(c)?)
+      }
+      t = t with {columns: cols}
+    } else if k == "rows" {
+      var rows: List[List[json.Value]] = []
+      for row in list_of("Rows", x)? {
+        rows.push(list_of("Rows", row)?)
+      }
+      t = t with {rows: rows}
+    }
+  }
+  Ok(t)
+}
+
+/// Go's ErrorInfo.UnmarshalJSON: the raw text, and `Code` as Go's
+/// json.Unmarshal finds it (any key equal to `code` ignoring case).
+fn error_of(raw: Str) -> ErrorInfo? ! Str {
+  var code = ""
+  match value_of("Error", raw)? {
+    Null => return Ok(None)
+    Object(fs) => {
+      for (k, x) in fs {
+        if k.to_lower() == "code" {
+          code = str_of("Error", x)? ?? code
+        }
+      }
+    }
+    _ => return Err("struct field Error: expected an object")
+  }
+  Ok(Some(ErrorInfo{code: code, data: raw}))
+}
+
+fn parse_query_results(text: Str) -> QueryResults ! Str {
+  var q = QueryResults{}
+  for (k, raw) in raw_fields(text)? ?? [] {
+    if k == "tables" {
+      var ts: List[Table] = []
+      for t in list_of("Tables", value_of("Tables", raw)?)? {
+        ts.push(table_of(t)?)
+      }
+      q = q with {tables: ts}
+    } else if k == "error" {
+      q = q with {error: error_of(raw)?}
+    } else if k == "statistics" && raw != "null" {
+      q = q with {statistics: Some(raw)}
+    } else if k == "render" && raw != "null" {
+      q = q with {visualization: Some(raw)}
+    }
+  }
+  Ok(q)
+}
+
+fn parse_batch_response(text: Str) -> BatchResponse ! Str {
+  var out: List[BatchQueryResponse] = []
+  for (k, raw) in raw_fields(text)? ?? [] {
+    if k != "responses" {
+      continue
+    }
+    for item in raw_items(raw)? ?? [] {
+      var r = BatchQueryResponse{}
+      for (rk, rv) in raw_fields(item)? ?? [] {
+        if rk == "id" {
+          r = r with {id: str_of("ID", value_of("ID", rv)?)?}
+        } else if rk == "status" {
+          r = r with {status: match value_of("Status", rv)? {
+            Null => None
+            Int(n) => if n >= -2147483648 && n <= 2147483647 { Some(n) } else { return Err("struct field Status: out of range") }
+            _ => return Err("struct field Status: expected an integer")
+          }}
+        } else if rk == "headers" {
+          r = r with {headers: match object_of("Headers", value_of("Headers", rv)?)? {
+            None => None
+            Some(fs) => {
+              var m: Map[Str, Str] = {}
+              for (hk, hv) in fs {
+                if let Some(s) = str_of("Headers", hv)? {
+                  m[hk] = s
+                }
+              }
+              Some(m)
+            }
+          }}
+        } else if rk == "body" {
+          r = r with {body: if rv == "null" { None } else { Some(parse_query_results(rv) ?? e => return Err("struct field Body: ${e}")) }}
+        }
+      }
+      out.push(r)
+    }
+  }
+  Ok(BatchResponse{responses: out})
+}

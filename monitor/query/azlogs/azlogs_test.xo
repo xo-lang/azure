@@ -1,0 +1,228 @@
+// The Client against a fake Log Analytics service that answers as the
+// Go program's fake does: each request must be Go's, byte for byte, and
+// each result must print as Go printed it (govectors_test.xo). Where the
+// port differs from Go on purpose, the test says so.
+
+use std/http
+use std/json
+use std/testing
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+/// Go's credential: each token request logged with its scopes.
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+/// Go's fake: what it answers next, and each request logged as Go logs it.
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[(Int, Str)]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[(Int, Str)].new((200, ""))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for host in ["https://api.loganalytics.io", "https://api.loganalytics.us"] {
+    net.handle("POST ${host}/{rest...}", h)
+  }
+  f
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length on the wire; FakeNet hands the
+  // request over in process, so the recorder writes the body's length
+  hs.push("content-length=${req.body.len()}")
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} https://${req.url.host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  f.log.with(fn(var l: List[Str]) { l.push(line) })
+  let (st, body) = f.next.with(fn(var n: (Int, Str)) -> (Int, Str) { n })
+  http.text(st, body).with_header("Content-Type", "application/json")
+}
+
+fn set_next(f: Fake, st: Int, body: Str) {
+  f.next.with(fn(var n: (Int, Str)) { n = (st, body) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+/// Go's `%v` of a call's error, or errText's form of a response error.
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+fn err_v[T](r: Result[T, azcore.CallErr]) -> Str {
+  match r {
+    Ok(_) => "<nil>"
+    Err(e) => err_text(e)
+  }
+}
+
+/// A JSON value as Go's json.Marshal writes the `any` it decoded: an
+/// object's keys sorted, `<`, `>` and `&` escaped.
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer()
+  w.value(sorted(v)) ?? _ => return "marshal error"
+  w.finish().to_str_lossy()
+}
+
+fn sorted(v: json.Value) -> json.Value {
+  match v {
+    List(xs) => json.Value.List(xs.map(sorted))
+    Object(fs) => json.Value.Object(fs.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }).map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sorted(f.1)) }))
+    _ => v
+  }
+}
+
+fn columns_json(cs: List[Column]) -> Str {
+  go_json(json.Value.List(cs.map(fn(c: Column) -> json.Value {
+    var fs: List[(Str, json.Value)] = []
+    if let Some(n) = c.name {
+      fs.push(("name", json.Value.Str(n)))
+    }
+    if let Some(t) = c.type_ {
+      fs.push(("type", json.Value.Str(t.0)))
+    }
+    json.Value.Object(fs)
+  })))
+}
+
+fn rows_json(rows: List[List[json.Value]]) -> Str {
+  go_json(json.Value.List(rows.map(fn(r: List[json.Value]) -> json.Value { json.Value.List(r) })))
+}
+
+fn opts(c: cloud.Configuration) -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{cloud: c, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+const RESULTS: Str = "{\"tables\":[{\"name\":\"PrimaryResult\",\"columns\":[{\"name\":\"TimeGenerated\",\"type\":\"datetime\"},{\"name\":\"Count\",\"type\":\"long\"},{\"name\":\"Rate\",\"type\":\"real\"},{\"name\":\"Tags\",\"type\":\"dynamic\"},{\"name\":\"Ok\",\"type\":\"bool\"},{\"name\":\"Msg\",\"type\":\"string\"}],\"rows\":[[\"2026-11-05T03:04:05Z\",9007199254740993,0.5,{\"a\":[1,2]},true,\"x<y\"],[null,1,null,null,false,\"\"]]}],\"statistics\":{\"query\":{\"executionTime\":0.25}},\"render\":{\"visualization\":\"table\"},\"error\":{\"code\":\"PartialError\",\"message\":\"some\",\"details\":[{\"code\":\"Inner\"}]}}"
+
+fn rfc3339_nano(t: Time) -> Str {
+  t.format_rfc3339()
+}
+
+test "every query sends Go's request and reads back what Go reads" {
+  let f = serve(os.net)
+  let cred = Cred{log: f.log}
+  let start = Time.parse_rfc3339("2026-11-05T03:04:05Z") ?? return Err("start")
+  let end = Time.parse_rfc3339("2026-11-06T02:04:05Z") ?? return Err("end")
+  let ti = new_time_interval_in(start, time.utc(), end, time.fixed("x", 1h))
+  note(f, "interval ${ti.0}")
+  for t in [ti, TimeInterval("2026-11-05T03:04:05Z"), TimeInterval("a/b"), TimeInterval("2026-11-05T03:04:05Z/x")] {
+    match t.values() {
+      Ok((a, z)) => note(f, "values \"${t.0}\" ${rfc3339_nano(a)} ${rfc3339_nano(z)}")
+      Err(e) => note(f, "values \"${t.0}\" err ${e}")
+    }
+  }
+  set_next(f, 200, RESULTS)
+  let lcr = new_client(os.net, os.clock, os.rand, cred, opts(cloud.AZURE_PUBLIC))
+  note(f, "new ${lcr.err() ?? "<nil>"}")
+  let lc = lcr?
+  match lc.query_workspace("ws 1/x", QueryBody{query: Some("T | take 5"), timespan: Some(ti), additional_workspaces: ["w2", "w3"]}, QueryWorkspaceOptions{options: Some(QueryOptions{statistics: Some(true), visualization: Some(true), wait: Some(600)})}) {
+    Ok(r) => {
+      let t = r.tables[0]
+      note(f, "table ${t.name ?? ""} cols ${columns_json(t.columns)} rows ${rows_json(t.rows)}")
+      let e = r.error ?? return Err("no error")
+      note(f, "stats ${r.statistics ?? ""} render ${r.visualization ?? ""} error ${e.code} ${e.display()}")
+    }
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 200, "{\"tables\":[]}")
+  note(f, "prefer empty ${err_v(lc.query_workspace("ws", QueryBody{query: Some("q")}, QueryWorkspaceOptions{options: Some(QueryOptions{})}))}")
+  note(f, "no query ${err_v(lc.query_workspace("ws", QueryBody{}, QueryWorkspaceOptions{options: Some(QueryOptions{statistics: Some(false), wait: Some(-1)})}))}")
+  note(f, "empty workspace ${err_v(lc.query_workspace("", QueryBody{query: Some("q")}))}")
+  for rid in ["/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/a b", "subscriptions/s1/x", ""] {
+    note(f, "resource \"${rid}\" ${err_v(lc.query_resource(rid, QueryBody{query: Some("q")}, QueryResourceOptions{options: Some(QueryOptions{visualization: Some(true)})}))}")
+  }
+  set_next(f, 200, "{\"responses\":[{\"id\":\"1\",\"status\":200,\"headers\":{\"x\":\"y\"},\"body\":${RESULTS}},{\"id\":\"2\",\"status\":400,\"body\":{\"error\":{\"code\":\"BadArgumentError\",\"message\":\"bad\"}}}]}")
+  let br = lc.query_batch(BatchRequest{requests: [
+    BatchQueryRequest{id: Some("1"), workspace_id: Some("w1"), body: Some(QueryBody{query: Some("q1"), timespan: Some(ti)}), headers: {"Prefer": "wait=10"}},
+    BatchQueryRequest{id: Some("2"), workspace_id: Some("w2"), body: Some(QueryBody{query: Some("q2")})},
+  ]})
+  match br {
+    Ok(b) => {
+      for x in b.responses {
+        let body = x.body ?? QueryResults{}
+        let e = match body.error {
+          Some(ei) => "${ei.code} ${ei.display()}"
+          None => ""
+        }
+        let hs = match x.headers {
+          Some(m) => go_json(json.Value.Object(m.keys().sort().map(fn(k: Str) -> (Str, json.Value) { (k, json.Value.Str(m.get(k) ?? "")) })))
+          None => "null"
+        }
+        note(f, "batch ${x.id ?? ""} ${x.status ?? 0} headers ${hs} tables ${body.tables.len()} error ${e}")
+      }
+    }
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 403, "{\"error\":{\"code\":\"InsufficientAccessError\",\"message\":\"no\"}}")
+  note(f, err_v(lc.query_workspace("ws", QueryBody{query: Some("q")})))
+  set_next(f, 200, "{\"tables\":")
+  note(f, "bad json ${err_v(lc.query_workspace("ws", QueryBody{query: Some("q")}))}")
+  let custom = new_client(os.net, os.clock, os.rand, cred, opts(cloud.Configuration{authority_host: "https://login.example.test/"}))
+  note(f, "custom cloud ${custom.err() ?? "<nil>"}")
+  set_next(f, 200, "{}")
+  let gc = new_client(os.net, os.clock, os.rand, cred, opts(cloud.AZURE_GOVERNMENT))?
+  note(f, "gov ${err_v(gc.query_workspace("ws", QueryBody{query: Some("q")}))}")
+
+  let got = f.log.with(fn(var l: List[Str]) -> List[Str] { l }).join("\n").split("\n")
+  let want = GO_OUT.map(fn(w: Str) -> Str {
+    // Xo's Time has no zone: the end Go parsed keeps its +01:00, Xo's is
+    // the same instant in UTC
+    let v = w.replace("Z 2026-11-06T03:04:05+01:00", "Z 2026-11-06T02:04:05Z")
+      // a long keeps every digit, where Go's any rounds it to a float64
+      .replace(",9007199254740992,", ",9007199254740993,")
+    // Go's decoder error; Xo's says the same of its own reader
+    if v.starts_with("bad json unmarshalling type *azlogs.QueryResults: ") {
+      "bad json unmarshalling type QueryResults: at $: invalid JSON: unexpected EOF"
+    } else {
+      v
+    }
+  })
+  expect(got.join("\n")) == want.join("\n")
+}
+
+test "a cloud's own entry gives the endpoint and the audience" {
+  let f = serve(os.net)
+  let c = cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "https://aud.example.test", endpoint: "https://api.loganalytics.io/base"}}}
+  set_next(f, 200, "{\"tables\":[],\"statistics\":null,\"render\":null,\"error\":null}")
+  let r = new_client(os.net, os.clock, os.rand, Cred{log: f.log}, opts(c))?.query_workspace("w", QueryBody{query: Some("q")})?
+  expect(r.statistics.is_none()) == true
+  expect(r.error.is_none()) == true
+  let log = f.log.with(fn(var l: List[Str]) -> List[Str] { l })
+  expect(log[0]) == "TOKEN https://aud.example.test/.default"
+  expect(log[1].split("\n")[0]) == "REQ POST https://api.loganalytics.io/base/v1/workspaces/w/query"
+  // an entry with an empty field is Go's error
+  let half = cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "https://aud.example.test", endpoint: ""}}}
+  expect(new_client(os.net, os.clock, os.rand, Cred{log: f.log}, opts(half)).err()) == Some("provided Cloud field is missing Azure Monitor Logs configuration")
+}
+
+test "a time without an offset is not RFC 3339, as Go's time.Parse says" {
+  expect(TimeInterval("2026-11-05T03:04:05/2026-11-06T03:04:05Z").values().err()) == Some("error parsing start time")
+  expect(TimeInterval("2026-11-05T03:04:05Z/2026-11-06T03:04:05.5-02:00").values().is_ok()) == true
+  expect(new_time_interval(Time.from_unix_millis(1793847845500), Time.from_unix_millis(1793934245000)).0) == "2026-11-05T03:04:05Z/2026-11-06T03:04:05Z"
+}

@@ -1,0 +1,123 @@
+// The Client against a fake metrics service that answers as the Go
+// program's fake does: each request must be Go's, byte for byte, and each
+// result must print as Go printed it (govectors_test.xo). Where the port
+// differs from Go on purpose, the test says so.
+
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+/// Go's credential: each token request logged with its scopes.
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+/// Go's fake: what it answers next, and each request logged as Go logs it.
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[(Int, Str)]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[(Int, Str)].new((200, ""))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for host in ["https://westus.metrics.monitor.azure.com", "https://m.example.test"] {
+    net.handle("POST ${host}/{rest...}", h)
+  }
+  f
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length on the wire; FakeNet hands the
+  // request over in process, so the recorder writes the body's length
+  hs.push("content-length=${req.body.len()}")
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} https://${req.url.host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  f.log.with(fn(var l: List[Str]) { l.push(line) })
+  let (st, body) = f.next.with(fn(var n: (Int, Str)) -> (Int, Str) { n })
+  http.text(st, body).with_header("Content-Type", "application/json")
+}
+
+fn set_next(f: Fake, st: Int, body: Str) {
+  f.next.with(fn(var n: (Int, Str)) { n = (st, body) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+/// Go's `%v` of a call's error, or errText's form of a response error.
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+fn err_v[T](r: Result[T, azcore.CallErr]) -> Str {
+  match r {
+    Ok(_) => "<nil>"
+    Err(e) => err_text(e)
+  }
+}
+
+fn opts(c: cloud.Configuration, api: Str = "") -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{cloud: c, api_version: api, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+const METRICS: Str = "{\"values\":[{\"starttime\":\"2026-11-05T00:00:00Z\",\"endtime\":\"2026-11-05T01:00:00Z\",\"interval\":\"PT1M\",\"namespace\":\"Microsoft.Storage/storageAccounts\",\"resourceregion\":\"westus\",\"resourceid\":\"/subscriptions/s1/r1\",\"value\":[{\"id\":\"m1\",\"type\":\"Microsoft.Insights/metrics\",\"name\":{\"value\":\"Ingress\",\"localizedValue\":\"Ingress\"},\"displayDescription\":\"d\",\"unit\":\"Bytes\",\"timeseries\":[{\"metadatavalues\":[{\"name\":{\"value\":\"GeoType\"},\"value\":\"Primary\"}],\"data\":[{\"timeStamp\":\"2026-11-05T00:00:00Z\",\"total\":1.5,\"average\":0.25},{\"timeStamp\":\"2026-11-05T00:01:00.1234567\",\"count\":3}]}],\"errorCode\":\"Success\"}]}]}"
+
+test "every query sends Go's request and reads back what Go reads" {
+  let f = serve(os.net)
+  let cred = Cred{log: f.log}
+  set_next(f, 200, METRICS)
+  let mcr = new_client(os.net, os.clock, os.rand, "https://westus.metrics.monitor.azure.com/", cred, opts(cloud.AZURE_PUBLIC))
+  note(f, "new ${mcr.err() ?? "<nil>"}")
+  let mc = mcr?
+  match mc.query_resources("s 1", "Microsoft.Storage/storageAccounts", ["Ingress", "Egress"], ResourceIDList{resource_ids: ["/subscriptions/s1/r1", "/subscriptions/s1/r2"]}, QueryResourcesOptions{aggregation: Some("average,total"), start_time: Some("2026-11-05T00:00:00Z"), end_time: Some("2026-11-05T01:00:00Z"), interval: Some("PT1M"), filter: Some("GeoType eq '*'"), order_by: Some("total desc"), roll_up_by: Some("GeoType"), top: Some(3)}) {
+    Ok(r) => note(f, "metrics ${json.encode_str(r)}")
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 200, "{\"values\":[]}")
+  note(f, "minimal ${err_v(mc.query_resources("s1", "ns", [], ResourceIDList{}))}")
+  note(f, "empty sub ${err_v(mc.query_resources("", "ns", ["a"], ResourceIDList{}))}")
+  let ac = new_client(os.net, os.clock, os.rand, "https://m.example.test/base", cred, opts(cloud.AZURE_CHINA, "2023-10-01"))?
+  note(f, "china api ${err_v(ac.query_resources("s1", "ns", ["a"], ResourceIDList{resource_ids: ["r"]}))}")
+  set_next(f, 200, "{\"values\":[{\"value\":[{\"timeseries\":[{\"data\":[{\"timeStamp\":\"bad\"}]}]}]}]}")
+  note(f, "bad time ${err_v(mc.query_resources("s1", "ns", ["a"], ResourceIDList{}))}")
+  set_next(f, 400, "{\"error\":{\"code\":\"BadRequest\",\"message\":\"x\"}}")
+  note(f, err_v(mc.query_resources("s1", "ns", ["a"], ResourceIDList{})))
+  let custom = new_client(os.net, os.clock, os.rand, "https://m.example.test", cred, opts(cloud.Configuration{authority_host: "https://login.example.test/"}))
+  note(f, "custom cloud ${custom.err() ?? "<nil>"}")
+
+  let got = f.log.with(fn(var l: List[Str]) -> List[Str] { l }).join("\n").split("\n")
+  let want = GO_OUT.map(fn(w: Str) -> Str {
+    // Go's decoder error names each struct on the way down; Xo's names
+    // the JSON path
+    if w.starts_with("bad time ") {
+      "bad time unmarshalling type MetricResults: at \$.values[0].value[0].timeseries[0].data[0].timeStamp: invalid date-time \"bad\""
+    } else {
+      w
+    }
+  })
+  expect(got.join("\n")) == want.join("\n")
+}
