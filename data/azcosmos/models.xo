@@ -94,6 +94,74 @@ pub struct IndexingPolicy {
   pub excluded_paths: List[ExcludedPath] = []
   pub spatial_indexes: List[SpatialIndex] = []
   pub composite_indexes: List[List[CompositeIndex]] = []
+  pub vector_indexes: List[VectorIndex] = []
+  pub full_text_indexes: List[FullTextIndex] = []
+}
+
+/// A vector index on a path in the vector embedding policy.
+pub struct VectorIndex {
+  pub path: Str
+  /// `flat`, `quantizedFlat` or `diskANN` (VECTOR_INDEX_TYPE_*).
+  pub index_type: Str
+}
+
+pub const VECTOR_INDEX_TYPE_FLAT: Str = "flat"
+pub const VECTOR_INDEX_TYPE_QUANTIZED_FLAT: Str = "quantizedFlat"
+pub const VECTOR_INDEX_TYPE_DISK_ANN: Str = "diskANN"
+
+/// A full text index on a path in the full text policy.
+pub struct FullTextIndex {
+  pub path: Str
+}
+
+/// The container's vector embeddings.
+pub struct VectorEmbeddingPolicy {
+  /// Written as null when empty (Go's nil slice).
+  pub vector_embeddings: List[VectorEmbedding] = []
+}
+
+pub struct VectorEmbedding {
+  pub path: Str
+  /// VECTOR_DATA_TYPE_*.
+  pub data_type: Str
+  /// VECTOR_DISTANCE_FUNCTION_*.
+  pub distance_function: Str
+  pub dimensions: Int
+}
+
+pub const VECTOR_DATA_TYPE_FLOAT32: Str = "float32"
+pub const VECTOR_DATA_TYPE_FLOAT16: Str = "float16"
+pub const VECTOR_DATA_TYPE_INT8: Str = "int8"
+pub const VECTOR_DATA_TYPE_UINT8: Str = "uint8"
+pub const VECTOR_DISTANCE_FUNCTION_COSINE: Str = "cosine"
+pub const VECTOR_DISTANCE_FUNCTION_DOT_PRODUCT: Str = "dotproduct"
+pub const VECTOR_DISTANCE_FUNCTION_EUCLIDEAN: Str = "euclidean"
+
+/// The container's full text paths and default language.
+pub struct FullTextPolicy {
+  pub default_language: Str = ""
+  /// Written as null when empty (Go's nil slice).
+  pub full_text_paths: List[FullTextPath] = []
+}
+
+pub struct FullTextPath {
+  pub path: Str
+  pub language: Str = ""
+}
+
+/// `xs` as Go writes a slice: null when empty (nil).
+fn nil_list(xs: List[Str]) -> Str {
+  if xs.is_empty() { "null" } else { "[${xs.join(",")}]" }
+}
+
+fn (p: VectorEmbeddingPolicy) to_json() -> Str {
+  let es = p.vector_embeddings.map(fn(e: VectorEmbedding) -> Str { "{\"path\":${jstr(e.path)},\"dataType\":${jstr(e.data_type)},\"distanceFunction\":${jstr(e.distance_function)},\"dimensions\":${e.dimensions}}" })
+  "{\"vectorEmbeddings\":${nil_list(es)}}"
+}
+
+fn (p: FullTextPolicy) to_json() -> Str {
+  let ps = p.full_text_paths.map(fn(x: FullTextPath) -> Str { "{\"path\":${jstr(x.path)},\"language\":${jstr(x.language)}}" })
+  "{\"defaultLanguage\":${jstr(p.default_language)},\"fullTextPaths\":${nil_list(ps)}}"
 }
 
 fn path_json(p: Str) -> Str {
@@ -111,6 +179,12 @@ pub fn (p: IndexingPolicy) to_json() -> Str {
   if !p.composite_indexes.is_empty() {
     let one = fn(xs: List[CompositeIndex]) -> Str { "[${xs.map(fn(x: CompositeIndex) -> Str { "{\"path\":${jstr(x.path)},\"order\":${jstr(x.order)}}" }).join(",")}]" }
     out = out + ",\"compositeIndexes\":[${p.composite_indexes.map(one).join(",")}]"
+  }
+  if !p.vector_indexes.is_empty() {
+    out = out + ",\"vectorIndexes\":[${p.vector_indexes.map(fn(x: VectorIndex) -> Str { "{\"path\":${jstr(x.path)},\"type\":${jstr(x.index_type)}}" }).join(",")}]"
+  }
+  if !p.full_text_indexes.is_empty() {
+    out = out + ",\"fullTextIndexes\":[${p.full_text_indexes.map(fn(x: FullTextIndex) -> Str { path_json(x.path) }).join(",")}]"
   }
   out + "}"
 }
@@ -143,6 +217,8 @@ pub struct ContainerProperties {
   pub indexing_policy: IndexingPolicy? = None
   pub unique_key_policy: UniqueKeyPolicy? = None
   pub conflict_resolution_policy: ConflictResolutionPolicy? = None
+  pub vector_embedding_policy: VectorEmbeddingPolicy? = None
+  pub full_text_policy: FullTextPolicy? = None
 }
 
 pub fn (p: ContainerProperties) to_json() -> Str {
@@ -159,6 +235,8 @@ pub fn (p: ContainerProperties) to_json() -> Str {
     if c.resolution_procedure != "" { cr = cr + ",\"conflictResolutionProcedure\":${jstr(c.resolution_procedure)}" }
     out = out + ",\"conflictResolutionPolicy\":${cr}}"
   }
+  if let Some(v) = p.vector_embedding_policy { out = out + ",\"vectorEmbeddingPolicy\":${v.to_json()}" }
+  if let Some(f) = p.full_text_policy { out = out + ",\"fullTextPolicy\":${f.to_json()}" }
   out + "}"
 }
 
@@ -199,6 +277,8 @@ fn indexing_of(v: json.Value) -> IndexingPolicy {
         _ => []
       }
     }),
+    vector_indexes: list_of(v, "vectorIndexes").map(fn(x: json.Value) -> VectorIndex { VectorIndex{path: str_of(x, "path"), index_type: str_of(x, "type")} }),
+    full_text_indexes: list_of(v, "fullTextIndexes").map(fn(x: json.Value) -> FullTextIndex { FullTextIndex{path: str_of(x, "path")} }),
   }
 }
 
@@ -211,6 +291,8 @@ fn container_of(v: json.Value) -> ContainerProperties {
     analytical_store_time_to_live_in_seconds: int_of(v, "analyticalStorageTtl"),
     indexing_policy: v.get("indexingPolicy").map(indexing_of),
     unique_key_policy: v.get("uniqueKeyPolicy").map(fn(u: json.Value) -> UniqueKeyPolicy { UniqueKeyPolicy{unique_keys: list_of(u, "uniqueKeys").map(fn(k: json.Value) -> UniqueKey { UniqueKey{paths: strs_of(k, "paths")} })} }),
+    vector_embedding_policy: v.get("vectorEmbeddingPolicy").map(fn(x: json.Value) -> VectorEmbeddingPolicy { VectorEmbeddingPolicy{vector_embeddings: list_of(x, "vectorEmbeddings").map(fn(e: json.Value) -> VectorEmbedding { VectorEmbedding{path: str_of(e, "path"), data_type: str_of(e, "dataType"), distance_function: str_of(e, "distanceFunction"), dimensions: int_of(e, "dimensions") ?? 0} })} }),
+    full_text_policy: v.get("fullTextPolicy").map(fn(x: json.Value) -> FullTextPolicy { FullTextPolicy{default_language: str_of(x, "defaultLanguage"), full_text_paths: list_of(x, "fullTextPaths").map(fn(e: json.Value) -> FullTextPath { FullTextPath{path: str_of(e, "path"), language: str_of(e, "language")} })} }),
     conflict_resolution_policy: v.get("conflictResolutionPolicy").map(fn(c: json.Value) -> ConflictResolutionPolicy { ConflictResolutionPolicy{mode: str_of(c, "mode"), resolution_path: str_of(c, "conflictResolutionPath"), resolution_procedure: str_of(c, "conflictResolutionProcedure")} }),
   }
 }

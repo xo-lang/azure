@@ -24,8 +24,9 @@ What it does:
   on is not retried again by azcore's retry policy; 429 is left to it.
 - Databases: create (with manual or autoscale throughput), read,
   delete, and the query pager.
-- Containers: create (partition key definition, indexing policy,
-  unique keys, conflict resolution, time to live, throughput), read,
+- Containers: create (partition key definition, indexing policy with
+  vector and full text indexes, unique keys, conflict resolution, time
+  to live, vector embedding and full text policies, throughput), read,
   replace, delete, and the query pager.
 - Items as JSON text: create, upsert, replace, read, delete, patch (add,
   set, replace, remove, increment, with a condition), and the query
@@ -131,6 +132,8 @@ Where it differs from Go v1.5.0:
 - Throughput options' ETag conditions go on every request of the
   operation, the offer query included, as Go sends them. The offer
   replace writes the offer's strings as JSON strings (Go uses `%s`).
-- Not ported yet: vector and full text policies.
+- An empty list of vector embeddings or full text paths is written as
+  `null`, as Go writes a nil slice; Go writes a decoded empty one as
+  `[]`, but a List has no nil, so here both are `null`.
 - Options are Xo's: optional values are `T?`, JSON values are
   `json.Value`, items are JSON text, and errors are `azcore.CallErr`.
