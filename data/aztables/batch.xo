@@ -1,0 +1,138 @@
+// Transactions (entity group batches), as aztables's
+// transactional_batch.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): one changeset in a multipart/mixed POST to `$batch`, each
+// action an HTTP request written as Go writes it.
+//
+// Go writes each part's headers with http.Header.Get on keys it set
+// without canonicalizing them, so `DataServiceVersion` and
+// `x-ms-version` go with empty values; the service takes that, and the
+// parts here are the same bytes. Unlike Go, keys are written with `'`
+// doubled, as the single-entity calls write them (Go leaves a quote in
+// a batch key as it is, which ends the key literal early).
+
+
+use std/json
+use std/uuid
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+pub const TRANSACTION_TYPE_ADD: Str = "add"
+pub const TRANSACTION_TYPE_UPDATE_MERGE: Str = "updatemerge"
+pub const TRANSACTION_TYPE_UPDATE_REPLACE: Str = "updatereplace"
+pub const TRANSACTION_TYPE_DELETE: Str = "delete"
+pub const TRANSACTION_TYPE_INSERT_MERGE: Str = "insertmerge"
+pub const TRANSACTION_TYPE_INSERT_REPLACE: Str = "insertreplace"
+
+/// One action of a transaction: its type, the entity as JSON text, and
+/// for an update or a delete the ETag it must have.
+pub struct TransactionAction {
+  pub action_type: Str
+  pub entity: Str
+  pub if_match: Str? = None
+}
+
+pub struct SubmitTransactionOptions {}
+
+pub const ERR_EMPTY_TRANSACTION: Str = "transaction cannot be empty"
+
+/// The changeset part of one action: its request line, headers sorted as
+/// Go sorts the raw keys, and body.
+fn (t: Client) action_part(a: TransactionAction, cosmos: Bool) -> Str ! azcore.CallErr {
+  let fields = entity_of(a.entity)?
+  let pk = match field(fields, "PartitionKey") {
+    Some(json.Value.Str(s)) => s
+    Some(_) => return Err(azcore.CallErr.InvalidInput("entity properties must contain a PartitionKey property"))
+    None => return Err(azcore.CallErr.InvalidInput("entity properties must contain a PartitionKey property"))
+  }
+  let rk = match field(fields, "RowKey") {
+    Some(json.Value.Str(s)) => s
+    Some(_) => return Err(azcore.CallErr.InvalidInput("entity properties must contain a RowKey property"))
+    None => return Err(azcore.CallErr.InvalidInput("entity properties must contain a RowKey property"))
+  }
+  let format = [("$format", METADATA_FORMAT_MINIMAL)]
+  var hs: List[(Str, Str)] = [("DataServiceVersion", ""), ("x-ms-version", "")]
+  var body = ""
+  var method = ""
+  var u = ""
+  match a.action_type {
+    "delete" => {
+      method = "DELETE"
+      u = with_query(t.entity_url(pk, rk), format)
+      hs = hs + [("If-Match", a.if_match ?? "*"), ("Accept", ACCEPT_MINIMAL)]
+    }
+    "add" => {
+      method = "POST"
+      u = with_query(join_paths(t.core.endpoint, url_path_escape(t.name)), format)
+      body = canonical_entity(fields)?
+      hs = hs + [("Prefer", RESPONSE_FORMAT_RETURN_NO_CONTENT), ("Accept", ACCEPT_MINIMAL)]
+    }
+    "updatemerge" | "insertmerge" | "updatereplace" | "insertreplace" => {
+      let merge = a.action_type == "updatemerge" || a.action_type == "insertmerge"
+      method = if merge { "PATCH" } else { "PUT" }
+      u = t.entity_url(pk, rk)
+      body = canonical_entity(fields)?
+      hs.push(("Accept", "application/json"))
+      if let Some(e) = a.if_match {
+        hs.push(("If-Match", e))
+      }
+      if merge && cosmos {
+        method = "POST"
+        hs.push(("X-Http-Method", "MERGE"))
+      }
+    }
+    other => return Err(azcore.CallErr.InvalidInput("unknown transaction type '${other}'"))
+  }
+  if body != "" {
+    hs = hs + [("Content-Type", "application/json"), ("Content-Length", "${body.bytes().len()}")]
+  }
+  let lines = hs.sort_by(fn(h: (Str, Str)) -> Str { h.0 }).map(fn(h: (Str, Str)) -> Str { "${h.0}: ${h.1}\r\n" }).join("")
+  Ok("Content-Transfer-Encoding: binary\r\nContent-Type: application/http\r\n\r\n${method} ${u} HTTP/1.1\r\n${lines}\r\n${body}")
+}
+
+/// The multipart body of `actions` with the two boundaries' ids.
+fn (t: Client) batch_body(actions: List[TransactionAction], batch_id: Str, changeset_id: Str) -> Str ! azcore.CallErr {
+  let cosmos = is_cosmos_endpoint(t.core.endpoint)
+  let cs = "changeset_${changeset_id}"
+  var changeset = ""
+  for (i, a) in actions.indexed() {
+    let sep = if i == 0 { "--${cs}\r\n" } else { "\r\n--${cs}\r\n" }
+    changeset = changeset + sep + t.action_part(a, cosmos)?
+  }
+  changeset = changeset + "\r\n--${cs}--\r\n"
+  Ok("--batch_${batch_id}\r\nContent-Type: multipart/mixed; boundary=${cs}\r\n\r\n${changeset}\r\n--batch_${batch_id}--\r\n")
+}
+
+/// Submits the actions as one transaction: all or none of them apply.
+/// They must share a PartitionKey, and a RowKey may appear once. The
+/// service answers 202 with a response per action; a failed one is the
+/// batch's error.
+pub fn (t: Client) submit_transaction(actions: List[TransactionAction], options: SubmitTransactionOptions = SubmitTransactionOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  if actions.is_empty() {
+    return Err(azcore.CallErr.InvalidInput(ERR_EMPTY_TRANSACTION))
+  }
+  let batch_id = uuid.v4(t.core.rand).display()
+  let changeset_id = uuid.v4(t.core.rand).display()
+  let body = t.batch_body(actions, batch_id, changeset_id)?
+  let req = policy.Request{method: "POST", url: join_paths(t.core.endpoint, "$batch"), headers: [("DataServiceVersion", "3.0"), ("Accept", ACCEPT_MINIMAL), ("Content-Type", "multipart/mixed; boundary=batch_${batch_id}")], body: body.bytes()}
+  let resp = t.core.send(req, [202, 204])?
+  let text = resp.body.to_str_lossy()
+  if text.starts_with("{") || failed_part(text) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(())
+}
+
+/// Whether a part of the batch response has a status of 400 or more.
+fn failed_part(text: Str) -> Bool {
+  for line in text.split("\n") {
+    let l = line.trim_end_chars("\r")
+    if l.starts_with("HTTP/1.1 ") && l.len() >= 12 {
+      if let Some(code) = Int.parse(l[9..12]) {
+        if code >= 400 {
+          return true
+        }
+      }
+    }
+  }
+  false
+}

@@ -1,0 +1,190 @@
+// Shared access signatures for tables, as aztables's sas_service.go,
+// sas_account.go and sas_query_params.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): table SAS (with a key range) and account SAS
+// for the Table service, signed with the account key.
+
+use std/url
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+/// The version signed into a SAS when none is given (aztables's
+/// SASVersion).
+pub const SAS_VERSION: Str = "2019-02-02"
+
+pub const SAS_PROTOCOL_HTTPS: Str = "https"
+pub const SAS_PROTOCOL_HTTPS_AND_HTTP: Str = "https,http"
+
+/// Permission letters in the order each SAS kind writes them.
+pub const TABLE_PERMISSIONS: Str = "raud"
+pub const ACCOUNT_PERMISSIONS: Str = "rwdlacup"
+pub const ACCOUNT_RESOURCE_TYPES: Str = "sco"
+
+pub const ERR_MISSING_SHARED_KEY: Str = "SAS can only be signed with a SharedKeyCredential"
+
+fn opt_time(t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { blobsas.format_time(x) }) ?? ""
+}
+
+/// The letters of `s` in `order`, each once; an unknown one is Go's
+/// error, its rune printed as a number, as Go's `%v` of a rune prints it.
+fn letters(s: Str, order: Str, what: Str, alias: Str = "", to: Str = "") -> Str ! Str {
+  var have = ""
+  for c in s.runes() {
+    let r = "${c}"
+    if alias != "" && r == alias {
+      have = have + to
+    } else if order.contains(r) {
+      have = have + r
+    } else {
+      return Err("${what}: '${Int(c)}'")
+    }
+  }
+  var out = ""
+  for c in order.runes() {
+    if have.contains("${c}") {
+      out = out + "${c}"
+    }
+  }
+  Ok(out)
+}
+
+/// A table's permissions and the key range a table SAS allows.
+pub struct SASPermissions {
+  pub read: Bool = false
+  pub add: Bool = false
+  pub update: Bool = false
+  pub delete: Bool = false
+  pub start_partition_key: Str = ""
+  pub start_row_key: Str = ""
+  pub end_partition_key: Str = ""
+  pub end_row_key: Str = ""
+}
+
+/// The letters, in `raud` order.
+pub fn (p: SASPermissions) display() -> Str {
+  (if p.read { "r" } else { "" }) + (if p.add { "a" } else { "" }) + (if p.update { "u" } else { "" }) + (if p.delete { "d" } else { "" })
+}
+
+/// A table SAS: an expiry and permissions, or a stored access policy's
+/// `identifier`. The table name is signed and sent in lowercase.
+pub struct SASSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start_time: Time? = None
+  pub expiry_time: Time? = None
+  /// Letters of `raud`.
+  pub permissions: Str = ""
+  /// `start` or `start-end` (IP addresses).
+  pub ip_range: Str = ""
+  pub identifier: Str = ""
+  pub table_name: Str = ""
+  pub start_partition_key: Str = ""
+  pub start_row_key: Str = ""
+  pub end_partition_key: Str = ""
+  pub end_row_key: Str = ""
+}
+
+/// The SAS query string. Unlike Go, the key range goes in the query as
+/// `spk`, `srk`, `epk` and `erk` as well as in the signature (Go signs
+/// it but leaves it out, so the service's signature cannot match).
+pub fn (v: SASSignatureValues) sign(cred: SharedKeyCredential) -> Str ! Str {
+  let perms = letters(v.permissions, TABLE_PERMISSIONS, "invalid permission")?
+  let version = if v.version == "" { SAS_VERSION } else { v.version }
+  let table = v.table_name.to_lower()
+  let sts = [perms, opt_time(v.start_time), opt_time(v.expiry_time), "/table/${cred.account_name}/${table}", v.identifier, v.ip_range, v.protocol, version, v.start_partition_key, v.start_row_key, v.end_partition_key, v.end_row_key].join("\n")
+  let sig = cred.compute_hmac_sha256(sts)
+  Ok(encode_query([
+    ("sv", version), ("spr", v.protocol), ("st", opt_time(v.start_time)), ("se", opt_time(v.expiry_time)), ("sip", v.ip_range),
+    ("si", v.identifier), ("sp", perms), ("sig", sig), ("tn", table),
+    ("spk", v.start_partition_key), ("epk", v.end_partition_key), ("srk", v.start_row_key), ("erk", v.end_row_key),
+  ]))
+}
+
+/// The resource types an account SAS covers.
+pub struct AccountSASResourceTypes {
+  pub service: Bool = false
+  pub container: Bool = false
+  pub object: Bool = false
+}
+
+pub fn (r: AccountSASResourceTypes) display() -> Str {
+  (if r.service { "s" } else { "" }) + (if r.container { "c" } else { "" }) + (if r.object { "o" } else { "" })
+}
+
+pub struct AccountSASPermissions {
+  pub read: Bool = false
+  pub write: Bool = false
+  pub delete: Bool = false
+  pub list: Bool = false
+  pub add: Bool = false
+  pub create: Bool = false
+  pub update: Bool = false
+  pub process: Bool = false
+}
+
+/// The letters, in `rwdlacup` order.
+pub fn (p: AccountSASPermissions) display() -> Str {
+  var s = ""
+  for (on, c) in [(p.read, "r"), (p.write, "w"), (p.delete, "d"), (p.list, "l"), (p.add, "a"), (p.create, "c"), (p.update, "u"), (p.process, "p")] {
+    if on {
+      s = s + c
+    }
+  }
+  s
+}
+
+/// An account SAS.
+pub struct AccountSASSignatureValues {
+  pub version: Str = ""
+  pub protocol: Str = ""
+  pub start_time: Time? = None
+  pub expiry_time: Time? = None
+  /// Letters of `rwdlacup` (`x` is `p`).
+  pub permissions: Str = ""
+  pub ip_range: Str = ""
+  /// `t` for the Table service.
+  pub services: Str = ""
+  /// Letters of `sco`.
+  pub resource_types: Str = ""
+}
+
+pub fn (v: AccountSASSignatureValues) sign(cred: SharedKeyCredential) -> Str ! Str {
+  let expiry = v.expiry_time ?? return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  if v.permissions == "" || v.resource_types == "" || v.services == "" {
+    return Err("account SAS is missing at least one of these: ExpiryTime, Permissions, Service, or ResourceType")
+  }
+  let version = if v.version == "" { SAS_VERSION } else { v.version }
+  let perms = letters(v.permissions, ACCOUNT_PERMISSIONS, "invalid permission character", alias: "x", to: "p")?
+  let sts = [cred.account_name, perms, v.services, v.resource_types, opt_time(v.start_time), blobsas.format_time(expiry), v.ip_range, v.protocol, version, ""].join("\n")
+  let sig = cred.compute_hmac_sha256(sts)
+  Ok(encode_query([
+    ("sv", version), ("ss", v.services), ("srt", v.resource_types), ("spr", v.protocol), ("st", opt_time(v.start_time)), ("se", blobsas.format_time(expiry)),
+    ("sip", v.ip_range), ("sp", perms), ("sig", sig),
+  ]))
+}
+
+fn encode_query(pairs: List[(Str, Str)]) -> Str {
+  var v = url.values()
+  for (k, x) in pairs {
+    if x != "" {
+      v.add(k, x)
+    }
+  }
+  v.encode()
+}
+
+/// The table's URL with a SAS for `permissions` (and its key range).
+/// Unlike Go, a `/` goes between the service URL and the name (Go
+/// writes `https://acct.table.core.windows.nett1`).
+pub fn (t: Client) get_table_sas_url(permissions: SASPermissions, start: Time, expiry: Time) -> Str ! Str {
+  let cred = t.core.cred ?? return Err(ERR_MISSING_SHARED_KEY)
+  let q = SASSignatureValues{table_name: t.name, permissions: permissions.display(), start_time: Some(start), expiry_time: Some(expiry), start_partition_key: permissions.start_partition_key, start_row_key: permissions.start_row_key, end_partition_key: permissions.end_partition_key, end_row_key: permissions.end_row_key}.sign(cred)?
+  Ok("${t.core.endpoint.trim_end_chars("/")}/${t.name}?${q}")
+}
+
+/// An account SAS URL for the Table service over HTTPS.
+pub fn (s: ServiceClient) get_account_sas_url(resources: AccountSASResourceTypes, permissions: AccountSASPermissions, start: Time, expiry: Time) -> Str ! Str {
+  let cred = s.core.cred ?? return Err(ERR_MISSING_SHARED_KEY)
+  let q = AccountSASSignatureValues{version: SAS_VERSION, protocol: SAS_PROTOCOL_HTTPS, permissions: permissions.display(), services: "t", resource_types: resources.display(), start_time: Some(start), expiry_time: Some(expiry)}.sign(cred)?
+  let ep = if s.core.endpoint.ends_with("/") { s.core.endpoint } else { "${s.core.endpoint}/" }
+  Ok("${ep}?${q}")
+}

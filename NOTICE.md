@@ -20,7 +20,10 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   ServiceClient and QueueClient, their options, responses and XML
   models, connection strings, URL parts, the `sas` package and
   `queueerror`, hand written over azblob's Shared Key; requests checked
-  against its own), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
+  against its own), `sdk/data/aztables` v1.4.1 (the ServiceClient and
+  Client, the SharedKeyLite and Cosmos policies, entities, transactions,
+  SAS, connection strings, XML models and error codes, hand written;
+  requests checked against its own), `sdk/security/keyvault/internal` (the Key Vault challenge policy and
   its tests, ParseID), `sdk/security/keyvault/azsecrets`, `azkeys` and `azcertificates`
   (their hand written clients, options and ID types, and
   azcertificates' ErrorInfo; the rest is generated), `sdk/messaging/azservicebus`

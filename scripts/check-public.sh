@@ -39,7 +39,8 @@ hits=$(echo "$files" | xargs grep -n -I -E '/U''sers/|/h''ome/[a-z]' 2>/dev/null
 hits=$(echo "$files" | xargs grep -n -I -E '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' 2>/dev/null | grep -v -E '127\.0\.0\.1|169\.254\.169\.254|124\.56\.78\.(91|0/24)|192\.0\.2\.[0-9]+|198\.51\.100\.[0-9]+|203\.0\.113\.[0-9]+|0\.0\.0\.0' | grep -E '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)')
 [ -n "$hits" ] && report "IP addresses" "$hits"
 
-hits=$(echo "$files" | xargs grep -n -I -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}' 2>/dev/null | grep -v -E '@(example|contoso)\.(com|org|net)|@azure-tools/|@typespec/')
+# OData annotations (`Name@odata.type`) are protocol syntax, not addresses.
+hits=$(echo "$files" | xargs grep -n -I -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}' 2>/dev/null | grep -v -E '@(example|contoso)\.(com|org|net)|@azure-tools/|@typespec/|@odata\.(type|etag|metadata|editLink|id)\b')
 [ -n "$hits" ] && report "email addresses" "$hits"
 
 gl=${GITLEAKS_CONFIG:-../xo-publish-tools/gitleaks.toml}

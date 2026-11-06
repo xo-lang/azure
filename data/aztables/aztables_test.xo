@@ -1,0 +1,361 @@
+// The ServiceClient and Client against a fake table service that
+// answers as the Go program's fake does: every request must be Go's,
+// byte for byte (the SharedKeyLite signature and the batch's multipart
+// body included), and what is read back must print as Go printed it.
+// Where this port differs from Go on purpose, the test says so and
+// checks both forms.
+
+use std/crypto
+use std/http
+use std/time
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const EP: Str = "https://acct1.table.example.test"
+const COSMOS: Str = "https://acct1.table.cosmos.example.test"
+const EMU: Str = "http://127.0.0.1:10002"
+const KEY: Str = "aW52ZW50ZWQta2V5"
+const DATE: Str = "Thu, 05 Nov 2026 03:04:05 GMT"
+
+struct Fixed {}
+
+fn (p: Fixed) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(req.with_header("x-ms-date", DATE).with_header("x-ms-client-request-id", "00000000-0000-0000-0000-000000000000"))
+}
+
+fn json_resp(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/json;odata=minimalmetadata;streaming=true;charset=utf-8")
+}
+
+fn xml_resp(status: Int, body: Str) -> http.Response {
+  http.text(status, body).with_header("Content-Type", "application/xml")
+}
+
+/// The batch's boundary ids are random: each is numbered as Go's fake
+/// numbers them (the batch's first, the changeset's second).
+fn number_ids(t: Str) -> Str {
+  var out = t
+  for (prefix, name) in [("batch_", "UUID1"), ("changeset_", "UUID2")] {
+    var rest = out
+    var acc = ""
+    while {
+      let i = rest.find(prefix) ?? break
+      let start = i + prefix.len()
+      acc = acc + rest[0..start]
+      if rest.len() >= start + 36 && rest[start + 8..start + 9] == "-" {
+        acc = acc + name
+        rest = rest[start + 36..rest.len()]
+      } else {
+        rest = rest[start..rest.len()]
+      }
+    }
+    out = acc + rest
+  }
+  out
+}
+
+/// The Go program's fake, answer for answer; each request logged in its
+/// format.
+fn answer(req: http.Request, log: Mutex[List[Str]]) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // The path and query as sent, as Go's RequestURI prints them.
+  let qs = req.raw_query()
+  let host = match req.url.port {
+    Some(n) => "${req.url.host}:${n}"
+    None => req.url.host
+  }
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} ${host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  log.with(fn(var l: List[Str]) { l.push(number_ids(line)) })
+  answer_for(req).with_header("x-ms-request-id", "r1").with_header("Date", DATE)
+}
+
+fn answer_for(req: http.Request) -> http.Response {
+  let p = req.path
+  let comp = req.url.query.get("comp") ?? ""
+  let m = req.method
+  if p.contains("missing") {
+    return json_resp(404, "{\"odata.error\":{\"code\":\"ResourceNotFound\",\"message\":{\"lang\":\"en-US\",\"value\":\"The specified resource does not exist.\"}}}").with_header("x-ms-error-code", "ResourceNotFound")
+  }
+  if p == "/Tables" && m == "POST" {
+    return json_resp(201, "{\"odata.metadata\":\"http://acct1.table.example.test/$metadata#Tables/@Element\",\"TableName\":\"t1\"}")
+  }
+  if p == "/Tables" && m == "GET" {
+    if (req.url.query.get("NextTableName") ?? "") == "" {
+      return json_resp(200, "{\"odata.metadata\":\"http://acct1.table.example.test/$metadata#Tables\",\"value\":[{\"TableName\":\"t1\"},{\"TableName\":\"t2\"}]}").with_header("x-ms-continuation-NextTableName", "t3")
+    }
+    return json_resp(200, "{\"odata.metadata\":\"http://acct1.table.example.test/$metadata#Tables\",\"value\":[{\"TableName\":\"t3\"}]}")
+  }
+  if p.starts_with("/Tables(") {
+    return http.text(204, "")
+  }
+  if comp == "properties" && m == "GET" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><Logging><Version>1.0</Version><Read>true</Read><Write>false</Write><Delete>true</Delete><RetentionPolicy><Enabled>true</Enabled><Days>7</Days></RetentionPolicy></Logging><HourMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></HourMetrics><MinuteMetrics><Version>1.0</Version><Enabled>false</Enabled><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></MinuteMetrics><Cors /></StorageServiceProperties>")
+  }
+  if comp == "properties" {
+    return http.text(202, "")
+  }
+  if comp == "stats" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats><GeoReplication><Status>bootstrap</Status><LastSyncTime>Thu, 05 Nov 2026 02:00:00 GMT</LastSyncTime></GeoReplication></StorageServiceStats>")
+  }
+  if comp == "acl" && m == "GET" {
+    return xml_resp(200, "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>pol1</Id><AccessPolicy><Start>2026-11-05T00:00:00.0000000Z</Start><Expiry>2026-11-06T00:00:00.0000000Z</Expiry><Permission>raud</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>")
+  }
+  if comp == "acl" {
+    return http.text(204, "")
+  }
+  if p.ends_with("/$batch") {
+    return http.text(202, "--batchresponse_b1\r\nContent-Type: multipart/mixed; boundary=changesetresponse_c1\r\n\r\n--changesetresponse_c1\r\nContent-Type: application/http\r\nContent-Transfer-Encoding: binary\r\n\r\nHTTP/1.1 204 No Content\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\nDataServiceVersion: 1.0;\r\n\r\n\r\n--changesetresponse_c1--\r\n--batchresponse_b1--\r\n").with_header("Content-Type", "multipart/mixed; boundary=batchresponse_b1")
+  }
+  if p == "/t1" && m == "POST" {
+    return json_resp(201, "{\"odata.metadata\":\"x\",\"odata.etag\":\"W/\\\"datetime'2026-11-05T03%3A04%3A05.0000000Z'\\\"\",\"PartitionKey\":\"a'b\",\"RowKey\":\"r1\",\"Timestamp\":\"2026-11-05T03:04:05.0000000Z\",\"Age\":42,\"Big@odata.type\":\"Edm.Int64\",\"Big\":\"9007199254740993\",\"Name\":\"Ann\"}").with_header("ETag", "W/\"datetime'2026-11-05T03%3A04%3A05.0000000Z'\"")
+  }
+  if p == "/t1()" && m == "GET" {
+    if (req.url.query.get("NextPartitionKey") ?? "") == "" {
+      return json_resp(200, "{\"odata.metadata\":\"x\",\"value\":[{\"odata.etag\":\"W/\\\"1\\\"\",\"PartitionKey\":\"a\",\"RowKey\":\"r1\",\"Age\":42}]}").with_header("x-ms-continuation-NextPartitionKey", "1!8!YQ--").with_header("x-ms-continuation-NextRowKey", "1!4!cjI-")
+    }
+    return json_resp(200, "{\"odata.metadata\":\"x\",\"value\":[{\"odata.etag\":\"W/\\\"2\\\"\",\"PartitionKey\":\"a\",\"RowKey\":\"r2\",\"Age\":7.5}]}")
+  }
+  if p.contains("/t1(") && m == "GET" {
+    return json_resp(200, "{\"odata.metadata\":\"x\",\"odata.etag\":\"W/\\\"1\\\"\",\"PartitionKey\":\"a'b\",\"RowKey\":\"r1\",\"Timestamp\":\"2026-11-05T03:04:05.0000000Z\",\"Age\":42,\"Big@odata.type\":\"Edm.Int64\",\"Big\":\"9007199254740993\",\"Bin@odata.type\":\"Edm.Binary\",\"Bin\":\"AAEC\"}").with_header("ETag", "W/\"1\"")
+  }
+  if p.starts_with("/t1(") {
+    return http.text(204, "").with_header("ETag", "W/\"2\"")
+  }
+  http.text(400, "")
+}
+
+fn serve(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response { answer(req, log) }
+  for base in [EP, COSMOS, EMU] {
+    for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+      net.handle("${m} ${base}/", h)
+      net.handle("${m} ${base}/{a}", h)
+      net.handle("${m} ${base}/{a}/{b}", h)
+    }
+  }
+  log
+}
+
+fn short_hash(v: Str) -> Str {
+  "sha256:${crypto.sha256(v.bytes()).to_hex()[0..16]}"
+}
+
+/// Every signature replaced by a short hash of it, as the vectors keep
+/// them: a `sig=` value (to `&`, a space, a quote or the end) and a
+/// SharedKeyLite signature (to the end of the line).
+fn hide(t: Str) -> Str {
+  let lite = "SharedKeyLite acct1:"
+  var out = ""
+  var rest = t
+  while {
+    let a = rest.find("sig=")
+    let b = rest.find(lite)
+    let (at, skip, stop) = match (a, b) {
+      (Some(i), Some(j)) => if i < j { (i, 4, "& \"\n") } else { (j, lite.len(), " \n") }
+      (Some(i), None) => (i, 4, "& \"\n")
+      (None, Some(j)) => (j, lite.len(), " \n")
+      (None, None) => break
+    }
+    out = out + rest[0..at + skip]
+    rest = rest[at + skip..rest.len()]
+    let end = rest.find_any(stop) ?? rest.len()
+    out = out + short_hash(rest[0..end])
+    rest = rest[end..rest.len()]
+  }
+  out + rest
+}
+
+fn at(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()).or_fault("time")
+}
+
+fn nil_or(s: Str?) -> Str {
+  s ?? "nil"
+}
+
+/// The table SAS URL as Go writes it: no `/` before the name and no key
+/// range in the query (this port adds both; see the README).
+fn as_go_table_sas(u: Str) -> Str {
+  let (base, q) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  let kept = q.split("&").filter(fn(kv: Str) -> Bool { !(kv.starts_with("spk=") || kv.starts_with("srk=") || kv.starts_with("epk=") || kv.starts_with("erk=")) }).join("&")
+  let i = base.rfind("/") ?? 0
+  "${base[0..i]}${base[i + 1..base.len()]}?${kept}"
+}
+
+test "every call sends Go's request, byte for byte, and reads back what Go reads" {
+  let log = serve(os.net)
+  var out: List[Str] = []
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let opts = ClientOptions{client: policy.ClientOptions{per_call_policies: [Fixed{}], retry: policy.RetryOptions{max_retries: -1}}}
+  let svc = new_service_client_with_shared_key(os.net, os.clock, os.rand, EP, cred, opts)
+
+  out.push("== tables")
+  out.push("created ${svc.create_table("t1")?.table_name ?? ""}")
+  var pager = svc.new_list_tables_pager(ListTablesOptions{filter: Some("TableName ge 't'"), top: Some(2)})
+  while pager.more() {
+    let pg = pager.next_page()?
+    out.push("tables [${pg.tables.map(fn(t: TableProperties) -> Str { t.name ?? "" }).join(" ")}] next=${nil_or(pg.next_table_name)}")
+  }
+  svc.delete_table("t9")?
+
+  out.push("== service")
+  let gp = svc.get_properties()?.properties
+  let lg = gp.logging ?? return Err("no logging")
+  out.push("logging read=${lg.read ?? false} delete=${lg.delete ?? false} days=${lg.retention_policy.and_then(fn(r: RetentionPolicy) -> Int? { r.days }) ?? 0} cors=${(gp.cors ?? []).len()}")
+  svc.set_properties(ServiceProperties{
+    logging: Some(Logging{read: Some(true), write: Some(false), delete: Some(false), version: Some("1.0"), retention_policy: Some(RetentionPolicy{enabled: Some(false)})}),
+    cors: Some([CorsRule{allowed_origins: Some("*"), allowed_methods: Some("GET"), allowed_headers: Some(""), exposed_headers: Some(""), max_age_in_seconds: Some(5)}]),
+  })?
+  let geo = svc.get_statistics()?.geo_replication ?? return Err("no geo")
+  out.push("geo ${geo.status ?? ""} ${geo.last_sync_time.map(fn(t: Time) -> Str { t.format_rfc3339() }) ?? ""}")
+
+  out.push("== entities")
+  let c = svc.new_client("t1")
+  let ae = c.add_entity("{\"PartitionKey\":\"a'b\",\"RowKey\":\"r1\",\"Name\":\"Ann\",\"Age\":42,\"Big\":9007199254740993,\"Big@odata.type\":\"Edm.Int64\",\"When\":\"2026-11-05T03:04:05Z\",\"When@odata.type\":\"Edm.DateTime\",\"Nested\":{\"x\":[1,2]},\"Esc\":\"<&>\u{2028}\"}")?
+  out.push("added etag=${ae.etag} value=${ae.value}")
+  let ge = c.get_entity("a'b", "r1")?
+  out.push("got etag=${ge.etag} value=${ge.value}")
+  c.get_entity("a'b", "r1", GetEntityOptions{format: Some(METADATA_FORMAT_FULL)})?
+  var lp = c.new_list_entities_pager(ListEntitiesOptions{filter: Some("PartitionKey eq 'a' and Age gt 5"), select_fields: Some("RowKey,Age"), top: Some(1)})
+  while lp.more() {
+    let pg = lp.next_page()?
+    out.push("entities [${pg.entities.join(" ")}] next=${nil_or(pg.next_partition_key)}/${nil_or(pg.next_row_key)}")
+  }
+  let etag = "W/\"1\""
+  out.push("merged ${c.update_entity("{\"PartitionKey\":\"a'b\",\"RowKey\":\"r1\",\"Age\":43}", UpdateEntityOptions{if_match: Some(etag), update_mode: UPDATE_MODE_MERGE})?.etag}")
+  c.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r1\",\"Age\":44}", UpdateEntityOptions{update_mode: UPDATE_MODE_REPLACE})?
+  c.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r1\",\"Age\":45}")?
+  // Go's options struct with no mode is "" here.
+  let nm = c.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r1\"}", UpdateEntityOptions{if_match: Some(etag), update_mode: ""}).err()
+  out.push("no mode: ${nm.map(fn(e: azcore.CallErr) -> Str { invalid_msg(e) }) ?? ""}")
+  c.upsert_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r2\",\"Age\":1}")?
+  c.upsert_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r2\",\"Age\":2}", UpsertEntityOptions{update_mode: UPDATE_MODE_REPLACE})?
+  c.delete_entity("a'b", "r1")?
+  c.delete_entity("a", "r2", DeleteEntityOptions{if_match: Some(etag)})?
+
+  out.push("== acl")
+  let si = c.get_access_policy()?[0]
+  let ap = si.access_policy ?? return Err("no policy")
+  let f = fn(t: Time?) -> Str { t.map(fn(x: Time) -> Str { x.format_rfc3339() }) ?? "" }
+  out.push("acl ${si.id ?? ""} ${f(ap.start)} ${f(ap.expiry)} ${ap.permission ?? ""}")
+  let start = at("2026-11-05T00:02:03Z")
+  let exp = at("2026-11-07T00:00:00Z")
+  c.set_access_policy([SignedIdentifier{id: Some("pol1"), access_policy: Some(AccessPolicy{start: Some(start), expiry: Some(exp), permission: Some("raud")})}])?
+
+  out.push("== batch")
+  c.submit_transaction([
+    TransactionAction{action_type: TRANSACTION_TYPE_ADD, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r5\",\"Age\":5}"},
+    TransactionAction{action_type: TRANSACTION_TYPE_UPDATE_MERGE, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r6\",\"Age\":6}", if_match: Some(etag)},
+    TransactionAction{action_type: TRANSACTION_TYPE_INSERT_REPLACE, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r7\",\"Age\":7}"},
+    TransactionAction{action_type: TRANSACTION_TYPE_DELETE, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r8\"}"},
+  ])?
+  out.push("batch ok")
+  out.push("empty: ${c.submit_transaction([]).err().map(fn(e: azcore.CallErr) -> Str { invalid_msg(e) }) ?? ""}")
+
+  out.push("== error")
+  let err = svc.new_client("missing").get_entity("a", "b").err() ?? return Err("no error")
+  let (is_resp, code, status) = match err {
+    Response(r) => (true, r.error_code, r.status_code)
+    _ => (false, "", 0)
+  }
+  out.push("err ${is_resp} ${code} ${status}")
+
+  out.push("== cosmos")
+  let cos = new_client_with_shared_key(os.net, os.clock, os.rand, "${COSMOS}/t1", cred, opts)?
+  cos.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r1\",\"Age\":1}")?
+  cos.submit_transaction([TransactionAction{action_type: TRANSACTION_TYPE_INSERT_MERGE, entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r1\"}"}])?
+
+  out.push("== sas")
+  let table_sas = c.get_table_sas_url(SASPermissions{read: true, add: true, start_partition_key: "a", end_partition_key: "b", start_row_key: "r1", end_row_key: "r9"}, start, exp)?
+  expect(table_sas.starts_with("${EP}/t1?epk=b&erk=r9&")) == true
+  expect(table_sas.contains("&spk=a&srk=r1&")) == true
+  out.push("table ${as_go_table_sas(table_sas)}")
+  out.push("account ${svc.get_account_sas_url(AccountSASResourceTypes{service: true, object: true}, AccountSASPermissions{read: true, list: true, add: true}, start, exp)?}")
+  out.push("values ${SASSignatureValues{protocol: SAS_PROTOCOL_HTTPS, start_time: Some(start), expiry_time: Some(exp), permissions: "raud", table_name: "T1", identifier: "pol1"}.sign(cred)?}")
+
+  out.push("== connection strings")
+  for cs in [
+    "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=aW52ZW50ZWQta2V5;EndpointSuffix=core.example.test",
+    "AccountName=acct1;AccountKey=aW52ZW50ZWQta2V5;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1",
+    "AccountName=acct1;SharedAccessSignature=sv=2019-02-02&sig=abc;TableEndpoint=https://t.example.test",
+    "AccountKey=aW52ZW50ZWQta2V5",
+    "AccountName=acct1",
+    "nonsense",
+  ] {
+    match new_service_client_from_connection_string(os.net, os.clock, os.rand, cs) {
+      Ok(_) => out.push("cs ok")
+      Err(e) => out.push("cs err: ${e}")
+    }
+  }
+  for u in ["${EP}/t1", "${EMU}/devstoreaccount1/t1", "${EP}/t1?sv=2019-02-02&sig=abc"] {
+    let cl = new_client_with_no_credential(os.net, os.clock, os.rand, u, opts)?
+    out.push("url client ${cl.get_entity("p", "r").is_ok()}")
+  }
+
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  expect(got.len()) == GO_REQUESTS.len()
+  // Go's transport adds Content-Length on the wire; FakeNet hands the
+  // request over in process, so there is none to compare (SharedKeyLite
+  // does not sign it). The add keeps Big's every digit, where Go's
+  // float64 rounds it.
+  for (i, want) in GO_REQUESTS.indexed() {
+    let w = want.split("\n").filter(fn(l: Str) -> Bool { !l.starts_with("  content-length=") }).join("\n").replace("\"Big\":9007199254740992", "\"Big\":9007199254740993")
+    expect(hide(got.get(i) ?? "")) == w
+  }
+  expect(out.map(hide)) == GO_OUTPUT
+}
+
+fn invalid_msg(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    other => other.display()
+  }
+}
+
+test "a SAS connection string keeps the endpoint it names (Go always uses core.windows.net)" {
+  let p = parse_connection_string("AccountName=acct1;SharedAccessSignature=sv=2019-02-02&sig=abc;TableEndpoint=https://t.example.test")?
+  expect(p.service_url) == "https://t.example.test/?sv=2019-02-02&sig=abc"
+  expect(p.credential.is_none()) == true
+  let k = parse_connection_string("DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=aW52ZW50ZWQta2V5;EndpointSuffix=core.example.test")?
+  expect(k.service_url) == "http://acct1.table.core.example.test"
+}
+
+test "table URLs split as Go's parseURL splits them; Cosmos endpoints are detected as Go detects them" {
+  expect(parse_table_url("${EMU}/devstoreaccount1/t1")?) == ("${EMU}/devstoreaccount1", "t1")
+  expect(parse_table_url("${EP}/t1?sv=x&sig=y")?) == ("${EP}/?sig=y&sv=x", "t1")
+  expect(is_cosmos_endpoint("https://a.table.cosmosdb.example.test")) == true
+  expect(is_cosmos_endpoint("http://localhost:8902/")) == true
+  expect(is_cosmos_endpoint(EP)) == false
+}
+
+test "a key with a quote is doubled in a batch too; a bad mode, a missing key and an unknown action are errors" {
+  let cred = new_shared_key_credential("acct1", KEY)?
+  let c = new_service_client_with_shared_key(os.net, os.clock, os.rand, EP, cred).new_client("t1")
+  let body = c.batch_body([TransactionAction{action_type: TRANSACTION_TYPE_DELETE, entity: "{\"PartitionKey\":\"a'b\",\"RowKey\":\"r\"}"}], "B", "C")?
+  expect(body.contains("DELETE ${EP}/t1(PartitionKey='a%27%27b',RowKey='r')?")) == true
+  expect(c.update_entity("{\"PartitionKey\":\"a\",\"RowKey\":\"r\"}", UpdateEntityOptions{update_mode: "patch"}).err().map(invalid_msg)) == Some(ERR_INVALID_UPDATE_MODE)
+  expect(c.update_entity("{\"RowKey\":\"r\"}").err().map(invalid_msg)) == Some(ERR_PARTITION_KEY_ROW_KEY)
+  expect(c.batch_body([TransactionAction{action_type: "merge", entity: "{\"PartitionKey\":\"a\",\"RowKey\":\"r\"}"}], "B", "C").err().map(invalid_msg)) == Some("unknown transaction type 'merge'")
+  expect(c.batch_body([TransactionAction{action_type: TRANSACTION_TYPE_ADD, entity: "{\"RowKey\":\"r\"}"}], "B", "C").err().map(invalid_msg)) == Some("entity properties must contain a PartitionKey property")
+  expect(SASSignatureValues{permissions: "rx", table_name: "t1"}.sign(cred).err()) == Some("invalid permission: '120'")
+  expect(c.get_table_sas_url(SASPermissions{read: true}, at("2026-11-05T00:00:00Z"), at("2026-11-06T00:00:00Z")).is_ok()) == true
+  let anon = new_service_client_with_no_credential(os.net, os.clock, os.rand, EP).new_client("t1")
+  expect(anon.get_table_sas_url(SASPermissions{read: true}, at("2026-11-05T00:00:00Z"), at("2026-11-06T00:00:00Z")).err()) == Some(ERR_MISSING_SHARED_KEY)
+}
+
+test "entities are re-encoded as Go re-encodes them, but integers keep every digit" {
+  let v = json.parse_value("{\"b\":1.0,\"a\":[1e3,0.000001,1e21,-0.0],\"c\":\"<\u{2028}>\",\"d\":9007199254740993}").or_fault("json")
+  expect(canonical_json(v).ok()) == Some("{\"a\":[1000,0.000001,1e+21,-0],\"b\":1,\"c\":\"\\u003c\\u2028\\u003e\",\"d\":9007199254740993}")
+}

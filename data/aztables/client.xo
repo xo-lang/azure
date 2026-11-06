@@ -1,0 +1,297 @@
+// The ServiceClient and Client, as aztables's service_client.go,
+// client.go, options.go and responses.go (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), with the requests of its generated clients:
+// the query in Go's sorted order, and each call's Accept and
+// DataServiceVersion headers as Go sends them.
+
+use std/http
+use std/json
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// A client of one account's Table service.
+pub struct ServiceClient {
+  /// The service URL (`https://<account>.table.core.windows.net`), with
+  /// a SAS query when the client has no credential.
+  pub url: Str
+  core: Core
+}
+
+/// A client of one table.
+pub struct Client {
+  /// The table's name.
+  pub name: Str
+  core: Core
+}
+
+fn service_of(c: Core) -> ServiceClient {
+  ServiceClient{url: c.endpoint, core: c}
+}
+
+/// A service client with Entra ID tokens (aztables.NewServiceClient):
+/// the Cosmos audience for a Cosmos endpoint, Storage's otherwise.
+pub fn new_service_client(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  let audience = if is_cosmos_endpoint(service_url) { COSMOS_AUDIENCE } else { STORAGE_AUDIENCE }
+  service_of(new_core(net, clock, rand, service_url, [runtime.bearer_token_policy(cred, ["${audience}/.default"], clock)], None, options))
+}
+
+/// A service client with the account key (SharedKeyLite).
+pub fn new_service_client_with_shared_key(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service_of(new_core(net, clock, rand, service_url, [SharedKeyLitePolicy{credential: cred, clock: clock}], Some(cred), options))
+}
+
+/// A service client with no credential: a SAS in `service_url`.
+pub fn new_service_client_with_no_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient {
+  service_of(new_core(net, clock, rand, service_url, [], None, options))
+}
+
+/// A service client from a connection string with a key or a SAS.
+pub fn new_service_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> ServiceClient ! Str {
+  let p = parse_connection_string(connection_string)?
+  match p.credential {
+    Some(c) => Ok(new_service_client_with_shared_key(net, clock, rand, p.service_url, c, options))
+    None => Ok(new_service_client_with_no_credential(net, clock, rand, p.service_url, options))
+  }
+}
+
+/// A table client from the table's URL (aztables.NewClient).
+pub fn new_client(net: Net, clock: Clock, rand: Rand, table_url: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let (s, name) = parse_table_url(table_url)?
+  Ok(new_service_client(net, clock, rand, s, cred, options).new_client(name))
+}
+
+pub fn new_client_with_shared_key(net: Net, clock: Clock, rand: Rand, table_url: Str, cred: SharedKeyCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let (s, name) = parse_table_url(table_url)?
+  Ok(new_service_client_with_shared_key(net, clock, rand, s, cred, options).new_client(name))
+}
+
+pub fn new_client_with_no_credential(net: Net, clock: Clock, rand: Rand, table_url: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+  let (s, name) = parse_table_url(table_url)?
+  Ok(new_service_client_with_no_credential(net, clock, rand, s, options).new_client(name))
+}
+
+/// A client of the table `table_name` on the same pipeline.
+pub fn (s: ServiceClient) new_client(table_name: Str) -> Client {
+  Client{name: table_name, core: s.core}
+}
+
+fn json_request(method: Str, u: Str, accept: Str, body: Str? = None, headers: List[(Str, Str)] = [], dsv: Bool = true) -> policy.Request {
+  var hs = headers
+  if dsv {
+    hs.push(("DataServiceVersion", "3.0"))
+  }
+  hs.push(("Accept", accept))
+  var b = b""
+  if let Some(x) = body {
+    hs.push(("Content-Type", "application/json"))
+    b = x.bytes()
+  }
+  policy.Request{method: method, url: u, headers: hs, body: b}
+}
+
+fn xml_request(method: Str, u: Str, body: Str? = None) -> policy.Request {
+  var hs = [("Accept", "application/xml")]
+  var b = b""
+  if let Some(x) = body {
+    hs.push(("Content-Type", "application/xml"))
+    b = x.bytes()
+  }
+  policy.Request{method: method, url: u, headers: hs, body: b}
+}
+
+fn decoded[T](resp: http.Response, parse: fn(Str) -> T ! Str) -> T ! azcore.CallErr {
+  parse(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// An HTTP date (`Thu, 05 Nov 2026 03:04:05 GMT`) as a Time.
+fn rfc1123(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
+}
+
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time.
+fn rfc3339(v: Str) -> Time? {
+  if v == "" {
+    return None
+  }
+  time.parse(v.to_upper(), time.RFC3339, time.utc()).ok()
+}
+
+/// The `$format` of a response: how much OData metadata it carries.
+pub const METADATA_FORMAT_FULL: Str = "application/json;odata=fullmetadata"
+pub const METADATA_FORMAT_MINIMAL: Str = "application/json;odata=minimalmetadata"
+pub const METADATA_FORMAT_NONE: Str = "application/json;odata=nometadata"
+
+/// `return-content` or `return-no-content` (the Prefer header).
+pub const RESPONSE_FORMAT_RETURN_CONTENT: Str = "return-content"
+pub const RESPONSE_FORMAT_RETURN_NO_CONTENT: Str = "return-no-content"
+
+// Tables.
+
+pub struct CreateTableOptions {}
+
+pub struct CreateTableResponse {
+  pub table_name: Str? = None
+}
+
+fn table_name_of(text: Str) -> Str? ! Str {
+  let v = json.parse_value(text) ?? e => return Err(e.display())
+  Ok(match v.get("TableName") {
+    Some(json.Value.Str(s)) => Some(s)
+    _ => None
+  })
+}
+
+/// Creates the table `name` (201, or 204 when the service sends no
+/// content).
+pub fn (s: ServiceClient) create_table(name: Str, options: CreateTableOptions = CreateTableOptions{}) -> CreateTableResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let body = json_object([("TableName", json.Value.Str(name))])
+  let resp = s.core.send(json_request("POST", join_paths(s.url, "Tables"), ACCEPT_MINIMAL, body: Some(body)), [201, 204])?
+  if resp.status == 204 {
+    return Ok(CreateTableResponse{})
+  }
+  Ok(CreateTableResponse{table_name: decoded(resp, table_name_of)?})
+}
+
+pub struct DeleteTableOptions {}
+
+pub fn (s: ServiceClient) delete_table(name: Str, options: DeleteTableOptions = DeleteTableOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let u = join_paths(s.url, "Tables('${url_path_escape(name)}')")
+  s.core.send(json_request("DELETE", u, "application/json", dsv: false), [204])?
+  Ok(())
+}
+
+pub fn (t: Client) create_table(options: CreateTableOptions = CreateTableOptions{}) -> CreateTableResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  service_of(t.core).create_table(t.name, options)
+}
+
+pub fn (t: Client) delete(options: DeleteTableOptions = DeleteTableOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  service_of(t.core).delete_table(t.name, options)
+}
+
+pub struct ListTablesOptions {
+  /// An OData filter (`TableName ge 't'`).
+  pub filter: Str? = None
+  /// Comma separated property names.
+  pub select_fields: Str? = None
+  /// The most tables a page.
+  pub top: Int? = None
+  /// Where to start (a previous page's next_table_name).
+  pub next_table_name: Str? = None
+  pub format: Str? = None
+}
+
+pub struct TableProperties {
+  pub name: Str? = None
+  /// The odata.editLink, odata.id and odata.type the service sent, as a
+  /// JSON object ("" when none).
+  pub value: Str = ""
+}
+
+pub struct ListTablesResponse {
+  pub next_table_name: Str? = None
+  pub tables: List[TableProperties] = []
+}
+
+fn query_options(format: Str?, top: Int?, select_fields: Str?, filter: Str?) -> List[(Str, Str)] {
+  var q: List[(Str, Str)] = []
+  if let Some(f) = format { q.push(("$format", f)) }
+  if let Some(n) = top { q.push(("$top", "${n}")) }
+  if let Some(s) = select_fields { q.push(("$select", s)) }
+  if let Some(f) = filter { q.push(("$filter", f)) }
+  q
+}
+
+fn tables_url(base: Str, o: ListTablesOptions, next: Str?) -> Str {
+  var q = query_options(o.format, o.top, o.select_fields, o.filter)
+  if let Some(n) = next { q.push(("NextTableName", n)) }
+  with_query(join_paths(base, "Tables"), q)
+}
+
+fn parse_tables(resp: http.Response) -> ListTablesResponse ! Str {
+  let v = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(e.display())
+  let items = match v.get("value") {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+  let tables = items.map(fn(x: json.Value) -> TableProperties {
+    let name = match x.get("TableName") {
+      Some(json.Value.Str(s)) => Some(s)
+      _ => None
+    }
+    var odata: List[(Str, json.Value)] = []
+    for k in ["odata.editLink", "odata.id", "odata.type"] {
+      if let Some(json.Value.Str(s)) = x.get(k) {
+        odata.push((k, json.Value.Str(s)))
+      }
+    }
+    TableProperties{name: name, value: if odata.is_empty() { "" } else { json_object(odata) }}
+  })
+  Ok(ListTablesResponse{next_table_name: resp.header("x-ms-continuation-NextTableName"), tables: tables})
+}
+
+/// The account's tables, a page a call (Go's NewListTablesPager): the
+/// next page asks from the last one's NextTableName until there is none.
+pub fn (s: ServiceClient) new_list_tables_pager(options: ListTablesOptions = ListTablesOptions{}) -> runtime.Pager[ListTablesResponse] {
+  let base = s.url
+  runtime.new_pager_with(s.core.pipeline, json_request("GET", tables_url(base, options, options.next_table_name), ACCEPT_MINIMAL), parse_tables, fn(prev: policy.Request, page: ListTablesResponse) -> policy.Request? {
+    let n = page.next_table_name ?? return None
+    if n == "" {
+      return None
+    }
+    Some(prev with {url: tables_url(base, options, Some(n))})
+  })
+}
+
+// The service.
+
+pub struct GetPropertiesResponse {
+  pub properties: ServiceProperties
+}
+
+pub fn (s: ServiceClient) get_properties() -> GetPropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(xml_request("GET", with_query(join_paths(s.url, ""), [("comp", "properties"), ("restype", "service")])), [200])?
+  Ok(GetPropertiesResponse{properties: decoded(resp, parse_properties)?})
+}
+
+/// Sets the service's properties, as given (Go's toGenerated fills in
+/// no defaults).
+pub fn (s: ServiceClient) set_properties(properties: ServiceProperties) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  s.core.send(xml_request("PUT", with_query(join_paths(s.url, ""), [("comp", "properties"), ("restype", "service")]), body: Some(properties_xml(properties))), [202])?
+  Ok(())
+}
+
+pub struct GetStatisticsResponse {
+  pub geo_replication: GeoReplication? = None
+}
+
+pub fn (s: ServiceClient) get_statistics() -> GetStatisticsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = s.core.send(xml_request("GET", with_query(join_paths(s.url, ""), [("comp", "stats"), ("restype", "service")])), [200])?
+  Ok(GetStatisticsResponse{geo_replication: decoded(resp, parse_stats)?.geo_replication})
+}
+
+// Access policies.
+
+pub fn (t: Client) get_access_policy() -> List[SignedIdentifier] ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = t.core.send(xml_request("GET", with_query(t.table_url(), [("comp", "acl")])), [200])?
+  decoded(resp, parse_signed_identifiers)
+}
+
+pub const ERR_TOO_MANY_ACCESS_POLICIES: Str = "you cannot set more than five (5) access policies at a time"
+
+/// Replaces the table's stored access policies. When the service refuses
+/// more than five, the error is Go's errTooManyAccessPoliciesError.
+pub fn (t: Client) set_access_policy(table_acl: List[SignedIdentifier] = []) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  match t.core.send(xml_request("PUT", with_query(t.table_url(), [("comp", "acl")]), body: Some(signed_identifiers_xml(table_acl))), [204]) {
+    Ok(_) => Ok(())
+    Err(e) => if table_acl.len() > 5 { Err(azcore.CallErr.InvalidInput(ERR_TOO_MANY_ACCESS_POLICIES)) } else { Err(e) }
+  }
+}
+
+fn (t: Client) table_url() -> Str {
+  join_paths(t.core.endpoint, url_path_escape(t.name))
+}

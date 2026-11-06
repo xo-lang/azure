@@ -1,0 +1,195 @@
+// The Table service's XML models (service properties, statistics,
+// access policies), as aztables's generated zz_models.go and
+// zz_models_serde.go (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md), written as azqueue's are. Request bodies are written as Go's encoding/xml writes
+// them: a `<?xml ...?>` line, elements in Go's field order (a field the
+// serde overrides goes last), an unset field left out, an empty one
+// written as a start and an end tag.
+
+use std/xml
+use github.com/xo-lang/azure/storage/azblob/sas as blobsas
+
+const XML_HEADER: Str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+
+pub struct RetentionPolicy {
+  pub enabled: Bool? = None
+  pub days: Int? = None
+}
+
+pub struct Logging {
+  pub delete: Bool? = None
+  pub read: Bool? = None
+  pub write: Bool? = None
+  pub retention_policy: RetentionPolicy? = None
+  /// "1.0" when left out of set_properties.
+  pub version: Str? = None
+}
+
+pub struct Metrics {
+  pub enabled: Bool? = None
+  pub include_apis: Bool? = None
+  pub retention_policy: RetentionPolicy? = None
+  /// "1.0" when left out of set_properties.
+  pub version: Str? = None
+}
+
+pub struct CorsRule {
+  pub allowed_origins: Str? = None
+  pub allowed_methods: Str? = None
+  /// "" when left out of set_properties.
+  pub allowed_headers: Str? = None
+  /// "" when left out of set_properties.
+  pub exposed_headers: Str? = None
+  /// 0 when left out of set_properties.
+  pub max_age_in_seconds: Int? = None
+}
+
+pub struct StorageServiceProperties {
+  pub cors: List[CorsRule]? = None
+  pub hour_metrics: Metrics? = None
+  pub logging: Logging? = None
+  pub minute_metrics: Metrics? = None
+}
+
+pub struct GeoReplication {
+  /// `live`, `bootstrap` or `unavailable`.
+  pub status: Str? = None
+  pub last_sync_time: Time? = None
+}
+
+pub struct StorageServiceStats {
+  pub geo_replication: GeoReplication? = None
+}
+
+pub struct AccessPolicy {
+  pub start: Time? = None
+  pub expiry: Time? = None
+  /// Letters of `raud`.
+  pub permission: Str? = None
+}
+
+/// A stored access policy (at most five a table).
+pub struct SignedIdentifier {
+  pub id: Str? = None
+  pub access_policy: AccessPolicy? = None
+}
+
+// Writing.
+
+fn el(name: Str, inner: Str) -> Str {
+  "<${name}>${inner}</${name}>"
+}
+
+fn opt_str(name: Str, v: Str?) -> Str {
+  v.map(fn(x: Str) -> Str { el(name, xml.escape(x)) }) ?? ""
+}
+
+fn opt_bool(name: Str, v: Bool?) -> Str {
+  v.map(fn(x: Bool) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn opt_int(name: Str, v: Int?) -> Str {
+  v.map(fn(x: Int) -> Str { el(name, "${x}") }) ?? ""
+}
+
+fn retention_xml(r: RetentionPolicy?) -> Str {
+  r.map(fn(x: RetentionPolicy) -> Str { el("RetentionPolicy", opt_bool("Enabled", x.enabled) + opt_int("Days", x.days)) }) ?? ""
+}
+
+fn metrics_xml(name: Str, m: Metrics?) -> Str {
+  m.map(fn(x: Metrics) -> Str { el(name, opt_bool("Enabled", x.enabled) + opt_bool("IncludeAPIs", x.include_apis) + retention_xml(x.retention_policy) + opt_str("Version", x.version)) }) ?? ""
+}
+
+fn logging_xml(l: Logging?) -> Str {
+  l.map(fn(x: Logging) -> Str { el("Logging", opt_bool("Delete", x.delete) + opt_bool("Read", x.read) + retention_xml(x.retention_policy) + opt_str("Version", x.version) + opt_bool("Write", x.write)) }) ?? ""
+}
+
+fn cors_xml(rules: List[CorsRule]?) -> Str {
+  rules.map(fn(rs: List[CorsRule]) -> Str {
+    el("Cors", rs.map(fn(r: CorsRule) -> Str {
+      el("CorsRule", opt_str("AllowedHeaders", r.allowed_headers) + opt_str("AllowedMethods", r.allowed_methods) + opt_str("AllowedOrigins", r.allowed_origins) + opt_str("ExposedHeaders", r.exposed_headers) + opt_int("MaxAgeInSeconds", r.max_age_in_seconds))
+    }).join(""))
+  }) ?? ""
+}
+
+/// The set_properties body (Cors last: its serde override).
+pub fn properties_xml(p: StorageServiceProperties) -> Str {
+  XML_HEADER + el("StorageServiceProperties", metrics_xml("HourMetrics", p.hour_metrics) + logging_xml(p.logging) + metrics_xml("MinuteMetrics", p.minute_metrics) + cors_xml(p.cors))
+}
+
+fn opt_time3339(name: Str, t: Time?) -> Str {
+  t.map(fn(x: Time) -> Str { el(name, blobsas.format_time(x)) }) ?? ""
+}
+
+/// The set_access_policy body (Permission first: Expiry and Start are
+/// the serde's overrides). Times are written to the second in UTC, as
+/// azqueue truncates them.
+pub fn signed_identifiers_xml(ids: List[SignedIdentifier]) -> Str {
+  XML_HEADER + el("SignedIdentifiers", ids.map(fn(s: SignedIdentifier) -> Str {
+    let ap = s.access_policy.map(fn(a: AccessPolicy) -> Str { el("AccessPolicy", opt_str("Permission", a.permission) + opt_time3339("Expiry", a.expiry) + opt_time3339("Start", a.start)) }) ?? ""
+    el("SignedIdentifier", ap + opt_str("Id", s.id))
+  }).join(""))
+}
+
+// Reading.
+
+fn child_text(e: xml.Element, name: Str) -> Str? {
+  e.child(name).map(fn(x: xml.Element) -> Str { x.text() })
+}
+
+fn child_bool(e: xml.Element, name: Str) -> Bool? {
+  child_text(e, name).map(fn(t: Str) -> Bool { t == "true" || t == "1" })
+}
+
+fn child_int(e: xml.Element, name: Str) -> Int? {
+  child_text(e, name).and_then(fn(t: Str) -> Int? { Int.parse(t) })
+}
+
+fn child_1123(e: xml.Element, name: Str) -> Time? {
+  child_text(e, name).and_then(fn(t: Str) -> Time? { rfc1123(t) })
+}
+
+fn child_3339(e: xml.Element, name: Str) -> Time? {
+  child_text(e, name).and_then(fn(t: Str) -> Time? { rfc3339(t) })
+}
+
+fn retention_of(e: xml.Element) -> RetentionPolicy? {
+  e.child("RetentionPolicy").map(fn(r: xml.Element) -> RetentionPolicy { RetentionPolicy{enabled: child_bool(r, "Enabled"), days: child_int(r, "Days")} })
+}
+
+fn metrics_of(e: xml.Element, name: Str) -> Metrics? {
+  e.child(name).map(fn(m: xml.Element) -> Metrics { Metrics{enabled: child_bool(m, "Enabled"), include_apis: child_bool(m, "IncludeAPIs"), retention_policy: retention_of(m), version: child_text(m, "Version")} })
+}
+
+fn parse_xml(text: Str, what: Str) -> xml.Element ! Str {
+  xml.parse(text) ?? e => Err("the ${what} is not XML: ${e.display()}")
+}
+
+pub fn parse_properties(text: Str) -> StorageServiceProperties ! Str {
+  let d = parse_xml(text, "service properties")?
+  Ok(StorageServiceProperties{
+    cors: d.child("Cors").map(fn(c: xml.Element) -> List[CorsRule] {
+      c.children_named("CorsRule").map(fn(r: xml.Element) -> CorsRule {
+        CorsRule{allowed_origins: child_text(r, "AllowedOrigins"), allowed_methods: child_text(r, "AllowedMethods"), allowed_headers: child_text(r, "AllowedHeaders"), exposed_headers: child_text(r, "ExposedHeaders"), max_age_in_seconds: child_int(r, "MaxAgeInSeconds")}
+      })
+    }),
+    hour_metrics: metrics_of(d, "HourMetrics"),
+    logging: d.child("Logging").map(fn(l: xml.Element) -> Logging { Logging{delete: child_bool(l, "Delete"), read: child_bool(l, "Read"), write: child_bool(l, "Write"), retention_policy: retention_of(l), version: child_text(l, "Version")} }),
+    minute_metrics: metrics_of(d, "MinuteMetrics"),
+  })
+}
+
+pub fn parse_stats(text: Str) -> StorageServiceStats ! Str {
+  let d = parse_xml(text, "service statistics")?
+  Ok(StorageServiceStats{geo_replication: d.child("GeoReplication").map(fn(g: xml.Element) -> GeoReplication { GeoReplication{status: child_text(g, "Status"), last_sync_time: child_1123(g, "LastSyncTime")} })})
+}
+
+pub fn parse_signed_identifiers(text: Str) -> List[SignedIdentifier] ! Str {
+  let d = parse_xml(text, "access policy")?
+  Ok(d.children_named("SignedIdentifier").map(fn(s: xml.Element) -> SignedIdentifier {
+    SignedIdentifier{id: child_text(s, "Id"), access_policy: s.child("AccessPolicy").map(fn(a: xml.Element) -> AccessPolicy { AccessPolicy{start: child_3339(a, "Start"), expiry: child_3339(a, "Expiry"), permission: child_text(a, "Permission")} })}
+  }))
+}
+
+/// The service properties set_properties takes (Go's ServiceProperties).
+pub type ServiceProperties = StorageServiceProperties

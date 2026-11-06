@@ -1,0 +1,222 @@
+// Azure Tables (Storage and Cosmos DB for Table), as aztables v1.4.1
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md): the
+// ServiceClient and Client over the REST API version 2019-02-02, the
+// SharedKeyLite credential policy, Cosmos's PATCH to MERGE transform,
+// connection strings and the client URL parsing.
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob
+use github.com/xo-lang/azure/storage/azblob/exported
+
+pub const VERSION: Str = "v0.1.0"
+
+/// The REST API version the calls are written for (aztables v1.4.1's).
+pub const SERVICE_VERSION: Str = "2019-02-02"
+
+/// The token audience of Azure Storage tables.
+pub const STORAGE_AUDIENCE: Str = "https://storage.azure.com"
+
+/// The token audience of Cosmos DB for Table (cloud.AzurePublic's).
+pub const COSMOS_AUDIENCE: Str = "https://cosmos.azure.com"
+
+const ACCEPT_MINIMAL: Str = "application/json;odata=minimalmetadata"
+
+/// The account name and key; aztables signs with SharedKeyLite.
+pub type SharedKeyCredential = exported.SharedKeyCredential
+
+/// The credential of `account_name` with `account_key` (base64).
+pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedKeyCredential ! Str {
+  exported.new_shared_key_credential(account_name, account_key)
+}
+
+pub struct ClientOptions {
+  pub client: policy.ClientOptions = policy.ClientOptions{}
+}
+
+/// Whether `u` is a Cosmos DB table endpoint (Go's isCosmosEndpoint):
+/// `.table.cosmos.` or `.table.cosmosdb.` in it, or the emulator's
+/// localhost with port 8902.
+pub fn is_cosmos_endpoint(u: Str) -> Bool {
+  (u.contains("localhost") && u.contains("8902")) || u.contains(".table.cosmos.") || u.contains(".table.cosmosdb.")
+}
+
+/// The SharedKeyLite string to sign: `x-ms-date`, then `/account`, the
+/// path as sent (`/` when empty) and `?comp=` with the comp parameter
+/// when there is one.
+pub fn string_to_sign(account_name: Str, req: policy.Request) -> Str {
+  "${req.header("x-ms-date") ?? ""}\n${canonicalized_resource(account_name, req.url)}"
+}
+
+fn canonicalized_resource(account_name: Str, u: Str) -> Str {
+  let (path, query) = split_url(u)
+  let p = if path == "" { "/" } else { path }
+  var cr = "/${account_name}${p}"
+  let qv = url.parse_query(query).ok() ?? url.values()
+  if let Some(c) = qv.get("comp") {
+    cr = "${cr}?comp=${c}"
+  }
+  cr
+}
+
+/// The escaped path and the raw query of `u`.
+fn split_url(u: Str) -> (Str, Str) {
+  let (head, query) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  let rest = match head.find("://") {
+    Some(i) => head[i + 3..head.len()]
+    None => head
+  }
+  let path = match rest.find("/") {
+    Some(i) => rest[i..rest.len()]
+    None => ""
+  }
+  (path, query)
+}
+
+/// Signs each request with SharedKeyLite, setting x-ms-date when the
+/// request has none (a caller's date is kept, as Go's does here).
+pub struct SharedKeyLitePolicy {
+  pub credential: SharedKeyCredential
+  pub clock: Clock
+}
+
+fn (p: SharedKeyLitePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", exported.http_date(p.clock.now())) } else { req }
+  let sig = p.credential.compute_hmac_sha256(string_to_sign(p.credential.account_name, dated))
+  next.send(dated.with_header("Authorization", "SharedKeyLite ${p.credential.account_name}:${sig}"))
+}
+
+/// Cosmos takes no PATCH: a PATCH goes as a POST with
+/// `X-HTTP-Method: MERGE` (Go's cosmosPatchTransformPolicy).
+pub struct CosmosPatchTransformPolicy {}
+
+fn (p: CosmosPatchTransformPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  next.send(cosmos_transform(req))
+}
+
+fn cosmos_transform(req: policy.Request) -> policy.Request {
+  if req.method == "PATCH" {
+    return (req with {method: "POST"}).with_header("X-HTTP-Method", "MERGE")
+  }
+  req
+}
+
+/// What both clients share: the service endpoint, the pipeline, and the
+/// key for SAS URLs.
+struct Core {
+  endpoint: Str
+  pipeline: runtime.Pipeline
+  cred: SharedKeyCredential?
+  /// For the batch boundaries.
+  rand: Rand
+}
+
+fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: List[policy.Policy], cred: SharedKeyCredential?, opts: ClientOptions) -> Core {
+  var per_call: List[policy.Policy] = [azblob.VersionPolicy{version: SERVICE_VERSION}]
+  if is_cosmos_endpoint(endpoint) {
+    per_call.push(CosmosPatchTransformPolicy{})
+  }
+  Core{endpoint: endpoint, pipeline: runtime.new_pipeline("aztables", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: per_call, per_retry: auth}, opts.client), cred: cred, rand: rand}
+}
+
+/// `base` with `segment` joined to its path, its query kept
+/// (runtime.JoinPaths).
+fn join_paths(base: Str, segment: Str) -> Str {
+  let (path, query) = match base.find("?") {
+    Some(i) => (base[0..i], base[i..base.len()])
+    None => (base, "")
+  }
+  let seg = segment.trim_start_chars("/")
+  "${path.trim_end_chars("/")}/${seg}${query}"
+}
+
+/// `u` with `query` merged into the query it has, the keys sorted as Go's
+/// url.Values.Encode sorts them.
+fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
+  let (base, raw) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  var v = url.parse_query(raw).ok() ?? url.values()
+  for (k, x) in query {
+    v.set(k, x)
+  }
+  let q = v.encode()
+  if q == "" { base } else { "${base}?${q}" }
+}
+
+fn (c: Core) send(req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if !ok.contains(resp.status) {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+/// The ETag response header, "" when absent.
+fn etag_of(resp: http.Response) -> Str {
+  resp.header("ETag") ?? ""
+}
+
+/// A parsed connection string: the service URL (with the SAS when it
+/// has one) and the key's credential.
+pub struct ParsedConnectionString {
+  pub service_url: Str
+  pub credential: SharedKeyCredential? = None
+}
+
+pub const ERR_CONNECTION_STRING: Str = "connection string is either blank or malformed. The expected connection string should contain key value pairs separated by semicolons. For example 'DefaultEndpointsProtocol=https;AccountName=<accountName>;AccountKey=<accountKey>;EndpointSuffix=core.windows.net'"
+
+/// Parses a connection string as aztables does: `AccountName` is
+/// required, with `AccountKey` (and `TableEndpoint`, or
+/// `DefaultEndpointsProtocol` and `EndpointSuffix`) or
+/// `SharedAccessSignature`. Unlike Go, a SAS goes on the endpoint the
+/// string names (Go always uses `https://<account>.table.core.windows.net`
+/// for a SAS).
+pub fn parse_connection_string(connection_string: Str) -> ParsedConnectionString ! Str {
+  var m: Map[Str, Str] = {}
+  for part in connection_string.trim_end_chars(";").split(";") {
+    let i = part.find("=") ?? return Err(ERR_CONNECTION_STRING)
+    m[part[0..i]] = part[i + 1..part.len()]
+  }
+  let account = m.get("AccountName") ?? return Err(ERR_CONNECTION_STRING)
+  let protocol = m.get("DefaultEndpointsProtocol") ?? "https"
+  let suffix = m.get("EndpointSuffix") ?? "core.windows.net"
+  let endpoint = m.get("TableEndpoint") ?? "${protocol}://${account}.table.${suffix}"
+  match m.get("AccountKey") {
+    Some(k) => Ok(ParsedConnectionString{service_url: endpoint, credential: Some(new_shared_key_credential(account, k)?)})
+    None => {
+      let s = m.get("SharedAccessSignature") ?? return Err(ERR_CONNECTION_STRING)
+      Ok(ParsedConnectionString{service_url: "${endpoint.trim_end_chars("/")}/?${s}"})
+    }
+  }
+}
+
+/// A table URL split as Go's parseURL splits it: the service URL (the
+/// path's leading segments and the SAS query kept) and the table name
+/// (the last segment).
+pub fn parse_table_url(table_url: Str) -> (Str, Str) ! Str {
+  let p = http.parse_url(table_url) ?? e => return Err(e.display())
+  let host = match p.port {
+    Some(n) => "${p.host}:${n}"
+    None => p.host
+  }
+  let (path, query) = split_url(table_url)
+  var service = "${p.scheme}://${host}"
+  var name = path.trim_start_chars("/")
+  if let Some(i) = path.rfind("/") {
+    name = path[i + 1..path.len()]
+    service = service + path[0..i]
+  }
+  if query != "" {
+    let qv = url.parse_query(query) ?? e => return Err("${e}")
+    service = "${service}/?${qv.encode()}"
+  }
+  Ok((service, name))
+}

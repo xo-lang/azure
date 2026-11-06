@@ -1,0 +1,258 @@
+// Entities, as aztables's client.go and entity.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md). An entity is JSON text; Go decodes
+// it into a map and encodes it again, so what is sent (and what a get
+// returns) has its keys sorted and `<`, `>`, `&`, U+2028 and U+2029
+// escaped. Unlike Go, an integer keeps every digit (Go makes each
+// number a float64: 9007199254740993 is sent as 9007199254740992).
+
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+fn scalar(write: fn(var json.JsonWriter) -> () ! json.DecodeErr) -> Str ! json.DecodeErr {
+  var w = json.json_writer(escape_html: true)
+  write(w)?
+  Ok(w.finish().to_str_lossy().trim_end_chars("\n"))
+}
+
+/// `v` as Go's json.Marshal of its `any` decoding writes it: object keys
+/// sorted, strings HTML escaped, a fraction or exponent number as Go's
+/// float encoder writes it.
+pub fn canonical_json(v: json.Value) -> Str ! json.DecodeErr {
+  match v {
+    Null => Ok("null")
+    Bool(b) => Ok("${b}")
+    Int(n) => Ok("${n}")
+    Num(f) => scalar(fn(var w: json.JsonWriter) -> () ! json.DecodeErr { w.float(f) })
+    Str(s) => scalar(fn(var w: json.JsonWriter) -> () ! json.DecodeErr { w.str(s); Ok(()) })
+    Trusted(_, s) => scalar(fn(var w: json.JsonWriter) -> () ! json.DecodeErr { w.str(s); Ok(()) })
+    List(items) => {
+      var parts: List[Str] = []
+      for x in items {
+        parts.push(canonical_json(x)?)
+      }
+      Ok("[${parts.join(",")}]")
+    }
+    Object(fields) => {
+      var parts: List[Str] = []
+      for (k, x) in fields.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }) {
+        parts.push("${canonical_json(json.Value.Str(k))?}:${canonical_json(x)?}")
+      }
+      Ok("{${parts.join(",")}}")
+    }
+  }
+}
+
+fn json_object(fields: List[(Str, json.Value)]) -> Str {
+  canonical_json(json.Value.Object(fields)).ok() ?? "{}"
+}
+
+/// An entity's JSON text decoded: it must be an object.
+fn entity_of(entity: Str) -> List[(Str, json.Value)] ! azcore.CallErr {
+  match json.parse_value(entity) {
+    Ok(json.Value.Object(fields)) => Ok(fields)
+    Ok(_) => Err(azcore.CallErr.InvalidInput("an entity is a JSON object"))
+    Err(e) => Err(azcore.CallErr.InvalidInput(e.display()))
+  }
+}
+
+fn canonical_entity(fields: List[(Str, json.Value)]) -> Str ! azcore.CallErr {
+  canonical_json(json.Value.Object(fields)) ?? e => Err(azcore.CallErr.InvalidInput(e.display()))
+}
+
+/// A response body re-encoded as Go re-encodes it.
+fn canonical_text(text: Str) -> Str ! Str {
+  let v = json.parse_value(text) ?? e => return Err(e.display())
+  canonical_json(v) ?? e => Err(e.display())
+}
+
+fn field(fields: List[(Str, json.Value)], name: Str) -> json.Value? {
+  for (k, v) in fields {
+    if k == name {
+      return Some(v)
+    }
+  }
+  None
+}
+
+pub const ERR_PARTITION_KEY_ROW_KEY: Str = "entity must have a PartitionKey and RowKey"
+pub const ERR_INVALID_UPDATE_MODE: Str = "invalid EntityUpdateMode"
+
+/// The entity's PartitionKey and RowKey strings.
+fn keys_of(fields: List[(Str, json.Value)]) -> (Str, Str) ! azcore.CallErr {
+  match (field(fields, "PartitionKey"), field(fields, "RowKey")) {
+    (Some(json.Value.Str(pk)), Some(json.Value.Str(rk))) => Ok((pk, rk))
+    _ => Err(azcore.CallErr.InvalidInput(ERR_PARTITION_KEY_ROW_KEY))
+  }
+}
+
+/// A key in an entity's address: `'` doubled (Go's prepareKey), then
+/// path escaped.
+fn key_segment(key: Str) -> Str {
+  url_path_escape(key.replace("'", "''"))
+}
+
+fn url_path_escape(s: Str) -> Str {
+  url.path_escape(s)
+}
+
+fn (t: Client) entity_url(pk: Str, rk: Str) -> Str {
+  join_paths(t.core.endpoint, "${url_path_escape(t.name)}(PartitionKey='${key_segment(pk)}',RowKey='${key_segment(rk)}')")
+}
+
+/// What an add or a get returns: the ETag and the entity's JSON.
+pub struct EntityResponse {
+  pub etag: Str = ""
+  /// The entity as JSON text (keys sorted, as Go re-encodes it).
+  pub value: Str = ""
+}
+
+pub struct AddEntityOptions {
+  /// The `$format` of the response.
+  pub format: Str? = None
+}
+
+/// Inserts the entity (JSON text with PartitionKey and RowKey).
+pub fn (t: Client) add_entity(entity: Str, options: AddEntityOptions = AddEntityOptions{}) -> EntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let fields = entity_of(entity)?
+  let u = with_query(join_paths(t.core.endpoint, url_path_escape(t.name)), query_options(options.format, None, None, None))
+  let resp = match t.core.send(json_request("POST", u, ACCEPT_MINIMAL, body: Some(canonical_entity(fields)?)), [201, 204]) {
+    Ok(r) => r
+    Err(e) => {
+      if field(fields, "PartitionKey").is_none() || field(fields, "RowKey").is_none() {
+        return Err(azcore.CallErr.InvalidInput(ERR_PARTITION_KEY_ROW_KEY))
+      }
+      return Err(e)
+    }
+  }
+  let value = if resp.body.len() == 0 { "null" } else { decoded(resp, canonical_text)? }
+  Ok(EntityResponse{etag: etag_of(resp), value: value})
+}
+
+pub struct GetEntityOptions {
+  /// The `$format` of the response.
+  pub format: Str? = None
+}
+
+pub fn (t: Client) get_entity(partition_key: Str, row_key: Str, options: GetEntityOptions = GetEntityOptions{}) -> EntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let u = with_query(t.entity_url(partition_key, row_key), query_options(options.format, None, None, None))
+  let resp = t.core.send(json_request("GET", u, ACCEPT_MINIMAL), [200])?
+  Ok(EntityResponse{etag: etag_of(resp), value: decoded(resp, canonical_text)?})
+}
+
+pub struct DeleteEntityOptions {
+  /// The ETag the entity must have; `*` (any) when None.
+  pub if_match: Str? = None
+}
+
+pub fn (t: Client) delete_entity(partition_key: Str, row_key: Str, options: DeleteEntityOptions = DeleteEntityOptions{}) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = json_request("DELETE", t.entity_url(partition_key, row_key), ACCEPT_MINIMAL, headers: [("If-Match", options.if_match ?? "*")])
+  t.core.send(req, [204])?
+  Ok(())
+}
+
+/// How an update or an upsert writes the entity: `merge` (PATCH: the
+/// properties given replace theirs, the rest stay) or `replace` (PUT).
+pub const UPDATE_MODE_MERGE: Str = "merge"
+pub const UPDATE_MODE_REPLACE: Str = "replace"
+
+pub struct UpdateEntityOptions {
+  /// The ETag the entity must have; `*` (any) when None.
+  pub if_match: Str? = None
+  /// `merge` unless given. (Go's zero options struct has an empty mode,
+  /// which is its "invalid EntityUpdateMode"; "" here is the same error.)
+  pub update_mode: Str = UPDATE_MODE_MERGE
+}
+
+/// What an update or an upsert returns.
+pub struct UpdateEntityResponse {
+  pub etag: Str = ""
+}
+
+fn (t: Client) write_entity(entity: Str, mode: Str, if_match: Str?) -> UpdateEntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let fields = entity_of(entity)?
+  let (pk, rk) = keys_of(fields)?
+  let method = match mode {
+    "merge" => "PATCH"
+    "replace" => "PUT"
+    _ => return Err(azcore.CallErr.InvalidInput(if pk == "" || rk == "" { ERR_PARTITION_KEY_ROW_KEY } else { ERR_INVALID_UPDATE_MODE }))
+  }
+  let hs = match if_match {
+    Some(e) => [("If-Match", e)]
+    None => []
+  }
+  let resp = t.core.send(json_request(method, t.entity_url(pk, rk), "application/json", body: Some(canonical_entity(fields)?), headers: hs), [204])?
+  Ok(UpdateEntityResponse{etag: etag_of(resp)})
+}
+
+/// Updates an existing entity; the If-Match is `*` unless given.
+pub fn (t: Client) update_entity(entity: Str, options: UpdateEntityOptions = UpdateEntityOptions{}) -> UpdateEntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  t.write_entity(entity, options.update_mode, Some(options.if_match ?? "*"))
+}
+
+pub struct UpsertEntityOptions {
+  /// `merge` unless given.
+  pub update_mode: Str = UPDATE_MODE_MERGE
+}
+
+/// Inserts the entity, or updates it when it exists (no If-Match).
+pub fn (t: Client) upsert_entity(entity: Str, options: UpsertEntityOptions = UpsertEntityOptions{}) -> UpdateEntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  t.write_entity(entity, options.update_mode, None)
+}
+
+pub struct ListEntitiesOptions {
+  /// An OData filter (`PartitionKey eq 'a'`).
+  pub filter: Str? = None
+  /// Comma separated property names.
+  pub select_fields: Str? = None
+  /// The most entities a page.
+  pub top: Int? = None
+  /// Where to start (a previous page's next keys).
+  pub next_partition_key: Str? = None
+  pub next_row_key: Str? = None
+  pub format: Str? = None
+}
+
+pub struct ListEntitiesResponse {
+  pub next_partition_key: Str? = None
+  pub next_row_key: Str? = None
+  /// Each entity as JSON text (keys sorted).
+  pub entities: List[Str] = []
+}
+
+fn entities_url(base: Str, o: ListEntitiesOptions, pk: Str?, rk: Str?) -> Str {
+  var q = query_options(o.format, o.top, o.select_fields, o.filter)
+  if let Some(k) = pk { q.push(("NextPartitionKey", k)) }
+  if let Some(k) = rk { q.push(("NextRowKey", k)) }
+  with_query(base, q)
+}
+
+fn parse_entities(resp: http.Response) -> ListEntitiesResponse ! Str {
+  let v = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(e.display())
+  let items = match v.get("value") {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+  var es: List[Str] = []
+  for x in items {
+    es.push(canonical_json(x) ?? e => return Err(e.display()))
+  }
+  Ok(ListEntitiesResponse{next_partition_key: resp.header("x-ms-continuation-NextPartitionKey"), next_row_key: resp.header("x-ms-continuation-NextRowKey"), entities: es})
+}
+
+/// The table's entities, a page a call (Go's NewListEntitiesPager): the
+/// next page asks from the last one's next keys until both are empty.
+pub fn (t: Client) new_list_entities_pager(options: ListEntitiesOptions = ListEntitiesOptions{}) -> runtime.Pager[ListEntitiesResponse] {
+  let base = join_paths(t.core.endpoint, "${url_path_escape(t.name)}()")
+  runtime.new_pager_with(t.core.pipeline, json_request("GET", entities_url(base, options, options.next_partition_key, options.next_row_key), ACCEPT_MINIMAL), parse_entities, fn(prev: policy.Request, page: ListEntitiesResponse) -> policy.Request? {
+    let pk = page.next_partition_key ?? ""
+    let rk = page.next_row_key ?? ""
+    if pk == "" && rk == "" {
+      return None
+    }
+    Some(prev with {url: entities_url(base, options, page.next_partition_key, page.next_row_key)})
+  })
+}
