@@ -87,12 +87,13 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v9.0.0 | 0 + 31271 gen |  |
 | resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 0 | 24355 | v9.7.0 | 0 + 6979 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
+| resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (300)
+## ARM modules not ported (299)
 
 <details><summary>The list</summary>
 
@@ -278,7 +279,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/monitor/armmonitor | v0.14.0 | v0 | 35278 |
 | resourcemanager/monitor/armmonitorworkspaces | v1.0.0 | stable | 6119 |
 | resourcemanager/monitor/armslis | v0.2.0 | v0 | 2067 |
-| resourcemanager/msi/armmsi | v1.3.0 | stable | 3108 |
 | resourcemanager/mysql/armmysqlflexibleservers | v2.0.0 | stable | 18146 |
 | resourcemanager/napsteromniagentapi/armnapsteromniagentapi | v0.1.0 | v0 | 3074 |
 | resourcemanager/netapp/armnetapp | v11.0.0 | stable | 33878 |

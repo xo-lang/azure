@@ -229,7 +229,8 @@ response type equal, except armkeyvault's `Secret`, which is
   `value` as JSON text; a patch that touches no file is reported).
   Its clients are named per group (`Client` for the package's own,
   `BlobClient`, ...), with responses carrying their headers. Also:
-  `remove_unreferenced` (Go's `remove-unreferenced-types`), `[ops]`
+  `remove_unreferenced` (Go's `remove-unreferenced-types`, or its
+  build.go's `-removeUnreferencedTypes` as for armmsi), `[ops]`
   renames, `body_fields` (the field of a binary response,
   `ManifestData`), `next_link_transform` (a pager whose next link is
   the `Link` header, joined to the endpoint after the named hand

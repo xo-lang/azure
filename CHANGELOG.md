@@ -8,6 +8,12 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/msi/armmsi v1.3.0, Go's armmsi v1.3.0 (managed
+identities; autorest, API version 2024-11-30): generated with no
+generator change, its custom file only naming Go's
+`-removeUnreferencedTypes`. All 12 calls of its four clients checked
+against a local Go program's requests and results (azcore v1.23.3).
+
 resourcemanager/containerservice/armcontainerservice v9.7.0, Go's
 armcontainerservice/v9 v9.7.0 (AKS; TypeSpec, API version 2026-08-01):
 generated with no generator change. All 69 calls of its 13 clients
