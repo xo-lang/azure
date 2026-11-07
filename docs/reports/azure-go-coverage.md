@@ -89,6 +89,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 0 | 24355 | v9.7.0 | 0 + 6979 gen |  |
 | resourcemanager/cosmos/armcosmos | v4.0.0 (`v4`) | stable | 0 | 59620 | v4.0.0 | 0 + 17800 gen |  |
 | resourcemanager/dns/armdns | v1.2.0 | stable | 0 | 3889 | v1.2.0 | 0 + 1033 gen |  |
+| resourcemanager/eventhub/armeventhub | v1.3.0 | stable; newer v2.0.0-beta.1 | 0 | 15366 | v1.3.0 | 0 + 4593 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
@@ -99,7 +100,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/servicebus/armservicebus | v1.2.0 | stable; newer v2.0.0-beta.4 | 0 | 14615 | v1.2.0 | 0 + 4504 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (293)
+## ARM modules not ported (292)
 
 <details><summary>The list</summary>
 
@@ -222,7 +223,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/enclave/armenclave | v1.0.0 | stable | 15765 |
 | resourcemanager/engagementfabric/armengagementfabric | v0.3.0 | v0 | 3729 |
 | resourcemanager/eventgrid/armeventgrid | v2.3.0 | stable | 42025 |
-| resourcemanager/eventhub/armeventhub | v1.3.0 | stable; newer v2.0.0-beta.1 | 15366 |
 | resourcemanager/extendedlocation/armextendedlocation | v1.2.0 | stable; newer v2.0.0-beta.1 | 2623 |
 | resourcemanager/fabric/armfabric | v1.0.0 | stable | 3129 |
 | resourcemanager/fileshares/armfileshares | v0.1.0 | v0 | 6027 |

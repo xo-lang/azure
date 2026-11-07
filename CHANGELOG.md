@@ -8,6 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/eventhub/armeventhub v1.3.0, Go's armeventhub v1.3.0
+(namespaces, event hubs, consumer groups, clusters, application groups,
+schema groups, disaster recovery configs, network security perimeter
+configurations, private endpoints; autorest package-2024-01). All 66
+calls of its 13 clients checked against a local Go program's requests
+and results (azcore v1.23.3). No generator change.
+
 resourcemanager/servicebus/armservicebus v1.2.0, Go's armservicebus
 v1.2.0 (namespaces, queues, topics, subscriptions, rules, disaster
 recovery and migration configs, private endpoints; autorest
