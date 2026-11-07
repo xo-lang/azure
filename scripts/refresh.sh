@@ -129,7 +129,7 @@ for d in $changed; do
     echo "$d go-program-panicked: $(grep -m1 '^panic: ' "$work/$n.go.out" | cut -c8-)" >> "$work/result"
     continue
   fi
-  resp=$md/responses.go; [ -f "$resp" ] || resp=$md/response_types.go
+  resp=$md/responses.go; [ -f "$resp" ] || resp=$md/response_types.go; [ -f "$resp" ] || resp=$md/zz_generated_response_types.go
   # the module's vectors as they were, put back if the new ones fail
   had_vec=0; [ -f "$d/govectors_test.xo" ] && { had_vec=1; cp "$d/govectors_test.xo" "$work/$n.old_vectors"; }
   had_fake=0; [ -f "$d/client_test.xo" ] && { had_fake=1; cp "$d/client_test.xo" "$work/$n.old_fake"; }

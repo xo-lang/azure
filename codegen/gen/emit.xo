@@ -54,6 +54,9 @@ pub struct Package {
   /// spaces `+` (typespec-go before strings.ReplaceAll(..., "+", "%20");
   /// codegen/gorows' `query_plus` row).
   pub query_plus: Bool = false
+  /// An autorest module whose Go GETs a next link as it is, its query
+  /// not re-encoded (codegen/gorows' `raw_next_link` row).
+  pub raw_next_link: Bool = false
   /// A hand-written function a next link header passes through before
   /// it is joined to the endpoint (azcontainerregistry's
   /// extractNextLink, from autorest.md's replace of `result.Link = &val`).
@@ -300,8 +303,9 @@ pub fn emit_models(p: Package, api: Api) -> File {
     let head = if m.private { "struct ${m.name}" } else { "pub struct ${m.name}" }
     s = s + "\n" + doc("", m.doc) + "${head} {\n"
     // Go's MarshalJSON fills a map[string]any, so json.Marshal writes the
-    // keys sorted: the fields are declared in that order
-    for f in m.fields.sort_by(fn(f: Field) -> Str { f.wire }) {
+    // keys sorted: the fields are declared in that order (or in Go's
+    // struct order, for a module with no MarshalJSON)
+    for f in m.fields.sort_by(fn(f: Field) -> Str { if f.go_order != "" { f.go_order } else { f.wire } }) {
       s = s + doc("  ", f.doc) + (if m.patch { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": json.Patch[${f.typ}] = json.Patch.Absent\n" } else { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n" })
     }
     let disc = if m.patch { None } else { disc_of(api, m.name, p.null_base_discriminator) }
@@ -432,6 +436,47 @@ fn accept_value(p: Package, op: Op) -> Str {
   if own.is_empty() { "application/json" } else { own.join(", ") }
 }
 
+/// A method's required parameters as (name, type): a parameter group's
+/// members as the one group parameter, after the others, the body too
+/// (Go's `BeginCreate(ctx, resourceGroupName, privateLink,
+/// privateLinkName PrivateLinkParameters, options)`).
+fn method_args(req: List[Param]) -> List[(Str, Str)] {
+  var out: List[(Str, Str)] = []
+  var groups: List[(Str, Str)] = []
+  for x in req {
+    if x.group == "" {
+      out.push((x.name, x.typ))
+    } else if !groups.any(fn(a: (Str, Str)) -> Bool { a.0 == x.group }) {
+      groups.push((x.group, x.group_type))
+    }
+  }
+  out + groups
+}
+
+/// The parameter group structs `op` is the first of `api`'s operations
+/// to take (Go's `PrivateLinkParameters`, by its fields' Go names).
+fn emit_groups(api: Api, op: Op) -> Str {
+  var s = ""
+  var done: List[Str] = []
+  for x in op.params {
+    if x.group_type == "" || done.contains(x.group_type) {
+      continue
+    }
+    done.push(x.group_type)
+    let first = api.ops.filter(fn(o: Op) -> Bool { o.params.any(fn(q: Param) -> Bool { q.group_type == x.group_type }) }).get(0) ?? continue
+    if first.group != op.group || first.name != op.name {
+      continue
+    }
+    s = s + "\n/// ${x.group_type}: a parameter group, Go's ${x.group_type}.\npub struct ${x.group_type} {\n"
+    for f in op.params.filter(fn(q: Param) -> Bool { q.group_type == x.group_type }) {
+      let gf = f.go_name.cut(".").map(fn(t: (Str, Str)) -> Str { t.1 }) ?? f.wire
+      s = s + doc("  ", f.doc) + "  pub ${f.name} as \"${esc(gf)}\": ${f.typ}\n"
+    }
+    s = s + "} derive Json\n"
+  }
+  s
+}
+
 fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let cn = client_name_in(p, op.group)
   let (req, opt) = split_params(op)
@@ -440,7 +485,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let snake_op = snake(op.name)
   let hname = if op.group == "" { "${snake_op}_handle" } else { "${snake(op.group)}_${snake_op}_handle" }
   let opts_vis = if on.starts_with("Raw") && p.private_types.contains(on[3..on.len()]) { "" } else { "pub " }
-  var s = "\n" + doc("", "${on}: the optional parameters of ${cn}.${method_name(op)}.") + "${opts_vis}struct ${on} {\n"
+  var s = emit_groups(api, op) + "\n" + doc("", "${on}: the optional parameters of ${cn}.${method_name(op)}.") + "${opts_vis}struct ${on} {\n"
   for x in opt {
     s = s + doc("  ", x.doc) + "  pub ${x.name}: ${x.typ}? = None\n"
   }
@@ -524,7 +569,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   s = s + "}\n"
   // the request
-  let args = req.map(fn(x: Param) -> Str { "${x.name}: ${x.typ}" }).join(", ")
+  let args = method_args(req).map(fn(a: (Str, Str)) -> Str { "${a.0}: ${a.1}" }).join(", ")
   let sep = if args == "" { "" } else { ", " }
   s = s + "\nfn (c: ${cn}) ${snake_op}_create_request(${args}${sep}options: ${on}) -> policy.Request ! azcore.CallErr {\n"
   // a path that carries a query to tell two operations apart
@@ -537,7 +582,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     } else {
       match x.constant {
         Some(k) => k
-        None => param_text(api, x, x.name)
+        None => param_text(api, x, if x.group != "" { "${x.group}.${x.name}" } else { x.name })
       }
     }
     // Go checks a string parameter that it escapes: not a reserved
@@ -673,7 +718,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
   let ok_list = if op.method == "HEAD" && ((!p.typespec && !grouped(p)) || p.head_as_boolean) && !op.ok.contains(404) { "[${ok}, 404]" } else { "[${ok}]" }
-  let call_args = req.map(fn(x: Param) -> Str { x.name }).join(", ")
+  let call_args = method_args(req).map(fn(a: (Str, Str)) -> Str { a.0 }).join(", ")
   let handler = "fn(r: http.Response) -> ${rn} ! Str { ${hname}(r${if link_join { ", c.setup.endpoint" } else { "" }}) }"
   s = s + "\n" + doc("", op.doc)
   // a private operation (Go's lower case one) is raw_<name>, leaving
@@ -690,7 +735,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       (Some(nl), Some(t), _) => if is_model(api, t) { "fn(r: ${rn}) -> Str? { r.${body_field(api, op)}.${snake(nl)} }" } else { "fn(r: ${rn}) -> Str? { None }" }
       _ => "fn(r: ${rn}) -> Str? { None }"
     }
-    s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}))\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" })
+    s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}))\n}\n" } else if p.raw_next_link { "  Ok(runtime.new_raw_link_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" })
   } else if op.lro && op.paged_lro {
     // Go's Poller[*Pager[T]]: the final response is the first page, and
     // the pager GETs each page's nextLink after it.

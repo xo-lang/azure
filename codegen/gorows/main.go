@@ -49,9 +49,9 @@ var (
 )
 
 type row struct {
-	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion string
-	OpenAPIMore                                                []string
-	UTC, Seal, AcceptAll, QueryPlus, PutBodyInOptions          bool
+	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion                  string
+	OpenAPIMore                                                                 []string
+	UTC, Seal, AcceptAll, QueryPlus, PutBodyInOptions, RawNextLink, StructOrder bool
 }
 
 var specs string
@@ -121,6 +121,13 @@ func derive(modPath, version, dir string) row {
 	// typespec-go before it replaced the query's "+" with "%20"
 	// (armalertsmanagement's emitter 0.10.2)
 	r.QueryPlus = exists(filepath.Join(dir, "tsp-location.yaml")) && strings.Contains(s, "RawQuery = reqQP.Encode()") && !strings.Contains(s, `reqQP.Encode(), "+", "%20"`)
+	// autorest.go before about mid 2022 GETs a next link as it is, its
+	// query not re-encoded (armservicefabricmesh 0.6.2's
+	// runtime.NewRequest; later ones use FetcherForNextLink)
+	r.RawNextLink = strings.Contains(s, "runtime.NewRequest(ctx, http.MethodGet, *page.NextLink)")
+	// autorest.go before models_serde.go wrote no MarshalJSON: a model's
+	// JSON is encoding/json's, in struct order (armworkloadmonitor 0.5.1)
+	r.StructOrder = strings.HasPrefix(rel, "resourcemanager/") && s != "" && !strings.Contains(s, "MarshalJSON")
 	// autorest.go before about December 2023 kept a PUT's or PATCH's
 	// optional body in the options (armdatadog 1.3.0); later ones, and
 	// typespec-go, take it as a parameter (armconnectedvmware 1.1.1)
@@ -498,6 +505,12 @@ func format(r row) string {
 	}
 	if r.PutBodyInOptions {
 		out = append(out, "put_body_in_options = true")
+	}
+	if r.RawNextLink {
+		out = append(out, "raw_next_link = true")
+	}
+	if r.StructOrder {
+		out = append(out, "struct_order_json = true")
 	}
 	return strings.Join(out, "\n")
 }

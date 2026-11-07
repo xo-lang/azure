@@ -23,6 +23,12 @@ pub struct Renames {
   /// order (armcosmos' `GetSQLRoleDefinition(ctx, roleDefinitionID,
   /// resourceGroupName, accountName)`), by operationId, lower case.
   pub param_order: Map[Str, List[Str]] = {}
+  /// `@@override(Iface.op, customOp, "go")` whose custom operation takes
+  /// a model with `@path` properties as one parameter (armsecurity's
+  /// `privateLinkName: \`private-link-parameters\``): Go's method takes a
+  /// parameter group struct. By operationId, lower case: (the
+  /// parameter's name, Go's type name, the model's path properties).
+  pub param_groups: Map[Str, List[(Str, Str, List[Str])]] = {}
   /// model to Go's name
   pub models: Map[Str, Str] = {}
   /// `Model.property` to Go's field name
@@ -342,7 +348,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
   let unscoped_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"?([A-Za-z0-9_]+)\"?\\s*,?\\s*\\)") ?? e => return Err(e.display())
-  let override_re = regexp.compile("@@override\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
+  let override_re = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?override\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let param_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)::parameters\\.([A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
@@ -790,6 +796,10 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
         let order = override_path_order(t, m[2] ?? "")
         if !order.is_empty() {
           r.param_order[id.to_lower()] = order
+          let groups = override_groups(t, m[2] ?? "", texts)
+          if !groups.is_empty() {
+            r.param_groups[id.to_lower()] = groups
+          }
           break
         }
       }
@@ -839,6 +849,85 @@ fn model_props(text: Str, name: Str) -> List[Str] {
   for line in prop.find_all(m[1] ?? "") {
     let c = prop.captures(line) ?? continue
     out.push(c[1] ?? "")
+  }
+  out
+}
+
+/// The parameter list of `op name(...)` in `text` (None when `text` has
+/// no such operation).
+fn override_body(text: Str, name: Str) -> Str? {
+  if name == "" {
+    return None
+  }
+  let short = name.split(".").last() ?? name
+  let decl = regexp.compile("(?:^|\\n)[ \\t]*(?:op[ \\t]+)?${short}[ \\t]*\\(").ok()?
+  let whole = decl.find_all(text).get(0)?
+  let at = text.find(whole)?
+  let rest = text[at + whole.len()..text.len()]
+  match rest.find("\n):") {
+    Some(j) => Some(rest[0..j])
+    None => match rest.find("):") {
+      Some(j) => Some(rest[0..j])
+      None => None
+    }
+  }
+}
+
+/// The `@path` properties of `model name { ... }` in any of `texts`, by
+/// name ([] for none).
+fn model_path_props(texts: List[Str], name: Str) -> List[Str] {
+  for t in texts {
+    let at = t.find("model ${name} {") ?? continue
+    let rest = t[at..t.len()]
+    let end = rest.find("\n}") ?? continue
+    var out: List[Str] = []
+    var path = false
+    for raw in rest[0..end].split("\n") {
+      let l = raw.trim()
+      if l.starts_with("@path") {
+        path = true
+      } else if l.starts_with("@") || l.starts_with("#") || l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") || l == "" {
+        // a decorator, a comment: the property is next
+      } else if l.contains(":") {
+        if path {
+          out.push(l[0..(l.find(":") ?? 0)].trim().trim_suffix("?"))
+        }
+        path = false
+      }
+    }
+    return out
+  }
+  []
+}
+
+/// The parameters of the custom operation `name` that are a model with
+/// `@path` properties: (the parameter's name, Go's type name, the path
+/// properties). Go's TypeSpec emitter takes each as a parameter group
+/// struct named after the model (`private-link-parameters` is
+/// PrivateLinkParameters).
+fn override_groups(text: Str, name: Str, texts: List[Str]) -> List[(Str, Str, List[Str])] {
+  let body = override_body(text, name) ?? return []
+  let prop = regexp.compile("^([A-Za-z0-9_]+)\\??\\s*:\\s*(`[^`]+`|[A-Za-z0-9_]+)\\s*,?$").ok() ?? return []
+  var out: List[(Str, Str, List[Str])] = []
+  for raw in body.split("\n") {
+    let l = raw.trim()
+    let c = prop.captures(l) ?? continue
+    let ty = c[2] ?? ""
+    if ty == "" || ty == "string" || ty == "int32" || ty == "int64" || ty == "boolean" {
+      continue
+    }
+    let props = model_path_props(texts, ty)
+    if props.is_empty() {
+      continue
+    }
+    let bare = ty.trim_prefix("`").trim_suffix("`")
+    var go = ""
+    for w in bare.split("-") {
+      if w != "" {
+        go = go + w[0..1].to_upper() + w[1..w.len()]
+      }
+    }
+    out.push((c[1] ?? "", go, props))
   }
   out
 }

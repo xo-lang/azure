@@ -17,6 +17,10 @@ pub struct Field {
   /// The schema, or an allOf parent, lists it as required: Go writes a
   /// constant one always, an optional one only when set.
   pub required: Bool = false
+  /// The field's place in Go's struct, for a module whose JSON is in
+  /// struct order (Custom.struct_order_json): the read-only fields after
+  /// the others, each by Go's name. "" sorts by the wire name.
+  pub go_order: Str = ""
 }
 
 pub struct Model {
@@ -84,6 +88,11 @@ pub struct Param {
   /// A `format: date` parameter: a Time written as its date
   /// (runtime.date_text).
   pub date: Bool = false
+  /// A path parameter Go's method takes inside a parameter group struct
+  /// (TypeSpec's override with a model parameter, Custom.param_groups):
+  /// the method's parameter and the struct's type.
+  pub group: Str = ""
+  pub group_type: Str = ""
 }
 
 pub struct Op {
@@ -223,6 +232,12 @@ pub struct Custom {
   /// operationId (lower case) to its path parameters' wire names in Go's
   /// order (custom `param_order`).
   pub param_order: Map[Str, List[Str]] = {}
+  /// TypeSpec's override parameter groups (spec.Renames' param_groups):
+  /// operationId, lower case, to (parameter, Go's type, path properties).
+  pub param_groups: Map[Str, List[(Str, Str, List[Str])]] = {}
+  /// Go's module has no MarshalJSON (codegen/gorows'
+  /// `struct_order_json`): models encode in Go's struct order.
+  pub struct_order_json: Bool = false
   /// Go's autorest module keeps a PUT's or PATCH's optional body in the
   /// options (older autorest.go: armdatadog 1.3.0).
   pub put_body_in_options: Bool = false
@@ -286,6 +301,9 @@ pub struct Builder {
   /// x-ms-enum of the same name adds its values (modelerfour's union).
   enum_keys: Map[Str, List[(Str, (Str, Str, Str))]] = {}
   polys: List[Poly] = []
+  /// Definitions (file#def) under a discriminator with no subtypes of
+  /// their own: plain structs, never a Classification.
+  leaves: Map[Str, Bool] = {}
   known: Map[Str, Str] = {}
   /// The package's api-version: the first input file with operations.
   api_version: Str = ""
@@ -586,7 +604,19 @@ pub fn (var b: Builder) type_of(file: Str, v: json.Value, hint: Str) -> Str {
       let t = b.named(f, spec.last(p), x)
       // A struct with a discriminator stands for its subtypes too.
       if str_of(x.get("discriminator")) != "" && b.known.get(t) == Some(t) {
-        return b.poly(f, spec.last(p), x, t)
+        return b.poly(f, spec.last(p), x, t, str_of(x.get("discriminator")))
+      }
+      // A subtype with subtypes of its own (servicefabricmesh's
+      // NetworkResourceProperties under NetworkResourcePropertiesBase):
+      // Go's m4 makes it polymorphic too, by the inherited discriminator.
+      if b.known.get(t) == Some(t) && !b.leaves.contains("${f}#${spec.last(p)}") {
+        let tag = b.inherited_disc(f, x, 0)
+        if tag != "" {
+          if b.known.contains("${t}Classification") || !b.subtypes(f, spec.last(p)).is_empty() {
+            return b.poly(f, spec.last(p), x, t, tag)
+          }
+        }
+        b.leaves["${f}#${spec.last(p)}"] = true
       }
       return t
     }
@@ -622,9 +652,46 @@ fn (b: Builder) descends(file: Str, v: json.Value, root_file: Str, root_def: Str
   false
 }
 
-/// The polymorphic type of the definition `def` (type `base`): its
-/// subtypes are the definitions of every file that descend from it.
-fn (var b: Builder) poly(file: Str, def: Str, v: json.Value, base: Str) -> Str {
+/// The discriminator definition `v` inherits through its allOf
+/// ancestors ("" for none).
+fn (b: Builder) inherited_disc(file: Str, v: json.Value, depth: Int) -> Str {
+  if depth > 10 {
+    return ""
+  }
+  for parent in list_of(v.get("allOf")) {
+    if str_of(parent.get("$ref")) == "" {
+      continue
+    }
+    let (pf, _, px) = b.deref(file, parent)
+    let d = str_of(px.get("discriminator"))
+    if d != "" {
+      return d
+    }
+    let up = b.inherited_disc(pf, px, depth + 1)
+    if up != "" {
+      return up
+    }
+  }
+  ""
+}
+
+/// The definitions of every file that descend from `def` of `file`.
+fn (b: Builder) subtypes(file: Str, def: Str) -> List[(Str, Str, json.Value)] {
+  var out: List[(Str, Str, json.Value)] = []
+  for (f, doc) in b.files {
+    for (d, x) in fields_of(doc.get("definitions")) {
+      if !(f == file && d == def) && b.descends(f, x, file, def, 0) {
+        out.push((f, d, x))
+      }
+    }
+  }
+  out
+}
+
+/// The polymorphic type of the definition `def` (type `base`, by the
+/// discriminator `tag`): its subtypes are the definitions of every file
+/// that descend from it.
+fn (var b: Builder) poly(file: Str, def: Str, v: json.Value, base: Str, tag: Str) -> Str {
   let name = "${base}Classification"
   if b.known.contains(name) {
     return name
@@ -644,7 +711,7 @@ fn (var b: Builder) poly(file: Str, def: Str, v: json.Value, base: Str) -> Str {
       variants.push((t, if value != "" { value } else { d }))
     }
   }
-  b.polys.push(Poly{name: name, base: base, tag: str_of(v.get("discriminator")), variants: variants, doc: "${name}: a ${base} by its ${str_of(v.get("discriminator"))}, Go's ${name} interface."})
+  b.polys.push(Poly{name: name, base: base, tag: tag, variants: variants, doc: "${name}: a ${base} by its ${tag}, Go's ${name} interface."})
   name
 }
 
@@ -1051,7 +1118,8 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value, id: 
       Some(json.Value.Str(c)) if typ == "Str" && b.sealed(target) => c
       _ => ""
     }
-    fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop), constant: constant, required: constant != "" && required.contains(wire)})
+    let go_order = if b.custom.struct_order_json { "${if prop.get("readOnly") == Some(json.Value.Bool(true)) || target.get("readOnly") == Some(json.Value.Bool(true)) { "1" } else { "0" }}${go_name[0..1].to_upper()}${go_name[1..go_name.len()]}" } else { "" }
+    fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop), constant: constant, required: constant != "" && required.contains(wire), go_order: go_order})
   }
   let private = b.custom.models.values().any(fn(r: Str) -> Bool { is_unexported(r) && reserve(r) == name })
   b.models.push(Model{name: name, fields: fields, doc: doc_of(v), private: private, extra: !fields.is_empty() && b.has_extra(file, v, 0)})
@@ -1307,6 +1375,15 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           params = params.map(fn(q: Param) -> Param { if q.client && b.custom.method_params.contains("${id.to_lower()}#${q.wire}") { q with {client: false} } else { q } })
           if let Some(order) = b.custom.param_order.get(id.to_lower()) {
             params = reordered(params, order)
+          }
+          for (gname, gtype, props) in b.custom.param_groups.get(id.to_lower()) ?? [] {
+            params = params.map(fn(q: Param) -> Param {
+              if q.loc == "path" && !q.client && props.contains(q.wire) {
+                q with {group: param_name(gname), group_type: gtype, go_name: "${gname}.${q.wire[0..1].to_upper()}${q.wire[1..q.wire.len()]}"}
+              } else {
+                q
+              }
+            })
           }
           // autorest.go takes the body last (azcontainerregistry's
           // uploadChunk(location, chunkData))
