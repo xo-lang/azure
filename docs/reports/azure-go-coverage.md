@@ -85,13 +85,14 @@ shipped a newer major whose spec our generator has not been run on.
 |---|---|---|---:|---:|---|---|---|
 | resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 7 | 14114 | v2.2.0 | 0 + 3714 gen |  |
 | resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v9.0.0 | 0 + 31271 gen |  |
+| resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 0 | 24355 | v9.7.0 | 0 + 6979 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (301)
+## ARM modules not ported (300)
 
 <details><summary>The list</summary>
 
@@ -159,7 +160,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/containerorchestratorruntime/armcontainerorchestratorruntime | v0.1.0 | v0 | 4969 |
 | resourcemanager/containerregistry/armcontainerregistry | v3.0.0 | stable | 15726 |
 | resourcemanager/containerregistry/armcontainerregistrytasks | v0.1.0 | v0 | 8803 |
-| resourcemanager/containerservice/armcontainerservice | v9.7.0 | stable | 24355 |
 | resourcemanager/containerservice/armdeploymentsafeguards | v0.1.0 | v0 | 1696 |
 | resourcemanager/containerserviceaimanager/armcontainerserviceaimanager | v0.2.0 | v0 | 8193 |
 | resourcemanager/containerservicefleet/armcontainerservicefleet | v3.0.0 | stable | 11768 |
@@ -433,7 +433,8 @@ Our line counts above are from before these catch-ups.
    own.
 
 The ARM majors (armstorage v4, armcompute v9, armnetwork v12,
-armresources v4 and armkeyvault v2) and armsubscriptions v2 are done by
+armresources v4 and armkeyvault v2), armsubscriptions v2 and
+armcontainerservice v9 are done by
 generating from the
 specs. containers/azcontainerregistry v0.2.3 is done: its operations
 generated from the swagger with Go's autorest.md directives as JSON

@@ -8,6 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/containerservice/armcontainerservice v9.7.0, Go's
+armcontainerservice/v9 v9.7.0 (AKS; TypeSpec, API version 2026-08-01):
+generated with no generator change. All 69 calls of its 13 clients
+checked against a local Go program's requests and results (azcore
+v1.23.3), the long-running ones through poll_until_done, including Go's
+`response is missing polling URL` for a 202 without one.
+
 resourcemanager/resources/armsubscriptions v2.0.0, Go's
 armsubscriptions/v2 v2.0.0 (TypeSpec, API version 2022-12-01): every
 call of its four clients checked against a local Go program's requests
