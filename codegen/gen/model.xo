@@ -61,6 +61,9 @@ pub struct Param {
   /// api-version and other constants
   pub constant: Str? = None
   pub doc: Str = ""
+  /// A body sent as it is (`format: binary` or `file`; Go's
+  /// io.ReadSeekCloser), not as JSON.
+  pub binary: Bool = false
 }
 
 pub struct Op {
@@ -93,6 +96,13 @@ pub struct Op {
   /// The headers of its success responses (wire names, in order) and
   /// whether each is an integer.
   pub resp_headers: List[(Str, Bool)] = []
+  /// The operation's `consumes` content types (a binary body's
+  /// Content-Type).
+  pub consumes: List[Str] = []
+  /// A success response's body is binary (`format: file` or `binary`):
+  /// `Bytes` as received, in the response field `body_field`.
+  pub binary_resp: Bool = false
+  pub body_field: Str = ""
 }
 
 /// A polymorphic type (a definition with a `discriminator`): Go's
@@ -181,6 +191,9 @@ pub struct Custom {
   pub drop_values: Map[Str, List[Str]] = {}
   /// A data-plane module: operations without a group stay on its Client.
   pub data_plane: Bool = false
+  /// The response field of an operation's binary body (operationId,
+  /// lower case), Go's name for it (`BlobData`); `Body` otherwise.
+  pub body_fields: Map[Str, Str] = {}
   /// Emit only the types operations reach (TypeSpec's Go emitter), not
   /// every definition (autorest.go).
   pub reachable_only: Bool = false
@@ -218,7 +231,10 @@ pub struct Builder {
 
 pub fn builder(files: Map[Str, json.Value], package: Str, custom: Custom = Custom{}) -> Builder {
   let p = package.to_lower()
-  Builder{files: files, custom: custom, stutter: if p.starts_with("arm") { p[3..p.len()] } else { p }}
+  // autorest.go drops a data plane package's name from its groups too,
+  // without its `az` (azcontainerregistry's ContainerRegistryBlob is Blob)
+  let stem = if p.starts_with("arm") { p[3..p.len()] } else if custom.data_plane && !custom.tsp && p.starts_with("az") { p[2..p.len()] } else { p }
+  Builder{files: files, custom: custom, stutter: stem}
 }
 
 /// A name with a word repeated back to back said once, as modelerfour
@@ -516,6 +532,11 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
       return b.str_enum(b.renamed_in(file, name) ?? b.enum_name(name), v)
     }
   }
+  // an enum without x-ms-enum: modelerfour's sealed choice, named
+  // from where it is (a form field's is `PostContentSchema<Field>`)
+  if v.get("x-ms-enum").is_none() && str_of(v.get("type")) == "string" && list_of(v.get("enum")).len() > 1 && hint != "" {
+    return b.str_enum(b.enum_name(hint), v)
+  }
   match str_of(v.get("type")) {
     "string" => match str_of(v.get("format")) {
       "date-time" => if b.custom.utc_date_times { "azcore.DateTimeUTC" } else { "azcore.DateTime" }
@@ -789,20 +810,36 @@ fn reordered(params: List[Param], order: List[Str]) -> List[Param] {
   out
 }
 
+/// A schema of raw bytes: `format: binary` or `file` (any type), sent
+/// and received as it is.
+fn is_binary(v: json.Value?) -> Bool {
+  let f = str_of(v.and_then(fn(x: json.Value) -> json.Value? { x.get("format") }))
+  f == "binary" || f == "file"
+}
+
 fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   let (f, _, p) = b.deref(file, raw)
   let wire = str_of(p.get("name"))
   let loc = str_of(p.get("in"))
+  let binary = loc == "body" && is_binary(p.get("schema"))
   // The api-version is a constant: its enum (some files have one) is
   // not a type, as in Go.
   let typ = if wire == "api-version" {
     "Str"
+  } else if binary {
+    "Bytes"
   } else if loc == "body" {
     b.type_of(f, p.get("schema") ?? json.Value.Object([]), pascal(wire))
+  } else if loc == "formData" {
+    // modelerfour gathers a form's fields into one schema, POST's
+    // `PostContentSchema`, and names an inline enum after its field
+    b.custom.param_types.get(wire) ?? b.inline(f, p, "PostContentSchema${pascal(wire)}")
   } else {
     b.custom.param_types.get(wire) ?? b.inline(f, p, pascal(wire))
   }
-  let required = bool_of(p.get("required")) || loc == "path"
+  // a required parameter with a client default is optional (the
+  // service's default applies when it is left out)
+  let required = (bool_of(p.get("required")) && p.get("x-ms-client-default").is_none()) || loc == "path"
   let one = list_of(p.get("enum"))
   let constant = if wire == "api-version" {
     // The operation's own file's version (compute mixes several);
@@ -820,12 +857,17 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   // TypeSpec's Go emitter camel-cases a quoted name (`setting-name` is
   // settingName)
   let plain = if b.custom.data_plane && wire.contains("-") { dash_camel(wire) } else { wire }
-  let go_name = b.custom.params.get(wire) ?? (if str_of(p.get("x-ms-client-name")) != "" { str_of(p.get("x-ms-client-name")) } else { plain })
+  // a form field keeps its wire name: the schema's property, which
+  // x-ms-client-name does not rename (azcontainerregistry's refresh_token
+  // is refreshToken, not acrRefreshToken)
+  let client_name = if loc == "formData" { "" } else { str_of(p.get("x-ms-client-name")) }
+  let go_name = b.custom.params.get(wire) ?? (if client_name != "" { client_name } else { plain })
   let client = wire == "subscriptionId" || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
   Param{
     name: snake(go_name), go_name: go_name,
     wire: wire, loc: loc, required: required, typ: typ,
     skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")), multi: str_of(p.get("collectionFormat")) == "multi" && loc == "query", client: client, constant: constant, doc: doc_of(p),
+    binary: binary,
   }
 }
 
@@ -889,15 +931,37 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           if let Some(order) = b.custom.param_order.get(id.to_lower()) {
             params = reordered(params, order)
           }
+          // autorest.go takes the body last (azcontainerregistry's
+          // uploadChunk(location, chunkData))
+          if !b.custom.tsp {
+            params = params.filter(fn(q: Param) -> Bool { q.loc != "body" }) + params.filter(fn(q: Param) -> Bool { q.loc == "body" })
+          }
+          let consumes = list_of(o.get("consumes")).map(fn(x: json.Value) -> Str { str_of(Some(x)) }).filter(fn(t: Str) -> Bool { t != "" })
+          // a binary body of several content types: autorest.go's
+          // `contentType ContentType` parameter before it
+          if consumes.len() > 1 && params.any(fn(q: Param) -> Bool { q.binary }) {
+            let ct = b.str_enum("ContentType", json.Value.Object([("type", json.Value.Str("string")), ("description", json.Value.Str("Content type for upload")), ("enum", json.Value.List(consumes.map(fn(c: Str) -> json.Value { json.Value.Str(c) })))]))
+            var at = params.len()
+            for (i, q) in params.indexed() {
+              if q.binary && at == params.len() {
+                at = i
+              }
+            }
+            params = params[0..at] + [Param{name: "content_type", go_name: "contentType", wire: "Content-Type", loc: "header", required: true, typ: ct, doc: "Upload file type"}] + params[at..params.len()]
+          }
           var okc: List[Int] = []
           var resp: Str? = None
+          var binary_resp = false
           // autorest.go sends Accept when any response, the error one
           // too, has a schema
           var accept = false
           var resp_headers: List[(Str, Bool)] = []
           let produces = list_of(o.get("produces")).map(fn(x: json.Value) -> Str { str_of(Some(x)) }).filter(fn(t: Str) -> Bool { t != "" })
+          // an operation that produces only a binary type sends no Accept
+          // for its error schema alone (ACR's DeleteBlob)
+          let json_out = produces.is_empty() || produces.any(fn(t: Str) -> Bool { t.contains("json") })
           for (code, r) in fields_of(o.get("responses")) {
-            if b.deref(file, r).2.get("schema").is_some() {
+            if b.deref(file, r).2.get("schema").is_some() && (code != "default" || json_out) {
               accept = true
             }
             if code == "default" {
@@ -907,6 +971,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
               }
             }
             let n = Int.parse(code) ?? continue
+            // autorest.go: every declared status not marked as an error
+            // response is a success (ACR's deletes declare 404)
+            let error_response = b.deref(file, r).2.get("x-ms-error-response") == Some(json.Value.Bool(true))
+            if n >= 300 && !error_response {
+              okc.push(n)
+            }
             if n >= 200 && n < 300 {
               okc.push(n)
               for (h, hv) in fields_of(b.deref(file, r).2.get("headers")) {
@@ -916,7 +986,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
               }
               if resp.is_none() {
                 if let Some(s) = b.deref(file, r).2.get("schema") {
-                  resp = Some(b.type_of(file, s, "${group}${name}Response"))
+                  if is_binary(Some(s)) {
+                    resp = Some("Bytes")
+                    binary_resp = true
+                  } else {
+                    resp = Some(b.type_of(file, s, "${group}${name}Response"))
+                  }
                 }
               }
             }
@@ -938,7 +1013,8 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             group: group, name: name, method: method.to_upper(), path: path, params: params, ok: okc.sort(), resp: resp,
             pageable: pg.is_some() && !lro, next_link: next, item_name: if item_name == "" { "value" } else { item_name },
             lro: lro, paged_lro: pg.is_some() && lro, final_state: fsv, accept: accept, status_poller: lro && b.custom.status_pollers.contains(id.to_lower()), doc: doc_of(o),
-            produces: produces, resp_headers: resp_headers,
+            produces: produces, resp_headers: resp_headers, consumes: consumes, binary_resp: binary_resp,
+            body_field: if binary_resp { b.custom.body_fields.get(id.to_lower()) ?? "Body" } else { "" },
           })
         }
       }

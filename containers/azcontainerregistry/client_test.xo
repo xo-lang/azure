@@ -1,0 +1,535 @@
+// Go's calls (clientvectors_test.xo) made again here against the same
+// fake registry: every request, token scope and result must be Go's.
+
+use std/base64
+use std/crypto
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const HOST: Str = "reg.example.test"
+const EP: Str = "https://reg.example.test"
+
+const MANIFEST: Str = "{\"schemaVersion\":2,\"config\":{\"digest\":\"sha256:c1\"}}"
+
+const REPO_PROPS: Str = "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"createdTime\":\"2026-11-01T10:00:00.1234567Z\",\"lastUpdateTime\":\"2026-11-02T10:00:00Z\",\"manifestCount\":2,\"tagCount\":1,\"changeableAttributes\":{\"deleteEnabled\":true,\"writeEnabled\":false,\"listEnabled\":true,\"readEnabled\":true}}"
+const TAG_PROPS: Str = "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"tag\":{\"name\":\"v1\",\"digest\":\"sha256:d1\",\"createdTime\":\"2026-11-01T10:00:00Z\",\"lastUpdateTime\":\"2026-11-02T10:00:00+01:00\",\"changeableAttributes\":{\"deleteEnabled\":false}}}"
+const MAN_PROPS: Str = "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"manifest\":{\"digest\":\"sha256:d1\",\"imageSize\":123,\"createdTime\":\"2026-11-01T10:00:00Z\",\"lastUpdateTime\":\"2026-11-02T10:00:00Z\",\"architecture\":\"arm64\",\"os\":\"linux\",\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"configMediaType\":\"application/vnd.oci.image.config.v1+json\",\"tags\":[\"v1\",\"latest\"],\"references\":[{\"digest\":\"sha256:p1\",\"architecture\":\"amd64\",\"os\":\"windows\"}],\"changeableAttributes\":{\"readEnabled\":true}}}"
+
+fn jwt(claims: Str) -> Str {
+  "h.${base64.encode(claims.bytes(), base64.Base64.RawUrl)}.s"
+}
+
+fn digest_of(s: Str) -> Str {
+  "sha256:${crypto.sha256(s.bytes()).to_hex()}"
+}
+
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("aad"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+struct BadCred {}
+
+fn (c: BadCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Err(azcore.AuthErr{credential: "BadCred", msg: "no token"})
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[List[Int]]
+  bodies: Mutex[List[Str]]
+  exchange_status: Mutex[List[Int]]
+  challenges: Mutex[List[Str]]
+  refresh_token: Mutex[Str]
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn pop_first[T](m: Mutex[List[T]]) -> T? {
+  m.with(fn(var l: List[T]) -> T? {
+    let x = l.get(0) ?? return None
+    l = l[1..l.len()]
+    Some(x)
+  })
+}
+
+/// The scope the registry asks for on a resource path.
+fn scope_of(path: Str) -> Str {
+  if path == "/acr/v1/_catalog" {
+    return "registry:catalog:*"
+  }
+  var p = path
+  if p.starts_with("/acr/v1/") {
+    p = p[8..p.len()]
+  } else if p.starts_with("/v2/") {
+    p = p[4..p.len()]
+  }
+  let name = match p.cut("/") {
+    Some((n, _)) => n
+    None => p
+  }
+  "repository:${name}:pull"
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  // every field of each header: Go's get_manifest sends two Accept
+  // fields (`Accept` and the option's `accept`), which its fake prints
+  // as two map keys
+  var hs: List[Str] = []
+  var seen: List[Str] = []
+  for (k, _) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" && !seen.contains(lk) {
+      seen.push(lk)
+      for v in req.header_values(lk) {
+        hs.push("${lk}=${v}")
+      }
+    }
+  }
+  let rq = req.raw_query()
+  let ep = req.escaped_path()
+  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${ep}${if rq == "" { "" } else { "?${rq}" }}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let p = url.path_unescape(ep) ?? _ => ep
+  let q = url.parse_query(rq) ?? _ => url.values()
+  var h: Map[Str, Str] = {}
+  if p.starts_with("/oauth2/") {
+    if let Some(st) = pop_first(f.exchange_status) {
+      return http.Response{status: st, headers: {"x-ms-error-code": "Denied"}, body: b"{\"errors\":[{\"code\":\"Denied\"}]}"}
+    }
+    let form = url.parse_query(req.body.to_str_lossy()) ?? _ => url.values()
+    if p == "/oauth2/exchange" {
+      let rt = f.refresh_token.with_read(fn(s: Str) -> Str { s })
+      return http.Response{status: 200, headers: {}, body: "{\"refresh_token\":\"${rt}\"}".bytes()}
+    }
+    return http.Response{status: 200, headers: {}, body: "{\"access_token\":\"at|${form.get("scope") ?? ""}\"}".bytes()}
+  }
+  let scope = scope_of(p)
+  if req.header("Authorization") != Some("Bearer at|${scope}") {
+    let c = pop_first(f.challenges) ?? "Bearer realm=\"https://${HOST}/oauth2/token\",service=\"${HOST}\",scope=\"${scope}\""
+    if c != "" {
+      h["WWW-Authenticate"] = c
+    }
+    return http.Response{status: 401, headers: h, body: b""}
+  }
+  if let Some(st) = pop_first(f.next) {
+    return http.Response{status: st, headers: {"x-ms-error-code": "Bad"}, body: b"{\"errors\":[{\"code\":\"Bad\",\"message\":\"no\"}]}"}
+  }
+  if let Some(b) = pop_first(f.bodies) {
+    return http.Response{status: 200, headers: {}, body: b.bytes()}
+  }
+  let m = req.method
+  let r = fn(st: Int, hd: Map[Str, Str], b: Str) -> http.Response { http.Response{status: st, headers: hd, body: b.bytes()} }
+  if p == "/acr/v1/_catalog" {
+    if (q.get("last") ?? "") == "" {
+      return r(200, {"Link": "</acr/v1/_catalog?last=b&n=2&orderby=>; rel=\"next\""}, "{\"repositories\":[\"a\",\"b\"]}")
+    }
+    return r(200, {}, "{\"repositories\":[\"c\"]}")
+  }
+  if p.ends_with("/_tags") {
+    if (q.get("last") ?? "") == "" {
+      return r(200, {"Link": "</acr/v1/hello/_tags?last=v1&n=1&orderby=timedesc>; rel=\"next\""}, "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"tags\":[{\"name\":\"v1\",\"digest\":\"sha256:d1\",\"createdTime\":\"2026-11-01T10:00:00Z\",\"lastUpdateTime\":\"2026-11-02T10:00:00Z\",\"changeableAttributes\":{\"writeEnabled\":true}}]}")
+    }
+    return r(200, {}, "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"tags\":[]}")
+  }
+  if p.ends_with("/_manifests") {
+    let hd: Map[Str, Str] = if (q.get("last") ?? "") == "" { {"Link": "</acr/v1/hello/_manifests?last=sha256%3Ad1&n=1>; rel=\"next\""} } else { {} }
+    return r(200, hd, "{\"registry\":\"reg.example.test\",\"imageName\":\"hello\",\"manifests\":[{\"digest\":\"sha256:d1\",\"imageSize\":5,\"tags\":[\"v1\"]}]}")
+  }
+  if p.starts_with("/acr/v1/") && p.contains("/_tags/") {
+    if m == "DELETE" {
+      return r(202, {}, "")
+    }
+    return r(200, {}, TAG_PROPS)
+  }
+  if p.starts_with("/acr/v1/") && p.contains("/_manifests/") {
+    return r(200, {}, MAN_PROPS)
+  }
+  if p.starts_with("/acr/v1/") {
+    if m == "DELETE" {
+      return r(202, {}, "")
+    }
+    return r(200, {}, REPO_PROPS)
+  }
+  if p.contains("/manifests/") {
+    if m == "GET" {
+      return r(200, {"Docker-Content-Digest": digest_of(MANIFEST)}, MANIFEST)
+    }
+    if m == "PUT" {
+      let d = digest_of(req.body.to_str_lossy())
+      return r(201, {"Docker-Content-Digest": d, "Location": "/v2/hello/manifests/${d}", "Content-Length": "0"}, "")
+    }
+    return r(202, {}, "")
+  }
+  if p.ends_with("/blobs/uploads/") {
+    if let Some(mount) = q.get("mount") {
+      return r(201, {"Docker-Content-Digest": mount, "Location": "/v2/hello/blobs/${mount}", "Docker-Upload-UUID": "u0"}, "")
+    }
+    return r(202, {"Location": "/v2/hello/blobs/uploads/u1?_state=s1", "Range": "0-0", "Docker-Upload-UUID": "u1"}, "")
+  }
+  if p.contains("/blobs/uploads/") {
+    if m == "PATCH" {
+      return r(202, {"Location": "/v2/hello/blobs/uploads/u1?_state=s2", "Range": "0-${req.body.len() - 1}", "Docker-Upload-UUID": "u1"}, "")
+    }
+    if m == "PUT" {
+      let d = q.get("digest") ?? ""
+      return r(201, {"Docker-Content-Digest": d, "Location": "/v2/hello/blobs/${d}", "Range": "0-9"}, "")
+    }
+    if m == "GET" {
+      return r(204, {"Range": "0-9", "Docker-Upload-UUID": "u1"}, "")
+    }
+    return r(204, {}, "")
+  }
+  if p.contains("/blobs/") {
+    let dg = digest_of("blob-bytes")
+    let ranged = req.header("Range").is_some()
+    if m == "GET" {
+      if ranged {
+        return r(206, {"Content-Range": "bytes 0-3/10", "Content-Length": "4"}, "blob")
+      }
+      return r(200, {"Docker-Content-Digest": dg, "Content-Length": "10"}, "blob-bytes")
+    }
+    if m == "HEAD" {
+      if ranged {
+        return r(200, {"Content-Length": "10", "Content-Range": "bytes 0-3/10"}, "")
+      }
+      return r(200, {"Content-Length": "10", "Docker-Content-Digest": dg}, "")
+    }
+    if m == "DELETE" {
+      return r(202, {"Docker-Content-Digest": dg}, "")
+    }
+  }
+  r(404, {}, "")
+}
+
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    azcore.CallErr.Response(re) => "response error ${re.status_code} ${re.error_code}"
+    // an exchange's service error, returned by the policy as Go's Do
+    // returns the token client's ResponseError
+    azcore.CallErr.Send(policy.SendErr.FinalResponse(resp)) => {
+      let re = azcore.response_error("", "", resp)
+      "response error ${re.status_code} ${re.error_code}"
+    }
+    // Go's text, without this module's prefixes
+    azcore.CallErr.Send(policy.SendErr.Auth(m)) => "error ${m}"
+    azcore.CallErr.InvalidInput(m) => "error ${m}"
+    _ => "error ${e.display()}"
+  }
+}
+
+fn out[T](f: Fake, name: Str, r: Result[T, azcore.CallErr], text: fn(T) -> Str) {
+  let s = match r {
+    Ok(v) => "ok${text(v)}"
+    Err(e) => err_text(e)
+  }
+  note(f, "OUT ${name}: ${s}")
+}
+
+/// A constructor's result.
+fn outs[T](f: Fake, name: Str, r: Result[T, Str]) {
+  let s = match r {
+    Ok(_) => "ok"
+    Err(e) => "error ${e}"
+  }
+  note(f, "OUT ${name}: ${s}")
+}
+
+fn none[T](v: T) -> Str {
+  ""
+}
+
+fn ps(s: Str?) -> Str {
+  match s {
+    Some(v) => "[${v}]"
+    None => "<nil>"
+  }
+}
+
+fn pn(n: Int?) -> Str {
+  match n {
+    Some(v) => "${v}"
+    None => "<nil>"
+  }
+}
+
+fn pb(b: Bool?) -> Str {
+  match b {
+    Some(v) => "${v}"
+    None => "<nil>"
+  }
+}
+
+fn pt(t: azcore.DateTime?) -> Str {
+  match t {
+    Some(v) => azcore.date_time_text(v)
+    None => "<nil>"
+  }
+}
+
+fn strs(l: List[Str]?) -> Str {
+  match l {
+    Some(v) => "[${v.map(fn(x: Str) -> Str { "[${x}]" }).join(" ")}]"
+    None => "<nil>"
+  }
+}
+
+fn perms(d: Bool?, l: Bool?, r: Bool?, w: Bool?) -> Str {
+  "{d=${pb(d)} l=${pb(l)} r=${pb(r)} w=${pb(w)}}"
+}
+
+fn repo_text(c: ContainerRepositoryProperties) -> Str {
+  let a = match c.changeable_attributes {
+    Some(x) => perms(x.can_delete, x.can_list, x.can_read, x.can_write)
+    None => "<nil>"
+  }
+  " name=${ps(c.name)} reg=${ps(c.registry_login_server)} created=${pt(c.created_on)} updated=${pt(c.last_updated_on)} manifests=${pn(c.manifest_count)} tags=${pn(c.tag_count)} attrs=${a}"
+}
+
+fn tag_text(t: TagAttributes?) -> Str {
+  let x = t ?? return "<nil>"
+  let a = match x.changeable_attributes {
+    Some(w) => perms(w.can_delete, w.can_list, w.can_read, w.can_write)
+    None => "<nil>"
+  }
+  "{name=${ps(x.name)} digest=${ps(x.digest)} created=${pt(x.created_on)} updated=${pt(x.last_updated_on)} attrs=${a}}"
+}
+
+fn tag_list_text(t: TagList) -> Str {
+  let ts = (t.tags ?? []).map(fn(x: TagAttributes) -> Str { tag_text(Some(x)) })
+  " reg=${ps(t.registry_login_server)} repo=${ps(t.repository)} link=${ps(t.link)} tags=[${ts.join(" ")}]"
+}
+
+fn tag_props_text(t: ArtifactTagProperties) -> Str {
+  " reg=${ps(t.registry_login_server)} repo=${ps(t.repository_name)} tag=${tag_text(t.tag)}"
+}
+
+fn man_text(m: ManifestAttributes?) -> Str {
+  let x = m ?? return "<nil>"
+  let a = match x.changeable_attributes {
+    Some(w) => perms(w.can_delete, w.can_list, w.can_read, w.can_write)
+    None => "<nil>"
+  }
+  let refs = match x.related_artifacts {
+    Some(rs) => "[${rs.map(fn(r: ArtifactManifestPlatform) -> Str { "${ps(r.digest)}/${ps(r.architecture.map(fn(v: ArtifactArchitecture) -> Str { v.0 }))}/${ps(r.operating_system.map(fn(v: ArtifactOperatingSystem) -> Str { v.0 }))}" }).join(" ")}]"
+    None => "<nil>"
+  }
+  let arch = ps(x.architecture.map(fn(v: ArtifactArchitecture) -> Str { v.0 }))
+  let os_ = ps(x.operating_system.map(fn(v: ArtifactOperatingSystem) -> Str { v.0 }))
+  "{digest=${ps(x.digest)} size=${pn(x.size)} created=${pt(x.created_on)} updated=${pt(x.last_updated_on)} arch=${arch} os=${os_} media=${ps(x.media_type)} config=${ps(x.config_media_type)} tags=${strs(x.tags)} refs=${refs} attrs=${a}}"
+}
+
+fn manifests_text(m: Manifests) -> Str {
+  let ms = (m.attributes ?? []).map(fn(x: ManifestAttributes) -> Str { man_text(Some(x)) })
+  " reg=${ps(m.registry_login_server)} repo=${ps(m.repository)} link=${ps(m.link)} manifests=[${ms.join(" ")}]"
+}
+
+fn man_props_text(m: ArtifactManifestProperties) -> Str {
+  " reg=${ps(m.registry_login_server)} repo=${ps(m.repository_name)} manifest=${man_text(m.manifest)}"
+}
+
+fn repos_text(r: Repositories) -> Str {
+  " names=${strs(r.names)} link=${ps(r.link)}"
+}
+
+fn digest_text(e: DigestErr) -> Str {
+  "error ${e.display()}"
+}
+
+fn co() -> policy.ClientOptions {
+  policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}
+}
+
+fn opts() -> ClientOptions {
+  ClientOptions{client: co()}
+}
+
+test "every call sends and returns what Go's does" {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([]), bodies: Mutex[List[Str]].new([]), exchange_status: Mutex[List[Int]].new([]), challenges: Mutex[List[Str]].new([]), refresh_token: Mutex[Str].new(jwt("{\"exp\":1893456000}"))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] {
+    os.net.handle("${m} https://reg.example.test/{rest...}", h)
+  }
+  let set_next = fn(st: Int) { f.next.with(fn(var l: List[Int]) { l = [st] }) }
+  let set_exchange = fn(st: Int) { f.exchange_status.with(fn(var l: List[Int]) { l = [st] }) }
+  let set_challenge = fn(c: Str) { f.challenges.with(fn(var l: List[Str]) { l = [c] }) }
+  let set_refresh = fn(t: Str) { f.refresh_token.reset(t) }
+  let cred: azcore.TokenCredential = Cred{log: f.log}
+
+  let cr = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts())
+  outs(f, "new client", cr)
+  let c = cr.or_fault("client")
+
+  var pager = c.new_list_repositories_pager().or_fault("pager")
+  while pager.more() {
+    let pg = pager.next_page()
+    out(f, "list repositories", pg, fn(v: ClientListRepositoriesResponse) -> Str { "${repos_text(v.repositories)} link=${ps(v.link)}" })
+    if pg.is_err() {
+      break
+    }
+  }
+  out(f, "get repository", c.get_repository_properties("hello"), fn(v: ClientGetRepositoryPropertiesResponse) -> Str { repo_text(v.container_repository_properties) })
+  out(f, "update repository", c.update_repository_properties("hello", ClientUpdateRepositoryPropertiesOptions{value: Some(RepositoryWriteableProperties{can_delete: Some(false), can_write: Some(true)})}), fn(v: ClientUpdateRepositoryPropertiesResponse) -> Str { repo_text(v.container_repository_properties) })
+  out(f, "update repository empty", c.update_repository_properties("hello"), none)
+  out(f, "delete repository", c.delete_repository("hello"), none)
+  set_next(404)
+  out(f, "delete repository 404", c.delete_repository("hello"), none)
+  set_next(400)
+  out(f, "delete repository 400", c.delete_repository("hello"), none)
+
+  var tp = c.new_list_tags_pager("hello", ClientListTagsOptions{max_num: Some(1), order_by: Some(ARTIFACT_TAG_ORDER_BY_LAST_UPDATED_ON_DESCENDING), digest: Some("sha256:d1")}).or_fault("pager")
+  while tp.more() {
+    let pg = tp.next_page()
+    out(f, "list tags", pg, fn(v: ClientListTagsResponse) -> Str { "${tag_list_text(v.tag_list)} link=${ps(v.link)}" })
+    if pg.is_err() {
+      break
+    }
+  }
+  out(f, "get tag", c.get_tag_properties("hello", "v1"), fn(v: ClientGetTagPropertiesResponse) -> Str { tag_props_text(v.artifact_tag_properties) })
+  out(f, "update tag", c.update_tag_properties("hello", "v1", ClientUpdateTagPropertiesOptions{value: Some(TagWriteableProperties{can_read: Some(true)})}), fn(v: ClientUpdateTagPropertiesResponse) -> Str { tag_props_text(v.artifact_tag_properties) })
+  out(f, "delete tag", c.delete_tag("hello", "v1"), none)
+
+  var mp = c.new_list_manifests_pager("hello", ClientListManifestsOptions{order_by: Some(ARTIFACT_MANIFEST_ORDER_BY_LAST_UPDATED_ON_ASCENDING)}).or_fault("pager")
+  var n = 0
+  while mp.more() && n < 2 {
+    n = n + 1
+    let pg = mp.next_page()
+    out(f, "list manifests", pg, fn(v: ClientListManifestsResponse) -> Str { "${manifests_text(v.manifests)} link=${ps(v.link)}" })
+    if pg.is_err() {
+      break
+    }
+  }
+  out(f, "get manifest properties", c.get_manifest_properties("hello", "sha256:d1"), fn(v: ClientGetManifestPropertiesResponse) -> Str { man_props_text(v.artifact_manifest_properties) })
+  out(f, "update manifest properties", c.update_manifest_properties("hello", "sha256:d1", ClientUpdateManifestPropertiesOptions{value: Some(ManifestWriteableProperties{can_list: Some(false)})}), fn(v: ClientUpdateManifestPropertiesResponse) -> Str { man_props_text(v.artifact_manifest_properties) })
+  out(f, "delete manifest", c.delete_manifest("hello", "sha256:d1"), none)
+
+  let g = c.get_manifest("hello", "v1", ClientGetManifestOptions{accept: Some("application/vnd.oci.image.manifest.v1+json")})
+  out(f, "get manifest", g, fn(v: ClientGetManifestResponse) -> Str { " ${v.manifest_data.to_str_lossy()} digest=${ps(v.docker_content_digest)}" })
+  let gv = g.or_fault("manifest")
+  let data = gv.manifest_data
+  let valid = match new_digest_validation_reader(gv.docker_content_digest ?? "") {
+    Ok(vr) => match vr.read(data, eof: true) {
+      Ok(_) => "ok ok"
+      Err(e) => "ok ${digest_text(e)}"
+    }
+    Err(e) => "${digest_text(e)} -"
+  }
+  note(f, "OUT validate manifest: ${valid}")
+  let mismatch = match validate_digest(digest_of("other"), data) {
+    Ok(_) => "ok"
+    Err(e) => digest_text(e)
+  }
+  note(f, "OUT validate mismatch: ${mismatch}")
+  for (name, d) in [("sha512", "sha512:00"), ("no colon", "nocolon")] {
+    let t = match new_digest_validation_reader(d) {
+      Ok(_) => "ok"
+      Err(e) => digest_text(e)
+    }
+    note(f, "OUT validate ${name}: ${t}")
+  }
+  out(f, "get manifest escaped", c.get_manifest("a b", "v1"), fn(v: ClientGetManifestResponse) -> Str { " ${v.manifest_data.to_str_lossy()}" })
+  out(f, "upload manifest", c.upload_manifest("hello", "v2", CONTENT_TYPE_APPLICATION_VND_OCI_IMAGE_MANIFEST_V1_JSON, MANIFEST.bytes()), fn(v: ClientUploadManifestResponse) -> Str { " len=${pn(v.content_length)} digest=${ps(v.docker_content_digest)} location=${ps(v.location)}" })
+
+  let br = new_blob_client(os.net, os.clock, os.rand, EP, Some(cred), BlobClientOptions{client: co()})
+  outs(f, "new blob client", br)
+  let b = br.or_fault("blob client")
+  let st = b.start_upload("hello")
+  out(f, "start upload", st, fn(v: BlobClientStartUploadResponse) -> Str { " location=${ps(v.location)} range=${ps(v.range)} uuid=${ps(v.docker_upload_uuid)}" })
+  let calc = new_blob_digest_calculator()
+  let uc = b.upload_chunk(st.or_fault("start").location ?? "", "blob-".bytes(), calc)
+  out(f, "upload chunk", uc, fn(v: BlobClientUploadChunkResponse) -> Str { " location=${ps(v.location)} range=${ps(v.range)} uuid=${ps(v.docker_upload_uuid)}" })
+  let loc = uc.or_fault("chunk").location ?? ""
+  set_next(416)
+  out(f, "upload chunk 416", b.upload_chunk(loc, "XXXX".bytes(), calc, BlobClientUploadChunkOptions{range_start: Some(5)}), none)
+  let uc2 = b.upload_chunk(loc, "bytes".bytes(), calc, BlobClientUploadChunkOptions{range_start: Some(5), range_end: Some(9)})
+  out(f, "upload chunk range", uc2, fn(v: BlobClientUploadChunkResponse) -> Str { " location=${ps(v.location)} range=${ps(v.range)}" })
+  let loc2 = uc2.or_fault("chunk").location ?? ""
+  out(f, "complete upload", b.complete_upload(loc2, calc), fn(v: BlobClientCompleteUploadResponse) -> Str { " digest=${ps(v.docker_content_digest)} location=${ps(v.location)} range=${ps(v.range)}" })
+  out(f, "upload status", b.get_upload_status(loc2), fn(v: BlobClientGetUploadStatusResponse) -> Str { " range=${ps(v.range)} uuid=${ps(v.docker_upload_uuid)}" })
+  out(f, "cancel upload", b.cancel_upload(loc2), none)
+  let bd = digest_of("blob-bytes")
+  out(f, "get blob", b.get_blob("hello", bd), fn(v: BlobClientGetBlobResponse) -> Str { " ${v.blob_data.to_str_lossy()} len=${pn(v.content_length)} digest=${ps(v.docker_content_digest)}" })
+  out(f, "check blob", b.check_blob_exists("hello", bd), fn(v: BlobClientCheckBlobExistsResponse) -> Str { " len=${pn(v.content_length)} digest=${ps(v.docker_content_digest)}" })
+  out(f, "get chunk", b.get_chunk("hello", bd, "bytes=0-3"), fn(v: BlobClientGetChunkResponse) -> Str { " ${v.chunk_data.to_str_lossy()} len=${pn(v.content_length)} range=${ps(v.content_range)}" })
+  out(f, "check chunk", b.check_chunk_exists("hello", bd, "bytes=0-3"), fn(v: BlobClientCheckChunkExistsResponse) -> Str { " len=${pn(v.content_length)} range=${ps(v.content_range)}" })
+  out(f, "delete blob", b.delete_blob("hello", bd), fn(v: BlobClientDeleteBlobResponse) -> Str { " digest=${ps(v.docker_content_digest)}" })
+  out(f, "mount blob", b.mount_blob("hello", "other", "sha256:m1"), fn(v: BlobClientMountBlobResponse) -> Str { " digest=${ps(v.docker_content_digest)} uuid=${ps(v.docker_upload_uuid)} location=${ps(v.location)}" })
+  set_next(404)
+  out(f, "check blob 404", b.check_blob_exists("hello", "sha256:none"), none)
+
+  // anonymous access
+  let none_cred: azcore.TokenCredential? = None
+  let a = new_client(os.net, os.clock, os.rand, EP, none_cred, opts()).or_fault("anonymous")
+  var ap = a.new_list_repositories_pager(ClientListRepositoriesOptions{max_num: Some(2), last: Some("a")}).or_fault("pager")
+  out(f, "anonymous list", ap.next_page(), fn(v: ClientListRepositoriesResponse) -> Str { "${repos_text(v.repositories)} link=${ps(v.link)}" })
+
+  // an expired refresh token is exchanged again on every challenge
+  set_refresh(jwt("{\"exp\":1000}"))
+  var e = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("expired")
+  out(f, "expired 1", e.get_tag_properties("x", "v1"), none)
+  out(f, "expired 2", e.get_tag_properties("y", "v1"), none)
+  set_refresh("notajwt")
+  e = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("bad jwt")
+  out(f, "bad jwt", e.get_tag_properties("x", "v1"), none)
+  set_refresh("a.!!!.c")
+  e = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("bad jwt")
+  out(f, "bad jwt base64", e.get_tag_properties("x", "v1"), none)
+  set_refresh(jwt("{\"exp\":1893456000}"))
+
+  // challenge and exchange failures
+  let fc = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("failures")
+  set_challenge("")
+  out(f, "no challenge", fc.get_tag_properties("x", "v1"), none)
+  set_challenge("Bearer realm=\"r\",service=\"s\"")
+  out(f, "no scope", fc.get_tag_properties("x", "v1"), none)
+  set_challenge("Bearer realm=\"r\",scope=\"x\"")
+  out(f, "no service", fc.get_tag_properties("x", "v1"), none)
+  set_challenge("Bearer realm=\"r\", service=\"${HOST}\", scope=\"repository:x:pull\"")
+  out(f, "spaced challenge", fc.get_tag_properties("x", "v1"), none)
+  set_exchange(401)
+  out(f, "exchange 401", fc.get_tag_properties("x", "v1"), none)
+  out(f, "after exchange 401", fc.get_tag_properties("x", "v1"), none)
+  set_exchange(500)
+  out(f, "token 500", fc.get_tag_properties("z", "v1"), none)
+  let bad: azcore.TokenCredential = BadCred{}
+  let bc = new_client(os.net, os.clock, os.rand, EP, Some(bad), opts()).or_fault("bad credential")
+  out(f, "bad credential", bc.get_tag_properties("x", "v1"), none)
+
+  // a request with a body is challenged without it
+  let u = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("update")
+  out(f, "challenged update", u.update_tag_properties("hello", "v1", ClientUpdateTagPropertiesOptions{value: Some(TagWriteableProperties{can_write: Some(false)})}), none)
+
+  // clouds
+  let clouds = [
+    ("china", cloud.AZURE_CHINA),
+    ("government", cloud.AZURE_GOVERNMENT),
+    ("custom", cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "https://acr.example.test", endpoint: ""}}}),
+    ("missing", cloud.Configuration{authority_host: "https://login.example.test/", services: {}}),
+    ("no audience", cloud.Configuration{authority_host: "", services: {SERVICE_NAME: cloud.ServiceConfiguration{audience: "", endpoint: "e"}}}),
+  ]
+  for (name, cfg) in clouds {
+    let o = co() with {cloud: cfg}
+    let cc = new_client(os.net, os.clock, os.rand, EP, Some(cred), ClientOptions{client: o})
+    outs(f, "cloud ${name}", cc)
+    if let Ok(x) = cc {
+      out(f, "cloud ${name} call", x.get_tag_properties("c", "v1"), none)
+    }
+    outs(f, "cloud ${name} blob", new_blob_client(os.net, os.clock, os.rand, EP, Some(cred), BlobClientOptions{client: o}))
+  }
+
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for i in 0..(if got.len() < CLIENT_GO.len() { got.len() } else { CLIENT_GO.len() }) {
+    expect(got[i]) == CLIENT_GO[i]
+  }
+  expect(got.len()) == CLIENT_GO.len()
+}

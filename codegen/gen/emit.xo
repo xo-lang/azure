@@ -40,6 +40,14 @@ pub struct Package {
   /// operation's response is `success` (armresources v4's CheckExistence),
   /// as autorest's readme.go.md option made it.
   pub head_as_boolean: Bool = false
+  /// A hand-written function a next link header passes through before
+  /// it is joined to the endpoint (azcontainerregistry's
+  /// extractNextLink, from autorest.md's replace of `result.Link = &val`).
+  pub next_link_transform: Str = ""
+  /// Operations (operationId, lower case) and types Go's module hides
+  /// (renamed lower case) for its own wrappers: not `pub` here.
+  pub private_ops: List[Str] = []
+  pub private_types: List[Str] = []
 }
 
 /// A string literal's contents.
@@ -205,19 +213,31 @@ fn client_name(group: Str) -> Str {
 }
 
 fn client_name_in(p: Package, group: Str) -> Str {
-  if "arm${group.to_lower()}" == p.name { "Client" } else { client_name(group) }
+  if "arm${group.to_lower()}" == p.name || (grouped(p) && (group == "" || "az${group.to_lower()}" == p.name)) { "Client" } else { client_name(group) }
+}
+
+/// A data plane module that autorest.go writes (not TypeSpec's emitter):
+/// one client per operation group, the group named as the package
+/// (without `az`) the package's `Client`, and options and responses
+/// named after their client (`BlobClientGetBlobOptions`), as an ARM
+/// module's are.
+fn grouped(p: Package) -> Bool {
+  p.data_plane && !p.typespec
 }
 
 fn resp_name(p: Package, op: Op) -> Str {
-  if p.data_plane {
+  if p.data_plane && !grouped(p) {
     return "${part(op.name)}Response"
   }
   "${client_name_in(p, op.group)}${part(op.name)}Response"
 }
 
 fn opts_name(p: Package, op: Op) -> Str {
-  let cn = if p.data_plane { "" } else { client_name_in(p, op.group) }
-  if op.lro { "${cn}Begin${part(op.name)}Options" } else { "${cn}${part(op.name)}Options" }
+  let cn = if p.data_plane && !grouped(p) { "" } else { client_name_in(p, op.group) }
+  let on = if op.lro { "${cn}Begin${part(op.name)}Options" } else { "${cn}${part(op.name)}Options" }
+  // a private options type (Go's lower case one) leaves its name to the
+  // hand written public one that wraps it
+  if p.private_types.contains(on) { "Raw${on}" } else { on }
 }
 
 fn method_name(op: Op) -> Str {
@@ -226,6 +246,9 @@ fn method_name(op: Op) -> Str {
 
 /// The response struct's field holding the body.
 fn body_field(api: Api, op: Op) -> Str {
+  if op.binary_resp {
+    return snake(op.body_field)
+  }
   match op.resp {
     Some(t) => if is_model(api, t) { snake(unreserve(t)) } else { "value" }
     None => ""
@@ -249,7 +272,7 @@ fn header_field(wire: Str) -> Str {
 /// a field for each header of a success response, but not on a
 /// long-running operation (its result is the final body).
 fn resp_headers(p: Package, op: Op) -> List[(Str, Bool)] {
-  if p.typespec && !op.lro { op.resp_headers.sort_by(fn(h: (Str, Bool)) -> Str { header_field(h.0) }) } else { [] }
+  if (p.typespec || grouped(p)) && !op.lro { op.resp_headers.sort_by(fn(h: (Str, Bool)) -> Str { header_field(h.0) }) } else { [] }
 }
 
 /// The Accept value: the operation's `produces` but `application/json`
@@ -267,7 +290,8 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let on = opts_name(p, op)
   let snake_op = snake(op.name)
   let hname = if op.group == "" { "${snake_op}_handle" } else { "${snake(op.group)}_${snake_op}_handle" }
-  var s = "\n" + doc("", "${on}: the optional parameters of ${cn}.${method_name(op)}.") + "pub struct ${on} {\n"
+  let opts_vis = if on.starts_with("Raw") && p.private_types.contains(on[3..on.len()]) { "" } else { "pub " }
+  var s = "\n" + doc("", "${on}: the optional parameters of ${cn}.${method_name(op)}.") + "${opts_vis}struct ${on} {\n"
   for x in opt {
     s = s + doc("  ", x.doc) + "  pub ${x.name}: ${x.typ}? = None\n"
   }
@@ -277,7 +301,9 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   s = s + "}\n"
   // the response
   s = s + "\n" + doc("", "${rn}: the response of ${cn}.${method_name(op)}.") + "pub struct ${rn} {\n"
-  let exists_check = op.method == "HEAD" && (!p.typespec || p.head_as_boolean)
+  // ARM's head-as-boolean (autorest's readme.go.md option for ARM,
+  // TypeSpec's tspconfig); not a data plane module's
+  let exists_check = op.method == "HEAD" && ((!p.typespec && !grouped(p)) || p.head_as_boolean)
   let hs = resp_headers(p, op)
   if exists_check {
     s = s + "  /// Whether the resource exists (a 2xx response, not a 404).\n  pub success: Bool = false\n"
@@ -288,9 +314,23 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     s = s + "  /// The `${esc(h)}` header.\n  pub ${header_field(h)}: ${if int { "Int" } else { "Str" }}? = None\n"
   }
   s = s + "}\n"
-  let hset = hs.map(fn(h: (Str, Bool)) -> Str { ", ${header_field(h.0)}: ${if h.1 { header_field(h.0) } else { "runtime.header_value(resp, \"${esc(h.0)}\")" }}" }).join("")
-  // the pure response handler
-  s = s + "\nfn ${hname}(resp: http.Response) -> ${rn} ! Str {\n"
+  // a pageable operation whose next link is a header (Go's response
+  // field of the header hides the body's one of the same name)
+  let link_header = if op.pageable { hs.map(fn(h: (Str, Bool)) -> Str { h.0 }).filter(fn(h: Str) -> Bool { header_field(h) == snake(op.next_link ?? "") }).get(0) } else { None }
+  let link_join = link_header.is_some() && p.next_link_transform != ""
+  let hset = hs.map(fn(h: (Str, Bool)) -> Str {
+    let v = if h.1 {
+      header_field(h.0)
+    } else if link_join && Some(h.0) == link_header {
+      "runtime.header_value(resp, \"${esc(h.0)}\").map(fn(v: Str) -> Str { runtime.join_paths(endpoint, ${p.next_link_transform}(v)) })"
+    } else {
+      "runtime.header_value(resp, \"${esc(h.0)}\")"
+    }
+    ", ${header_field(h.0)}: ${v}"
+  }).join("")
+  // the pure response handler (given the endpoint when it joins a link)
+  let endpoint_arg = if link_join { ", endpoint: Str" } else { "" }
+  s = s + "\nfn ${hname}(resp: http.Response${endpoint_arg}) -> ${rn} ! Str {\n"
   // an integer header that does not parse fails as Go's strconv.ParseInt
   for (h, int) in hs {
     if int {
@@ -299,6 +339,9 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   if exists_check {
     s = s + "  Ok(${rn}{success: resp.status >= 200 && resp.status < 300})\n"
+  } else if op.binary_resp {
+    // the body as received (Go's io.ReadCloser, read whole here)
+    s = s + "  Ok(${rn}{${body_field(api, op)}: resp.body${hset}})\n"
   } else if let Some(t) = op.resp {
     let zero = if api.models.any(fn(m: Model) -> Bool { m.name == t }) { Some("${t}{}") } else if t.starts_with("List[") { Some("[]") } else if t.starts_with("Map[") { Some("{}") } else if t == "Str" { Some("\"\"") } else if t == "json.Value" { Some("json.Value.Null") } else { None }
     if let Some(z) = zero {
@@ -345,7 +388,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   // autorest.go: Accept when any response, the error one too, has a
   // schema; TypeSpec's emitter: when the success response has a body
-  let accept = if p.data_plane || p.tsp_arm { op.resp.is_some() || p.accept_always } else { op.accept }
+  let accept = if (p.data_plane && !grouped(p)) || p.tsp_arm { op.resp.is_some() || p.accept_always } else { op.accept }
   let accept_h = if accept { "(\"Accept\", \"${esc(accept_value(op))}\")" } else { "" }
   s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [${accept_h}]\n"
   // TypeSpec's Go emitter keeps the path's query (`?$expand=Properties`)
@@ -389,7 +432,38 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     }
   }
   var body = "b\"\""
+  // form fields: one x-www-form-urlencoded body, each field set
+  // (Go's url.Values Set, then Encode, which sorts the keys)
+  let form = op.params.filter(fn(x: Param) -> Bool { x.loc == "formData" })
+  if !form.is_empty() {
+    s = s + "  var form = url.values()\n"
+    for x in form {
+      if let Some(k) = x.constant {
+        s = s + "  form.set(\"${esc(x.wire)}\", ${k})\n"
+      } else if x.required {
+        s = s + "  form.set(\"${esc(x.wire)}\", ${to_text(api, x.typ, x.name)})\n"
+      } else {
+        s = s + "  if let Some(v) = options.${x.name} {\n    form.set(\"${esc(x.wire)}\", ${to_text(api, x.typ, "v")})\n  }\n"
+      }
+    }
+    s = s + "  headers.push((\"Content-Type\", \"application/x-www-form-urlencoded\"))\n"
+    body = "form.encode().bytes()"
+  }
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "body" }) {
+    if x.binary {
+      // sent as it is, with the content type parameter's value or the
+      // operation's one content type
+      let has_ct = op.params.any(fn(q: Param) -> Bool { q.loc == "header" && q.wire.to_lower() == "content-type" })
+      let ct = if has_ct { "" } else { "  headers.push((\"Content-Type\", \"${esc(op.consumes.get(0) ?? "application/octet-stream")}\"))\n" }
+      if x.required {
+        s = s + ct
+        body = x.name
+      } else {
+        s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n  ${ct}    body = v\n  }\n"
+        body = "body"
+      }
+      continue
+    }
     if x.required {
       s = s + "  headers.push((\"Content-Type\", \"application/json\"))\n"
       body = "runtime.marshal_json(${x.name})"
@@ -403,18 +477,27 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   let base = "\${runtime.join_paths(c.setup.endpoint, path)}"
   let encoded = if p.query_pct20 || p.tsp_arm { "q.encode().replace(\"+\", \"%20\")" } else { "q.encode()" }
   let qs_expr = if has_raw { "([${encoded}] + raw_q).join(\"&\")" } else { encoded }
-  s = s + "  let qs = ${qs_expr}\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
+  // query parameters go into a query the joined URL already has (an
+  // endpoint's, a Location's), as Go's code sets them on URL.Query()
+  let sets_query = s.contains("  q.add(") || s.contains("    q.add(")
+  if sets_query && !has_raw {
+    let pct = if p.query_pct20 || p.tsp_arm { ", pct20: true" } else { "" }
+    s = s + "  Ok(policy.Request{method: \"${op.method}\", url: runtime.with_query(runtime.join_paths(c.setup.endpoint, path), q${pct}), headers: headers, body: ${body}})\n}\n"
+  } else {
+    s = s + "  let qs = ${qs_expr}\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
+  }
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
-  let ok_list = if op.method == "HEAD" && (!p.typespec || p.head_as_boolean) && !op.ok.contains(404) { "[${ok}, 404]" } else { "[${ok}]" }
+  let ok_list = if op.method == "HEAD" && ((!p.typespec && !grouped(p)) || p.head_as_boolean) && !op.ok.contains(404) { "[${ok}, 404]" } else { "[${ok}]" }
   let call_args = req.map(fn(x: Param) -> Str { x.name }).join(", ")
-  let handler = "fn(r: http.Response) -> ${rn} ! Str { ${hname}(r) }"
+  let handler = "fn(r: http.Response) -> ${rn} ! Str { ${hname}(r${if link_join { ", c.setup.endpoint" } else { "" }}) }"
   s = s + "\n" + doc("", op.doc)
   if op.pageable {
     let pg = opts_name(p, op)
     s = s + "pub fn (c: ${cn}[fx]) ${method_name(op)}(${args}${sep}options: ${pg} = ${pg}{}) -> runtime.Pager[${rn}, fx] ! azcore.CallErr {\n"
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
-    let next = match (op.next_link, op.resp) {
-      (Some(nl), Some(t)) => if is_model(api, t) { "fn(r: ${rn}) -> Str? { r.${body_field(api, op)}.${snake(nl)} }" } else { "fn(r: ${rn}) -> Str? { None }" }
+    let next = match (op.next_link, op.resp, link_header) {
+      (_, _, Some(h)) => "fn(r: ${rn}) -> Str? { r.${header_field(h)} }"
+      (Some(nl), Some(t), _) => if is_model(api, t) { "fn(r: ${rn}) -> Str? { r.${body_field(api, op)}.${snake(nl)} }" } else { "fn(r: ${rn}) -> Str? { None }" }
       _ => "fn(r: ${rn}) -> Str? { None }"
     }
     s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}))\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" })
@@ -443,7 +526,12 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
     s = s + "  runtime.new_${kind}poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${rn}\", ${handler})\n}\n"
   } else {
-    s = s + "pub fn (c: ${cn}) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> ${rn} ! azcore.CallErr uses (net.dial, clock, rand) {\n"
+    // a private operation (Go's lower case one) is raw_<name>, leaving
+    // <name> to the hand written public one that wraps it
+    let private = p.private_ops.contains("${cn}.${part(op.name)}")
+    let vis = if private { "" } else { "pub " }
+    let mname = if private { "raw_${method_name(op)}" } else { method_name(op) }
+    s = s + "${vis}fn (c: ${cn}) ${mname}(${args}${sep}options: ${on} = ${on}{}) -> ${rn} ! azcore.CallErr uses (net.dial, clock, rand) {\n"
     s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
     s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
     s = s + "  if !${ok_list}.contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
@@ -480,7 +568,7 @@ pub fn emit_clients(p: Package, api: Api) -> List[File] {
     s = s + "\n"
     if p.data_plane {
       s = s + body_text
-      out.push(File{name: if g == "" { "client.xo" } else { "${snake(g)}_client.xo" }, text: s})
+      out.push(File{name: if grouped(p) { "${snake(cn)}.xo" } else if g == "" { "client.xo" } else { "${snake(g)}_client.xo" }, text: s})
       continue
     }
     s = s + "/// ${cn}: the ${g} operations (Go's ${p.name}.${cn}).\npub struct ${cn}[fx: Effects] {\n  setup: arm.Setup[fx]\n"

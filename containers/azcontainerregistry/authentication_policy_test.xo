@@ -1,0 +1,100 @@
+// The refresh token's cache as Go's temporal.Resource, on the fake
+// clock (Go's reads time.Now, so its program cannot drive it), and the
+// helpers' edge cases.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+fn new_fake(refresh: Str) -> Fake {
+  Fake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([]), bodies: Mutex[List[Str]].new([]), exchange_status: Mutex[List[Int]].new([]), challenges: Mutex[List[Str]].new([]), refresh_token: Mutex[Str].new(refresh)}
+}
+
+/// Entra ID tokens asked for so far.
+fn tokens(f: Fake) -> Int {
+  f.log.with_read(fn(l: List[Str]) -> List[Str] { l }).filter(fn(s: Str) -> Bool { s.starts_with("TOKEN ") }).len()
+}
+
+test "a refresh token is fetched again within 5 minutes of expiry, at most every 30 seconds" {
+  let start = Time.from_unix_millis(1893456000000)
+  os.clock.set(start)
+  // expires 10 minutes after start
+  let f = new_fake(jwt("{\"exp\":${1893456000 + 600}}"))
+  os.net.handle("GET https://reg.example.test/{rest...}", fn(req: http.Request) -> http.Response { answer(f, req) })
+  os.net.handle("POST https://reg.example.test/{rest...}", fn(req: http.Request) -> http.Response { answer(f, req) })
+  let cred: azcore.TokenCredential = Cred{log: f.log}
+  let c = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("client")
+  expect(c.get_tag_properties("a", "v1").is_ok()) == true
+  expect(tokens(f)) == 1
+  // 4 minutes on: not yet within the window
+  os.clock.advance(240s)
+  expect(c.get_tag_properties("b", "v1").is_ok()) == true
+  expect(tokens(f)) == 1
+  // 6 minutes on: within it, and no attempt for 30 seconds
+  os.clock.advance(120s)
+  expect(c.get_tag_properties("c", "v1").is_ok()) == true
+  expect(tokens(f)) == 2
+  // the new token expires at the same time: 10 seconds later the last
+  // attempt is too recent
+  os.clock.advance(10s)
+  expect(c.get_tag_properties("d", "v1").is_ok()) == true
+  expect(tokens(f)) == 2
+  // 29 seconds is within the backoff; at 30 Go's
+  // `lastAttempt.Add(30s).After(now)` is false, so it fetches
+  os.clock.advance(19s)
+  expect(c.get_tag_properties("e", "v1").is_ok()) == true
+  expect(tokens(f)) == 2
+  os.clock.advance(1s)
+  expect(c.get_tag_properties("f", "v1").is_ok()) == true
+  expect(tokens(f)) == 3
+}
+
+test "an eager refresh that fails keeps the token; an expired one returns the error" {
+  let start = Time.from_unix_millis(1893456000000)
+  os.clock.set(start)
+  let f = new_fake(jwt("{\"exp\":${1893456000 + 600}}"))
+  os.net.handle("GET https://reg.example.test/{rest...}", fn(req: http.Request) -> http.Response { answer(f, req) })
+  os.net.handle("POST https://reg.example.test/{rest...}", fn(req: http.Request) -> http.Response { answer(f, req) })
+  let cred: azcore.TokenCredential = Cred{log: f.log}
+  let c = new_client(os.net, os.clock, os.rand, EP, Some(cred), opts()).or_fault("client")
+  expect(c.get_tag_properties("a", "v1").is_ok()) == true
+  os.clock.advance(360s)
+  // the exchange fails: the old refresh token is used for the access token
+  f.exchange_status.with(fn(var l: List[Int]) { l = [500] })
+  expect(c.get_tag_properties("b", "v1").is_ok()) == true
+  expect(tokens(f)) == 2
+  // past expiry the fetch's error is the call's
+  os.clock.advance(300s)
+  f.exchange_status.with(fn(var l: List[Int]) { l = [500] })
+  let r = c.get_tag_properties("c", "v1")
+  expect(r.is_err()) == true
+  // and the next call fetches again, with no backoff
+  expect(c.get_tag_properties("d", "v1").is_ok()) == true
+  expect(tokens(f)) == 4
+}
+
+test "the challenge's service and scope are parsed as Go's findServiceAndScope" {
+  let r = fn(h: Str) -> http.Response { http.Response{status: 401, headers: {"WWW-Authenticate": h}, body: b""} }
+  expect(find_service_and_scope(r("Bearer realm=\"x\",service=\"s\",scope=\"repository:a:pull\""))) == Ok(("s", "repository:a:pull"))
+  // a scope with `=` in it is not one key and value
+  expect(find_service_and_scope(r("Bearer service=\"s\",scope=\"a=b\""))) == Err("could not find a valid scope in the WWW-Authenticate header")
+  // several scopes are split at `",` too, so the last one wins
+  expect(find_service_and_scope(r("Bearer service=\"s\",scope=\"a\",scope=\"b\""))) == Ok(("s", "b"))
+  expect(find_service_and_scope(http.Response{status: 401, headers: {}, body: b""})) == Err("response has no WWW-Authenticate header for challenge authentication")
+}
+
+test "a Link header's URL is between its first character and its first >" {
+  expect(extract_next_link("</acr/v1/_catalog?last=a&n=1>; rel=\"next\"")) == "/acr/v1/_catalog?last=a&n=1"
+  expect(extract_next_link("<>")) == ""
+  expect(extract_next_link("<abc")) == "abc"
+  expect(extract_next_link("")) == ""
+}
+
+test "a JWT's exp is read from its padded claims" {
+  // claims of every length mod 4, with and without padding
+  for (claims, want) in [("{\"exp\":1}", 1), ("{\"exp\":12}", 12), ("{\"exp\":123}", 123), ("{\"exp\":1234}", 1234), ("{}", 0)] {
+    expect(jwt_expire_time(jwt(claims)).map(fn(t: Time) -> Int { t.unix_millis() })) == Ok(want * 1000)
+  }
+  expect(jwt_expire_time("a.b")) == Err("could not parse refresh token expire time")
+  expect(jwt_expire_time("a.!!!.c").is_err()) == true
+  expect(jwt_expire_time("a.bm90IGpzb24.c").is_err()) == true
+}

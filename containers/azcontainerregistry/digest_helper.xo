@@ -1,0 +1,102 @@
+// Digests of blobs and manifests, as Go's digest_helper.go
+// (azcontainerregistry v0.2.3; MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): a SHA-256 digest checked while a download is read, and
+// computed while an upload's chunks are sent.
+
+use std/crypto
+
+/// Why a digest was refused (Go's ErrMismatchedHash and
+/// ErrDigestAlgNotSupported).
+pub enum DigestErr {
+  MismatchedHash
+  DigestAlgNotSupported
+}
+
+pub fn (e: DigestErr) display() -> Str {
+  match e {
+    MismatchedHash => "mismatched hash"
+    DigestAlgNotSupported => "digest algorithm not supported"
+  }
+}
+
+/// The hasher of a digest's algorithm (`sha256:<hex>`); only SHA-256 is
+/// supported, as Go's validatorCtors.
+fn digest_hasher(digest: Str) -> crypto.Hasher ! DigestErr {
+  let (alg, _) = digest.cut(":") ?? return Err(DigestErr.DigestAlgNotSupported)
+  if alg != "sha256" {
+    return Err(DigestErr.DigestAlgNotSupported)
+  }
+  Ok(crypto.hasher(crypto.Hash.Sha256))
+}
+
+/// Checks a downloaded manifest or blob against its digest while it is
+/// read (Go's DigestValidationReader; a body is read whole here, so
+/// `read` hands back what it is given).
+pub struct DigestValidationReader {
+  digest: Str
+  hasher: Mutex[crypto.Hasher]
+}
+
+/// A reader for content of `digest` (NewDigestValidationReader); only
+/// `sha256:` digests are supported.
+pub fn new_digest_validation_reader(digest: Str) -> DigestValidationReader ! DigestErr {
+  Ok(DigestValidationReader{digest: digest, hasher: Mutex.new(digest_hasher(digest)?)})
+}
+
+/// Adds `data` (the next part of the content) to the digest and returns
+/// it; with `eof`, the content is complete and its digest must match
+/// (Go's Read up to io.EOF).
+pub fn (d: DigestValidationReader) read(data: Bytes, eof: Bool = false) -> Bytes ! DigestErr {
+  let sum = d.hasher.with(fn(var h: crypto.Hasher) -> Bytes {
+    h.write(data)
+    h.sum()
+  })
+  if eof && "sha256:${sum.to_hex()}" != d.digest {
+    return Err(DigestErr.MismatchedHash)
+  }
+  Ok(data)
+}
+
+/// The whole of `data`, checked against `digest` (a read to EOF).
+pub fn validate_digest(digest: Str, data: Bytes) -> () ! DigestErr {
+  new_digest_validation_reader(digest)?.read(data, eof: true)?
+  Ok(())
+}
+
+/// Computes an upload's digest from the chunks upload_chunk sends; one
+/// for each blob uploaded (Go's BlobDigestCalculator). Copies share it.
+pub struct BlobDigestCalculator {
+  state: Mutex[(crypto.Hasher, crypto.Hasher?)]
+}
+
+/// A calculator for a new upload (NewBlobDigestCalculator).
+pub fn new_blob_digest_calculator() -> BlobDigestCalculator {
+  BlobDigestCalculator{state: Mutex.new((crypto.hasher(crypto.Hash.Sha256), None))}
+}
+
+/// Saves the digest so far, to be restored if the next chunk fails.
+fn (b: BlobDigestCalculator) save_state() {
+  b.state.with(fn(var s: (crypto.Hasher, crypto.Hasher?)) { s = (s.0, Some(s.0)) })
+}
+
+/// Back to the saved digest (none saved: unchanged).
+fn (b: BlobDigestCalculator) restore_state() {
+  b.state.with(fn(var s: (crypto.Hasher, crypto.Hasher?)) {
+    if let Some(saved) = s.1 {
+      s = (saved, s.1)
+    }
+  })
+}
+
+fn (b: BlobDigestCalculator) write(data: Bytes) {
+  b.state.with(fn(var s: (crypto.Hasher, crypto.Hasher?)) {
+    var h = s.0
+    h.write(data)
+    s = (h, s.1)
+  })
+}
+
+/// `sha256:<hex>` of what was uploaded so far.
+fn (b: BlobDigestCalculator) get_digest() -> Str {
+  "sha256:${b.state.with_read(fn(s: (crypto.Hasher, crypto.Hasher?)) -> Bytes { s.0.sum() }).to_hex()}"
+}

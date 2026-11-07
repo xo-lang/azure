@@ -8,6 +8,14 @@ version has been tagged since.
 
 ## Unreleased
 
+`runtime.with_query`: a generated operation's URL with its query
+parameters set on a query the joined URL already has, as Go's generated
+`reqQP := req.Raw().URL.Query(); reqQP.Set(...)` does (the whole query
+encoded again, keys sorted). Every generated module now builds its
+request URLs with it: before, an endpoint with a query (or Container
+Registry's upload Location, `...?_state=...`) got a second `?` for the
+operation's parameters. A URL without a query is unchanged.
+
 `azcore.DateTimeUTC`: a `date-time` read as `azcore.DateTime` reads it
 (the offset kept in `offset`) and written in UTC, as Go's TypeSpec
 emitter writes an ARM module's times (`populateTime` with `utc`).

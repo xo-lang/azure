@@ -23,6 +23,11 @@ struct Service {
   /// ComputeRP, DiskRP, GalleryRP and skus, each its own api-version):
   /// the others, after `openapi`.
   pub openapi_more: List[Str] = []
+  /// An autorest module's one input file, from the repository root,
+  /// when Go's autorest.md names it directly (`input-file:`) rather
+  /// than a readme tag: the spec's readme and readme.go.md directives do
+  /// not apply (azcontainerregistry).
+  pub swagger: Str = ""
   /// The spec commit, when not specs.lock's.
   pub commit: Str = ""
   pub go_module: Str = ""
@@ -45,6 +50,9 @@ struct Services {
 struct CustomFile {
   pub data_plane: Bool = false
   pub reachable_only: Bool = false
+  /// autorest.md's `remove-unreferenced-types: true`: only the types
+  /// operations reach, as `reachable_only`, but autorest.go's shapes.
+  pub remove_unreferenced: Bool = false
   pub field_types: Map[Str, Str] = {}
   pub replace_types: Map[Str, Str] = {}
   /// Type names Go's modelerfour gives an inline schema from its JSON
@@ -70,6 +78,20 @@ struct CustomFile {
   pub needs as "requires": List[Str] = []
   /// operationIds polled by runtime.new_status_poller (see gen.Custom).
   pub status_pollers: List[Str] = []
+  /// Edits of the spec before it is read: autorest.md's swagger-document
+  /// transforms, in their order (spec.Patch).
+  pub patch: List[spec.Patch] = []
+  /// autorest.md's `rename-operation`s: operationId (any case) to its
+  /// new operationId's operation part.
+  pub ops: Map[Str, Str] = {}
+  /// Go's response field of an operation's binary body (operationId):
+  /// autorest.md's replace of `Body` (`BlobData`).
+  pub body_fields: Map[Str, Str] = {}
+  /// See gen.Package: a next link header's hand-written transform, and
+  /// the operations (`BlobClient.UploadChunk`) and types Go hides.
+  pub next_link_transform: Str = ""
+  pub private_ops: List[Str] = []
+  pub private_types: List[Str] = []
 } derive Json
 
 fn main(os: Os) -> () ! Error {
@@ -93,7 +115,7 @@ fn main(os: Os) -> () ! Error {
   let name = dir.split("/").last() ?? dir
   let custom_path = "codegen/custom/${name}.toml"
   let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
-  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() })}
+  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || cf.remove_unreferenced || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() }), ops: lower_keys(cf.ops), body_fields: lower_keys(cf.body_fields)}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -136,6 +158,9 @@ fn main(os: Os) -> () ! Error {
     }
     custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots}
     source = "${svc.openapi} (from ${svc.spec})"
+  } else if svc.swagger != "" {
+    inputs = ["${base}/${svc.swagger}"]
+    source = svc.swagger
   } else {
     let root = "${base}/${svc.spec}"
     let readme = os.fs.read_text("${root}/readme.md")?
@@ -156,9 +181,22 @@ fn main(os: Os) -> () ! Error {
     }
     files[f] = doc
   }
+  // each patch must change one of the files it is for
+  var patch_hits: Map[Str, Int] = {}
+  for (f, doc) in files {
+    let (d, m) = spec.apply_patches(doc, f, cf.patch)?
+    files[f] = d
+    for pt in cf.patch {
+      let k = "${pt.op} ${pt.pointer}"
+      if (pt.file == "" || f.ends_with("/${pt.file}")) && !m.contains(k) {
+        patch_hits[k] = (patch_hits.get(k) ?? 0) + 1
+      }
+    }
+  }
+  let unpatched = cf.patch.map(fn(pt: spec.Patch) -> Str { "${pt.op} ${pt.pointer}" }).filter(fn(k: Str) -> Bool { !patch_hits.contains(k) })
   // readme.go.md's assignments (enum and field renames for Go).
   var skipped: List[Str] = []
-  if svc.openapi == "" {
+  if svc.openapi == "" && svc.swagger == "" {
     let go_md = "${base}/${svc.spec}/readme.go.md"
     if os.fs.exists(go_md)? {
       let ds = spec.go_directives(os.fs.read_text(go_md)?)?
@@ -178,7 +216,7 @@ fn main(os: Os) -> () ! Error {
   let api = b.build(inputs)
   let tspconfig = "${base}/${svc.spec}/tspconfig.yaml"
   let head_as_boolean = svc.openapi != "" && os.fs.exists(tspconfig)? && go_option(os.fs.read_text(tspconfig)?, "head-as-boolean") == Some("true")
-  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty, accept_always: cf.accept_always, query_pct20: cf.query_pct20, typespec: cf.reachable_only || svc.openapi != "", tsp_arm: svc.openapi != "" && !cf.data_plane, head_as_boolean: head_as_boolean, go_package: go_package(svc.go_module, name)}
+  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty, accept_always: cf.accept_always, query_pct20: cf.query_pct20, typespec: cf.reachable_only || svc.openapi != "", tsp_arm: svc.openapi != "" && !cf.data_plane, head_as_boolean: head_as_boolean, go_package: go_package(svc.go_module, name), next_link_transform: cf.next_link_transform, private_ops: cf.private_ops, private_types: cf.private_types}
   os.fs.create_dir_all(dir)?
   os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n" + cf.needs.map(fn(r: Str) -> Str { "require ${r} v0.1.0\n" }).join("")).bytes())?
   let m = gen.emit_models(p, api)
@@ -189,6 +227,9 @@ fn main(os: Os) -> () ! Error {
   os.stdio.println("${name}: ${api.ops.len()} operations, ${api.models.len()} models, ${api.enums.len()} enums, api-version ${api.api_version}")
   for r in api.report {
     os.stdio.println("  not handled: ${r}")
+  }
+  for w in unpatched {
+    os.stdio.println("  patch not applied: ${w}")
   }
   for w in skipped {
     os.stdio.println("  readme.go.md directive not applied: ${w}")
@@ -248,4 +289,13 @@ fn is_major_suffix(s: Str) -> Bool {
     }
   }
   true
+}
+
+/// `m` with its keys in lower case.
+fn lower_keys(m: Map[Str, Str]) -> Map[Str, Str] {
+  var out: Map[Str, Str] = {}
+  for (k, v) in m {
+    out[k.to_lower()] = v
+  }
+  out
 }

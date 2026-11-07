@@ -1,0 +1,87 @@
+// The hand written part of azcontainerregistry's Client, as Go's
+// custom_client.go, cloud_config.go and custom_constants.go
+// (azcontainerregistry v0.2.3; MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md). The operations are generated (client.xo, blob_client.xo,
+// authentication_client.xo, models.xo).
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// The key of Azure Container Registry in `cloud.Configuration.services`
+/// (Go's ServiceName).
+pub const SERVICE_NAME: Str = "azcontainerregistry"
+
+/// The audience of tokens for the registry's exchange (Go's
+/// defaultAudience).
+const DEFAULT_AUDIENCE: Str = "https://containerregistry.azure.net"
+
+/// The cloud's configuration with Azure Container Registry's audience:
+/// the given one, or Azure Public's when it is empty, and any of the
+/// three Azure clouds with the registry added (Go's cloud_config.go
+/// adds it to each in its init).
+fn registry_cloud(c: cloud.Configuration) -> cloud.Configuration {
+  let acr = cloud.ServiceConfiguration{audience: DEFAULT_AUDIENCE, endpoint: ""}
+  if c.authority_host == "" && c.services.is_empty() {
+    return cloud.Configuration{authority_host: "", services: {SERVICE_NAME: acr}}
+  }
+  for known in [cloud.AZURE_PUBLIC, cloud.AZURE_CHINA, cloud.AZURE_GOVERNMENT] {
+    if c.authority_host == known.authority_host && !c.services.contains(SERVICE_NAME) && c.services.len() == known.services.len() {
+      var s = c.services
+      s[SERVICE_NAME] = acr
+      return c with {services: s}
+    }
+  }
+  c
+}
+
+/// The scopes of the Entra ID token exchanged for a registry refresh
+/// token, from the cloud's audience.
+fn registry_scopes(c: cloud.Configuration) -> List[Str] ! Str {
+  let svc = registry_cloud(c).services.get(SERVICE_NAME) ?? return Err("provided Cloud field is missing Azure Container Registry configuration")
+  if svc.audience == "" {
+    return Err("provided Cloud field is missing Azure Container Registry configuration")
+  }
+  Ok(["${svc.audience}/.default"])
+}
+
+struct Setup[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  endpoint: Str
+}
+
+/// Options of new_client.
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// Client: the registry's repositories, tags and manifests.
+pub struct Client[fx: Effects] {
+  setup: Setup[fx]
+}
+
+/// A client for the registry at `endpoint` (`https://<name>.azurecr.io`),
+/// authorized by the registry's challenge: an Entra ID token from
+/// `credential` exchanged for registry tokens, or anonymous access when
+/// it is None (NewClient).
+pub fn new_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, credential: azcore.TokenCredential[fx]?, options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] ! Str {
+  let scopes = registry_scopes(options.client.cloud)?
+  let auth_client = new_authentication_client(net, clock, rand, endpoint, AuthenticationClientOptions{client: options.client})
+  let auth = new_authentication_policy(credential, scopes, auth_client, clock)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options.client)
+  Ok(Client{setup: Setup{pipeline: pl, endpoint: endpoint}})
+}
+
+/// The URL of a `Link` header (`</acr/v1/_catalog?last=a&n=1>; rel="next"`),
+/// as Go's extractNextLink: between the first character and the first
+/// `>` (all of it after the first character without one; Go panics).
+fn extract_next_link(value: Str) -> Str {
+  if value.is_empty() {
+    return ""
+  }
+  match value.find(">") {
+    Some(i) if i >= 1 => value[1..i]
+    _ => value[1..value.len()]
+  }
+}

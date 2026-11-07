@@ -198,6 +198,30 @@ response type equal, except armkeyvault's `Secret`, which is
   (`query_pct20`), and a path's disambiguating query dropped. An enum of one
   value is a constant when `modelAsString` is false, or unset in a
   module that seals them.
+- An autorest data plane module from one swagger file
+  (`services.toml: swagger`, as Go's autorest.md `input-file`; the
+  spec's readme and its directives are not read) takes Go's
+  autorest.md directives as JSON patches (`custom/<module>.toml:
+  [[patch]]` with `pointer`, `op` set, delete, push or copy, and
+  `value` as JSON text; a patch that touches no file is reported).
+  Its clients are named per group (`Client` for the package's own,
+  `BlobClient`, ...), with responses carrying their headers. Also:
+  `remove_unreferenced` (Go's `remove-unreferenced-types`), `[ops]`
+  renames, `body_fields` (the field of a binary response,
+  `ManifestData`), `next_link_transform` (a pager whose next link is
+  the `Link` header, joined to the endpoint after the named hand
+  written function extracts it), and `private_ops` and `private_types`
+  (Go's lower case ones, emitted as `raw_<name>` and `Raw<Name>` so a
+  hand written public wrapper keeps Go's name).
+- A `formData` body is sent `application/x-www-form-urlencoded`; a
+  `format: binary` or `file` body is `Bytes`, with a `content_type`
+  parameter when the operation consumes several types; a binary
+  response is the response's `Bytes` field. Every declared status not
+  marked `x-ms-error-response` is a success (Container Registry's
+  deletes declare 404), as in autorest.go. An operation that produces
+  only a binary type sends no `Accept` for its error schema alone.
+- Query parameters are set with `runtime.with_query`, so a query the
+  joined URL already has is kept, as Go's `URL.Query()` keeps it.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
 - A Go name whose snake_case form is an Xo keyword or predeclared value

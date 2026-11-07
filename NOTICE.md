@@ -82,7 +82,11 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   models and serialization, hand written; requests checked against its
   own), `sdk/messaging/eventgrid/aznamespaces` v1.0.0 (its sender and
   receiver clients, models and serialization, hand written; requests
-  checked against its own), and
+  checked against its own), `sdk/containers/azcontainerregistry`
+  v0.2.3 (its clients' constructors, challenge authentication policy,
+  chunk upload and digest helpers, hand written; the rest generated
+  with its autorest.md directives; requests checked against its own),
+  and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's
   generated `sdk/resourcemanager` modules (autorest.go's naming:

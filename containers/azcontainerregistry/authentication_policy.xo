@@ -1,0 +1,180 @@
+// The registry's challenge authorization, as Go's
+// authentication_policy.go (azcontainerregistry v0.2.3; MIT, Copyright
+// (c) Microsoft Corporation; NOTICE.md), with the refresh token cached
+// as Go's sdk/internal temporal.Resource.
+//
+// A request with no token is first sent without its body; the
+// registry's 401 names the service and scope in WWW-Authenticate. An
+// Entra ID token from the credential is exchanged for a registry
+// refresh token (`/oauth2/exchange`, cached until the JWT's `exp`), and
+// that for an access token for the scope (`/oauth2/token`), with which
+// the request is sent again. Without a credential the access token is
+// asked for anonymously (grant type `password`). The last access token
+// is kept and tried first on the next request.
+
+use std/base64
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// How long before a refresh token expires a new one is fetched, and
+/// how long after a failed refresh the next is tried (temporal.Resource).
+const REFRESH_WINDOW_MILLIS: Int = 5 * 60 * 1000
+const REFRESH_BACKOFF_MILLIS: Int = 30 * 1000
+
+struct RefreshState {
+  token: azcore.AccessToken? = None
+  last_attempt_millis: Int = 0
+}
+
+struct AuthenticationPolicy[fx: Effects] {
+  credential: azcore.TokenCredential[fx]?
+  scopes: List[Str]
+  auth_client: AuthenticationClient[fx]
+  clock: Clock
+  refresh: Mutex[RefreshState]
+  access: Mutex[Str]
+}
+
+fn new_authentication_policy[fx: Effects](credential: azcore.TokenCredential[fx]?, scopes: List[Str], auth_client: AuthenticationClient[fx], clock: Clock) -> AuthenticationPolicy[fx] {
+  AuthenticationPolicy{credential: credential, scopes: scopes, auth_client: auth_client, clock: clock, refresh: Mutex.new(RefreshState{}), access: Mutex.new("")}
+}
+
+/// An exchange's failure as the policy's: a service error is the
+/// response (not retried, as Go returns the error from Do), anything
+/// else an authentication failure.
+fn exchange_err(e: azcore.CallErr) -> policy.SendErr {
+  match e {
+    Send(se) => se
+    Response(re) => policy.SendErr.FinalResponse(re.response)
+    Decode(m) => policy.SendErr.Auth(m)
+    InvalidInput(m) => policy.SendErr.Auth(m)
+  }
+}
+
+fn (p: AuthenticationPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
+  let cached = p.access.with_read(fn(s: Str) -> Str { s })
+  let resp = if req.header("Authorization").is_some() {
+    // a retry already carries the token
+    next.send(req)?
+  } else if cached != "" {
+    next.send(req.with_header("Authorization", "Bearer ${cached}"))?
+  } else {
+    next.send(challenge_request(req))?
+  }
+  if resp.status != 401 {
+    return Ok(resp)
+  }
+  let (service, scope) = find_service_and_scope(resp) ?? e => return Err(policy.SendErr.Auth(e))
+  let token = p.access_token(service, scope)?
+  p.access.reset(token)
+  next.send(req.with_header("Authorization", "Bearer ${token}"))
+}
+
+/// The request with no body and no Content-Type (getChallengeRequest).
+fn challenge_request(req: policy.Request) -> policy.Request {
+  req with {body: b"", headers: req.headers.filter(fn(h: (Str, Str)) -> Bool { h.0.to_lower() != "content-type" })}
+}
+
+/// The service and scope of the registry's challenge, parsed as Go's
+/// findServiceAndScope: every `Bearer ` removed, split at `",`, and
+/// each part that is one `key=value` kept with its quotes removed.
+fn find_service_and_scope(resp: http.Response) -> (Str, Str) ! Str {
+  // Go's Header.Get: the first value only
+  let header = resp.header_values("WWW-Authenticate").first() ?? ""
+  if header == "" {
+    return Err("response has no WWW-Authenticate header for challenge authentication")
+  }
+  var values: Map[Str, Str] = {}
+  for part in header.replace("Bearer ", "").split("\",") {
+    let sub = part.split("=")
+    if sub.len() == 2 {
+      values[sub[0]] = sub[1].replace("\"", "")
+    }
+  }
+  let service = values.get("service") ?? return Err("could not find a valid service in the WWW-Authenticate header")
+  let scope = values.get("scope") ?? return Err("could not find a valid scope in the WWW-Authenticate header")
+  Ok((service, scope))
+}
+
+/// A registry access token for `scope` (getAccessToken).
+fn (p: AuthenticationPolicy[fx]) access_token(service: Str, scope: Str) -> Str ! policy.SendErr uses (net.dial, clock, rand, fx) {
+  var refresh_token = ""
+  var grant = TOKEN_GRANT_TYPE_PASSWORD
+  if p.credential.is_some() {
+    refresh_token = p.refresh_token(service)?.token.reveal()
+    grant = TOKEN_GRANT_TYPE_REFRESH_TOKEN
+  }
+  let r = p.auth_client.exchange_acr_refresh_token_for_acr_access_token(service, scope, refresh_token, AuthenticationClientExchangeACRRefreshTokenForACRAccessTokenOptions{grant_type: Some(grant)}) ?? e => return Err(exchange_err(e))
+  // Go dereferences the field (a panic when it is missing)
+  r.acr_access_token.access_token.or_err(policy.SendErr.Auth("the token response has no access_token"))
+}
+
+/// The cached refresh token, or a new one (temporal.Resource.Get): one
+/// is fetched when there is none or it has expired, its error returned;
+/// within 5 minutes of expiry one is fetched at most every 30 seconds,
+/// and a failure keeps the old one.
+fn (p: AuthenticationPolicy[fx]) refresh_token(service: Str) -> azcore.AccessToken ! policy.SendErr uses (net.dial, clock, rand, fx) {
+  // an eager refresh that fails returns Ok (the old token), so its
+  // attempt time is kept for the 30 second backoff; a failure with no
+  // valid token returns Err, which drops the attempt time, as Go's
+  // backoff applies only before expiry
+  let got = p.refresh.with(fn(var s: RefreshState) -> Result[azcore.AccessToken, policy.SendErr] uses (net.dial, clock, rand, fx) {
+    let now = p.clock.now().unix_millis()
+    var expired = true
+    if let Some(have) = s.token {
+      let exp = have.expires_on.unix_millis()
+      expired = exp < now
+      // not close to expiring, or an attempt within the last 30 seconds
+      if !expired && (exp - REFRESH_WINDOW_MILLIS >= now || s.last_attempt_millis + REFRESH_BACKOFF_MILLIS > now) {
+        return Ok(have)
+      }
+    }
+    s = s with {last_attempt_millis: now}
+    match p.acquire_refresh_token(service) {
+      Ok(fresh) => {
+        s = s with {token: Some(fresh)}
+        Ok(fresh)
+      }
+      // an eager refresh's failure keeps the still valid token
+      Err(e) => match s.token {
+        Some(have) if !expired => Ok(have)
+        _ => Err(e)
+      }
+    }
+  })
+  got
+}
+
+/// An Entra ID token for the policy's scopes exchanged for a registry
+/// refresh token, which expires at its JWT's `exp` (acquireRefreshToken).
+fn (p: AuthenticationPolicy[fx]) acquire_refresh_token(service: Str) -> azcore.AccessToken ! policy.SendErr uses (net.dial, clock, rand, fx) {
+  let cred = p.credential ?? return Err(policy.SendErr.Auth("no credential"))
+  let aad = cred.get_token(azcore.TokenRequestOptions{scopes: p.scopes}) ?? e => return Err(policy.SendErr.Auth(e.display()))
+  let r = p.auth_client.exchange_aad_access_token_for_acr_refresh_token(POST_CONTENT_SCHEMA_GRANT_TYPE_ACCESS_TOKEN, service, AuthenticationClientExchangeAADAccessTokenForACRRefreshTokenOptions{access_token: Some(aad.token.reveal())}) ?? e => return Err(exchange_err(e))
+  let token = r.acr_refresh_token.refresh_token ?? return Err(policy.SendErr.Auth("the exchange response has no refresh_token"))
+  let exp = jwt_expire_time(token) ?? e => return Err(policy.SendErr.Auth(e))
+  Ok(azcore.AccessToken{token: Secret.new(token), expires_on: exp})
+}
+
+struct JwtExp {
+  exp: Int = 0
+} derive Json
+
+/// The `exp` of a JWT's claims (getJWTExpireTime): the second of its
+/// dot separated parts, padded standard base64 JSON.
+fn jwt_expire_time(token: Str) -> Time ! Str {
+  let parts = token.split(".")
+  if parts.len() <= 2 {
+    return Err("could not parse refresh token expire time")
+  }
+  var value = parts[1]
+  let padding = value.len() % 4
+  if padding > 0 {
+    value = value + "=".repeat(4 - padding)
+  }
+  let claims = base64.decode(value) ?? e => return Err(e.display())
+  let j = json.decode[JwtExp](claims) ?? e => return Err(e.display())
+  Ok(Time.from_unix_millis(j.exp * 1000))
+}

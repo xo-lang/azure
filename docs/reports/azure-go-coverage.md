@@ -43,7 +43,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | azidentity/cache | v0.4.0 | v0 | 595 | 595 | missing |  |  |
 | batch/azbatch | v0.1.0 | v0 | 66 | 24575 | missing |  |  |
 | cognitiveservices/azopenai | v0.1.2 | v0, deprecated | 619 | 3309 | missing |  |  |
-| containers/azcontainerregistry | v0.2.3 | v0 | 680 | 3753 | missing |  |  |
+| containers/azcontainerregistry | v0.2.3 | v0 | 680 | 3753 | v0.2.3 | 454 + 1471 gen |  |
 | data/azappconfig | v2.3.0 (`v2`) | stable | 1972 | 5620 | v2.3.0 | 875 + 1870 gen |  |
 | data/azcosmos | v1.5.0 | stable | 12599 | 12687 | v1.5.0 | 3377 |  |
 | data/aztables | v1.4.1 | stable | 3409 | 5762 | v1.4.1 | 1346 |  |
@@ -434,5 +434,8 @@ Our line counts above are from before these catch-ups.
 
 The ARM majors (armstorage v4, armcompute v9, armnetwork v12,
 armresources v4 and armkeyvault v2) are done by regenerating from the
-specs. Next: then containers/azcontainerregistry (v0, 680 hand-written lines)
-and ai/azopenai (v0, 284).
+specs. containers/azcontainerregistry v0.2.3 is done: its operations
+generated from the swagger with Go's autorest.md directives as JSON
+patches, and its challenge policy, chunk upload and digest helpers
+written by hand, with requests checked against Go's own. Next: azcore's
+SSE streaming, then ai/azopenai (v0, 284) on top of it.

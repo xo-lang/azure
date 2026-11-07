@@ -270,3 +270,132 @@ pub fn apply_renames(doc: json.Value, renames: List[Rename]) -> (json.Value, Int
   }
   (d, n)
 }
+
+/// One edit of a spec file, a structured form of an autorest.md
+/// directive's JavaScript transform (codegen/custom/<module>.toml's
+/// `[[patch]]`): `op` at JSON pointer `pointer` (RFC 6901, `~1` for `/`).
+pub struct Patch {
+  /// The file it applies to (`containerregistry.json`), empty for every
+  /// file.
+  pub file: Str = ""
+  pub pointer: Str
+  /// `set` (the key or index to `value`), `delete` (the key or index
+  /// removed), `push` (`value` appended to the list), `copy` (the value
+  /// at pointer `from` set here).
+  pub op: Str
+  /// JSON text.
+  pub value: Str = ""
+  pub from: Str = ""
+} derive Json
+
+/// The keys of a JSON pointer, unescaped.
+pub fn pointer_keys(ptr: Str) -> List[Str] {
+  ptr.trim_prefix("/").split("/").filter(fn(k: Str) -> Bool { k != "" }).map(fn(k: Str) -> Str { k.replace("~1", "/").replace("~0", "~") })
+}
+
+/// The value at `keys` (a list's index as its decimal text).
+pub fn get_at(v: json.Value, keys: List[Str]) -> json.Value? {
+  var cur = v
+  for k in keys {
+    cur = match cur {
+      json.Value.Object(_) => cur.get(k) ?? return None
+      json.Value.List(xs) => xs.get(Int.parse(k) ?? return None) ?? return None
+      _ => return None
+    }
+  }
+  Some(cur)
+}
+
+/// `v` with `f` applied to the value at `keys`, None when a key on the
+/// way is missing (the last one may be missing in an object).
+fn update_at(v: json.Value, keys: List[Str], f: fn(json.Value?) -> json.Value?) -> json.Value? {
+  if keys.is_empty() {
+    return f(Some(v))
+  }
+  let k = keys[0]
+  let rest = keys[1..keys.len()]
+  match v {
+    json.Value.Object(fs) => {
+      var out: List[(Str, json.Value)] = []
+      var found = false
+      for (name, x) in fs {
+        if name == k {
+          found = true
+          if rest.is_empty() {
+            if let Some(nx) = f(Some(x)) {
+              out.push((name, nx))
+            }
+          } else {
+            out.push((name, update_at(x, rest, f)?))
+          }
+        } else {
+          out.push((name, x))
+        }
+      }
+      if !found {
+        if !rest.is_empty() {
+          return None
+        }
+        out.push((k, f(None)?))
+      }
+      Some(json.Value.Object(out))
+    }
+    json.Value.List(xs) => {
+      let i = Int.parse(k) ?? return None
+      if i < 0 || i >= xs.len() {
+        return None
+      }
+      var out: List[json.Value] = []
+      for (j, x) in xs.indexed() {
+        if j != i {
+          out.push(x)
+        } else if rest.is_empty() {
+          if let Some(nx) = f(Some(x)) {
+            out.push(nx)
+          }
+        } else {
+          out.push(update_at(x, rest, f)?)
+        }
+      }
+      Some(json.Value.List(out))
+    }
+    _ => None
+  }
+}
+
+/// `doc` (the file `file`) with the patches for it applied, and the
+/// pointers of those that found nothing to change.
+pub fn apply_patches(doc: json.Value, file: Str, patches: List[Patch]) -> (json.Value, List[Str]) ! Str {
+  var d = doc
+  var missed: List[Str] = []
+  for p in patches {
+    if p.file != "" && !file.ends_with("/${p.file}") {
+      continue
+    }
+    let value = if p.value == "" { json.Value.Null } else { json.parse_value(p.value) ?? e => return Err("patch ${p.pointer}: ${e.display()}") }
+    let keys = pointer_keys(p.pointer)
+    let r = match p.op {
+      "set" => update_at(d, keys, fn(_: json.Value?) -> json.Value? { Some(value) })
+      "delete" => if get_at(d, keys).is_some() { update_at(d, keys, fn(_: json.Value?) -> json.Value? { None }) } else { None }
+      "push" => update_at(d, keys, fn(x: json.Value?) -> json.Value? {
+        match x {
+          Some(json.Value.List(xs)) => Some(json.Value.List(xs + [value]))
+          _ => None
+        }
+      })
+      "copy" => {
+        let src = get_at(d, pointer_keys(p.from))
+        match src {
+          Some(sv) => update_at(d, keys, fn(_: json.Value?) -> json.Value? { Some(sv) })
+          None => None
+        }
+      }
+      other => return Err("patch ${p.pointer}: unknown op ${other}")
+    }
+    match r {
+      Some(nd) => d = nd
+      None => missed.push("${p.op} ${p.pointer}")
+    }
+  }
+  Ok((d, missed))
+}

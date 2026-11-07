@@ -1,0 +1,62 @@
+// The hand written part of azcontainerregistry's BlobClient, as Go's
+// blob_custom_client.go (azcontainerregistry v0.2.3; MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): its constructor, and the chunk
+// upload and its completion with the digest of what was sent.
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// Options of new_blob_client.
+pub struct BlobClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// BlobClient: the registry's blobs and their uploads.
+pub struct BlobClient[fx: Effects] {
+  setup: Setup[fx]
+}
+
+/// A blob client for the registry at `endpoint`, authorized as
+/// new_client's (NewBlobClient).
+pub fn new_blob_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, credential: azcore.TokenCredential[fx]?, options: BlobClientOptions[fx] = BlobClientOptions{}) -> BlobClient[fx] ! Str {
+  let scopes = registry_scopes(options.client.cloud)?
+  let auth_client = new_authentication_client(net, clock, rand, endpoint, AuthenticationClientOptions{client: options.client})
+  let auth = new_authentication_policy(credential, scopes, auth_client, clock)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options.client)
+  Ok(BlobClient{setup: Setup{pipeline: pl, endpoint: endpoint}})
+}
+
+/// The optional parameters of BlobClient.upload_chunk.
+pub struct BlobClientUploadChunkOptions {
+  /// Start of the chunk's range in the blob; sent (as `Content-Range`)
+  /// only with `range_end`.
+  pub range_start: Int32? = None
+  /// End of the chunk's range in the blob.
+  pub range_end: Int32? = None
+}
+
+/// Uploads one chunk of a blob to `location` (an upload's Location),
+/// adding it to `calculator`'s digest; a failed upload leaves the digest
+/// as it was (UploadChunk).
+pub fn (c: BlobClient) upload_chunk(location: Str, chunk_data: Bytes, calculator: BlobDigestCalculator, options: BlobClientUploadChunkOptions = BlobClientUploadChunkOptions{}) -> BlobClientUploadChunkResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  calculator.save_state()
+  calculator.write(chunk_data)
+  var request_options = RawBlobClientUploadChunkOptions{}
+  if let (Some(s), Some(e)) = (options.range_start, options.range_end) {
+    request_options = RawBlobClientUploadChunkOptions{content_range: Some("${s}-${e}")}
+  }
+  match c.raw_upload_chunk(location, chunk_data, request_options) {
+    Ok(r) => Ok(r)
+    Err(e) => {
+      calculator.restore_state()
+      Err(e)
+    }
+  }
+}
+
+/// Completes the upload at `location` with the digest of the chunks
+/// `calculator` saw (CompleteUpload).
+pub fn (c: BlobClient) complete_upload(location: Str, calculator: BlobDigestCalculator, options: BlobClientCompleteUploadOptions = BlobClientCompleteUploadOptions{}) -> BlobClientCompleteUploadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.raw_complete_upload(calculator.get_digest(), location, options)
+}
