@@ -121,7 +121,7 @@ counted as ported until their Go vectors pass.
 | resourcemanager/alertsmanagement/armalertsmanagement | v0.11.0 | v0 | 5061 | v0.11.0 | 1764 gen | compiled |
 | resourcemanager/analysisservices/armanalysisservices | v1.2.0 | stable | 4034 | v1.2.0 | 1204 gen | compiled |
 | resourcemanager/apicenter/armapicenter | v1.0.0 | stable | 10258 | v1.0.0 | 3229 gen | compiled |
-| resourcemanager/apimanagement/armapimanagement | v3.0.0 | stable; newer v4.0.0-beta.1 | 138430 | v3.0.0 | 42153 gen | compiled |
+| resourcemanager/apimanagement/armapimanagement | v3.0.0 | stable; newer v4.0.0-beta.1 | 138430 | v3.0.0 | 42146 gen | compiled |
 | resourcemanager/appcomplianceautomation/armappcomplianceautomation | v1.0.0 | stable | 9725 | v1.0.0 | 2995 gen | compiled |
 | resourcemanager/appconfiguration/armappconfiguration | v3.0.0 | stable | 7836 | v3.0.0 | 2322 gen | compiled |
 | resourcemanager/appcontainers/armappcontainers | v5.0.0 | stable | 46587 | v5.0.0 | 13764 gen | compiled |
@@ -264,7 +264,7 @@ counted as ported until their Go vectors pass.
 | resourcemanager/loadtesting/armloadtesting | v1.2.0 | stable | 3477 | v1.2.0 | 979 gen | compiled |
 | resourcemanager/logic/armlogic | v1.2.0 | stable | 31522 | v1.2.0 | 9011 gen | compiled |
 | resourcemanager/m365securityandcompliance/armm365securityandcompliance | v0.7.0 | v0 | 14913 | v0.7.0 | 4377 gen | compiled |
-| resourcemanager/machinelearning/armmachinelearning | v4.0.0 | stable; newer v5.0.0-beta.1 | 76326 | v4.0.0 | 27614 gen | compiled |
+| resourcemanager/machinelearning/armmachinelearning | v4.0.0 | stable; newer v5.0.0-beta.1 | 76326 | v4.0.0 | 27607 gen | compiled |
 | resourcemanager/maintenance/armmaintenance | v1.3.0 | stable; newer v2.0.0-beta.1 | 7536 | v1.3.0 | 2168 gen | compiled |
 | resourcemanager/managednetwork/armmanagednetwork | v0.3.0 | v0 | 4826 | v0.3.0 | 1273 gen | compiled |
 | resourcemanager/managednetworkfabric/armmanagednetworkfabric | v2.0.0 | stable | 55337 | v2.0.0 | 16132 gen | compiled |
@@ -281,7 +281,7 @@ counted as ported until their Go vectors pass.
 | resourcemanager/migrationdiscovery/armmigrationdiscoverysap | v0.1.0 | v0 | 5132 | v0.1.0 | 1718 gen | compiled |
 | resourcemanager/mongocluster/armmongocluster | v1.2.0 | stable | 7396 | v1.2.0 | 2360 gen | compiled |
 | resourcemanager/mongodbatlas/armmongodbatlas | v1.0.0 | stable | 2427 | v1.0.0 | 622 gen | compiled |
-| resourcemanager/monitor/armmonitor | v0.14.0 | v0 | 35278 | v0.14.0 | 10809 gen | compiled |
+| resourcemanager/monitor/armmonitor | v0.14.0 | v0 | 35278 | v0.14.0 | 10697 gen | compiled |
 | resourcemanager/monitor/armmonitorworkspaces | v1.0.0 | stable | 6119 | v1.0.0 | 2028 gen | compiled |
 | resourcemanager/monitor/armslis | v0.2.0 | v0 | 2067 | v0.2.0 | 802 gen | compiled |
 | resourcemanager/mysql/armmysqlflexibleservers | v2.0.0 | stable | 18146 | v2.0.0 | 5440 gen | compiled |
