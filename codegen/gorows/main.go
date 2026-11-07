@@ -45,12 +45,13 @@ var (
 	reFlag    = regexp.MustCompile(`(?m)^(package-[\w-]+): true`)
 	reKey     = regexp.MustCompile(`(?m)^([\w-]+):`)
 	reUTC     = regexp.MustCompile(`populate\w*(?:\[[^\]]*\])?\(objectMap, "[^"]*", [\w.]+, true\)`)
+	reOptBody = regexp.MustCompile(`MarshalAs\w*\(req, \*options\.\w+\)`)
 )
 
 type row struct {
 	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion string
 	OpenAPIMore                                                []string
-	UTC, Seal, AcceptAll, QueryPlus                            bool
+	UTC, Seal, AcceptAll, QueryPlus, PutBodyInOptions          bool
 }
 
 var specs string
@@ -120,6 +121,17 @@ func derive(modPath, version, dir string) row {
 	// typespec-go before it replaced the query's "+" with "%20"
 	// (armalertsmanagement's emitter 0.10.2)
 	r.QueryPlus = exists(filepath.Join(dir, "tsp-location.yaml")) && strings.Contains(s, "RawQuery = reqQP.Encode()") && !strings.Contains(s, `reqQP.Encode(), "+", "%20"`)
+	// autorest.go before about December 2023 kept a PUT's or PATCH's
+	// optional body in the options (armdatadog 1.3.0); later ones, and
+	// typespec-go, take it as a parameter (armconnectedvmware 1.1.1)
+	if !exists(filepath.Join(dir, "tsp-location.yaml")) {
+		for _, fn := range strings.Split(s, "\nfunc ") {
+			if (strings.Contains(fn, "http.MethodPut,") || strings.Contains(fn, "http.MethodPatch,")) && reOptBody.MatchString(fn) {
+				r.PutBodyInOptions = true
+				break
+			}
+		}
+	}
 	consts := map[string]string{}
 	for _, m := range reConst.FindAllStringSubmatch(s, -1) {
 		consts[m[1]] = m[2]
@@ -483,6 +495,9 @@ func format(r row) string {
 	}
 	if r.QueryPlus && r.OpenAPI != "" {
 		out = append(out, "query_plus = true")
+	}
+	if r.PutBodyInOptions {
+		out = append(out, "put_body_in_options = true")
 	}
 	return strings.Join(out, "\n")
 }

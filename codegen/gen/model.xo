@@ -214,6 +214,9 @@ pub struct Custom {
   /// operationId (lower case) to its path parameters' wire names in Go's
   /// order (custom `param_order`).
   pub param_order: Map[Str, List[Str]] = {}
+  /// Go's autorest module keeps a PUT's or PATCH's optional body in the
+  /// options (older autorest.go: armdatadog 1.3.0).
+  pub put_body_in_options: Bool = false
   /// Path parameters that may be empty (wire names).
   pub allow_empty: List[Str] = []
   /// autorest's modelerfour `seal-single-value-enum-by-default`: an
@@ -685,7 +688,14 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
       "byte" => "Bytes"
       _ => "Str"
     }
-    "integer" => if str_of(v.get("format")) == "unixtime" { "azcore.UnixTime" } else { "Int" }
+    // `format: decimal` is a number whatever the type says: autorest's
+    // modeler reads it so (armcustomerinsights' trainingAccuracy, Go's
+    // float64)
+    "integer" => match str_of(v.get("format")) {
+      "unixtime" => "azcore.UnixTime"
+      "decimal" => "Float"
+      _ => "Int"
+    }
     // Go's float32 (decision on Float32): `format: float`
     "number" => if str_of(v.get("format")) == "float" { "Float32" } else { "Float" }
     "boolean" => "Bool"
@@ -935,7 +945,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
   var fields: List[Field] = []
   var seen: List[Str] = []
   let required = b.required_of(file, v, 0)
-  for (wire, prop, pf) in b.properties(file, v) {
+  for (wire, prop, pf, owner) in b.properties(file, v, def) {
     if seen.contains(wire) {
       continue
     }
@@ -948,8 +958,11 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     let client = b.custom.fields.get("${def}.${wire}") ?? undone ?? b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
     // an inline schema is named after the definition's key, not its
     // x-ms-client-name (modelerfour names it before the rename: Compute's
-    // Operation, renamed OperationValue, has an OperationDisplay)
-    var typ = b.custom.alt_fields.get("${def}.${wire}") ?? b.type_of(pf, prop, "${def}${pascal_part(wire)}")
+    // Operation, renamed OperationValue, has an OperationDisplay), and
+    // after the definition that declares it: an allOf parent's inline
+    // property keeps the parent's name (armcontainerinstance's
+    // ContainerGroup.properties is ContainerGroupPropertiesProperties)
+    var typ = b.custom.alt_fields.get("${def}.${wire}") ?? b.type_of(pf, prop, "${owner}${pascal_part(wire)}")
     let go_name = if client != "" { client } else { wire }
     if typ == "Str" {
       // `Model.field` first (one model's), then the field in every model.
@@ -974,15 +987,17 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
 }
 
 /// Every property of a schema, its allOf parents' first, with the file
-/// each is in.
-fn (b: Builder) properties(file: Str, v: json.Value) -> List[(Str, json.Value, Str)] {
-  var out: List[(Str, json.Value, Str)] = []
+/// each is in and the definition that declares it (`owner` for the
+/// schema's own).
+fn (b: Builder) properties(file: Str, v: json.Value, owner: Str) -> List[(Str, json.Value, Str, Str)] {
+  var out: List[(Str, json.Value, Str, Str)] = []
   for parent in list_of(v.get("allOf")) {
-    let (f, _, x) = b.deref(file, parent)
-    out = out + b.properties(f, x)
+    let (f, ptr, x) = b.deref(file, parent)
+    let po = if ptr.starts_with("/definitions/") { ptr["/definitions/".len()..ptr.len()] } else { owner }
+    out = out + b.properties(f, x, po)
   }
   for (k, p) in fields_of(v.get("properties")) {
-    out.push((k, p, file))
+    out.push((k, p, file, owner))
   }
   out
 }
@@ -1103,7 +1118,9 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   // is refreshToken, not acrRefreshToken)
   let client_name = if loc == "formData" { "" } else { str_of(p.get("x-ms-client-name")) }
   let go_name = b.custom.params.get(wire) ?? (if client_name != "" { client_name } else { plain })
-  let client = wire == "subscriptionId" || (b.custom.client_params.contains(wire) && loc == "path") || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
+  // a subscriptionId the spec puts on the method is the method's
+  // (armcustomerlockbox's RequestsClient.Get)
+  let client = (wire == "subscriptionId" && str_of(p.get("x-ms-parameter-location")) != "method") || (b.custom.client_params.contains(wire) && loc == "path") || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
   Param{
     name: param_name(go_name),
     go_name: go_name,
@@ -1173,10 +1190,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             params = params.filter(fn(q: Param) -> Bool { q.wire != p.wire || q.loc != p.loc })
             params.push(p)
           }
-          // TypeSpec's Go emitter takes a PUT's or PATCH's optional body as
-          // a parameter of the method, as a required one (armstorage's
-          // TableClient.Create); an action's stays in the options.
-          if b.custom.tsp && !b.custom.data_plane && (method == "put" || method == "patch") {
+          // TypeSpec's Go emitter, and autorest.go since about December
+          // 2023, take a PUT's or PATCH's optional body as a parameter of
+          // the method, as a required one (armstorage's TableClient.Create,
+          // armconnectedvmware's VirtualNetworksClient.Update); an
+          // action's stays in the options.
+          if (b.custom.tsp || !b.custom.put_body_in_options) && !b.custom.data_plane && (method == "put" || method == "patch") {
             params = params.map(fn(q: Param) -> Param { if q.loc == "body" { q with {required: true} } else { q } })
           }
           // TypeSpec's ArmResourcePatch<R, P>: Go's body is R itself, not

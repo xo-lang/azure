@@ -136,7 +136,7 @@ for d in $changed; do
   "$work/vectors" "$work/$n.go.out" "$resp" "$d" "$d/govectors_test.xo" "$(basename "$d") $mv" "$(awk '/sdk\/azcore / { print $2 }' "$work/$n.prog/go.mod")" > /dev/null
   # the fake the vectors run against is generated too: always the template
   cp codegen/govec/client_test.xo.txt "$d/client_test.xo"
-  "$xo" fmt "$d" > /dev/null
+  "$xo" fmt "$d" > /dev/null || true
   if (cd "$d" && "$xo" test .) > "$work/$n.test" 2>&1; then
     echo "$d Go-verified" >> "$work/result"
   else

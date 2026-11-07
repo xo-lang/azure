@@ -323,6 +323,19 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
         moved["${segs[segs.len() - 2]}.${segs[segs.len() - 1]}".to_lower()] = m[2] ?? ""
       }
     }
+    // a scope of negations only (`"!csharp"`) moves the OpenAPI
+    // operationId too (armdatabox's JobResources.markDevicesShipped is
+    // Jobs_MarkDevicesShipped)
+    for whole in client_loc.find_all(text) {
+      let m = client_loc.captures(whole) ?? continue
+      let segs = (m[1] ?? "").split(".")
+      let negs = (m[4] ?? "").split(",").all(fn(x: Str) -> Bool { x.trim().starts_with("!") })
+      if segs.len() >= 2 && negs {
+        let dest = m[2] ?? ""
+        let group = if dest != "" { dest.trim_suffix("Client") } else { (m[3] ?? "").split(".").last() ?? "" }
+        moved["${segs[segs.len() - 2]}.${segs[segs.len() - 1]}".to_lower()] = group
+      }
+    }
   }
   for text in texts {
     for (id, iface, op, _) in operation_ids(text) {
@@ -628,15 +641,29 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
     for whole in override_re.find_all(text) {
       let m = override_re.captures(whole) ?? continue
-      if !for_go(m[3] ?? "") {
+      // no scope is every emitter's, Go's too (armdatabox)
+      if (m[3] ?? "") != "" && !for_go(m[3] ?? "") {
         continue
       }
       let segs = (m[1] ?? "").split(".")
+      let op = segs.last() ?? ""
+      if op == "" {
+        continue
+      }
+      // a namespace's own operation (armdatabox's `mitigate`) has the
+      // operationId its name gives
       if segs.len() < 2 {
+        let id = "${op[0..1].to_upper()}${op[1..op.len()]}"
+        for t in texts {
+          let order = override_path_order(t, m[2] ?? "")
+          if !order.is_empty() {
+            r.param_order[id.to_lower()] = order
+            break
+          }
+        }
         continue
       }
       let iface = segs[segs.len() - 2]
-      let op = segs[segs.len() - 1]
       // an unscoped `@@clientLocation(Iface.op, Group)` moves it to Group
       // for every emitter, the OpenAPI one's operationId too, and an
       // unscoped `@@clientName(Iface.op, "Name")` renames its part
@@ -708,11 +735,19 @@ fn override_path_order(text: Str, name: Str) -> List[Str] {
   for raw in body.split("\n") {
     let l = raw.trim()
     if l.starts_with("...") {
-      let spread = l.trim_suffix(",")
-      // the subscription is the client's, not the method's
-      if spread.ends_with(".ResourceGroupParameter") {
+      // the spread's own name, its namespace and type arguments dropped
+      // (`...ResourceGroupParameter` in armappservice,
+      // `...Azure.ResourceManager.CommonTypes.ResourceGroupNameParameter`
+      // in armdataboxedge); the subscription is the client's, not the
+      // method's
+      let spread = (l.trim_prefix("...").trim_suffix(",").split("<").get(0) ?? "").split(".").last() ?? ""
+      if spread == "ResourceGroupParameter" || spread == "ResourceGroupNameParameter" {
         out.push("resourceGroupName")
       }
+      path = false
+    } else if l.starts_with("@path ") && l.contains(":") {
+      // `@path name: string,` on one line
+      out.push(l.trim_prefix("@path ").trim()[0..(l.trim_prefix("@path ").trim().find(":") ?? 0)].trim().trim_suffix("?"))
       path = false
     } else if l.starts_with("@path") {
       path = true
