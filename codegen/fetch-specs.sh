@@ -70,11 +70,14 @@ refs_outside() {
     [ -e "$dst/$d" ] || continue
     grep -rEo --include='*.json' '"\$ref": *"[^"#]+' "$dst/$d" || true
     grep -rEo --include='readme.md' '^ *- *\.\./[^ ]+\.json' "$dst/$d" || true
+    # a TypeSpec project's imports of sibling folders (armdiscovery's
+    # ../Discovery.Bookshelf.Management/all.tsp): the folder
+    grep -rEo --include='*.tsp' '^import "\.\./[^"]+' "$dst/$d" || true
   done 2>/dev/null | DIRS="$dirs" awk -v root="$dst/" '
     BEGIN { n = split(ENVIRON["DIRS"], D, "\n") }
     {
       i = index($0, ":"); f = substr($0, 1, i - 1); r = substr($0, i + 1)
-      sub(/^"\$ref": *"/, "", r); sub(/^ *- */, "", r)
+      sub(/^"\$ref": *"/, "", r); sub(/^ *- */, "", r); sub(/^import "/, "", r)
       if (r ~ /^[a-z]+:/) next
       rel = substr(f, length(root) + 1); sub(/\/[^\/]*$/, "", rel)
       m = split(rel "/" r, s, "/"); k = 0
@@ -84,6 +87,7 @@ refs_outside() {
         o[++k] = s[j]
       }
       out = o[1]; for (j = 2; j <= k; j++) out = out "/" o[j]
+      if (out ~ /\.tsp$/) sub(/\/[^\/]*$/, "", out)
       for (j = 1; j <= n; j++) if (D[j] != "" && (out == D[j] || index(out, D[j] "/") == 1)) next
       print out
     }' | sort -u

@@ -180,19 +180,43 @@ fn main(os: Os) -> () ! Error {
     // each namespace's emitted file: a folder's main.tsp declares it,
     // and the folder's tspconfig.yaml names the file (output-file)
     var ns_file: Map[Str, Str] = {}
-    for f in os.fs.walk("${base}/${svc.spec}")? {
-      if !f.is_dir && f.name.ends_with(".tsp") && !f.path.contains("/examples/") {
-        let text = os.fs.read_text(f.path)?
-        texts.push(text)
-        if f.name == "main.tsp" {
-          let dir = f.path[0..f.path.len() - f.name.len() - 1]
-          let cfg = "${dir}/tspconfig.yaml"
-          if os.fs.exists(cfg)? {
-            if let Some(out) = output_file(os.fs.read_text(cfg)?) {
-              for line in text.split("\n") {
-                let l = line.trim()
-                if l.starts_with("namespace ") && l.ends_with(";") {
-                  ns_file[l[10..l.len() - 1].trim()] = out
+    // and the sibling folders the project imports (armdiscovery's
+    // ../Discovery.Bookshelf.Management/all.tsp), until none is new
+    var walk_dirs = ["${base}/${svc.spec}"]
+    var walked: List[Str] = []
+    var files_seen: List[Str] = []
+    while let Some(wd) = walk_dirs.pop() {
+      if walked.contains(wd) || !os.fs.exists(wd)? {
+        continue
+      }
+      walked.push(wd)
+      for f in os.fs.walk(wd)? {
+        if !f.is_dir && f.name.ends_with(".tsp") && !f.path.contains("/examples/") && !files_seen.contains(f.path) {
+          files_seen.push(f.path)
+          let text = os.fs.read_text(f.path)?
+          texts.push(text)
+          let fdir = f.path[0..f.path.len() - f.name.len() - 1]
+          for line in text.split("\n") {
+            let l = line.trim()
+            if l.starts_with("import \"../") {
+              let rel = l.trim_prefix("import \"").split("\"").get(0) ?? ""
+              let target = clean_path("${fdir}/${rel}")
+              let tdir = target[0..(target.rfind("/") ?? target.len())]
+              if !tdir.starts_with("${base}/${svc.spec}") && !tdir.contains("/common-types") && !walked.contains(tdir) {
+                walk_dirs.push(tdir)
+              }
+            }
+          }
+          if f.name == "main.tsp" {
+            let dir = f.path[0..f.path.len() - f.name.len() - 1]
+            let cfg = "${dir}/tspconfig.yaml"
+            if os.fs.exists(cfg)? {
+              if let Some(out) = output_file(os.fs.read_text(cfg)?) {
+                for line in text.split("\n") {
+                  let l = line.trim()
+                  if l.starts_with("namespace ") && l.ends_with(";") {
+                    ns_file[l[10..l.len() - 1].trim()] = out
+                  }
                 }
               }
             }
@@ -211,7 +235,7 @@ fn main(os: Os) -> () ! Error {
         _ => models[m] = v
       }
     }
-    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, client_params: r.client_params, action_routes: r.action_routes, patch_bodies: r.patch_bodies, param_order: merged_orders(r.param_order, custom.param_order)}
+    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, client_params: r.client_params, action_routes: r.action_routes, patch_bodies: r.patch_bodies, tsp_declared: r.declared, param_order: merged_orders(r.param_order, custom.param_order)}
     source = "${svc.openapi} (from ${svc.spec})"
   } else if svc.swagger != "" {
     inputs = ["${base}/${svc.swagger}"]
@@ -220,6 +244,7 @@ fn main(os: Os) -> () ! Error {
     let root = "${base}/${svc.spec}"
     let readme = os.fs.read_text("${root}/readme.md")?
     inputs = spec.input_files(readme, svc.readme_tag)?.map(fn(f: Str) -> Str { "${root}/${f}" })
+    custom = custom with {title: spec.readme_title(readme)}
     source = "${svc.spec}, tag ${svc.readme_tag}"
   }
   var files: Map[Str, json.Value] = {}
@@ -383,4 +408,20 @@ fn merged_orders(from_tsp: Map[Str, List[Str]], custom: Map[Str, List[Str]]) -> 
     out[k] = v
   }
   out
+}
+
+/// `p` with its `.` and `..` segments resolved.
+fn clean_path(p: Str) -> Str {
+  var out: List[Str] = []
+  for seg in p.split("/") {
+    if seg == "." {
+      continue
+    }
+    if seg == ".." && !out.is_empty() && out.last() != Some("..") && out.last() != Some("") {
+      out.pop()
+      continue
+    }
+    out.push(seg)
+  }
+  out.join("/")
 }
