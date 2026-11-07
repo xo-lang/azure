@@ -4,16 +4,21 @@
 // App Service (IDENTITY_ENDPOINT and IDENTITY_HEADER), Azure ML
 // (MSI_ENDPOINT and MSI_SECRET), Cloud Shell (MSI_ENDPOINT), Azure Arc
 // (IDENTITY_ENDPOINT and IMDS_ENDPOINT, or the agent's himds file), else
-// IMDS. Service Fabric (it pins the server's certificate) comes later.
+// IMDS. Service Fabric (IDENTITY_ENDPOINT, IDENTITY_HEADER and
+// IDENTITY_SERVER_THUMBPRINT) pins its endpoint's self signed
+// certificate to the thumbprint and refuses redirects.
 // Azure Arc reads the key file its agent names, so the credential is a
 // TokenCredential[fs.read] (decision 0009).
 
+use std/crypto
 use std/http
 use std/json
 use std/path as gopath
 use std/time
 use std/timego
+use std/tls
 use std/url
+use std/x509
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
@@ -32,6 +37,8 @@ pub enum Source {
   AzureMl(endpoint: Str, secret: Secret[Str])
   CloudShell(endpoint: Str)
   AzureArc(endpoint: Str)
+  /// The thumbprint as given (IDENTITY_SERVER_THUMBPRINT).
+  ServiceFabric(endpoint: Str, header: Secret[Str], thumbprint: Str)
 }
 
 /// A user-assigned identity, or None for the system-assigned one.
@@ -99,6 +106,9 @@ pub struct ManagedIdentityCredential {
 pub fn source_of(env: Env, himds: Bool = false) -> Source uses env {
   let get = fn(k: Str) -> Str { env.get(k) ?? "" }
   if get("IDENTITY_ENDPOINT") != "" && get("IDENTITY_HEADER") != "" {
+    if get("IDENTITY_SERVER_THUMBPRINT") != "" {
+      return Source.ServiceFabric(endpoint: get("IDENTITY_ENDPOINT"), header: Secret.new(get("IDENTITY_HEADER")), thumbprint: get("IDENTITY_SERVER_THUMBPRINT"))
+    }
     return Source.AppService(endpoint: get("IDENTITY_ENDPOINT"), header: Secret.new(get("IDENTITY_HEADER")))
   }
   if get("MSI_ENDPOINT") != "" {
@@ -115,7 +125,20 @@ pub fn source_of(env: Env, himds: Bool = false) -> Source uses env {
 }
 
 pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential ! azcore.AuthErr uses (env, fs.read) {
-  // MSAL Go's managedidentity.New refuses an empty ID
+  let (dir, himds) = arc_paths(target.os, env.get("ProgramData") ?? "")
+  let arc_himds = opts.arc_himds ?? himds
+  // Go's os.Stat: any file or directory there, followed through links
+  let found = match fs.stat(arc_himds) {
+    Ok(Some(_)) => true
+    _ => false
+  }
+  let src = source_of(env, himds: arc_himds != "" && found)
+  // MSAL Go's managedidentity.New: the source's own refusal, then an
+  // empty ID
+  if src is Source.ServiceFabric(..) && opts.id.is_some() {
+    let msg = "Service Fabric API doesn't support specifying a user-assigned identity. The identity is determined by cluster resource configuration. See https://aka.ms/servicefabricmi"
+    return Err(azcore.AuthErr{credential: MI_NAME, msg: msg, text: msg})
+  }
   let empty = match opts.id {
     Some(UserAssigned.ClientId(v)) => if v == "" { "UserAssignedClientID" } else { "" }
     Some(UserAssigned.ObjectId(v)) => if v == "" { "UserAssignedObjectID" } else { "" }
@@ -125,23 +148,78 @@ pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock,
   if empty != "" {
     return Err(azcore.AuthErr{credential: MI_NAME, msg: "empty managedidentity.${empty}"})
   }
-  let (dir, himds) = arc_paths(target.os, env.get("ProgramData") ?? "")
-  let arc_himds = opts.arc_himds ?? himds
-  // Go's os.Stat: any file or directory there, followed through links
-  let found = match fs.stat(arc_himds) {
-    Ok(Some(_)) => true
-    _ => false
-  }
-  let src = source_of(env, himds: arc_himds != "" && found)
   // IMDS answers 404 and 410 while it starts (MSAL retries them)
   let client = opts.client with {retry: opts.client.retry with {status_codes: opts.client.retry.status_codes + [404, 410]}}
   let probe_client = opts.client with {timeout: 1s, retry: opts.client.retry with {max_retries: -1}}
+  var pipeline = runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client)
+  if let Source.ServiceFabric(endpoint, _, thumbprint) = src {
+    // MSAL's errors, as Go's NewManagedIdentityCredential returns them
+    sf_endpoint(endpoint) ?? msg => return Err(azcore.AuthErr{credential: MI_NAME, msg: msg, text: msg})
+    let pin = sf_thumbprint(thumbprint) ?? msg => return Err(azcore.AuthErr{credential: MI_NAME, msg: msg, text: msg})
+    pipeline = pipeline with {transport: sf_client(pipeline.transport, pin)}
+  }
   Ok(ManagedIdentityCredential{
     source: src, id: opts.id, fs: fs, arc_dir: opts.arc_token_dir ?? dir, arc_os: target.os,
-    pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client),
+    pipeline: pipeline,
     probe_pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, probe_client),
     probing: Mutex.new(opts.probe && src is Source.Imds), chained: opts.chained, clock: clock, cache: Mutex.new([]),
   })
+}
+
+/// MSAL Go's serviceFabricEndpoint: a URL that parses, https, with a
+/// host.
+fn sf_endpoint(endpoint: Str) -> () ! Str {
+  // http.parse_url refuses an empty host, which Go's url.Parse takes
+  // (and then fails the https and host check)
+  let u = http.parse_url(endpoint) ?? e => return Err(if e.msg.starts_with("missing host") { "managed identity endpoint for Service Fabric must use HTTPS" } else { e.msg })
+  if u.scheme != "https" || u.host == "" {
+    return Err("managed identity endpoint for Service Fabric must use HTTPS")
+  }
+  Ok(())
+}
+
+/// MSAL Go's serviceFabricThumbprint: the SHA-1 thumbprint without its
+/// colons and white space, 40 hex digits.
+pub fn sf_thumbprint(value: Str) -> Bytes ! Str {
+  var hex = ""
+  for r in value.runes() {
+    if r != ':' && !r.is_space() {
+      hex = "${hex}${r}"
+    }
+  }
+  let bad = "IDENTITY_SERVER_THUMBPRINT must be a SHA-1 certificate thumbprint"
+  if hex.len() != 40 {
+    return Err(bad)
+  }
+  let b = Bytes.from_hex(hex) ?? return Err(bad)
+  if b.len() != 20 {
+    return Err(bad)
+  }
+  Ok(b)
+}
+
+/// MSAL Go's VerifyConnection for Service Fabric: the server's leaf
+/// certificate's SHA-1 must be the pin, compared in constant time.
+pub fn sf_verify(pin: Bytes) -> fn(List[x509.Certificate]) -> () ! Str {
+  fn(certs: List[x509.Certificate]) -> () ! Str {
+    if certs.is_empty() {
+      return Err("TLS connection to Service Fabric did not provide a certificate")
+    }
+    if !crypto.equal(crypto.digest(crypto.Hash.Sha1, certs[0].raw), pin) {
+      return Err("TLS certificate thumbprint from Service Fabric did not match IDENTITY_SERVER_THUMBPRINT")
+    }
+    Ok(())
+  }
+}
+
+/// MSAL Go's serviceFabricCertificateVerifiedHTTPClient: the chain and
+/// name checks off (Go's InsecureSkipVerify, the endpoint's certificate
+/// being self signed), the pin checked on every new connection in their
+/// place, and no redirects followed (get_token refuses a 3xx). The two
+/// are set together here and nowhere else: std/http refuses a
+/// Verify.None client without a verify_conn before any byte is sent.
+fn sf_client(c: http.Client, pin: Bytes) -> http.Client {
+  c.with_verify(tls.Verify.None).with_verify_conn(sf_verify(pin)).with_redirects(0)
 }
 
 /// The resource of a scope (`https://vault.azure.net/.default` is
@@ -181,31 +259,35 @@ pub fn token_request(src: Source, id: UserAssigned?, resource: Str) -> policy.Re
     CloudShell(endpoint) => policy.Request{method: "POST", url: endpoint, headers: [("Metadata", "true"), ("Content-Type", "application/x-www-form-urlencoded")], body: "resource=${url.query_escape(resource)}".bytes()}
     // the endpoint's own query is kept, with api-version, resource and
     // the identity set over it (MSAL Go's createAzureArcAuthRequest)
-    AzureArc(endpoint) => {
-      let (no_frag, frag) = match endpoint.cut("#") {
-        Some((a, f)) => (a, "#${f}")
-        None => (endpoint, "")
-      }
-      let (base, raw) = no_frag.cut("?") ?? (no_frag, "")
-      // Go's URL.Query keeps the pairs that parse
-      var v = url.values()
-      for pair in raw.split("&") {
-        if let Ok(q) = url.parse_query(pair) {
-          for k in q.keys() {
-            for x in q.all(k) {
-              v.add(k, x)
-            }
-          }
+    AzureArc(endpoint) => policy.Request{method: "GET", url: with_query(endpoint, [("api-version", "2020-06-01"), ("resource", resource)] + ua(("client_id", "object_id", "msi_res_id"))), headers: [("Metadata", "true")]}
+    // MSAL Go's createServiceFabricAuthRequest: likewise, no identity
+    ServiceFabric(endpoint, header, _) => policy.Request{method: "GET", url: with_query(endpoint, [("api-version", "2019-07-01-preview"), ("resource", resource)]), headers: [("Accept", "application/json"), ("Secret", header.reveal())]}
+  }
+}
+
+/// `endpoint` with each of `sets` set over its own query (Go's
+/// URL.Query, Values.Set, then Encode: sorted by key).
+fn with_query(endpoint: Str, sets: List[(Str, Str)]) -> Str {
+  let (no_frag, frag) = match endpoint.cut("#") {
+    Some((a, f)) => (a, "#${f}")
+    None => (endpoint, "")
+  }
+  let (base, raw) = no_frag.cut("?") ?? (no_frag, "")
+  // Go's URL.Query keeps the pairs that parse
+  var v = url.values()
+  for pair in raw.split("&") {
+    if let Ok(q) = url.parse_query(pair) {
+      for k in q.keys() {
+        for x in q.all(k) {
+          v.add(k, x)
         }
       }
-      v.set("api-version", "2020-06-01")
-      v.set("resource", resource)
-      for (k, x) in ua(("client_id", "object_id", "msi_res_id")) {
-        v.set(k, x)
-      }
-      policy.Request{method: "GET", url: "${base}?${v.encode()}${frag}", headers: [("Metadata", "true")]}
     }
   }
+  for (k, x) in sets {
+    v.set(k, x)
+  }
+  "${base}?${v.encode()}${frag}"
 }
 
 const MI_NAME: Str = "ManagedIdentityCredential"
@@ -218,6 +300,12 @@ fn mi_unavailable(msg: Str) -> azcore.AuthErr {
 
 /// The probe of a credential inside DefaultAzureCredential: Ok once
 /// something answers at IMDS (any status), and every call after that.
+/// The TLS settings of the credential's transport (tests: Service
+/// Fabric's pin).
+fn (m: ManagedIdentityCredential) transport_tls() -> http.TlsOptions {
+  m.pipeline.transport.tls_options()
+}
+
 fn (m: ManagedIdentityCredential) probe() -> () ! azcore.AuthErr uses (net.dial, clock, rand) {
   if !m.probing.with_read(fn(p: Bool) -> Bool { p }) {
     return Ok(())
@@ -467,6 +555,10 @@ pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions
     let first = token_request(m.source, m.id, resource)
     let req = if m.source is Source.AzureArc(..) { m.arc_challenge(first)? } else { first }
     let resp = m.pipeline.send(req) ?? e => return Err(failed_text(name, e.display()))
+    if m.source is Source.ServiceFabric(..) && resp.status >= 300 && resp.status <= 399 && resp.header("Location").is_some() {
+      // Go's CheckRedirect error, on the URL the server named
+      return Err(failed_text(name, "Get ${json_quote(resp.header("Location") ?? "")}: redirects are not permitted for managed identity on Service Fabric"))
+    }
     if resp.status < 200 || resp.status > 299 {
       return Err(m.token_err(req, resp))
     }

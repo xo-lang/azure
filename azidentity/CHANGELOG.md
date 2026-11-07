@@ -7,6 +7,26 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- Service Fabric managed identity (gap item 5), as MSAL Go v1.10.1's:
+  chosen when IDENTITY_ENDPOINT, IDENTITY_HEADER and
+  IDENTITY_SERVER_THUMBPRINT are set. The thumbprint (colons and white
+  space ignored, 40 hex digits) pins the endpoint's certificate: the
+  SHA-1 of the server's leaf is compared in constant time on every new
+  connection (`sf_verify`, std/http's `with_verify_conn`), and a
+  redirect is refused. The endpoint must be https with a host; a
+  user-assigned identity is refused. The request is a GET with
+  `api-version=2019-07-01-preview` and `resource` set over the
+  endpoint's own query, `Accept: application/json` and `Secret`. Go's
+  errors and order. Checked against a Go program's requests to a local
+  TLS endpoint (`sfvectors_test.xo`). As Go's, the chain and name
+  checks are off for the self signed certificate (`tls.Verify.None`,
+  Go's InsecureSkipVerify), set only together with the pin; std/http
+  refuses a Verify.None client without one. A loopback TLS test
+  (`sf_tls_test.xo`, `xo test --real --run=loopback`,
+  `scripts/integration-loopback.sh`) shows the right pin accepted, a
+  wrong one failing before any request byte, and Verify.None without
+  the pin refused. Needs xo d6f52c2d9 or later (`Client.with_verify`,
+  `TlsOptions.verify`).
 - Workload identity's Azure Kubernetes token proxy (gap item 10), as
   azidentity's internal/customtokenproxy: with
   `WorkloadIdentityOptions.enable_azure_proxy`, every request goes to

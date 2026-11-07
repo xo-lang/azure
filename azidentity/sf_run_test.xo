@@ -1,0 +1,158 @@
+// Replays the Go program's Service Fabric cases (sfvectors_test.xo): the
+// endpoint is a FakeNet handler at https://127.0.0.1:8445. FakeNet does
+// no TLS, so the pin is not checked on these requests (the "wrong pin"
+// case is KNOWN until FakeNet's handle_tls); sf_verify, the check the
+// client runs on each new connection, is tested directly below.
+use std/crypto
+use std/http
+use std/tls
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const SF_PORT: Str = "8445"
+
+/// A thumbprint that is well formed; FakeNet never checks it.
+const SF_PIN: Str = "00112233445566778899aabbccddeeff00112233"
+
+/// Cases whose output differs from Go's here, with the reason and this
+/// port's lines for them (which must not be Go's).
+const SF_KNOWN: Map[Str, Str] = {
+  "wrong pin": "FakeNet does no TLS, so the pin is never compared (sf_verify is tested below)",
+}
+
+fn sf_case(os: testing.TestOs, f: GvFake, name: Str) {
+  let s = "sf5"
+  let base = "https://127.0.0.1:${SF_PORT}"
+  var endpoint = "${base}/msi/token"
+  var pin = SF_PIN
+  var id: UserAssigned? = None
+  match name {
+    "pin colons" => pin = "00: 11: 22: 33: 44: 55: 66: 77: 88: 99: AA: BB: CC: DD: EE: FF: 00: 11: 22: 33"
+    "wrong pin" => pin = "ffffffffffffffffffffffffffffffffffffffff"
+    "pin not hex" => pin = "zz".repeat(20)
+    "pin short" => pin = SF_PIN[0..38]
+    "pin sha256" => pin = SF_PIN + SF_PIN[0..24]
+    "http endpoint" => endpoint = "http://127.0.0.1:${SF_PORT}/msi/token"
+    "no host" => endpoint = "https:///msi/token"
+    "bad url" => endpoint = "https://[::1/msi/token"
+    "user assigned" => id = Some(UserAssigned.ClientId("client-1"))
+    "redirect" => endpoint = "${base}/redirect"
+    "500" => endpoint = "${base}/fail"
+    "400" => endpoint = "${base}/badreq"
+    "query endpoint" => endpoint = "${base}/msi/token?a=b&api-version=x"
+    _ => {}
+  }
+  let env = os.env
+  env.set("IDENTITY_ENDPOINT", endpoint)
+  env.set("IDENTITY_HEADER", "sf-secret")
+  env.set("IDENTITY_SERVER_THUMBPRINT", pin)
+  let o = ManagedIdentityOptions{id: id, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, arc_himds: ""}
+  let r = new_managed_identity_credential(env.only(["IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT"]), os.fs, os.net, os.clock, os.rand, o)
+  gv_new(f, s, "sf ${name}", r)
+  if let Ok(c) = r {
+    gv_get(f, s, "sf ${name}", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  }
+}
+
+/// Go's Request.Host: FakeNet's host() is "" unless the client set one,
+/// so the URL's host and port stand in.
+fn sf_host(req: http.Request) -> Str {
+  if req.host() != "" {
+    return req.host()
+  }
+  "${req.url.host}${req.url.port.map(fn(n: Int) -> Str { ":${n}" }) ?? ""}"
+}
+
+test "Service Fabric managed identity is Go's" {
+  let s = "sf5"
+  let f = gv_serve(os.net, s)
+  let h = fn(req: http.Request) -> http.Response {
+    var hs: List[Str] = []
+    for (k, v) in req.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" && lk != "host" && !lk.starts_with("x-client-") && lk != "traceparent" {
+        hs.push("${lk}=${v}")
+      }
+    }
+    gv_note(f, "${s}: SF ${req.method} ${req.escaped_path()}?${req.raw_query()} host=${sf_host(req)}\n  H ${hs.sort().join(" | ")}")
+    let p = req.escaped_path()
+    if p.starts_with("/redirect") {
+      return http.text(302, "").with_header("Location", "/msi/token")
+    }
+    if p.starts_with("/fail") {
+      return http.text(500, "{\"error\":{\"code\":\"SecretHeaderNotFound\",\"message\":\"Secret is not found in the request headers.\"}}").with_header("Content-Type", "application/json")
+    }
+    if p.starts_with("/badreq") {
+      return http.text(400, "{\"error\":\"invalid_resource\",\"error_description\":\"bad resource\"}").with_header("Content-Type", "application/json")
+    }
+    http.text(200, "{\"access_token\":\"at-sf\",\"expires_on\":\"4102444800\",\"resource\":\"https://vault.example.test\",\"token_type\":\"Bearer\"}").with_header("Content-Type", "application/json")
+  }
+  os.net.handle("GET https://127.0.0.1:${SF_PORT}/{rest...}", h)
+  let names = ["ok", "pin colons", "wrong pin", "pin not hex", "pin short", "pin sha256", "http endpoint", "no host", "bad url", "user assigned", "redirect", "500", "400", "query endpoint"]
+  for n in names {
+    sf_case(os, f, n)
+  }
+  let want_all = GO_SF_LINES.map(fn(l: Str) -> Str { l.replace("<port>", SF_PORT) })
+  let (got, want) = gv_lines(f, s, want_all)
+  // a KNOWN case's lines (its NEW line through the next case's) are
+  // set apart on both sides, and must differ
+  let strip = fn(ls: List[Str]) -> (List[Str], List[Str]) {
+    var keep: List[Str] = []
+    var known: List[Str] = []
+    var in_known = false
+    for l in ls {
+      if l.starts_with("${s}: NEW sf ") || l.starts_with("${s}: OUT sf ") {
+        let rest = l.trim_prefix("${s}: NEW sf ").trim_prefix("${s}: OUT sf ")
+        in_known = SF_KNOWN.keys().any(fn(k: Str) -> Bool { rest.starts_with("${k}:") })
+      }
+      if in_known { known.push(l) } else { keep.push(l) }
+    }
+    (keep, known)
+  }
+  let (g, gk) = strip(got)
+  let (w, wk) = strip(want)
+  for i in 0..g.len().min(w.len()) {
+    expect((i, g[i])) == (i, w[i])
+  }
+  expect(g.len()) == w.len()
+  expect(gk != wk) == true
+}
+
+test "Service Fabric's pin accepts only the leaf whose SHA-1 is the thumbprint" {
+  let (certs, _) = parse_certificates(TEST_PEM.bytes())?
+  let leaf = certs[0]
+  let thumb = crypto.digest(crypto.Hash.Sha1, leaf.raw).to_hex()
+  let ok = sf_verify(sf_thumbprint(thumb)?)
+  expect(ok([leaf])) == Ok(())
+  // spaced, colon separated, upper case: Go's normalization
+  var spaced: List[Str] = []
+  for i in 0..20 {
+    spaced.push(thumb[2 * i..2 * i + 2].to_upper())
+  }
+  expect(sf_verify(sf_thumbprint(spaced.join(": "))?)([leaf])) == Ok(())
+  // a mismatched pin fails, and so does a server with no certificate
+  let wrong = sf_verify(sf_thumbprint("ff".repeat(20))?)
+  expect(wrong([leaf])) == Err("TLS certificate thumbprint from Service Fabric did not match IDENTITY_SERVER_THUMBPRINT")
+  expect(ok([])) == Err("TLS connection to Service Fabric did not provide a certificate")
+  expect(sf_thumbprint(thumb + "00")) == Err("IDENTITY_SERVER_THUMBPRINT must be a SHA-1 certificate thumbprint")
+}
+
+test "Service Fabric's client pins every connection and follows no redirect" {
+  let env = os.env
+  env.set("IDENTITY_ENDPOINT", "https://127.0.0.1:${SF_PORT}/msi/token")
+  env.set("IDENTITY_HEADER", "sf-secret")
+  env.set("IDENTITY_SERVER_THUMBPRINT", SF_PIN)
+  let c = new_managed_identity_credential(env.only(["IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT"]), os.fs, os.net, os.clock, os.rand, ManagedIdentityOptions{arc_himds: ""})?
+  expect(c.source is Source.ServiceFabric(..)) == true
+  // the chain and name checks are off only with the pin hook set
+  expect(c.transport_tls().verify) == tls.Verify.None
+  expect(c.transport_tls().verify_conn) == true
+  // the other sources keep the full check and no hook
+  env.set("IDENTITY_SERVER_THUMBPRINT", "")
+  env.set("IDENTITY_ENDPOINT", "")
+  env.set("MSI_ENDPOINT", "https://127.0.0.1:${SF_PORT}/msi/token")
+  let other = new_managed_identity_credential(env.only(["MSI_ENDPOINT"]), os.fs, os.net, os.clock, os.rand, ManagedIdentityOptions{arc_himds: ""})?
+  expect(other.source is Source.ServiceFabric(..)) == false
+  expect(other.transport_tls().verify) == tls.Verify.Full
+  expect(other.transport_tls().verify_conn) == false
+}

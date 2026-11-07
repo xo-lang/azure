@@ -1,0 +1,93 @@
+// Service Fabric's client against a self signed TLS endpoint on the
+// loopback host (a listener this test opens): the pin replaces the chain
+// check, a wrong pin fails before any request byte, and Verify.None
+// without the pin hook is refused. FakeNet does no TLS, so this needs
+// real sockets: without `xo test --real` it is skipped. Run it with
+// `xo test --real --run=loopback ./azidentity` (from azidentity's
+// module); the client's Net reaches only 127.0.0.1.
+
+use std/base64
+use std/crypto
+use std/http
+use std/netip
+use std/tls
+use std/x509
+use github.com/xo-lang/azure/azcore
+
+fn sf_pem_block(kind: Str, der: Bytes) -> Bytes {
+  "-----BEGIN ${kind}-----\n${base64.encode(der)}\n-----END ${kind}-----\n".bytes()
+}
+
+/// The variables of a --real test that must not read or change the
+/// process's own environment.
+struct MapEnv {
+  m: Map[Str, Str]
+}
+
+fn (e: MapEnv) get(name: Str) -> Str? uses env { e.m.get(name) }
+fn (e: MapEnv) vars() -> Map[Str, Str] uses env { e.m }
+fn (e: MapEnv) args() -> List[Str] uses env { [] }
+fn (e: MapEnv) program() -> Str uses env { "sf_tls_test" }
+fn (e: MapEnv) home() -> Str ! EnvErr uses env { Err(EnvErr.Missing("HOME")) }
+fn (e: MapEnv) only(names: List[Str]) -> Env {
+  var m: Map[Str, Str] = {}
+  for n in names {
+    if let Some(v) = e.m.get(n) { m[n] = v }
+  }
+  MapEnv{m: m}
+}
+fn (e: MapEnv) config_dir() -> Str ! EnvErr uses env { Err(EnvErr.Missing("XDG_CONFIG_HOME")) }
+fn (e: MapEnv) cache_dir() -> Str ! EnvErr uses env { Err(EnvErr.Missing("XDG_CACHE_HOME")) }
+fn (e: MapEnv) hostname() -> Str uses env { "" }
+
+test "loopback: Service Fabric pins a self signed endpoint and Verify.None needs the pin" uses net, env, fs, clock, rand {
+  let now = os.clock.now()
+  let key = crypto.generate_key(os.rand, crypto.KeyAlg.EcdsaP256).or_fault("key")
+  let t = x509.Template{subject: x509.Name{common_name: "sf"}, not_before: now - 1h, not_after: now + 24h, ip_addresses: [netip.parse_addr("127.0.0.1").or_fault("ip")], key_usage: [x509.KeyUsage.DigitalSignature], ext_key_usage: [x509.ExtKeyUsage.ServerAuth]}
+  let cert = x509.create_certificate(os.rand, t, key.public_key(), None, key).or_fault("cert")
+  let pair = tls.cert(cert.pem(), sf_pem_block("PRIVATE KEY", crypto.marshal_private_key(key))).or_fault("pair")
+  let hits = Atomic[Int].new(0)
+  var r = http.router()
+  r.handle("GET /msi/token", fn(req: http.Request) -> http.Response {
+    let _n = hits.add(1)
+    http.text(200, "{\"access_token\":\"at-sf\",\"expires_on\":\"4102444800\",\"resource\":\"https://vault.example.test\",\"token_type\":\"Bearer\"}").with_header("Content-Type", "application/json")
+  })
+  let net = os.net.only(["127.0.0.1"])
+  let l = net.listen("127.0.0.1:0").or_fault("listen")
+  let endpoint = "https://${l.addr()}/msi/token"
+  let srv = http.server(l, r).with_tls([pair])
+  let thumb = crypto.digest(crypto.Hash.Sha1, cert.raw).to_hex()
+  let cred = fn(pin: Str) -> ManagedIdentityCredential {
+    let env = MapEnv{m: {"IDENTITY_ENDPOINT": endpoint, "IDENTITY_HEADER": "sf-secret", "IDENTITY_SERVER_THUMBPRINT": pin}}
+    new_managed_identity_credential(env, os.fs, net, os.clock, os.rand, ManagedIdentityOptions{arc_himds: ""}) ?? e => fault("${e}")
+  }
+  let opts = azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]}
+  scope s {
+    s.spawn_background(fn() {
+      let _ok = srv.serve().ignore_err("the server stops with the scope")
+    })
+    // the right pin: the self signed certificate is accepted
+    let tok = cred(thumb).get_token(opts) ?? e => fault("right pin: ${e}")
+    expect(tok.token.reveal()) == "at-sf"
+    expect(hits.get()) == 1
+    // a mismatched pin fails before the request is sent
+    match cred("ff".repeat(20)).get_token(opts) {
+      Ok(_) => fault("a wrong pin got a token")
+      Err(e) => expect("${e}".contains("did not match IDENTITY_SERVER_THUMBPRINT")) == true
+    }
+    expect(hits.get()) == 1
+    // Verify.None without the pin hook is refused before any byte
+    let bare = http.client(net, timeout: 5s).with_verify(tls.Verify.None)
+    match bare.get(endpoint) {
+      Ok(_) => fault("Verify.None without a pin was sent")
+      Err(e) => expect("${e}".contains("Verify.None needs a verify_conn")) == true
+    }
+    expect(hits.get()) == 1
+    // the full check refuses the self signed certificate
+    match http.client(net, timeout: 5s).get(endpoint) {
+      Ok(_) => fault("a self signed certificate passed the full check")
+      Err(_) => {}
+    }
+    expect(hits.get()) == 1
+  }
+}

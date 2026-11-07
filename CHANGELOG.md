@@ -8,6 +8,12 @@ version has been tagged since.
 
 ## Unreleased
 
+azidentity: Service Fabric managed identity (gap item 5): its self
+signed endpoint accepted by the IDENTITY_SERVER_THUMBPRINT pin alone
+(`tls.Verify.None`, set only with the pin hook), with a loopback TLS
+test (`scripts/integration-loopback.sh`). Needs xo d6f52c2d9 or later
+(`http.Client.with_verify`, `TlsOptions.verify`).
+
 batch/azbatch v0.1.0, Go's azbatch v0.1.0. The generator (`codegen`),
 for it: a TypeSpec data plane module's `@client` block without a
 language scope and its members' inline `@clientName` for Go;

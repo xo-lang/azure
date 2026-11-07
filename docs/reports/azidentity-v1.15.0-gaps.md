@@ -1,7 +1,7 @@
 # azidentity: the port against Go v1.15.0
 
 Status (2026-11-07): (1), (2), (3), (4), (6), (7), (8), (9), (10), (11), (12), (13) and (14) are ported (azidentity/CHANGELOG.md).
-Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) is unblocked: std/tls and std/http have `verify_conn`, `with_server_name` and `Request.with_host` (decision 0541). Go's azidentity
+Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) is ported, its self signed certificate accepted by the pin alone (std/http's `Client.with_verify`, Verify.None only with the pin). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
 credentials grant by hand, no MSAL).
@@ -59,12 +59,10 @@ Ranked by how many callers meet the gap first.
 5. **Service Fabric.** `IDENTITY_ENDPOINT`, `IDENTITY_HEADER` and
    `IDENTITY_SERVER_THUMBPRINT`: v1.15.0 pins the endpoint's certificate
    to that thumbprint and refuses redirects. Decision 0003 lists Service
-   Fabric, but the port has no source for it. **Blocked on std**: std/tls
-   and std/http give a client no way to see or check the server's
-   certificate beyond `Verify` and `Roots`. That needs an upstream draft,
-   for example a client option that pins a SHA-1 or SHA-256 thumbprint,
-   or the peer certificates on a response, as Go's
-   `VerifyPeerCertificate`.
+   Fabric. **Done**: the pin runs on every new connection
+   (`Client.with_verify_conn`, decision 0541), and the chain and name
+   checks are off for the self signed certificate (`Client.with_verify(
+   tls.Verify.None)`, only together with the pin).
 6. **Certificates from PKCS #12.** Decision 0003 says PKCS #12 waits on
    std. std now has `x509.parse_pkcs12` (Go's pkcs12.Decode with chains),
    so `parse_certificates` can read a `.pfx` with a password
@@ -160,5 +158,5 @@ so every name gets a vector.
 
 (1) and (3) first, since every confidential credential shows them. Then
 (12), (6), (4), (7) to (9), (13), (14) and (10). (2) and (11) wait for
-the lead's and owner's calls. (5) waits on the std draft. Each item
+the lead's and owner's calls. (5) is done. Each item
 gets its vectors from the Go program above, extended per item.
