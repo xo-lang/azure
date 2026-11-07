@@ -1,0 +1,94 @@
+// azcore v1.24.0's resource IDs replayed against the lines of a Go
+// program (resourceid_vectors_test.xo): the same inputs give the same
+// lines.
+
+use std/json
+
+fn q(s: Str) -> Str {
+  json.encode_str(s)
+}
+
+fn go_lines(prefix: Str) -> List[Str] {
+  RESOURCE_ID_GO.filter(fn(l: Str) -> Bool { l.starts_with(prefix) })
+}
+
+fn chain_of(id: ResourceID) -> Str {
+  var parts: List[Str] = []
+  var c: ResourceID? = Some(id)
+  while let Some(x) = c {
+    parts.push("${x.resource_type.display()}=${q(x.name)}")
+    c = x.parent
+  }
+  parts.join(" < ")
+}
+
+test "parse_resource_id is Go's ParseResourceID" {
+  let got = RESOURCE_ID_INPUTS.map(fn(s: Str) -> Str {
+    match parse_resource_id(s) {
+      Ok(id) => "ID ${q(s)} => ${q(id.display())} sub=${q(id.subscription_id)} rg=${q(id.resource_group_name)} provider=${q(id.provider)} location=${q(id.location)} type=${q(id.resource_type.display())} types=${q(id.resource_type.types.join(","))} name=${q(id.name)} chain=${chain_of(id)}"
+      Err(e) => "ID ${q(s)} => error ${e}"
+    }
+  })
+  expect(got) == go_lines("ID ")
+}
+
+test "parse_resource_type is Go's ParseResourceType" {
+  let inputs = [
+    "Microsoft.Compute/virtualMachines", "Microsoft.Network/virtualNetworks/subnets", "subscriptions", "Microsoft.Network/",
+    "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myRg/providers/Microsoft.Network/virtualNetworks/v/subnets/s",
+    "/subscriptions/00000000-0000-0000-0000-000000000000", "", "/", "a/b/c", "/bad",
+  ]
+  let got = inputs.map(fn(s: Str) -> Str {
+    match parse_resource_type(s) {
+      Ok(t) => "TYPE ${q(s)} => ${q(t.display())} ns=${q(t.namespace)} type=${q(t.type_name)} types=${q(t.types.join(","))}"
+      Err(e) => "TYPE ${q(s)} => error ${e}"
+    }
+  })
+  expect(got) == go_lines("TYPE ")
+}
+
+test "is_parent_of compares namespace and leading types ignoring case" {
+  let vnet = new_resource_type("Microsoft.Network", "virtualNetworks")
+  let sub = new_resource_type("microsoft.network", "VirtualNetworks/Subnets")
+  let other = new_resource_type("Microsoft.Compute", "virtualNetworks")
+  expect(["PARENT ${vnet.is_parent_of(sub)} ${sub.is_parent_of(vnet)} ${vnet.is_parent_of(vnet)} ${other.is_parent_of(sub)}"]) == go_lines("PARENT ")
+  expect(["ROOT ${q(ROOT_RESOURCE_ID.display())} ${ROOT_RESOURCE_ID.resource_type.display()}"]) == go_lines("ROOT ")
+}
+
+test "validate_resource_type_chain is Go's ValidateResourceTypeChain" {
+  let subnet = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myRg/providers/Microsoft.Network/virtualNetworks/myNet/subnets/mySubnet"
+  let ext = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id1/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id2"
+  let rgid = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id2"
+  let tenant = "/providers/Microsoft.Management/managementGroups/myGroup"
+  let t = TENANT_RESOURCE_TYPE
+  let s = SUBSCRIPTION_RESOURCE_TYPE
+  let r = RESOURCE_GROUP_RESOURCE_TYPE
+  let vnet = new_resource_type("Microsoft.Network", "virtualNetworks")
+  let sub = new_resource_type("microsoft.network", "VirtualNetworks/Subnets")
+  let uai = new_resource_type("Microsoft.ManagedIdentity", "userAssignedIdentities")
+  let cases: List[(Str, Str, Str, List[ResourceType])] = [
+    ("subnet", subnet, "full", [t, s, r, vnet, new_resource_type("Microsoft.Network", "virtualNetworks/subnets")]),
+    ("subnet", subnet, "folded", [t, s, r, new_resource_type("MICROSOFT.NETWORK", "VIRTUALNETWORKS"), sub]),
+    ("subnet", subnet, "no tenant", [s, r, vnet, sub]),
+    ("subnet", subnet, "extra", [t, t, s, r, vnet, sub]),
+    ("subnet", subnet, "wrong leaf", [t, s, r, vnet, vnet]),
+    ("subnet", subnet, "empty", []),
+    ("subnet", subnet, "empty type", [t, s, r, vnet, new_resource_type("Microsoft.Network", "")]),
+    ("ext", ext, "as rg scoped", [t, s, r, uai]),
+    ("ext", ext, "as extension", [t, s, r, uai, uai]),
+    ("rgid", rgid, "as rg scoped", [t, s, r, uai]),
+    ("rgid", rgid, "as extension", [t, s, r, uai, uai]),
+    ("tenant", tenant, "mg", [t, new_resource_type("Microsoft.Management", "managementGroups")]),
+    ("tenant", tenant, "root only", [t]),
+  ]
+  var got: List[Str] = []
+  for c in cases {
+    let id = parse_resource_id(c.1)?
+    let e = match id.validate_resource_type_chain(c.3) {
+      Ok(_) => "ok"
+      Err(m) => "error ${m}"
+    }
+    got.push("CHAIN ${c.0} ${c.2} => ${e}")
+  }
+  expect(got) == go_lines("CHAIN ")
+}

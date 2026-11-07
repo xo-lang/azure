@@ -1,0 +1,257 @@
+// Resource IDs and resource types, as azcore v1.24.0's
+// arm/internal/resource (resource_identifier.go, resource_type.go; MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): ParseResourceID,
+// ParseResourceType, NewResourceType and ValidateResourceTypeChain.
+
+const PROVIDERS_KEY: Str = "providers"
+const SUBSCRIPTIONS_KEY: Str = "subscriptions"
+const RESOURCE_GROUPS_LOWER_KEY: Str = "resourcegroups"
+const LOCATIONS_KEY: Str = "locations"
+const BUILT_IN_RESOURCE_NAMESPACE: Str = "Microsoft.Resources"
+
+/// Go's strings.EqualFold for the ASCII names resource IDs hold.
+fn equal_fold(a: Str, b: Str) -> Bool {
+  a.to_lower() == b.to_lower()
+}
+
+/// An Azure resource type, such as `Microsoft.Network/virtualNetworks/subnets`.
+/// Make one with `new_resource_type` or `parse_resource_type`.
+pub struct ResourceType {
+  /// `Microsoft.Network` in `Microsoft.Network/virtualNetworks/subnets`.
+  pub namespace: Str
+  /// `virtualNetworks/subnets` in the same.
+  pub type_name: Str
+  /// `["virtualNetworks", "subnets"]` in the same.
+  pub types: List[Str]
+}
+
+pub fn new_resource_type(provider_namespace: Str, type_name: Str) -> ResourceType {
+  ResourceType{namespace: provider_namespace, type_name: type_name, types: split_omit_empty(type_name)}
+}
+
+pub const SUBSCRIPTION_RESOURCE_TYPE: ResourceType = ResourceType{namespace: BUILT_IN_RESOURCE_NAMESPACE, type_name: "subscriptions", types: ["subscriptions"]}
+pub const RESOURCE_GROUP_RESOURCE_TYPE: ResourceType = ResourceType{namespace: BUILT_IN_RESOURCE_NAMESPACE, type_name: "resourceGroups", types: ["resourceGroups"]}
+pub const TENANT_RESOURCE_TYPE: ResourceType = ResourceType{namespace: BUILT_IN_RESOURCE_NAMESPACE, type_name: "tenants", types: ["tenants"]}
+pub const PROVIDER_RESOURCE_TYPE: ResourceType = ResourceType{namespace: BUILT_IN_RESOURCE_NAMESPACE, type_name: "providers", types: ["providers"]}
+
+/// `<namespace>/<type>`, as Go's String.
+pub fn (t: ResourceType) display() -> Str {
+  "${t.namespace}/${t.type_name}"
+}
+
+/// Whether `t` is `child`'s parent type (namespace and each leading type
+/// equal ignoring case, `child` deeper).
+pub fn (t: ResourceType) is_parent_of(child: ResourceType) -> Bool {
+  if !equal_fold(t.namespace, child.namespace) || t.types.len() >= child.types.len() {
+    return false
+  }
+  for (i, x) in t.types.indexed() {
+    if !equal_fold(x, child.types[i]) {
+      return false
+    }
+  }
+  true
+}
+
+/// `t` with `child_type` appended.
+pub fn (t: ResourceType) append_child(child_type: Str) -> ResourceType {
+  new_resource_type(t.namespace, "${t.type_name}/${child_type}")
+}
+
+fn (t: ResourceType) last_type() -> Str {
+  t.types.last() ?? ""
+}
+
+/// The type of `s`, a type such as `Microsoft.Compute/virtualMachines`
+/// (one segment is a `Microsoft.Resources` type) or a resource ID.
+pub fn parse_resource_type(s: Str) -> ResourceType ! Str {
+  let parts = split_omit_empty(s)
+  if parts.is_empty() {
+    return Err("invalid resource ID or type: ${s}")
+  }
+  if parts.len() == 1 {
+    return Ok(new_resource_type(BUILT_IN_RESOURCE_NAMESPACE, parts[0]))
+  }
+  if parts[0].contains(".") {
+    return Ok(new_resource_type(parts[0], parts[1..parts.len()].join("/")))
+  }
+  let id = parse_resource_id(s)?
+  Ok(new_resource_type(id.resource_type.namespace, id.resource_type.type_name))
+}
+
+/// A resource ID such as `/subscriptions/<id>/resourceGroups/myRg`. Make
+/// one with `parse_resource_id`. `name` and `resource_type` describe the
+/// resource itself; `parent` keeps its ancestry, up to the tenant root
+/// (whose parent is None).
+pub struct ResourceID {
+  pub parent: ResourceID? = None
+  /// "" when the ID names no subscription.
+  pub subscription_id: Str = ""
+  /// "" when the ID names no resource group.
+  pub resource_group_name: Str = ""
+  /// The provider of a provider ID (`/subscriptions/<id>/providers/Microsoft.Insights`).
+  pub provider: Str = ""
+  /// "" when the ID names no location.
+  pub location: Str = ""
+  pub resource_type: ResourceType
+  pub name: Str = ""
+  is_child: Bool = false
+  text: Str = ""
+}
+
+/// The tenant: every resource ID's root.
+pub const ROOT_RESOURCE_ID: ResourceID = ResourceID{resource_type: TENANT_RESOURCE_TYPE}
+
+/// The ID as written (`""` for the root), as Go's String.
+pub fn (id: ResourceID) display() -> Str {
+  id.text
+}
+
+/// `s` as a resource ID, with Go's errors. Parsing does not check that
+/// the resource exists or has the shape an operation expects; check the
+/// whole type chain with `validate_resource_type_chain` before using the
+/// ID's fields for an operation that assumes a shape.
+pub fn parse_resource_id(s: Str) -> ResourceID ! Str {
+  if s == "" {
+    return Err("invalid resource ID: id cannot be empty")
+  }
+  if !s.starts_with("/") {
+    return Err("invalid resource ID: resource id '${s}' must start with '/'")
+  }
+  let parts = split_omit_empty(s)
+  if parts.len() < 2 {
+    return Err("invalid resource ID: ${s}")
+  }
+  if !equal_fold(parts[0], SUBSCRIPTIONS_KEY) && !equal_fold(parts[0], PROVIDERS_KEY) {
+    return Err("invalid resource ID: ${s}")
+  }
+  append_next(ROOT_RESOURCE_ID, parts, s)
+}
+
+/// Checks that the ID's whole type ancestry, from the tenant down to the
+/// resource, is `expected` (namespaces and types compared ignoring case);
+/// a missing or extra ancestor is an error. Names, existence and access
+/// are not checked (azcore v1.24.0's ValidateResourceTypeChain).
+pub fn (id: ResourceID) validate_resource_type_chain(expected: List[ResourceType]) -> () ! Str {
+  if expected.is_empty() {
+    return Err("invalid resource-type chain: resource types cannot be empty")
+  }
+  for (i, t) in expected.indexed() {
+    if t.namespace == "" || t.type_name == "" {
+      return Err("invalid resource-type chain: resource type at ancestry index ${i} must have a namespace and type")
+    }
+  }
+  var current: ResourceID? = Some(id)
+  var i = expected.len() - 1
+  while i >= 0 {
+    let t = expected[i]
+    let c = current ?? return Err("resource ID does not match expected resource-type chain: missing resource type \"${t.display()}\" at ancestry index ${i}")
+    if !equal_fold(c.resource_type.namespace, t.namespace) || !equal_fold(c.resource_type.type_name, t.type_name) {
+      return Err("resource ID does not match expected resource-type chain: expected resource type \"${t.display()}\" at ancestry index ${i}, got \"${c.resource_type.display()}\"")
+    }
+    current = c.parent
+    i -= 1
+  }
+  if let Some(c) = current {
+    return Err("resource ID does not match expected resource-type chain: unexpected ancestor of resource type \"${c.resource_type.display()}\"")
+  }
+  Ok(())
+}
+
+fn choose_resource_type(type_name: Str, parent: ResourceID) -> ResourceType {
+  if equal_fold(type_name, RESOURCE_GROUPS_LOWER_KEY) && is_subscription_resource(Some(parent)) {
+    RESOURCE_GROUP_RESOURCE_TYPE
+  } else if equal_fold(type_name, SUBSCRIPTIONS_KEY) && is_tenant_resource(Some(parent)) {
+    SUBSCRIPTION_RESOURCE_TYPE
+  } else {
+    parent.resource_type.append_child(type_name)
+  }
+}
+
+/// Go's ResourceID.init: the fields carried down from `parent`, the
+/// one this level sets, and the text.
+fn new_level(parent: ResourceID, t: ResourceType, name: Str, is_child: Bool) -> ResourceID {
+  var id = ResourceID{
+    parent: Some(parent), subscription_id: parent.subscription_id, resource_group_name: parent.resource_group_name,
+    provider: parent.provider, location: parent.location, resource_type: t, name: name, is_child: is_child,
+  }
+  let ts = t.display()
+  if ts == SUBSCRIPTION_RESOURCE_TYPE.display() {
+    id.subscription_id = name
+  }
+  // azcore v1.23.3: a `locations` segment in any case is the location
+  if equal_fold(t.last_type(), LOCATIONS_KEY) {
+    id.location = name
+  }
+  if ts == RESOURCE_GROUP_RESOURCE_TYPE.display() {
+    id.resource_group_name = name
+  }
+  if ts == PROVIDER_RESOURCE_TYPE.display() {
+    id.provider = name
+  }
+  id.text = if is_child {
+    let base = "${parent.text}/${t.last_type()}"
+    if name == "" { base } else { "${base}/${name}" }
+  } else {
+    "${parent.text}/providers/${t.namespace}/${t.type_name}/${name}"
+  }
+  id
+}
+
+fn append_next(parent: ResourceID, parts: List[Str], s: Str) -> ResourceID ! Str {
+  if parts.is_empty() {
+    return Ok(parent)
+  }
+  let bad = Err("invalid resource ID: ${s}")
+  if parts.len() == 1 {
+    // subscriptions and resourceGroups are not IDs without their names
+    if (equal_fold(parts[0], SUBSCRIPTIONS_KEY) && is_tenant_resource(Some(parent))) || (equal_fold(parts[0], RESOURCE_GROUPS_LOWER_KEY) && is_subscription_resource(Some(parent))) {
+      return bad
+    }
+    // a resource group needs a child or provider type after it
+    if is_resource_group_resource(Some(parent)) {
+      return bad
+    }
+    return Ok(new_level(parent, choose_resource_type(parts[0], parent), "", true))
+  }
+  if equal_fold(parts[0], PROVIDERS_KEY) && (parts.len() == 2 || equal_fold(parts[2], PROVIDERS_KEY)) {
+    // a provider is only under the tenant or a subscription
+    if !is_subscription_resource(Some(parent)) && !is_tenant_resource(Some(parent)) {
+      return bad
+    }
+    return append_next(new_level(parent, PROVIDER_RESOURCE_TYPE, parts[1], true), parts[2..parts.len()], s)
+  }
+  if parts.len() > 3 && equal_fold(parts[0], PROVIDERS_KEY) {
+    return append_next(new_level(parent, new_resource_type(parts[1], parts[2]), parts[3], false), parts[4..parts.len()], s)
+  }
+  if !equal_fold(parts[0], PROVIDERS_KEY) {
+    return append_next(new_level(parent, choose_resource_type(parts[0], parent), parts[1], true), parts[2..parts.len()], s)
+  }
+  bad
+}
+
+/// The `/`-separated parts of `v`, each trimmed, the empty ones left out.
+fn split_omit_empty(v: Str) -> List[Str] {
+  v.split("/").map(fn(x: Str) -> Str { x.trim() }).filter(fn(x: Str) -> Bool { x != "" })
+}
+
+fn is_tenant_resource(id: ResourceID?) -> Bool {
+  match id {
+    Some(x) => equal_fold(x.resource_type.display(), TENANT_RESOURCE_TYPE.display()) && x.parent.is_none()
+    None => false
+  }
+}
+
+fn is_subscription_resource(id: ResourceID?) -> Bool {
+  match id {
+    Some(x) => equal_fold(x.resource_type.display(), SUBSCRIPTION_RESOURCE_TYPE.display()) && is_tenant_resource(x.parent)
+    None => false
+  }
+}
+
+fn is_resource_group_resource(id: ResourceID?) -> Bool {
+  match id {
+    Some(x) => equal_fold(x.resource_type.display(), RESOURCE_GROUP_RESOURCE_TYPE.display()) && is_subscription_resource(x.parent)
+    None => false
+  }
+}

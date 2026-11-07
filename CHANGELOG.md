@@ -8,6 +8,26 @@ version has been tagged since.
 
 ## Unreleased
 
+Go's azcore v1.23.0 to v1.24.0 (checked against the lines a Go program
+prints with azcore v1.24.0, `arm/resourceid_vectors_test.xo`):
+
+- `arm.ResourceID` and `arm.ResourceType` (`parse_resource_id`,
+  `parse_resource_type`, `new_resource_type`, `is_parent_of`,
+  `append_child`, `ROOT_RESOURCE_ID` and the subscription, resource
+  group, tenant and provider types): Go's `arm.ParseResourceID` and
+  `arm.ParseResourceType`, with Go's errors, new to this port. A
+  `locations` segment in any case sets `location` (v1.23.3).
+- `ResourceID.validate_resource_type_chain`: Go's
+  `ValidateResourceTypeChain` (v1.24.0), the ID's whole type ancestry
+  from the tenant down compared ignoring case, with Go's messages.
+- `azcore.parse_date_time` reads a time's offset with std's
+  `Time.rfc3339_offset` (xo 25bbebd9a or later) instead of its own
+  parse; the results are unchanged.
+
+Not ported from v1.24.0 (this port has no logging or tracing policies):
+the log sanitizer and tracing attribute changes. The `streaming` SSE
+reader is planned as its own change.
+
 Go's azcore v1.21.1 to v1.23.0 (each checked against the lines a Go
 program prints with azcore v1.23.0, `runtime/azcore123vectors_test.xo`):
 
