@@ -1,5 +1,6 @@
 // Replays the Go program's OnBehalfOfCredential cases
 // (obovectors_test.xo) against the same fake token host (gv_serve).
+use std/http
 use github.com/xo-lang/azure/azcore
 
 fn obo_opts(allowed: List[Str] = [], nodisc: Bool = false, send_chain: Bool = false) -> OnBehalfOfOptions {
@@ -100,4 +101,56 @@ test "OnBehalfOfCredential redeems the refresh token it was sent, as MSAL Go's" 
   get("obo rt refused", azcore.TokenRequestOptions{scopes: ["https://fourth.example.test/.default"]})
   get("obo rt after refusal", azcore.TokenRequestOptions{scopes: ["https://fifth.example.test/.default"]})
   obo_compare(f, s)
+}
+
+test "OnBehalfOfCredential's refresh token appears in no error and only in token request bodies" {
+  let f = gv_serve(os.net, "obo-rt-secret")
+  let rt = "rt-secret-7f3a"
+  let ua = "user-assert-9c1d"
+  let reply = fn(status: Int, body: Str) {
+    f.overrides.with(fn(var o: List[(Str, Int, Str)]) { o.push(("oauth2/v2.0/token", status, body)) })
+  }
+  reply(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"access_token\":\"at-1\",\"refresh_token\":\"${rt}\"}")
+  let c = new_on_behalf_of_credential_with_secret("tenant-a", "client-1", ua, "s3cret", os.net, os.clock, os.rand, obo_opts(["*"], nodisc: true))?
+  let before = os.net.requests().len()
+  expect(c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]})?.token.reveal()) == "at-1"
+  // the refresh is refused, then the on-behalf-of grant fails: the error
+  // names neither the refresh token nor the user assertion
+  reply(400, "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS70000: bad refresh token\"}")
+  reply(401, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad\"}")
+  var texts: List[Str] = []
+  match c.get_token(azcore.TokenRequestOptions{scopes: ["https://other.example.test/.default"]}) {
+    Ok(_) => texts.push("unexpected token")
+    Err(e) => texts.push(e.display())
+  }
+  // bad claims fail before any request, the refresh token kept
+  match c.get_token(azcore.TokenRequestOptions{scopes: ["https://third.example.test/.default"], claims: "not json"}) {
+    Ok(_) => texts.push("unexpected token")
+    Err(e) => texts.push(e.display())
+  }
+  // a tenant the transport cannot reach
+  os.net.fail_next("POST https://login.example.test/tenant-z/oauth2/v2.0/token", http.ClientErr.Connect("refused"))
+  match c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-z"}) {
+    Ok(_) => texts.push("unexpected token")
+    Err(e) => texts.push(e.display())
+  }
+  os.net.clear_failures()
+  expect(texts.len()) == 3
+  for t in texts {
+    expect((t, t.contains(rt) || t.contains(ua))) == (t, false)
+  }
+  // on the wire: only in the bodies of POSTs to a token endpoint
+  let rs = os.net.requests()
+  var bodies = 0
+  for i in before..rs.len() {
+    let r = rs[i]
+    let head = "${r.method} ${r.url.host}${r.escaped_path()}?${r.raw_query()} ${r.headers.entries().map(fn(h: (Str, Str)) -> Str { "${h.0}=${h.1}" }).join(";")}"
+    expect((head, head.contains(rt))) == (head, false)
+    if r.body.to_str_lossy().contains(rt) {
+      expect((r.method, r.escaped_path().ends_with("/oauth2/v2.0/token"))) == ("POST", true)
+      bodies = bodies + 1
+    }
+  }
+  // the refused refresh and the tenant-z refresh
+  expect(bodies) == 2
 }
