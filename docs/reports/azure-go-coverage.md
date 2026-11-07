@@ -85,6 +85,7 @@ shipped a newer major whose spec our generator has not been run on.
 |---|---|---|---:|---:|---|---|---|
 | resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 7 | 14114 | v2.2.0 | 0 + 3714 gen |  |
 | resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v9.0.0 | 0 + 31271 gen |  |
+| resourcemanager/containerregistry/armcontainerregistry | v3.0.0 (`v3`) | stable | 0 | 15726 | v3.0.0 | 0 + 4883 gen |  |
 | resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 0 | 24355 | v9.7.0 | 0 + 6979 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
@@ -94,7 +95,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (298)
+## ARM modules not ported (297)
 
 <details><summary>The list</summary>
 
@@ -160,7 +161,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/consumption/armconsumption | v2.1.0 | stable | 15639 |
 | resourcemanager/containerinstance/armcontainerinstance | v2.4.0 | stable; newer v3.0.0-beta.1 | 6575 |
 | resourcemanager/containerorchestratorruntime/armcontainerorchestratorruntime | v0.1.0 | v0 | 4969 |
-| resourcemanager/containerregistry/armcontainerregistry | v3.0.0 | stable | 15726 |
 | resourcemanager/containerregistry/armcontainerregistrytasks | v0.1.0 | v0 | 8803 |
 | resourcemanager/containerservice/armdeploymentsafeguards | v0.1.0 | v0 | 1696 |
 | resourcemanager/containerserviceaimanager/armcontainerserviceaimanager | v0.2.0 | v0 | 8193 |

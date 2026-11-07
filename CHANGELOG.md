@@ -8,6 +8,14 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/containerregistry/armcontainerregistry v3.0.0, Go's
+armcontainerregistry/v3 v3.0.0 (registries, replications, webhooks,
+tokens, scope maps, cache rules, credential sets, connected registries;
+TypeSpec, API version 2025-11-01): generated with no generator change.
+All 58 calls of its ten clients checked against a local Go program's
+requests and results (azcore v1.23.3), the long-running ones through
+poll_until_done.
+
 resourcemanager/resources/armdeployments v3.0.0, Go's armdeployments/v3
 v3.0.0 (ARM template deployments at resource group, subscription,
 management group, tenant and any scope; TypeSpec, API version
