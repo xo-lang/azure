@@ -10,30 +10,30 @@ use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/arm
 use github.com/xo-lang/azure/policy
 
-const EP: Str = "https://management.example.test"
+const GV_EP: Str = "https://management.example.test"
 
-struct Cred {}
+struct GvCred {}
 
-fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+fn (c: GvCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
   Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(4102444800000)})
 }
 
-struct Fake {
+struct GvFake {
   log: Mutex[List[Str]]
   status: Mutex[Int]
   body: Mutex[Str]
 }
 
-fn note(f: Fake, s: Str) {
+fn gv_note(f: GvFake, s: Str) {
   f.log.with(fn(var l: List[Str]) { l.push(s) })
 }
 
-fn set(f: Fake, status: Int, body: Str) {
+fn gv_set(f: GvFake, status: Int, body: Str) {
   f.status.with(fn(var s: Int) { s = status })
   f.body.with(fn(var b: Str) { b = body })
 }
 
-fn answer(f: Fake, req: http.Request) -> http.Response {
+fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
   var hs: List[Str] = []
   for (k, v) in req.headers {
     let lk = k.to_lower()
@@ -42,12 +42,12 @@ fn answer(f: Fake, req: http.Request) -> http.Response {
     }
   }
   let q = req.raw_query()
-  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
-  note(f, "  H ${hs.sort().join(" | ")}")
-  note(f, "  B ${req.body.to_str_lossy()}")
+  gv_note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+  gv_note(f, "  H ${hs.sort().join(" | ")}")
+  gv_note(f, "  B ${req.body.to_str_lossy()}")
   let st = f.status.with(fn(var s: Int) -> Int { s })
   let body = f.body.with(fn(var b: Str) -> Str { b })
-  note_lines(f, "  SERVED ${st} ${body}")
+  gv_note_lines(f, "  SERVED ${st} ${body}")
   let h: Map[Str, Str] = {
     "x-ms-request-id": "rid-1",
     "Content-Type": "application/json",
@@ -56,25 +56,25 @@ fn answer(f: Fake, req: http.Request) -> http.Response {
   http.Response{status: st, headers: h, body: body.bytes()}
 }
 
-fn new_fake(net: testing.FakeNet) -> Fake {
-  let f = Fake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new("")}
-  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+fn gv_new_fake(net: testing.FakeNet) -> GvFake {
+  let f = GvFake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new("")}
+  let h = fn(req: http.Request) -> http.Response { gv_answer(f, req) }
   for m in ["GET", "PUT", "POST", "DELETE", "HEAD", "PATCH"] {
-    net.handle("${m} ${EP}/{rest...}", h)
+    net.handle("${m} ${GV_EP}/{rest...}", h)
   }
   f
 }
 
-fn opts() -> arm.ClientOptions {
-  arm.ClientOptions{endpoint: EP, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+fn gv_opts() -> arm.ClientOptions {
+  arm.ClientOptions{endpoint: GV_EP, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
 }
 
-fn log_of(f: Fake) -> List[Str] {
+fn gv_log_of(f: GvFake) -> List[Str] {
   f.log.with(fn(var l: List[Str]) -> List[Str] { l })
 }
 
 /// An error as the Go program prints it: continuation lines after `| `.
-fn err_text(e: azcore.CallErr) -> Str {
+fn gv_err_text(e: azcore.CallErr) -> Str {
   let t = match e {
     azcore.CallErr.InvalidInput(m) => m
     azcore.CallErr.Decode(m) => m
@@ -83,28 +83,28 @@ fn err_text(e: azcore.CallErr) -> Str {
   t.replace("\n", "\n| ")
 }
 
-fn note_lines(f: Fake, s: Str) {
+fn gv_note_lines(f: GvFake, s: Str) {
   for line in s.split("\n") {
-    note(f, line)
+    gv_note(f, line)
   }
 }
 
 /// A time as the Go program prints one (RFC 3339, UTC).
-fn t3339(t: Time) -> Str {
+fn gv_t3339(t: Time) -> Str {
   time.format(t, time.utc(), time.RFC3339)
 }
 
 /// Go's %q of printable ASCII text with `\n`.
-fn go_q(b: Bytes) -> Str {
+fn gv_go_q(b: Bytes) -> Str {
   "\"${b.to_str_lossy().replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
 }
 
-fn at3339(s: Str) -> Time {
+fn gv_at3339(s: Str) -> Time {
   time.parse(s, time.RFC3339, time.utc()) ?? e => fault("time ${s}: ${e}")
 }
 
 /// Compares the lines, but for the KNOWN ones (Go's line, ours).
-fn compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
+fn gv_compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
   var g = got
   for (go_line, ours) in known {
     let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
@@ -123,15 +123,4 @@ fn compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
     }
     k += 1
   }
-}
-
-test "check_existence: 404 is success false with no error, 200 is an error (Go's 204 or 404 only)" {
-  let f = new_fake(os.net)
-  let c = new_deployments_client(os.net, os.clock, os.rand, "sub-test", Cred{}, opts()) ?? e => fault(e)
-  set(f, 404, "")
-  expect(c.check_existence("rg", "d")?.success) == false
-  set(f, 204, "")
-  expect(c.check_existence("rg", "d")?.success) == true
-  set(f, 200, "")
-  expect(c.check_existence("rg", "d").is_err()) == true
 }

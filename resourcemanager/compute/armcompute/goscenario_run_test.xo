@@ -1,0 +1,39 @@
+// The VirtualMachines client against the Go program's fake Resource
+// Manager: each request, decoded result, page, error and resume token
+// must be Go's (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const SC_VMB: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1\",\"name\":\"vm1\",\"location\":\"westus\",\"zones\":[\"1\"],\"properties\":{\"vmId\":\"00000000-0000-0000-0000-000000000000\",\"hardwareProfile\":{\"vmSize\":\"Standard_D2s_v3\"},\"storageProfile\":{\"osDisk\":{\"osType\":\"Linux\",\"createOption\":\"FromImage\",\"diskSizeGB\":30,\"managedDisk\":{\"storageAccountType\":\"Premium_LRS\"}}},\"osProfile\":{\"computerName\":\"vm1\",\"adminUsername\":\"azureuser\",\"linuxConfiguration\":{\"disablePasswordAuthentication\":true}},\"timeCreated\":\"2026-01-02T03:04:05.12Z\",\"provisioningState\":\"Succeeded\",\"priority\":\"Spot\",\"billingProfile\":{\"maxPrice\":-1}}}"
+const SC_VMS: Str = "/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines"
+const SC_OP: Str = "/subscriptions/sub-test/providers/Microsoft.Compute/locations/westus/operations/op3"
+
+test "get, the delete poller and the list pages match Go's" {
+  let f = sc_serve(os.net)
+  let c = new_virtual_machines_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  sc_add(f, "GET", "${SC_VMS}/vm1", ScReply{status: 200, body: SC_VMB})
+  sc_show(f, "get", c.get("rg1", "vm1", VirtualMachinesClientGetOptions{expand: Some(INSTANCE_VIEW_TYPES_USER_DATA)}), fn(r: VirtualMachinesClientGetResponse) -> Str { sc_json(json.to_value(r.virtual_machine)) })
+  sc_add(f, "DELETE", "${SC_VMS}/vm1", ScReply{status: 202, body: "", headers: [("Azure-AsyncOperation", "${EP}${SC_OP}?api-version=2024-11-01"), ("Location", "${EP}${SC_OP}?monitor=true&api-version=2024-11-01")]})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: "{\"status\":\"InProgress\",\"startTime\":\"2026-01-02T03:04:05Z\"}"})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: "{\"status\":\"Succeeded\",\"startTime\":\"2026-01-02T03:04:05Z\",\"endTime\":\"2026-01-02T03:05:05Z\"}"})
+  match c.begin_delete("rg1", "vm1", VirtualMachinesClientBeginDeleteOptions{force_deletion: Some(true)}) {
+    Ok(p0) => {
+      var p = p0
+      sc_token(f, "delete", p)
+      sc_show(f, "delete", p.poll_until_done(os.clock, frequency: 1ms), fn(r: VirtualMachinesClientDeleteResponse) -> Str { "{}" })
+    }
+    Err(e) => sc_note(f, "ERR begin_delete: ${sc_err(e)}")
+  }
+  sc_add(f, "GET", SC_VMS, ScReply{status: 200, body: "{\"value\":[${SC_VMB}],\"nextLink\":\"${EP}${SC_VMS}?api-version=2024-11-01&\$skiptoken=t1\"}"})
+  sc_add(f, "GET", SC_VMS, ScReply{status: 404, body: "{\"error\":{\"code\":\"ResourceGroupNotFound\",\"message\":\"gone\"}}"})
+  var pl = c.new_list_pager("rg1", VirtualMachinesClientListOptions{filter: Some("startswith(name,'vm')")})?
+  while pl.more() {
+    let pg = pl.next_page()
+    sc_show(f, "list_page", pg, fn(r: VirtualMachinesClientListResponse) -> Str { sc_json(json.to_value(r.virtual_machine_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  sc_check(f)
+}

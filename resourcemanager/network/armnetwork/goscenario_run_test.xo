@@ -1,0 +1,43 @@
+// The VirtualNetworks client against the Go program's fake Resource
+// Manager: each request, decoded result, page and resume token must be
+// Go's (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const SC_VNB: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn1\",\"name\":\"vn1\",\"etag\":\"W/\\\"e1\\\"\",\"location\":\"westus\",\"properties\":{\"provisioningState\":\"Succeeded\",\"resourceGuid\":\"00000000-0000-0000-0000-000000000000\",\"addressSpace\":{\"addressPrefixes\":[\"10.0.0.0/16\"]},\"subnets\":[{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn1/subnets/s1\",\"name\":\"s1\",\"properties\":{\"addressPrefix\":\"10.0.0.0/24\",\"privateEndpointNetworkPolicies\":\"Disabled\"}}],\"enableDdosProtection\":false}}"
+const SC_VNB_UPDATING: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn1\",\"name\":\"vn1\",\"etag\":\"W/\\\"e1\\\"\",\"location\":\"westus\",\"properties\":{\"provisioningState\":\"Updating\",\"resourceGuid\":\"00000000-0000-0000-0000-000000000000\",\"addressSpace\":{\"addressPrefixes\":[\"10.0.0.0/16\"]},\"subnets\":[{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn1/subnets/s1\",\"name\":\"s1\",\"properties\":{\"addressPrefix\":\"10.0.0.0/24\",\"privateEndpointNetworkPolicies\":\"Disabled\"}}],\"enableDdosProtection\":false}}"
+const SC_VN: Str = "/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn1"
+const SC_OP: Str = "/subscriptions/sub-test/providers/Microsoft.Network/locations/westus/operations/op4"
+const SC_ALL: Str = "/subscriptions/sub-test/providers/Microsoft.Network/virtualNetworks"
+
+test "the create poller with its final GET, get and the list pages match Go's" {
+  let f = sc_serve(os.net)
+  let c = new_virtual_networks_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  sc_add(f, "PUT", SC_VN, ScReply{status: 201, body: SC_VNB_UPDATING, headers: [("Azure-AsyncOperation", "${EP}${SC_OP}?api-version=2025-03-01")]})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: "{\"status\":\"InProgress\"}"})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: "{\"status\":\"Succeeded\"}"})
+  sc_add(f, "GET", SC_VN, ScReply{status: 200, body: SC_VNB})
+  let vn = VirtualNetwork{location: Some("westus"), properties: Some(VirtualNetworkPropertiesFormat{address_space: Some(AddressSpace{address_prefixes: Some(["10.0.0.0/16"])})})}
+  match c.begin_create_or_update("rg1", "vn1", vn) {
+    Ok(p0) => {
+      var p = p0
+      sc_token(f, "create_or_update", p)
+      sc_show(f, "create_or_update", p.poll_until_done(os.clock, frequency: 1ms), fn(r: VirtualNetworksClientCreateOrUpdateResponse) -> Str { sc_json(json.to_value(r.virtual_network)) })
+    }
+    Err(e) => sc_note(f, "ERR begin_create_or_update: ${sc_err(e)}")
+  }
+  sc_add(f, "GET", SC_VN, ScReply{status: 200, body: SC_VNB})
+  sc_show(f, "get", c.get("rg1", "vn1", VirtualNetworksClientGetOptions{expand: Some("subnets/ipConfigurations")}), fn(r: VirtualNetworksClientGetResponse) -> Str { sc_json(json.to_value(r.virtual_network)) })
+  sc_add(f, "GET", SC_ALL, ScReply{status: 200, body: "{\"value\":[${SC_VNB}],\"nextLink\":\"${EP}${SC_ALL}?api-version=2025-03-01&\$skipToken=n%2F1\"}"})
+  sc_add(f, "GET", SC_ALL, ScReply{status: 200, body: "{\"value\":[]}"})
+  var pl = c.new_list_all_pager()?
+  while pl.more() {
+    let pg = pl.next_page()
+    sc_show(f, "list_all_page", pg, fn(r: VirtualNetworksClientListAllResponse) -> Str { sc_json(json.to_value(r.virtual_network_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  sc_check(f)
+}

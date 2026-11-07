@@ -1,0 +1,38 @@
+// The Vaults client against the Go program's fake Resource Manager: each
+// request, decoded result (system data times, network rules), page and
+// resume token must be Go's (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const SC_KVB: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.KeyVault/vaults/kv1\",\"name\":\"kv1\",\"type\":\"Microsoft.KeyVault/vaults\",\"location\":\"westus\",\"tags\":{},\"systemData\":{\"createdBy\":\"user-a\",\"createdByType\":\"User\",\"createdAt\":\"2026-01-02T03:04:05.123Z\",\"lastModifiedAt\":\"2026-01-02T04:04:05+01:00\",\"lastModifiedBy\":\"app-b\",\"lastModifiedByType\":\"Application\"},\"properties\":{\"tenantId\":\"00000000-0000-0000-0000-000000000000\",\"sku\":{\"family\":\"A\",\"name\":\"standard\"},\"accessPolicies\":[{\"tenantId\":\"00000000-0000-0000-0000-000000000000\",\"objectId\":\"o1\",\"permissions\":{\"keys\":[\"get\",\"list\"],\"secrets\":[\"all\"]}}],\"enableSoftDelete\":true,\"softDeleteRetentionInDays\":90,\"vaultUri\":\"https://kv1.vault.example.test/\",\"provisioningState\":\"Succeeded\",\"networkAcls\":{\"bypass\":\"AzureServices\",\"defaultAction\":\"Deny\",\"ipRules\":[{\"value\":\"192.0.2.0/24\"}]}}}"
+const SC_VAULTS: Str = "/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.KeyVault/vaults"
+const SC_LOC: Str = "/subscriptions/sub-test/providers/Microsoft.KeyVault/locations/westus"
+
+test "get, the purge poller and the list pages match Go's" {
+  let f = sc_serve(os.net)
+  let c = new_vaults_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  sc_add(f, "GET", "${SC_VAULTS}/kv1", ScReply{status: 200, body: SC_KVB})
+  sc_show(f, "get", c.get("rg1", "kv1"), fn(r: VaultsClientGetResponse) -> Str { sc_json(json.to_value(r.vault)) })
+  sc_add(f, "POST", "${SC_LOC}/deletedVaults/kv1/purge", ScReply{status: 202, body: "", headers: [("Location", "${EP}${SC_LOC}/operationResults/op5?api-version=2024-11-01")]})
+  sc_add(f, "GET", "${SC_LOC}/operationResults/op5", ScReply{status: 200, body: ""})
+  match c.begin_purge_deleted("kv1", "westus") {
+    Ok(p0) => {
+      var p = p0
+      sc_token(f, "purge_deleted", p)
+      sc_show(f, "purge_deleted", p.poll_until_done(os.clock, frequency: 1ms), fn(r: VaultsClientPurgeDeletedResponse) -> Str { "{}" })
+    }
+    Err(e) => sc_note(f, "ERR begin_purge_deleted: ${sc_err(e)}")
+  }
+  sc_add(f, "GET", SC_VAULTS, ScReply{status: 200, body: "{\"value\":[${SC_KVB}],\"nextLink\":\"${EP}${SC_VAULTS}?api-version=2024-11-01&\$top=1&\$skiptoken=k1\"}"})
+  sc_add(f, "GET", SC_VAULTS, ScReply{status: 200, body: "{\"value\":[]}"})
+  var pl = c.new_list_by_resource_group_pager("rg1", VaultsClientListByResourceGroupOptions{top: Some(1)})?
+  while pl.more() {
+    let pg = pl.next_page()
+    sc_show(f, "list_page", pg, fn(r: VaultsClientListByResourceGroupResponse) -> Str { sc_json(json.to_value(r.vault_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  sc_check(f)
+}

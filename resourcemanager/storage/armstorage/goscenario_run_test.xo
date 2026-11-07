@@ -1,0 +1,38 @@
+// The Accounts client against the Go program's fake Resource Manager:
+// each request, decoded result, page and resume token must be Go's
+// (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const SC_ST: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/st1\",\"name\":\"st1\",\"type\":\"Microsoft.Storage/storageAccounts\",\"kind\":\"StorageV2\",\"location\":\"westus\",\"sku\":{\"name\":\"Standard_LRS\",\"tier\":\"Standard\"},\"properties\":{\"provisioningState\":\"Succeeded\",\"minimumTlsVersion\":\"TLS1_2\",\"allowBlobPublicAccess\":false,\"creationTime\":\"2026-01-02T03:04:05.1234567Z\",\"primaryEndpoints\":{\"blob\":\"https://st1.blob.example.test/\"},\"keyCreationTime\":{\"key1\":\"2026-01-02T03:04:05Z\",\"key2\":null},\"statusOfPrimary\":\"available\",\"newFutureProp\":true}}"
+const SC_RG: Str = "/subscriptions/sub-test/resourceGroups/rg1"
+const SC_OP: Str = "/subscriptions/sub-test/providers/Microsoft.Storage/locations/westus/asyncoperations/op2"
+
+test "the create poller, its decoded account and the list pages match Go's" {
+  let f = sc_serve(os.net)
+  let c = new_accounts_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  sc_add(f, "PUT", "${SC_RG}/providers/Microsoft.Storage/storageAccounts/st1", ScReply{status: 202, body: "", headers: [("Location", "${EP}${SC_OP}?monitor=true&api-version=2024-01-01"), ("Retry-After", "1")]})
+  sc_add(f, "GET", SC_OP, ScReply{status: 202, body: ""})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: SC_ST})
+  match c.begin_create("rg1", "st1", AccountCreateParameters{kind: Some(KIND_STORAGE_V2), location: Some("westus"), sku: Some(SKU{name: Some(SKU_NAME_STANDARD_LRS)})}) {
+    Ok(p0) => {
+      var p = p0
+      sc_token(f, "create", p)
+      sc_show(f, "create", p.poll_until_done(os.clock, frequency: 1ms), fn(r: AccountsClientCreateResponse) -> Str { sc_json(json.to_value(r.account)) })
+    }
+    Err(e) => sc_note(f, "ERR begin_create: ${sc_err(e)}")
+  }
+  let list = "${SC_RG}/providers/Microsoft.Storage/storageAccounts"
+  sc_add(f, "GET", list, ScReply{status: 200, body: "{\"value\":[${SC_ST}],\"nextLink\":\"${EP}${list}?api-version=2024-01-01&\$skipToken=x y\"}"})
+  sc_add(f, "GET", list, ScReply{status: 200, body: "{\"value\":[]}"})
+  var pl = c.new_list_by_resource_group_pager("rg1")?
+  while pl.more() {
+    let pg = pl.next_page()
+    sc_show(f, "list_page", pg, fn(r: AccountsClientListByResourceGroupResponse) -> Str { sc_json(json.to_value(r.account_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  sc_check(f)
+}

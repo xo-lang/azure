@@ -1,0 +1,39 @@
+// The ResourceGroups client against the Go program's fake Resource
+// Manager: each request, decoded result, page and resume token must be
+// Go's (govectors_test.xo).
+
+use std/json
+use github.com/xo-lang/azure/arm
+
+const SC_G1: Str = "{\"id\":\"/subscriptions/sub-test/resourceGroups/rg1\",\"name\":\"rg1\",\"type\":\"Microsoft.Resources/resourceGroups\",\"location\":\"westus\",\"managedBy\":null,\"tags\":{\"env\":\"a&b\",\"empty\":\"\"},\"properties\":{\"provisioningState\":\"Succeeded\"},\"extra\":{\"x\":1}}"
+const SC_RGS: Str = "/subscriptions/sub-test/resourcegroups"
+const SC_OP: Str = "/subscriptions/sub-test/operationresults/op1"
+
+test "get, the list pages and the delete poller match Go's" {
+  let f = sc_serve(os.net)
+  let c = new_resource_groups_client(os.net, os.clock, os.rand, SUB, Fixed{}, arm.ClientOptions{endpoint: EP})?
+  sc_add(f, "GET", "${SC_RGS}/rg1", ScReply{status: 200, body: SC_G1})
+  sc_show(f, "get", c.get("rg1"), fn(r: ResourceGroupsClientGetResponse) -> Str { sc_json(json.to_value(r.resource_group)) })
+  sc_add(f, "GET", SC_RGS, ScReply{status: 200, body: "{\"value\":[${SC_G1}],\"nextLink\":\"${EP}${SC_RGS}?api-version=2021-04-01&%24skiptoken=a%2Bb%3D\"}"})
+  sc_add(f, "GET", SC_RGS, ScReply{status: 200, body: "{\"value\":[{\"name\":\"rg2\",\"location\":\"eastus\"}],\"nextLink\":\"\"}"})
+  var p = c.new_list_pager(ResourceGroupsClientListOptions{filter: Some("tagName eq 'env'"), top: Some(1)})?
+  while p.more() {
+    let pg = p.next_page()
+    sc_show(f, "list_page", pg, fn(r: ResourceGroupsClientListResponse) -> Str { sc_json(json.to_value(r.resource_group_list_result)) })
+    if pg.is_err() {
+      break
+    }
+  }
+  sc_add(f, "DELETE", "${SC_RGS}/rg1", ScReply{status: 202, body: "", headers: [("Location", "${EP}${SC_OP}?api-version=2021-04-01")]})
+  sc_add(f, "GET", SC_OP, ScReply{status: 202, body: ""})
+  sc_add(f, "GET", SC_OP, ScReply{status: 200, body: ""})
+  match c.begin_delete("rg1", ResourceGroupsClientBeginDeleteOptions{force_deletion_types: Some("Microsoft.Compute/virtualMachines")}) {
+    Ok(p0) => {
+      var pd = p0
+      sc_token(f, "delete", pd)
+      sc_show(f, "delete", pd.poll_until_done(os.clock, frequency: 1ms), fn(r: ResourceGroupsClientDeleteResponse) -> Str { "{}" })
+    }
+    Err(e) => sc_note(f, "ERR begin_delete: ${sc_err(e)}")
+  }
+  sc_check(f)
+}

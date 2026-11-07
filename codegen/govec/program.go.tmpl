@@ -1,0 +1,523 @@
+// {{.Pkg}} {{.Version}} vectors: every public method of each client called by
+// reflection with every option and argument filled, through a fake
+// transport (no network). Each call prints its inputs as JSON (for the
+// Xo test to rebuild), the request, the response it was served and the
+// result.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"{{.Import}}"
+)
+
+const ep = "https://management.example.test"
+
+var fixed = time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+
+var status = 200
+var body = ""
+var lastReq string
+
+type fake struct{}
+
+func (fake) Do(r *http.Request) (*http.Response, error) {
+	var b []byte
+	if r.Body != nil {
+		b, _ = io.ReadAll(r.Body)
+	}
+	var hs []string
+	for k, v := range r.Header {
+		lk := strings.ToLower(k)
+		if lk == "user-agent" || lk == "x-ms-client-request-id" || lk == "content-length" || lk == "traceparent" {
+			continue
+		}
+		hs = append(hs, lk+"="+strings.Join(v, ","))
+	}
+	sort.Strings(hs)
+	lastReq = fmt.Sprintf("REQ %s %s\n  H %s\n  B %s", r.Method, r.URL.String(), strings.Join(hs, " | "), string(b))
+	h := http.Header{}
+	h.Set("x-ms-request-id", "rid-1")
+	h.Set("Content-Type", "application/json")
+	h.Set("Content-Length", fmt.Sprint(len(body)))
+	return &http.Response{StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)), Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+}
+
+type cred struct{}
+
+func (cred) GetToken(ctx context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	return azcore.AccessToken{Token: "tok", ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// fill sets every field of v (recursively, to a depth) to a sample.
+func fill(v reflect.Value, name string, depth int) {
+	switch v.Kind() {
+	case reflect.Ptr:
+		ek := v.Type().Elem().Kind()
+		if depth > 6 && (ek == reflect.Struct && v.Type().Elem() != timeType || ek == reflect.Slice || ek == reflect.Map) {
+			return
+		}
+		n := reflect.New(v.Type().Elem())
+		fill(n.Elem(), name, depth)
+		v.Set(n)
+	case reflect.String:
+		if strings.ToLower(name) == "provisioningstate" {
+			v.SetString("Succeeded")
+		} else if strings.Contains(strings.ToLower(name), "link") {
+			v.SetString(ep + "/next?$skiptoken=2")
+		} else {
+			v.SetString("s-" + strings.ToLower(name))
+		}
+	case reflect.Int32, reflect.Int64, reflect.Int:
+		v.SetInt(7)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1.5)
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			v.SetBytes([]byte("ab"))
+			return
+		}
+		if depth > 6 {
+			return
+		}
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fill(s.Index(0), name, depth+1)
+		if nilish(s.Index(0)) {
+			return
+		}
+		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		k := reflect.New(v.Type().Key()).Elem()
+		k.SetString("k1")
+		e := reflect.New(v.Type().Elem()).Elem()
+		fill(e, name, depth+1)
+		if nilish(e) {
+			return
+		}
+		m.SetMapIndex(k, e)
+		v.Set(m)
+	case reflect.Struct:
+		if v.Type() == timeType {
+			v.Set(reflect.ValueOf(fixed))
+			return
+		}
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Type().Field(i)
+			if !f.IsExported() || f.Name == "ResumeToken" {
+				continue
+			}
+			fill(v.Field(i), f.Name, depth+1)
+		}
+	case reflect.Interface:
+		if mk, ok := poly[v.Type()]; ok {
+			c := reflect.ValueOf(mk())
+			fill(c.Elem(), name, depth+1)
+			v.Set(c)
+			return
+		}
+		v.Set(reflect.ValueOf(map[string]any{"k": "v"}))
+	}
+}
+
+// optsJSON: the options' set fields by Go name; times as RFC 3339, a
+// struct as its JSON.
+func optsJSON(v reflect.Value) map[string]any {
+	out := map[string]any{}
+	if v.IsNil() {
+		return out
+	}
+	e := v.Elem()
+	for i := 0; i < e.NumField(); i++ {
+		f := e.Type().Field(i)
+		fv := e.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		x := fv.Interface()
+		if fv.Kind() == reflect.Ptr && fv.Elem().Type() == timeType {
+			x = fv.Elem().Interface().(time.Time).Format(time.RFC3339)
+		} else if fv.Kind() == reflect.Ptr && fv.Elem().Kind() == reflect.Struct {
+			b, _ := json.Marshal(x)
+			x = json.RawMessage(b)
+		} else if fv.Kind() == reflect.Ptr {
+			x = fv.Elem().Interface()
+		}
+		out[f.Name] = x
+	}
+	return out
+}
+
+// result: the response's header fields (times RFC 3339) and its body
+// model marshaled.
+func result(v reflect.Value) string {
+	var parts []string
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		fv := v.Field(i)
+		if f.Anonymous {
+			b, err := json.Marshal(fv.Interface())
+			parts = append(parts, fmt.Sprintf("body=%s%v", b, errText(err)))
+			continue
+		}
+		if f.Name == "Body" {
+			rc := fv.Interface().(io.ReadCloser)
+			b, _ := io.ReadAll(rc)
+			parts = append(parts, fmt.Sprintf("Body=%q", b))
+			continue
+		}
+		if bodyField(f) {
+			if isEmpty(fv) {
+				continue
+			}
+			b, err := json.Marshal(fv.Interface())
+			parts = append(parts, fmt.Sprintf("%s=%s%v", f.Name, b, errText(err)))
+			continue
+		}
+		if fv.Kind() != reflect.Ptr {
+			parts = append(parts, fmt.Sprintf("%s=%v", f.Name, fv.Interface()))
+			continue
+		}
+		if fv.IsNil() {
+			continue
+		}
+		x := fv.Elem().Interface()
+		if t, ok := x.(time.Time); ok {
+			x = t.UTC().Format(time.RFC3339)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%v", f.Name, x))
+	}
+	return strings.Join(parts, " ")
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return " error=" + err.Error()
+}
+
+func errLine(err error) string {
+	return strings.ReplaceAll(err.Error(), "\n", "\n| ")
+}
+
+// bodyField: a response's body that is not a model (Go's Value for a
+// string, map or any; <Model>Array for a list; Interface for any).
+func bodyField(f reflect.StructField) bool {
+	if f.Anonymous || f.Name == "Body" {
+		return false
+	}
+	switch f.Type.Kind() {
+	case reflect.Slice, reflect.Map, reflect.Interface:
+		return true
+	case reflect.Ptr:
+		return f.Name == "Value"
+	}
+	return false
+}
+
+// isEmpty: nil, or a list or map with nothing in it (here, as an empty
+// one, they print nothing).
+func isEmpty(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Map:
+		return v.Len() == 0
+	case reflect.Ptr, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
+}
+
+// respBody: a filled model of the response's embedded type, as JSON.
+func respBody(rt reflect.Type) string {
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if f.Anonymous {
+			v := reflect.New(f.Type).Elem()
+			fill(v, f.Name, 0)
+			b, _ := json.Marshal(v.Interface())
+			return string(b)
+		}
+		if f.Name == "Body" {
+			return "file <data>\n"
+		}
+		if bodyField(f) {
+			v := reflect.New(f.Type).Elem()
+			fill(v, f.Name, 0)
+			b, _ := json.Marshal(v.Interface())
+			return string(b)
+		}
+	}
+	return ""
+}
+
+func main() {
+	http.DefaultTransport = nil
+	cl := cloud.Configuration{ActiveDirectoryAuthorityHost: "https://login.example.test/", Services: map[cloud.ServiceName]cloud.ServiceConfiguration{cloud.ResourceManager: {Endpoint: ep, Audience: ep}}}
+	o := &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: fake{}, Retry: policy.RetryOptions{MaxRetries: -1}, Cloud: cl}}
+	sub := "sub-test"
+	_ = sub // a module whose clients all take none
+	mk := func(c any, err error) any {
+		if err != nil {
+			panic(err)
+		}
+		return c
+	}
+	clients := []struct {
+		name string
+		c    any
+	}{
+{{range .Clients}}		{"{{.Name}}", mk({{$.Pkg}}.New{{.Name}}({{if .Sub}}sub, {{end}}cred{}, o))},
+{{end}}	}
+	for _, cc := range clients {
+	c := cc.c
+	only := ""
+	if len(os.Args) > 1 {
+		only = os.Args[1]
+	}
+	cv := reflect.ValueOf(c)
+	ct := cv.Type()
+	ctx := reflect.ValueOf(context.Background())
+	for i := 0; i < ct.NumMethod(); i++ {
+		m := ct.Method(i)
+		if only != "" && cc.name+"."+m.Name != only {
+			continue
+		}
+		mt := m.Type
+		var args []reflect.Value
+		var spec []any
+		var opts reflect.Value
+		skip := false
+		strN := 0
+		for a := 1; a < mt.NumIn(); a++ {
+			at := mt.In(a)
+			switch {
+			case at.String() == "context.Context":
+				args = append(args, ctx)
+			case at.Kind() == reflect.Ptr && strings.HasSuffix(at.Elem().Name(), "Options"):
+				opts = reflect.New(at.Elem())
+				fill(opts.Elem(), "", 0)
+				args = append(args, opts)
+				spec = append(spec, map[string]any{"options": optsJSON(opts)})
+			case at.Kind() == reflect.String:
+				strN++
+				v := reflect.New(at).Elem()
+				if at.Name() != "string" {
+					// an enum: its first value
+					v.SetString("sha1")
+				} else {
+					v.SetString(fmt.Sprintf("id%d/ x", strN))
+				}
+				args = append(args, v)
+				spec = append(spec, v.String())
+			case at.Kind() == reflect.Int32 || at.Kind() == reflect.Int64 || at.Kind() == reflect.Int:
+				v := reflect.New(at).Elem()
+				v.SetInt(7)
+				args = append(args, v)
+				spec = append(spec, 7)
+			case at.Kind() == reflect.Bool:
+				v := reflect.New(at).Elem()
+				v.SetBool(true)
+				args = append(args, v)
+				spec = append(spec, true)
+			case at.Kind() == reflect.Float32 || at.Kind() == reflect.Float64:
+				v := reflect.New(at).Elem()
+				v.SetFloat(1.5)
+				args = append(args, v)
+				spec = append(spec, 1.5)
+			case at.Kind() == reflect.Struct:
+				v := reflect.New(at).Elem()
+				fill(v, at.Name(), 0)
+				args = append(args, v)
+				b, _ := json.Marshal(v.Interface())
+				spec = append(spec, json.RawMessage(b))
+			case at.Kind() == reflect.Interface && poly[at] != nil:
+				// a polymorphic body (a *Classification): its first
+				// concrete model, filled
+				v := reflect.New(at).Elem()
+				fill(v, at.Name(), 0)
+				args = append(args, v)
+				b, _ := json.Marshal(v.Interface())
+				spec = append(spec, json.RawMessage(b))
+			case at.Kind() == reflect.Interface:
+				t := map[string]any{"$schema": "s-schema", "resources": []any{}}
+				args = append(args, reflect.ValueOf(&t).Elem())
+				b, _ := json.Marshal(t)
+				spec = append(spec, json.RawMessage(b))
+			case at.String() == "io.ReadSeekCloser":
+				args = append(args, reflect.ValueOf(nopRSC{bytes.NewReader([]byte("x"))}))
+				spec = append(spec, "<stream>")
+			default:
+				fmt.Printf("SKIP %s arg %s\n", m.Name, at)
+				skip = true
+			}
+		}
+		sb, _ := json.Marshal(spec)
+		if skip {
+			continue
+		}
+		fmt.Printf("CALL %s.%s %s\n", cc.name, m.Name, sb)
+		if strings.HasPrefix(m.Name, "New") && strings.HasSuffix(m.Name, "Pager") {
+			pager := m.Func.Call(append([]reflect.Value{cv}, args...))[0]
+			rt := pager.Type().Method(0)
+			_ = rt
+			np := pager.MethodByName("NextPage")
+			respT := np.Type().Out(0)
+			body = respBody(respT)
+			status = 200
+			for page := 1; page <= 2; page++ {
+				more := pager.MethodByName("More").Call(nil)[0].Bool()
+				if !more {
+					fmt.Printf("OUT page %d: no more\n", page)
+					break
+				}
+				out := np.Call([]reflect.Value{ctx})
+				fmt.Println(lastReq)
+				fmt.Printf("  SERVED %d %s\n", status, body)
+				if e, _ := out[1].Interface().(error); e != nil {
+					fmt.Printf("OUT page %d: error: %s\n", page, errLine(e))
+					break
+				}
+				fmt.Printf("OUT page %d: %s\n", page, result(out[0]))
+			}
+			continue
+		}
+		if strings.HasPrefix(m.Name, "Begin") {
+			pt := mt.Out(0)
+			pud, _ := pt.MethodByName("PollUntilDone")
+			respT := pud.Type.Out(0)
+			// a long-running operation whose result is a pager
+			// (EnvironmentsClient.BeginChangeVnet): its page's body
+			lroPager := strings.Contains(respT.String(), "runtime.Pager[")
+			if lroPager {
+				np, _ := respT.MethodByName("NextPage")
+				respT = np.Type.Out(0)
+			}
+			body = respBody(respT)
+			var out []reflect.Value
+			for _, st := range []int{200, 201, 202, 204} {
+				status = st
+				out = m.Func.Call(append([]reflect.Value{cv}, args...))
+				e, _ := out[1].Interface().(error)
+				var re *azcore.ResponseError
+				if e != nil && asResp(e, &re) && re.StatusCode == st {
+					continue
+				}
+				break
+			}
+			fmt.Println(lastReq)
+			fmt.Printf("  SERVED %d %s\n", status, body)
+			if e, _ := out[1].Interface().(error); e != nil {
+				fmt.Printf("OUT: error: %s\n", errLine(e))
+				continue
+			}
+			r := out[0].MethodByName("PollUntilDone").Call([]reflect.Value{ctx, reflect.ValueOf(&runtime.PollUntilDoneOptions{Frequency: time.Second})})
+			if e, _ := r[1].Interface().(error); e != nil {
+				fmt.Printf("OUT: error: %s\n", errLine(e))
+				continue
+			}
+			if lroPager {
+				pager := r[0]
+				if pager.IsNil() {
+					fmt.Printf("OUT: nil pager\n")
+					continue
+				}
+				np := pager.MethodByName("NextPage")
+				for page := 1; page <= 2; page++ {
+					// Go's pager from a long-running operation's result has
+					// no handler (azcore v1.23.3): More panics; noted as is
+					var more bool
+					func() {
+						defer func() {
+							if e := recover(); e != nil {
+								fmt.Printf("OUT page %d: panic: %v\n", page, e)
+								page = 99
+							}
+						}()
+						more = pager.MethodByName("More").Call(nil)[0].Bool()
+					}()
+					if page == 99 {
+						break
+					}
+					if !more {
+						fmt.Printf("OUT page %d: no more\n", page)
+						break
+					}
+					out := np.Call([]reflect.Value{ctx})
+					fmt.Println(lastReq)
+					fmt.Printf("  SERVED %d %s\n", status, body)
+					if e, _ := out[1].Interface().(error); e != nil {
+						fmt.Printf("OUT page %d: error: %s\n", page, errLine(e))
+						break
+					}
+					fmt.Printf("OUT page %d: %s\n", page, result(out[0]))
+				}
+				continue
+			}
+			fmt.Printf("OUT: %s\n", result(r[0]))
+			continue
+		}
+		respT := mt.Out(0)
+		body = respBody(respT)
+		var out []reflect.Value
+		for _, st := range []int{200, 201, 202, 204} {
+			status = st
+			out = m.Func.Call(append([]reflect.Value{cv}, args...))
+			e, _ := out[1].Interface().(error)
+			var re *azcore.ResponseError
+			if e != nil && asResp(e, &re) && re.StatusCode == st {
+				continue
+			}
+			break
+		}
+		fmt.Println(lastReq)
+		fmt.Printf("  SERVED %d %s\n", status, body)
+		if e, _ := out[1].Interface().(error); e != nil {
+			fmt.Printf("OUT: error: %s\n", errLine(e))
+			continue
+		}
+		fmt.Printf("OUT: %s\n", result(out[0]))
+	}
+	}
+}
+
+func asResp(e error, re **azcore.ResponseError) bool {
+	r, ok := e.(*azcore.ResponseError)
+	if ok {
+		*re = r
+	}
+	return ok
+}
+
+type nopRSC struct{ *bytes.Reader }
+
+func (nopRSC) Close() error { return nil }
+
+// nilish: an element the depth limit left unset (a nil pointer, slice,
+// map or interface), which Go would marshal as null.
+func nilish(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
+}

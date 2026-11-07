@@ -8,40 +8,40 @@ use std/testing
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/runtime
 
-const GV_HOST: Str = "https://management.example.test"
+const SC_HOST: Str = "https://management.example.test"
 /// Whether a request without a token gets Key Vault's challenge.
-const GV_CHALLENGE: Bool = false
+const SC_CHALLENGE: Bool = false
 
-struct GvReply {
+struct ScReply {
   status: Int
   headers: List[(Str, Str)] = []
   body: Str = "{}"
 }
 
-struct GvFake {
+struct ScFake {
   log: Mutex[List[Str]]
-  queue: Mutex[List[(Str, GvReply)]]
+  queue: Mutex[List[(Str, ScReply)]]
 }
 
-fn gv_serve(net: testing.FakeNet) -> GvFake {
-  let f = GvFake{log: Mutex[List[Str]].new([]), queue: Mutex[List[(Str, GvReply)]].new([])}
-  let h = fn(req: http.Request) -> http.Response { gv_answer(f, req) }
+fn sc_serve(net: testing.FakeNet) -> ScFake {
+  let f = ScFake{log: Mutex[List[Str]].new([]), queue: Mutex[List[(Str, ScReply)]].new([])}
+  let h = fn(req: http.Request) -> http.Response { sc_answer(f, req) }
   for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
-    net.handle("${m} ${GV_HOST}/{rest...}", h)
+    net.handle("${m} ${SC_HOST}/{rest...}", h)
   }
   f
 }
 
 /// Queues `r` for the next `method path` request.
-fn gv_add(f: GvFake, method: Str, path: Str, r: GvReply) {
-  f.queue.with(fn(var q: List[(Str, GvReply)]) { q.push(("${method} ${path}", r)) })
+fn sc_add(f: ScFake, method: Str, path: Str, r: ScReply) {
+  f.queue.with(fn(var q: List[(Str, ScReply)]) { q.push(("${method} ${path}", r)) })
 }
 
-fn gv_note(f: GvFake, s: Str) {
+fn sc_note(f: ScFake, s: Str) {
   f.log.with(fn(var l: List[Str]) { l.push(s) })
 }
 
-fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
+fn sc_answer(f: ScFake, req: http.Request) -> http.Response {
   var hs: List[Str] = []
   for (k, v) in req.headers {
     let lk = k.to_lower()
@@ -57,12 +57,12 @@ fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
   }
   let qs = req.raw_query()
   let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
-  gv_note(f, "REQ ${req.method} ${GV_HOST}${uri}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}")
-  if GV_CHALLENGE && req.header("Authorization").is_none() {
+  sc_note(f, "REQ ${req.method} ${SC_HOST}${uri}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}")
+  if SC_CHALLENGE && req.header("Authorization").is_none() {
     return http.text(401, "").with_header("WWW-Authenticate", "Bearer authorization=\"https://login.example.test/tenant-a\", resource=\"https://vault.example.test\"")
   }
   let key = "${req.method} ${req.escaped_path()}"
-  let found = f.queue.with(fn(var q: List[(Str, GvReply)]) -> GvReply? {
+  let found = f.queue.with(fn(var q: List[(Str, ScReply)]) -> ScReply? {
     for i in 0..q.len() {
       if q[i].0 == key {
         let r = q[i].1
@@ -72,7 +72,7 @@ fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
     }
     None
   })
-  let r = found ?? GvReply{status: 200}
+  let r = found ?? ScReply{status: 200}
   var resp = http.text(r.status, r.body).with_header("Content-Type", "application/json")
   for (k, v) in r.headers {
     resp = resp.with_header(k, v)
@@ -82,38 +82,38 @@ fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
 
 /// `v` as Go's json.Marshal writes the response struct: keys sorted
 /// (as models_serde.go's MarshalJSON writes them), <, > and & escaped.
-fn gv_json(v: json.Value) -> Str {
+fn sc_json(v: json.Value) -> Str {
   var w = json.json_writer()
-  w.value(gv_sorted(v)) ?? e => return "unencodable: ${e.display()}"
+  w.value(sc_sorted(v)) ?? e => return "unencodable: ${e.display()}"
   w.finish().to_str_lossy()
 }
 
-fn gv_sorted(v: json.Value) -> json.Value {
+fn sc_sorted(v: json.Value) -> json.Value {
   match v {
-    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, gv_sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
-    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { gv_sorted(x) }))
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sc_sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { sc_sorted(x) }))
     other => other
   }
 }
 
 /// The Go program's line for a call's result: `out` writes the value.
-fn gv_show[T](f: GvFake, label: Str, r: Result[T, azcore.CallErr], out: fn(T) -> Str) {
+fn sc_show[T](f: ScFake, label: Str, r: Result[T, azcore.CallErr], out: fn(T) -> Str) {
   match r {
-    Ok(v) => gv_note(f, "OUT ${label}: ${out(v)}")
-    Err(e) => gv_note(f, "ERR ${label}: ${gv_err(e)}")
+    Ok(v) => sc_note(f, "OUT ${label}: ${out(v)}")
+    Err(e) => sc_note(f, "ERR ${label}: ${sc_err(e)}")
   }
 }
 
 /// The Go program's line for a poller's resume token.
-fn gv_token[T](f: GvFake, label: Str, p: runtime.Poller[T]) {
+fn sc_token[T](f: ScFake, label: Str, p: runtime.Poller[T]) {
   match p.resume_token() {
-    Ok(t) => gv_note(f, "TOK ${label}: ${t}")
-    Err(e) => gv_note(f, "ERR ${label}: ${e}")
+    Ok(t) => sc_note(f, "TOK ${label}: ${t}")
+    Err(e) => sc_note(f, "ERR ${label}: ${e}")
   }
 }
 
 /// Go's `%v` of an error, or the Go program's form of a response error.
-fn gv_err(e: azcore.CallErr) -> Str {
+fn sc_err(e: azcore.CallErr) -> Str {
   match e {
     InvalidInput(m) => m
     Response(re) => "response error ${re.status_code} ${re.error_code}"
@@ -123,7 +123,7 @@ fn gv_err(e: azcore.CallErr) -> Str {
 }
 
 /// Each logged line against Go's, the first difference reported.
-fn gv_check(f: GvFake) {
+fn sc_check(f: ScFake) {
   let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.join("\n").split("\n") })
   for i in 0..got.len() {
     if i >= GO_OUT.len() {
