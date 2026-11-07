@@ -8,6 +8,11 @@ version has been tagged since.
 
 ## Unreleased
 
+The SSE test reads a streamed response as the FakeNet server flushes
+it (the server's second event waits until the reader has returned the
+first); needs xo 3b2e4b78d or later, whose FakeNet sends an
+`http.stream` body flush by flush.
+
 The generator (`codegen`), for ai/azopenai: `keep_definitions` (Go's
 autorest.md filter of definitions by name), a hand written type for a
 field of an `x-ms-external` type (`field_types` by `model.field`), and

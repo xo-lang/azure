@@ -283,3 +283,37 @@ test "the SSE reader and sse_response do what Go's do" {
   }
   expect(got.len()) == SSE_GO.len()
 }
+
+test "a streamed response's events arrive as the server flushes them" {
+  // the server writes its second event only after the reader has
+  // returned the first: a body read whole would wait forever
+  let next = Chan[Int].new(1)
+  os.net.handle("GET https://live.example.test/events", fn(req: http.Request) -> http.Response {
+    let resp = http.stream(200, fn(w: http.BodyWriter) -> () ! IoErr {
+      w.write(b"id: 1\ndata: first\n\n")?
+      w.flush()?
+      let _ = next.recv()
+      w.write(b"data: sec")?
+      w.flush()?
+      w.write(b"ond\n\n")?
+      w.flush()?
+    })
+    resp with {headers: {"Content-Type": "text/event-stream"}}
+  })
+  let c = os.clock
+  let p = new_pipeline("ssetest", "v0.0.0", os.net, c, os.rand, PipelineOptions{}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1, retry_delay: 0s}})
+  let connect = fn(last: Str) -> streaming.Body? ! streaming.SSEErr uses (net.dial, clock, rand) {
+    let req = streamed(policy.Request{method: "GET", url: "https://live.example.test/events", headers: [("Accept", "text/event-stream")]})
+    sse_response(req, p.send(req), [200])
+  }
+  let decode = fn(f: streaming.SSEFrame) -> streaming.Decoded[Str] ! Str {
+    Ok(streaming.Decoded.Event((f.data ?? b"").to_str_lossy()))
+  }
+  var r = streaming.new_sse_reader(connect, streaming.SSEHandler{decode: decode}, c, streaming.SSEReaderOptions{})?
+  expect(r.next()?) == Some("first")
+  expect(r.last_event_id()) == "1"
+  next.send(1)
+  expect(r.next()?) == Some("second")
+  expect(r.next()?) == None
+  r.close()
+}
