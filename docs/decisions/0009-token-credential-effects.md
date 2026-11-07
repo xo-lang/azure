@@ -65,10 +65,11 @@ pub interface TokenCredential[fx: Effects] {
 
 ### Call sites
 
-A constructor's parameter `cred: azcore.TokenCredential`, written
-without arguments, is an implicit effect variable. The generated code
-does not change. A caller passing a credential that performs nothing
-does not change either:
+A constructor names one effect parameter for its credential and its
+options (`cred: azcore.TokenCredential[fx]`, `opts:
+ClientOptions[fx]`): written without arguments, they would be two
+implicit variables (see the call-site check below). A caller passing a
+credential that performs nothing does not change:
 
 ```
 // before and after: unchanged
@@ -144,6 +145,39 @@ natively:
 A generic `ChainedTokenCredential[fx]` dispatched through
 `TokenCredential` does not.
 
+## Call-site check (2026-11-06, on xo fb952a75a)
+
+Before azcore's types change, azblob was moved to this shape on a
+branch, and decision 0009's call sites were written as azblob tests
+(`fx_callsite_test.xo`). What held, and what did not:
+
+- Held: a caller passing a credential that performs nothing does not
+  change; a credential that reads a file is named once
+  (`let cred: azcore.TokenCredential[fs.read] = ...`); a caller's
+  function taking `azblob.Client` without arguments takes either
+  client; a closure type that fixes its effects writes
+  `Client[fs.read]`. Checked natively and on LLVM. azblob does not
+  build on the Go backend on main either (a default argument helper
+  name collision, sent to the lead), so that backend waits.
+- Did not hold: "the generated code does not change". A constructor
+  whose `cred: azcore.TokenCredential` and `opts: ClientOptions` are
+  both written without arguments gets two implicit effect variables,
+  and the pipeline built from both needs one. So each constructor
+  names it: `pub fn new_x_client[fx: Effects](..., cred:
+  azcore.TokenCredential[fx], opts: arm.ClientOptions[fx] = ...) ->
+  XClient[fx]`. That is one template line in codegen/gen/emit.xo, and
+  every generated constructor regenerates. Callers do not change.
+- Did not hold: `policy.ClientOptions`, the client options structs
+  and the hand-written clients' internal helpers name `fx` too
+  (`per_call_policies: List[Policy[fx]]`).
+- Pending ADR 0540 (xo, Proposed): a policy struct whose `send` takes
+  `next: policy.Next` written without arguments is not yet a
+  `Policy[fx]`. Until 0540 lands, every policy type, a caller's own
+  included, carries a phantom parameter (`struct P[fx: Effects]`,
+  `fn (p: P[fx]) send(req, next: policy.Next[fx]) ... uses (..., fx)`),
+  and a caller's list of its own policies is written
+  `List[policy.Policy[()]]`. With 0540, neither changes.
+
 ## Consequences
 
 - Arc can be ported with MSAL Go's checks:
@@ -158,7 +192,8 @@ A generic `ChainedTokenCredential[fx]` dispatched through
   Those clients' operations perform `fs.read`, so `xo audit` shows the
   file read that Arc can do.
 - 300 generated constructors and the hand-written core change in their
-  types only. The generator emits `azcore.TokenCredential` unchanged.
+  types only. The generator names `[fx: Effects]` on each constructor
+  (see the call-site check above); callers do not change.
 - The work waits on the native backend feature (XO1201, planned). The
   lead would ask for it, with the prototype as its test.
 

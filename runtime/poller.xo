@@ -41,8 +41,8 @@ pub const LOCATION: Str = "location"
 pub const ORIGINAL_URI: Str = "original-uri"
 pub const OPERATION_LOCATION: Str = "operation-location"
 
-pub struct Poller[T] {
-  pub pipeline: Pipeline
+pub struct Poller[T, fx: Effects] {
+  pub pipeline: Pipeline[fx]
   pub decode: fn(http.Response) -> T ! Str
   /// The result type's name in resume tokens, as azcore's
   /// getTokenTypeName writes it: the bare Go type name
@@ -71,7 +71,7 @@ fn header_of(resp: http.Response, name: Str) -> Str? {
 }
 
 /// The poller of the operation `req` started with `resp`.
-pub fn new_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+pub fn new_poller[T, fx: Effects](pipeline: Pipeline[fx], req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T, fx] ! azcore.CallErr {
   if ![200, 201, 202, 204].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }
@@ -122,7 +122,7 @@ fn valid_url(u: Str) -> () ! azcore.CallErr {
 /// (backup/internal/pollers of azadmin v1.5.0; MIT, Copyright (c)
 /// Microsoft Corporation; NOTICE.md): it polls the `Azure-AsyncOperation`
 /// URL, as sent, and the last status response is the result.
-pub fn new_status_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+pub fn new_status_poller[T, fx: Effects](pipeline: Pipeline[fx], req: policy.Request, resp: http.Response, final_state_via: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T, fx] ! azcore.CallErr {
   let a = header_of(resp, "Azure-AsyncOperation") ?? return Err(azcore.CallErr.InvalidInput("response is missing Azure-AsyncOperation header"))
   if !is_absolute(a) {
     return Err(azcore.CallErr.InvalidInput("invalid polling URL ${a}"))
@@ -132,7 +132,7 @@ pub fn new_status_poller[T](pipeline: Pipeline, req: policy.Request, resp: http.
 }
 
 /// A status poller from `token` (its resume_token, or Go's restorePoller's).
-pub fn resume_status_poller[T](pipeline: Pipeline, token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+pub fn resume_status_poller[T, fx: Effects](pipeline: Pipeline[fx], token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T, fx] ! azcore.CallErr {
   let doc = json.parse_value(token) ?? e => return Err(azcore.CallErr.InvalidInput("a resume token is JSON: ${e.display()}"))
   let f = fn(v: json.Value?, k: Str) -> Str {
     match v.and_then(fn(x: json.Value) -> json.Value? { x.get(k) }) {
@@ -210,17 +210,17 @@ pub fn resolve(base: Str, ref: Str) -> Str {
 }
 
 /// Whether the operation reached a terminal state.
-pub fn (p: Poller[T]) done() -> Bool {
+pub fn (p: Poller[T, fx]) done() -> Bool {
   succeeded(p.state) || failed(p.state)
 }
 
 /// The operation's state as last seen.
-pub fn (p: Poller[T]) status() -> Str {
+pub fn (p: Poller[T, fx]) status() -> Str {
   p.state
 }
 
 /// Polls once; returns the poll's response.
-pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: Poller[T, fx]) poll() -> http.Response ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if p.done() {
     return Ok(p.last ?? http.text(200, ""))
   }
@@ -297,7 +297,7 @@ pub fn (var p: Poller[T]) poll() -> http.Response ! azcore.CallErr uses (net.dia
 /// The final result, as each of azcore's pollers gives it: an error when
 /// the operation failed, else the result body, fetched by method and
 /// final-state-via.
-pub fn (var p: Poller[T]) result() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: Poller[T, fx]) result() -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if !p.done() {
     return Err(azcore.CallErr.InvalidInput("poller is in a non-terminal state"))
   }
@@ -362,7 +362,7 @@ pub fn (var p: Poller[T]) result() -> T ! azcore.CallErr uses (net.dial, clock, 
 }
 
 /// GETs `url`, when there is one, as the response the result comes from.
-fn (var p: Poller[T]) final_get(url: Str?) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (var p: Poller[T, fx]) final_get(url: Str?) -> () ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if let Some(u) = url {
     let r = p.pipeline.send(policy.Request{method: "GET", url: u}) ?? e => return Err(azcore.CallErr.Send(e))
     p.last = Some(r)
@@ -375,7 +375,7 @@ fn (var p: Poller[T]) final_get(url: Str?) -> () ! azcore.CallErr uses (net.dial
 /// azcore's ResultHelper over the last response: a 204 is the zero
 /// result, a failure or an unexpected status the response's error, an
 /// empty body the zero result.
-fn (p: Poller[T]) result_of(op_failed: Bool) -> T ! azcore.CallErr {
+fn (p: Poller[T, fx]) result_of(op_failed: Bool) -> T ! azcore.CallErr {
   let resp = p.last ?? http.text(200, "")
   if resp.status == 204 {
     return p.zero()
@@ -389,7 +389,7 @@ fn (p: Poller[T]) result_of(op_failed: Bool) -> T ! azcore.CallErr {
   (p.decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
 }
 
-fn (p: Poller[T]) zero() -> T ! azcore.CallErr {
+fn (p: Poller[T, fx]) zero() -> T ! azcore.CallErr {
   (p.decode)(http.text(200, "{}")) ?? e => Err(azcore.CallErr.Decode(e))
 }
 
@@ -422,7 +422,7 @@ fn resource_location(resp: http.Response) -> Str? ! azcore.CallErr {
 
 /// Polls until done, waiting `frequency` (at least 1 s) or the
 /// response's Retry-After between polls, then gives the result.
-pub fn (var p: Poller[T]) poll_until_done(clock: Clock, frequency: Duration = 30s) -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: Poller[T, fx]) poll_until_done(clock: Clock, frequency: Duration = 30s) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   let every = if frequency < 1s { 1s } else { frequency }
   while !p.done() {
     let resp = p.poll()?
@@ -434,7 +434,7 @@ pub fn (var p: Poller[T]) poll_until_done(clock: Clock, frequency: Duration = 30
 }
 
 /// azcore's resume token: `{"type": ..., "token": {...}}`.
-pub fn (p: Poller[T]) resume_token() -> Str ! Str {
+pub fn (p: Poller[T, fx]) resume_token() -> Str ! Str {
   if p.done() {
     return Err("poller is in a terminal state")
   }
@@ -454,7 +454,7 @@ pub fn (p: Poller[T]) resume_token() -> Str ! Str {
 }
 
 /// A poller from `token` (resume_token's, or a Go program's).
-pub fn resume_poller[T](pipeline: Pipeline, token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T] ! azcore.CallErr {
+pub fn resume_poller[T, fx: Effects](pipeline: Pipeline[fx], token: Str, type_name: Str, decode: fn(http.Response) -> T ! Str) -> Poller[T, fx] ! azcore.CallErr {
   let doc = json.parse_value(token) ?? e => return Err(azcore.CallErr.InvalidInput("a resume token is JSON: ${e.display()}"))
   let f = fn(v: json.Value?, k: Str) -> Str {
     match v.and_then(fn(x: json.Value) -> json.Value? { x.get(k) }) {

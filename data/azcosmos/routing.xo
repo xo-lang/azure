@@ -202,16 +202,16 @@ struct GemState {
 /// every 5 minutes, and at once after an endpoint is marked unavailable
 /// (then in the call that notices, where Go refreshes in the
 /// background). One refresh runs at a time; others wait for it.
-struct Gem {
+struct Gem[fx: Effects] {
   endpoint: Str
-  pipeline: runtime.Pipeline
+  pipeline: runtime.Pipeline[fx]
   clock: Clock
   rand: Rand
   preferred: List[Str]
   state: Mutex[GemState]
 }
 
-fn new_gem(endpoint: Str, pipeline: runtime.Pipeline, clock: Clock, rand: Rand, preferred: List[Str]) -> Gem {
+fn new_gem[fx: Effects](endpoint: Str, pipeline: runtime.Pipeline[fx], clock: Clock, rand: Rand, preferred: List[Str]) -> Gem[fx] {
   Gem{endpoint: endpoint, pipeline: pipeline, clock: clock, rand: rand, preferred: preferred, state: Mutex.new(GemState{locations: new_locations(endpoint, preferred)})}
 }
 
@@ -229,10 +229,10 @@ fn (s: GemState) should_refresh(now: Time) -> Bool {
 
 /// Reads the account when due (or now, when `force`); the error of the
 /// last read while the account was never read.
-fn (g: Gem) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (g: Gem[fx]) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   // The closure's value is the outcome, so a failed read still records
   // its attempt and error (a closure's Err would undo them).
-  let outcome = g.state.with(fn(var s: GemState) -> Result[(), azcore.CallErr] uses (net.dial, clock, rand) {
+  let outcome = g.state.with(fn(var s: GemState) -> Result[(), azcore.CallErr] uses (net.dial, clock, rand, fx) {
     let now = g.clock.now()
     if !force && !s.should_refresh(now) {
       return match s.last_err {
@@ -285,11 +285,11 @@ fn (g: Gem) mark(endpoint: Str, op: Int) -> Bool {
 /// Go's globalEndpointManagerPolicy: the account read before the first
 /// call and when due, and the tentative-writes header on a multi-write
 /// account.
-struct GemPolicy {
-  gem: Gem
+struct GemPolicy[fx: Effects] {
+  gem: Gem[fx]
 }
 
-fn (p: GemPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: GemPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   match p.gem.update(false) {
     Ok(_) => ()
     Err(azcore.CallErr.Send(e)) => return Err(e)
@@ -315,8 +315,8 @@ struct RetryState {
 /// azcore's tries: it picks the endpoint of every attempt and retries
 /// the Cosmos failures in place or in another region. A response it
 /// gives up on is final (azcore does not retry it again).
-struct CosmosRetryPolicy {
-  gem: Gem
+struct CosmosRetryPolicy[fx: Effects] {
+  gem: Gem[fx]
 }
 
 /// Go's classifyNetworkError: a failed connect was not sent; a timeout
@@ -329,7 +329,7 @@ fn network_kind(e: http.ClientErr) -> Int {
   }
 }
 
-fn (p: CosmosRetryPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: CosmosRetryPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   let write = req.values.get("cosmos.write") == Some("1")
   let document = req.values.get("cosmos.document") == Some("1")
   var st = RetryState{}

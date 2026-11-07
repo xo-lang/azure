@@ -1,0 +1,53 @@
+// Decision 0009's call sites, as written there: a credential that
+// performs nothing beyond the network passes unchanged; one that reads a
+// file is named once, where it becomes an interface value; a function
+// taking a client without effect arguments takes either; a closure type
+// that fixes its effects names them.
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+struct PureCred {}
+
+fn (c: PureCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("t1"), expires_on: Time.from_unix(1893456000)})
+}
+
+/// Reads its token from a file on each call, as Arc's key file is read.
+struct FileCred {
+  fs: Fs
+}
+
+fn (c: FileCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fs.read) {
+  let k = c.fs.read("/tokens/a.key") ?? e => return Err(azcore.AuthErr{credential: "FileCred", msg: e.display()})
+  Ok(azcore.AccessToken{token: Secret.new(k.to_str_lossy()), expires_on: Time.from_unix(1893456000)})
+}
+
+/// A caller's function taking a client without effect arguments.
+fn auth_of(c: Client, blob: Str) -> Str ! Str uses (net.dial, clock, rand) {
+  let r = c.download_buffer("photos", blob) ?? e => return Err(e.display())
+  Ok(r.body.to_str_lossy())
+}
+
+fn echo_auth(net: testing.FakeNet) {
+  net.handle("GET ${EP}/photos/{blob}", fn(req: http.Request) -> http.Response {
+    http.text(200, req.header("Authorization") ?? "")
+  })
+}
+
+test "0009: a credential that performs nothing passes unchanged" {
+  echo_auth(os.net)
+  let c = new_client(os.net, os.clock, os.rand, EP, PureCred{}, ClientOptions{insecure_allow_credential_with_http: true})
+  expect(auth_of(c, "a")?) == "Bearer t1"
+}
+
+test "0009: a credential that reads a file is named once" {
+  echo_auth(os.net)
+  os.fs.write("/tokens/a.key", b"k1")?
+  let cred: azcore.TokenCredential[fs.read] = FileCred{fs: os.fs}
+  let c = new_client(os.net, os.clock, os.rand, EP, cred, ClientOptions{insecure_allow_credential_with_http: true})
+  expect(auth_of(c, "a")?) == "Bearer k1"
+  // a closure whose type fixes its effects names the client's
+  let f = fn(x: Client[fs.read]) -> Str ! Str uses (net.dial, clock, rand, fs.read) { auth_of(x, "b") }
+  expect(f(c)?) == "Bearer k1"
+}

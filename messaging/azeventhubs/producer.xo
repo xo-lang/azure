@@ -26,27 +26,27 @@ struct SenderLink {
   gen: Int
 }
 
-pub struct ProducerClient {
-  ns: Namespace
+pub struct ProducerClient[fx: Effects] {
+  ns: Namespace[fx]
   event_hub: Str
   retry_options: RetryOptions
   /// The links by partition id, "" for the hub's (any partition).
   links: Mutex[Map[Str, SenderLink]]
 }
 
-fn producer(ns: Namespace, event_hub: Str, options: ProducerClientOptions) -> ProducerClient {
+fn producer[fx: Effects](ns: Namespace[fx], event_hub: Str, options: ProducerClientOptions) -> ProducerClient[fx] {
   ProducerClient{ns: ns with {custom_endpoint: options.custom_endpoint}, event_hub: event_hub, retry_options: options.retry_options, links: Mutex[Map[Str, SenderLink]].new({})}
 }
 
 /// A producer for `event_hub` in the namespace
 /// (`<name>.servicebus.windows.net`) with an Entra ID credential.
-pub fn new_producer_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, credential: azcore.TokenCredential, options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient ! Str {
+pub fn new_producer_client[fx: Effects](net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, credential: azcore.TokenCredential[fx], options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient[fx] ! Str {
   Ok(producer(namespace(net, clock, rand, fully_qualified_namespace, true, Auth.Credential(credential), options.application_id, options.timeout_ms), event_hub, options))
 }
 
 /// A producer from a connection string. The event hub is the string's
 /// EntityPath, or `event_hub` when it has none (exactly one of them).
-pub fn new_producer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str = "", options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient ! Str {
+pub fn new_producer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str = "", options: ProducerClientOptions = ProducerClientOptions{}) -> ProducerClient[()] ! Str {
   let (ns, hub) = namespace_from_connection_string(net, clock, rand, connection_string, event_hub, options.application_id, options.timeout_ms)?
   Ok(producer(ns, hub, options))
 }
@@ -58,10 +58,10 @@ fn (pc: ProducerClient) entity_path(partition_id: Str) -> Str {
 
 /// The partition's link, attached again when there is none or it is on
 /// a dropped connection. Mixed settlement, as Go's.
-fn (pc: ProducerClient) link(partition_id: Str) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand) {
+fn (pc: ProducerClient[fx]) link(partition_id: Str) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand, fx) {
   let ns = pc.ns
   let path = pc.entity_path(partition_id)
-  pc.links.with(fn(var m: Map[Str, SenderLink]) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand) {
+  pc.links.with(fn(var m: Map[Str, SenderLink]) -> SenderLink ! EventHubsErr uses (net.dial, clock, rand, fx) {
     if let Some(x) = m.get(partition_id) {
       if x.gen == ns.current_gen() {
         return Ok(x)
@@ -121,15 +121,15 @@ const BATCH_MESSAGE_FORMAT: Int = 0x80013700
 /// An empty batch, sized for the partition's link (which attaches here,
 /// as Go's). A link that names no size (0, AMQP's no limit) takes no
 /// limit.
-pub fn (pc: ProducerClient) new_event_data_batch(options: EventDataBatchOptions = EventDataBatchOptions{}) -> EventDataBatch ! EventHubsErr uses (net.dial, clock, rand) {
+pub fn (pc: ProducerClient[fx]) new_event_data_batch(options: EventDataBatchOptions = EventDataBatchOptions{}) -> EventDataBatch ! EventHubsErr uses (net.dial, clock, rand, fx) {
   if options.partition_id.is_some() && options.partition_key.is_some() {
     return Err(fatal("either PartitionID or PartitionKey can be set, but not both"))
   }
   let pid = options.partition_id ?? ""
-  let link_max = pc.ns.retry(pc.retry_options, fn(_: Int) -> Int ! EventHubsErr uses (net.dial, clock, rand) {
+  let link_max = pc.ns.retry(pc.retry_options, fn(_: Int) -> Int ! EventHubsErr uses (net.dial, clock, rand, fx) {
     let x = pc.link(pid)?
     Ok(x.l.remote_attach().map(fn(a: amqp.Attach) -> Int { a.max_message_size }) ?? 0)
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(pid, k) })?
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { pc.recover(pid, k) })?
   if options.max_bytes != 0 && link_max != 0 && options.max_bytes > link_max {
     return Err(fatal("maximum message size for batch was set to ${options.max_bytes} bytes, which is larger than the maximum size allowed by link (${link_max})"))
   }
@@ -206,7 +206,7 @@ pub struct SendEventDataBatchOptions {}
 
 /// Sends the batch in one transfer (message format 0x80013700) to its
 /// partition, or the hub's link, with retries.
-pub fn (pc: ProducerClient) send_event_data_batch(batch: EventDataBatch, options: SendEventDataBatchOptions = SendEventDataBatchOptions{}) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+pub fn (pc: ProducerClient[fx]) send_event_data_batch(batch: EventDataBatch, options: SendEventDataBatchOptions = SendEventDataBatchOptions{}) -> () ! EventHubsErr uses (net.dial, clock, rand, fx) {
   let env = batch.envelope ?? return Err(fatal("batch is nil or empty"))
   if batch.encoded.is_empty() {
     return Err(fatal("batch is nil or empty"))
@@ -214,7 +214,7 @@ pub fn (pc: ProducerClient) send_event_data_batch(batch: EventDataBatch, options
   // The envelope is the first event, so it carries the partition key.
   let m = env with {body: amqp.Body.Data(sections: batch.encoded)}
   let pid = batch.partition_id ?? ""
-  pc.ns.retry(pc.retry_options, fn(_: Int) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+  pc.ns.retry(pc.retry_options, fn(_: Int) -> () ! EventHubsErr uses (net.dial, clock, rand, fx) {
     let x = pc.link(pid)?
     let st = x.l.send(m, message_format: BATCH_MESSAGE_FORMAT) ?? e => return Err(from_amqp(e))
     match st {
@@ -222,7 +222,7 @@ pub fn (pc: ProducerClient) send_event_data_batch(batch: EventDataBatch, options
       Some(amqp.DeliveryState.Rejected(Some(w))) => Err(from_wire(w))
       Some(other) => Err(EventHubsErr{msg: "the batch was not accepted: ${other:?}", recovery: RecoveryKind.None})
     }
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(pid, k) })
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { pc.recover(pid, k) })
 }
 
 /// Detaches the links and closes the connection.

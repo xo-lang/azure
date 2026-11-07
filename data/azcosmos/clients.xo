@@ -77,8 +77,8 @@ fn raw_elements(text: Str, key: Str) -> List[Str] ! Str {
 
 /// A query's pages: the first request, then the same with each page's
 /// continuation token until a page has none.
-pub struct QueryPager[T] {
-  core: Core
+pub struct QueryPager[T, fx: Effects] {
+  core: Core[fx]
   call: Call
   decode: fn(http.Response) -> T ! Str
   continuation_of: fn(T) -> Str?
@@ -89,12 +89,12 @@ pub struct QueryPager[T] {
   failed: azcore.CallErr? = None
 }
 
-pub fn (p: QueryPager[T]) more() -> Bool {
+pub fn (p: QueryPager[T, fx]) more() -> Bool {
   p.failed.is_none() && (!p.started || p.next_token.is_some())
 }
 
 /// The next page; once a fetch fails, that error again with no request.
-pub fn (var p: QueryPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: QueryPager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if let Some(e) = p.failed {
     return Err(e)
   }
@@ -110,7 +110,7 @@ pub fn (var p: QueryPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, 
   }
 }
 
-fn (var p: QueryPager[T]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (var p: QueryPager[T, fx]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   var call = p.call
   if p.started {
     let tok = p.next_token ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
@@ -172,13 +172,13 @@ pub fn (c: Client) create_database(properties: DatabaseProperties, options: Crea
 }
 
 /// A client of the database `id`.
-pub fn (c: Client) new_database(id: Str) -> DatabaseClient ! azcore.CallErr {
+pub fn (c: Client[fx]) new_database(id: Str) -> DatabaseClient[fx] ! azcore.CallErr {
   require_id(id)?
   Ok(DatabaseClient{id: id, link: link("", "dbs", id), core: c.core})
 }
 
 /// A client of the container `container_id` in `database_id`.
-pub fn (c: Client) new_container(database_id: Str, container_id: Str) -> ContainerClient ! azcore.CallErr {
+pub fn (c: Client[fx]) new_container(database_id: Str, container_id: Str) -> ContainerClient[fx] ! azcore.CallErr {
   c.new_database(database_id)?.new_container(container_id)
 }
 
@@ -193,7 +193,7 @@ pub struct QueryDatabasesResponse {
   pub databases: List[DatabaseProperties] = []
 }
 
-pub fn (c: Client) new_query_databases_pager(query: Str, options: QueryDatabasesOptions = QueryDatabasesOptions{}) -> QueryPager[QueryDatabasesResponse] {
+pub fn (c: Client[fx]) new_query_databases_pager(query: Str, options: QueryDatabasesOptions = QueryDatabasesOptions{}) -> QueryPager[QueryDatabasesResponse, fx] {
   let hs = match options.continuation_token {
     Some(t) => [("x-ms-continuation", t)]
     None => []
@@ -204,10 +204,10 @@ pub fn (c: Client) new_query_databases_pager(query: Str, options: QueryDatabases
   }, continuation_of: fn(r: QueryDatabasesResponse) -> Str? { r.continuation_token }}
 }
 
-pub struct DatabaseClient {
+pub struct DatabaseClient[fx: Effects] {
   pub id: Str
   link: Str
-  core: Core
+  core: Core[fx]
 }
 
 pub fn (db: DatabaseClient) read() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
@@ -218,7 +218,7 @@ pub fn (db: DatabaseClient) delete() -> DatabaseResponse ! azcore.CallErr uses (
   database_response(db.core.send(Call{method: "DELETE", path: db.link, write: true})?)
 }
 
-pub fn (db: DatabaseClient) new_container(id: Str) -> ContainerClient ! azcore.CallErr {
+pub fn (db: DatabaseClient[fx]) new_container(id: Str) -> ContainerClient[fx] ! azcore.CallErr {
   require_id(id)?
   Ok(ContainerClient{id: id, link: link(db.link, "colls", id), core: db.core})
 }
@@ -258,7 +258,7 @@ pub struct QueryContainersResponse {
   pub containers: List[ContainerProperties] = []
 }
 
-pub fn (db: DatabaseClient) new_query_containers_pager(query: Str, options: QueryContainersOptions = QueryContainersOptions{}) -> QueryPager[QueryContainersResponse] {
+pub fn (db: DatabaseClient[fx]) new_query_containers_pager(query: Str, options: QueryContainersOptions = QueryContainersOptions{}) -> QueryPager[QueryContainersResponse, fx] {
   let hs = match options.continuation_token {
     Some(t) => [("x-ms-continuation", t)]
     None => []
@@ -271,10 +271,10 @@ pub fn (db: DatabaseClient) new_query_containers_pager(query: Str, options: Quer
 
 // Containers.
 
-pub struct ContainerClient {
+pub struct ContainerClient[fx: Effects] {
   pub id: Str
   link: Str
-  core: Core
+  core: Core[fx]
 }
 
 /// Reads the container; its properties are cached for the partition key
@@ -454,7 +454,7 @@ pub struct QueryItemsResponse {
 
 /// Items matching `query` in `partition_key` (all partitions for a key
 /// with no values). The pager's pages share one correlated activity id.
-pub fn (c: ContainerClient) new_query_items_pager(query: Str, partition_key: PartitionKey, options: QueryOptions = QueryOptions{}) -> QueryPager[QueryItemsResponse] uses rand {
+pub fn (c: ContainerClient[fx]) new_query_items_pager(query: Str, partition_key: PartitionKey, options: QueryOptions = QueryOptions{}) -> QueryPager[QueryItemsResponse, fx] uses (rand, fx) {
   var hs: List[(Str, Str)] = []
   if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
   if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }

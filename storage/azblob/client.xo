@@ -22,16 +22,17 @@ pub const SERVICE_VERSION: Str = "2026-12-06"
 pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
 
 /// Sets x-ms-version on every request.
-pub struct VersionPolicy {
+// 0540: phantom fx so send can name next's effects; removed when xo ADR 0540 is accepted
+pub struct VersionPolicy[fx: Effects] {
   pub version: Str
 }
 
-fn (p: VersionPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: VersionPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   next.send(req.with_header("x-ms-version", p.version))
 }
 
-pub struct ClientOptions {
-  pub client: policy.ClientOptions = policy.ClientOptions{}
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
   /// The token audience (`<audience>/.default`) when it is not
   /// Storage's; every token client reads it, as Go's azblob.NewClient
   /// passes it to service.NewClient.
@@ -43,38 +44,38 @@ pub struct ClientOptions {
 }
 
 /// A client of one storage account's Blob service.
-pub struct Client {
+pub struct Client[fx: Effects] {
   /// The service URL (`https://<account>.blob.core.windows.net`, or
   /// Azurite's `http://127.0.0.1:10000/devstoreaccount1`), with a SAS
   /// query when the client has no credential.
   pub url: Str
-  pipeline: runtime.Pipeline
+  pipeline: runtime.Pipeline[fx]
 }
 
-fn new_with(net: Net, clock: Clock, rand: Rand, service_url: Str, auth: List[policy.Policy], opts: ClientOptions) -> Client {
+fn new_with[fx: Effects](net: Net, clock: Clock, rand: Rand, service_url: Str, auth: List[policy.Policy[fx]], opts: ClientOptions[fx]) -> Client[fx] {
   let pl = runtime.new_pipeline("azblob", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [VersionPolicy{version: SERVICE_VERSION}], per_retry: auth}, opts.client)
   Client{url: service_url, pipeline: pl}
 }
 
 /// A client authorized by the account key (azblob.NewClientWithSharedKeyCredential).
-pub fn new_client_with_shared_key_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: exported.SharedKeyCredential, opts: ClientOptions = ClientOptions{}) -> Client {
+pub fn new_client_with_shared_key_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, service_url: Str, cred: exported.SharedKeyCredential, opts: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
   new_with(net, clock, rand, service_url, [exported.shared_key_policy(cred, clock)], opts)
 }
 
 /// A client authorized by Entra ID tokens (azblob.NewClient).
-pub fn new_client(net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential, opts: ClientOptions = ClientOptions{}) -> Client {
+pub fn new_client[fx: Effects](net: Net, clock: Clock, rand: Rand, service_url: Str, cred: azcore.TokenCredential[fx], opts: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
   new_with(net, clock, rand, service_url, [exported.new_storage_challenge_policy(cred, audience_scope(opts), clock, allow_http: opts.insecure_allow_credential_with_http)], opts)
 }
 
 /// A client with no credential: a SAS in `service_url`, or public
 /// access (azblob.NewClientWithNoCredential).
-pub fn new_client_with_no_credential(net: Net, clock: Clock, rand: Rand, service_url: Str, opts: ClientOptions = ClientOptions{}) -> Client {
+pub fn new_client_with_no_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, service_url: Str, opts: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
   new_with(net, clock, rand, service_url, [], opts)
 }
 
 /// The service URL with `path` appended and `query` added before any
 /// SAS query it holds.
-pub fn (c: Client) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
+pub fn (c: Client[fx]) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
   let (base, sas) = match c.url.find("?") {
     Some(i) => (c.url[0..i], c.url[i + 1..c.url.len()])
     None => (c.url, "")
@@ -87,7 +88,7 @@ pub fn (c: Client) url_for(path: Str, query: List[(Str, Str)] = []) -> Str {
 
 /// A list pager that asks for the next page with `marker` set in the
 /// first request's query, re-encoded as Go's generated code encodes it.
-fn marker_pager[T](c: Client, first: policy.Request, decode: fn(http.Response) -> T ! Str, marker: fn(T) -> Str?) -> runtime.Pager[T] {
+fn marker_pager[T, fx: Effects](c: Client[fx], first: policy.Request, decode: fn(http.Response) -> T ! Str, marker: fn(T) -> Str?) -> runtime.Pager[T, fx] {
   runtime.new_pager_with(c.pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
     let m = marker(page) ?? return None
     if m == "" {
@@ -399,7 +400,7 @@ pub fn parse_blobs(text: Str) -> ListBlobsFlatPage ! Str {
 
 /// The account's containers, `max_results` a page (0 for the
 /// service's default), with their metadata when `include_metadata`.
-pub fn (c: Client) new_list_containers_pager(prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListContainersPage] {
+pub fn (c: Client[fx]) new_list_containers_pager(prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListContainersPage, fx] {
   var q = [("comp", "list")]
   if prefix != "" { q.push(("prefix", prefix)) }
   if max_results > 0 { q.push(("maxresults", "${max_results}")) }
@@ -408,7 +409,7 @@ pub fn (c: Client) new_list_containers_pager(prefix: Str = "", max_results: Int 
 }
 
 /// A container's blobs, flat (azblob.Client.NewListBlobsFlatPager).
-pub fn (c: Client) new_list_blobs_flat_pager(container: Str, prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListBlobsFlatPage] {
+pub fn (c: Client[fx]) new_list_blobs_flat_pager(container: Str, prefix: Str = "", max_results: Int = 0, include_metadata: Bool = false) -> runtime.Pager[ListBlobsFlatPage, fx] {
   var q = [("restype", "container"), ("comp", "list")]
   if prefix != "" { q.push(("prefix", prefix)) }
   if max_results > 0 { q.push(("maxresults", "${max_results}")) }

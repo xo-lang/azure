@@ -143,9 +143,9 @@ fn (lb: LoadBalancer) load_balance(partition_ids: List[Str]) -> List[Ownership] 
 }
 
 /// A partition client the Processor handed out, with its checkpointing.
-pub struct ProcessorPartitionClient {
+pub struct ProcessorPartitionClient[fx: Effects] {
   pid: Str
-  inner: PartitionClient
+  inner: PartitionClient[fx]
   store: CheckpointStore
   details: Details
   consumers: Mutex[Map[Str, Bool]]
@@ -182,8 +182,8 @@ const STATE_NONE: Int = 0
 const STATE_STOPPED: Int = 1
 const STATE_RUNNING: Int = 2
 
-pub struct Processor {
-  cc: ConsumerClient
+pub struct Processor[fx: Effects] {
+  cc: ConsumerClient[fx]
   store: CheckpointStore
   update_interval: Duration
   start_positions: StartPositions
@@ -193,20 +193,20 @@ pub struct Processor {
   state: Mutex[Int]
   /// The partition clients ready to hand out, sized to the partitions
   /// once run has read them.
-  next: Mutex[Chan[ProcessorPartitionClient]?]
+  next: Mutex[Chan[ProcessorPartitionClient[fx]]?]
   /// Closed when `next` is made (or the Processor stops first).
   ready: Chan[()]
   ready_closed: Atomic[Bool]
   /// The partitions with a partition client out.
   consumers: Mutex[Map[Str, Bool]]
   /// The clients out, to close when run ends.
-  clients: Mutex[List[ProcessorPartitionClient]]
+  clients: Mutex[List[ProcessorPartitionClient[fx]]]
   current: Mutex[List[Ownership]]
 }
 
 /// A Processor for the consumer client's hub and group, owning
 /// partitions in `checkpoint_store` as the client's instance id.
-pub fn new_processor(consumer_client: ConsumerClient, checkpoint_store: CheckpointStore, options: ProcessorOptions = ProcessorOptions{}) -> Processor ! EventHubsErr {
+pub fn new_processor[fx: Effects](consumer_client: ConsumerClient[fx], checkpoint_store: CheckpointStore, options: ProcessorOptions = ProcessorOptions{}) -> Processor[fx] ! EventHubsErr {
   let strategy = match options.load_balancing_strategy {
     "" => PROCESSOR_STRATEGY_BALANCED
     "balanced" | "greedy" => options.load_balancing_strategy
@@ -227,7 +227,7 @@ pub fn new_processor(consumer_client: ConsumerClient, checkpoint_store: Checkpoi
 
 /// The next partition client, once run has one; None when the Processor
 /// stopped. Cancel the calling task to stop waiting (Go's context).
-pub fn (p: Processor) next_partition_client() -> ProcessorPartitionClient? {
+pub fn (p: Processor[fx]) next_partition_client() -> ProcessorPartitionClient[fx]? {
   let _ = p.ready.recv()
   let ch = p.next.with_read(fn(c: Chan[ProcessorPartitionClient]?) -> Chan[ProcessorPartitionClient]? { c }) ?? return None
   ch.recv()
@@ -323,9 +323,9 @@ fn (p: Processor) start_position(id: Str, checkpoints: Map[Str, Checkpoint]) -> 
   }
 }
 
-fn (p: Processor) add_partition_client(id: Str, checkpoints: Map[Str, Checkpoint]) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+fn (p: Processor[fx]) add_partition_client(id: Str, checkpoints: Map[Str, Checkpoint]) -> () ! EventHubsErr uses (net.dial, clock, rand, fx) {
   let start = p.start_position(id, checkpoints)?
-  let part = open_with_geo_fallback(start, fn(sp: StartPosition) -> PartitionClient ! EventHubsErr uses (net.dial, clock, rand) { p.open_partition_client(id, sp) })?
+  let part = open_with_geo_fallback(start, fn(sp: StartPosition) -> PartitionClient ! EventHubsErr uses (net.dial, clock, rand, fx) { p.open_partition_client(id, sp) })?
   let client = ProcessorPartitionClient{pid: id, inner: part, store: p.store, details: p.details, consumers: p.consumers}
   let ch = p.next.with_read(fn(c: Chan[ProcessorPartitionClient]?) -> Chan[ProcessorPartitionClient]? { c }) ?? return Err(fatal("the Processor is not running"))
   if !ch.try_send(client) {
@@ -339,7 +339,7 @@ fn (p: Processor) add_partition_client(id: Str, checkpoints: Map[Str, Checkpoint
 /// `open(start)`, and when a geo-replicated hub refuses the start's
 /// numeric offset, `open` again from the earliest event, inclusive (Go
 /// v2's addPartitionClient).
-fn open_with_geo_fallback[T](start: StartPosition, open: fn(StartPosition) -> T ! EventHubsErr uses (net.dial, clock, rand)) -> T ! EventHubsErr uses (net.dial, clock, rand) {
+fn open_with_geo_fallback[T, cb: Effects](start: StartPosition, open: fn(StartPosition) -> T ! EventHubsErr uses (net.dial, clock, rand, cb)) -> T ! EventHubsErr uses (net.dial, clock, rand, cb) {
   match open(start) {
     Ok(v) => Ok(v)
     Err(e) if is_geo_replication_offset_error(e) => open(StartPosition{earliest: true, inclusive: true})
@@ -349,7 +349,7 @@ fn open_with_geo_fallback[T](start: StartPosition, open: fn(StartPosition) -> T 
 
 /// A partition client with its link open now (Go's
 /// openPartitionClientImpl), so a stolen partition is claimed at once.
-fn (p: Processor) open_partition_client(id: Str, start: StartPosition) -> PartitionClient ! EventHubsErr uses (net.dial, clock, rand) {
+fn (p: Processor[fx]) open_partition_client(id: Str, start: StartPosition) -> PartitionClient[fx] ! EventHubsErr uses (net.dial, clock, rand, fx) {
   // Owner level 0, as Go's processorOwnerLevel.
   let part = p.cc.new_partition_client(id, PartitionClientOptions{start_position: start, owner_level: Some(0), prefetch: p.prefetch})?
   part.init() ?? e => {

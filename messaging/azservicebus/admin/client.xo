@@ -28,22 +28,22 @@ const ENTRY_CONTENT_TYPE: Str = "application/atom+xml;type=entry;charset=utf-8"
 /// entity that does not exist.
 const EMPTY_FEED_TITLE: Str = "Publicly Listed Services"
 
-pub struct ClientOptions {
-  pub client: policy.ClientOptions = policy.ClientOptions{}
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
 }
 
 /// How requests are authorized.
-enum Auth {
+enum Auth[fx: Effects] {
   /// A key: a SAS token per URL, valid for two hours.
   Key(name: Str, key: Secret[Str])
   /// A ready signature from the connection string, sent as it is.
   Signature(sig: Secret[Str])
   /// Entra ID tokens for `https://servicebus.azure.net//.default`.
-  Credential(c: azcore.TokenCredential)
+  Credential(c: azcore.TokenCredential[fx])
 }
 
 /// The token for `uri`, as Go's sbauth.TokenProvider.GetToken.
-fn token_for(auth: Auth, clock: Clock, uri: Str) -> Str ! policy.SendErr uses (net.dial, clock, rand) {
+fn token_for[fx: Effects](auth: Auth[fx], clock: Clock, uri: Str) -> Str ! policy.SendErr uses (net.dial, clock, rand, fx) {
   match auth {
     Auth.Key(name: n, key: k) => Ok(azservicebus.sign_sas(n, k, uri, clock.now().unix() + 7200))
     Auth.Signature(sig) => Ok(sig.reveal())
@@ -56,38 +56,38 @@ fn token_for(auth: Auth, clock: Clock, uri: Str) -> Str ! policy.SendErr uses (n
 
 /// Sets Authorization to a token for the request's URL on every try
 /// (Go's perRetryAuthPolicy).
-struct AuthPolicy {
-  auth: Auth
+struct AuthPolicy[fx: Effects] {
+  auth: Auth[fx]
   clock: Clock
 }
 
-fn (p: AuthPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: AuthPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   next.send(req.with_header("Authorization", token_for(p.auth, p.clock, req.url)?))
 }
 
 /// A client of one namespace's entities.
-pub struct Client {
+pub struct Client[fx: Effects] {
   /// `https://<namespace>/`.
   pub host: Str
-  auth: Auth
+  auth: Auth[fx]
   clock: Clock
-  pipeline: runtime.Pipeline
+  pipeline: runtime.Pipeline[fx]
 }
 
-fn new_with(net: Net, clock: Clock, rand: Rand, namespace: Str, auth: Auth, opts: ClientOptions) -> Client {
+fn new_with[fx: Effects](net: Net, clock: Clock, rand: Rand, namespace: Str, auth: Auth[fx], opts: ClientOptions[fx]) -> Client[fx] {
   let pl = runtime.new_pipeline("azsbadmin", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [AuthPolicy{auth: auth, clock: clock}]}, opts.client)
   Client{host: "https://${namespace}/", auth: auth, clock: clock, pipeline: pl}
 }
 
 /// A client for the namespace (`<name>.servicebus.windows.net`) with an
 /// Entra ID credential (admin.NewClient).
-pub fn new_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, credential: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client {
+pub fn new_client[fx: Effects](net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, credential: azcore.TokenCredential[fx], options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
   new_with(net, clock, rand, fully_qualified_namespace, Auth.Credential(credential), options)
 }
 
 /// A client from a connection string with a key or a signature
 /// (admin.NewClientFromConnectionString).
-pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+pub fn new_client_from_connection_string[fx: Effects](net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] ! Str {
   let p = azservicebus.parse_connection_string(connection_string)?
   let auth = match (p.shared_access_signature, p.shared_access_key_name, p.shared_access_key) {
     (Some(sig), _, _) => Auth.Signature(sig)
@@ -180,8 +180,8 @@ fn (c: Client) get_feed(path: Str, top: Int, skip: Int) -> List[xml.Element] ! a
 
 /// Pages of a feed, as Go's entityPager: each page skips what came
 /// before; an empty page, or one shorter than the page size, is the last.
-pub struct EntityPager[T] {
-  client: Client
+pub struct EntityPager[T, fx: Effects] {
+  client: Client[fx]
   path: Str
   top: Int
   convert: fn(xml.Element) -> T ! Str
@@ -189,12 +189,12 @@ pub struct EntityPager[T] {
   eof: Bool = false
 }
 
-pub fn (p: EntityPager[T]) more() -> Bool {
+pub fn (p: EntityPager[T, fx]) more() -> Bool {
   !p.eof
 }
 
 /// The next page's items; an empty list once there are no more.
-pub fn (var p: EntityPager[T]) next_page() -> List[T] ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: EntityPager[T, fx]) next_page() -> List[T] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if p.eof {
     return Ok([])
   }
@@ -213,7 +213,7 @@ pub fn (var p: EntityPager[T]) next_page() -> List[T] ! azcore.CallErr uses (net
   Ok(items)
 }
 
-fn (c: Client) pager[T](path: Str, max_page_size: Int, convert: fn(xml.Element) -> T ! Str) -> EntityPager[T] {
+fn (c: Client[fx]) pager[T](path: Str, max_page_size: Int, convert: fn(xml.Element) -> T ! Str) -> EntityPager[T, fx] {
   EntityPager{client: c, path: path, top: max_page_size, convert: convert}
 }
 

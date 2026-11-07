@@ -17,8 +17,8 @@ use github.com/xo-lang/azure/policy
 /// that writes the token in its own header shape (Cosmos DB's
 /// `type=aad&ver=1.0&sig=<token>`) keeps another instead of its own
 /// cache.
-pub struct TokenCache {
-  pub credential: azcore.TokenCredential
+pub struct TokenCache[fx: Effects] {
+  pub credential: azcore.TokenCredential[fx]
   pub scopes: List[Str]
   pub clock: Clock
   /// Ask for Continuous Access Evaluation tokens (`enable_cae`), as
@@ -27,7 +27,7 @@ pub struct TokenCache {
   token: Mutex[azcore.AccessToken?]
 }
 
-pub fn token_cache(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, enable_cae: Bool = true) -> TokenCache {
+pub fn token_cache[fx: Effects](credential: azcore.TokenCredential[fx], scopes: List[Str], clock: Clock, enable_cae: Bool = true) -> TokenCache[fx] {
   TokenCache{credential: credential, scopes: scopes, clock: clock, enable_cae: enable_cae, token: Mutex.new(None)}
 }
 
@@ -46,8 +46,8 @@ pub fn (c: TokenCache) get_for_claims(claims: Str) -> azcore.AccessToken ! azcor
 /// needs a refresh, or `opts` has claims (which always fetch), as
 /// azcore's temporal.Resource.Get with the request's options: the cache
 /// holds one token whatever scopes it was fetched for.
-pub fn (c: TokenCache) get_with(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: TokenCache[fx]) get_with(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
+  c.token.with(fn(var t: azcore.AccessToken?) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
     if opts.claims == "" {
       if let Some(have) = t {
         if !azcore.needs_refresh(have, c.clock.now()) {
@@ -70,21 +70,21 @@ pub fn (c: TokenCache) reset() {
 /// the bearer policy must authorize a request. Each hook gets an
 /// Authorizer (azcore's authNZ function) and returns the request it
 /// authorized.
-pub struct AuthorizationHandler {
+pub struct AuthorizationHandler[fx: Effects] {
   /// Authorizes every request; None asks for a token for the policy's
   /// scopes. On a CAE challenge it runs again, and its Authorizer adds
   /// the challenge's claims.
-  pub on_request: Option[fn(policy.Request, Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand)] = None
+  pub on_request: Option[fn(policy.Request, Authorizer[fx]) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand, fx)] = None
   /// Answers a 401 challenge the policy cannot answer itself (anything
   /// but CAE): it parses the response's WWW-Authenticate and authorizes
   /// the request again, which is then sent once more. None returns the
   /// 401 to the caller.
-  pub on_challenge: Option[fn(policy.Request, http.Response, Authorizer) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand)] = None
+  pub on_challenge: Option[fn(policy.Request, http.Response, Authorizer[fx]) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand, fx)] = None
 }
 
 /// azcore's policy.BearerTokenOptions.
-pub struct BearerTokenOptions {
-  pub authorization_handler: AuthorizationHandler = AuthorizationHandler{}
+pub struct BearerTokenOptions[fx: Effects] {
+  pub authorization_handler: AuthorizationHandler[fx] = AuthorizationHandler{}
   /// Send tokens over plain HTTP too (emulators and tests only).
   pub insecure_allow_credential_with_http: Bool = false
 }
@@ -92,10 +92,10 @@ pub struct BearerTokenOptions {
 /// Authorizes one request with a token from the policy's cache, as
 /// azcore's authenticateAndAuthorize: the cached token, or one fetched
 /// for the given options (always with CAE).
-pub struct Authorizer {
+pub struct Authorizer[fx: Effects] {
   req: policy.Request
-  cache: TokenCache
-  credential: azcore.TokenCredential
+  cache: TokenCache[fx]
+  credential: azcore.TokenCredential[fx]
   auxiliary_tenants: List[Str]
   /// A CAE challenge's claims, added to every fetch.
   claims: Str
@@ -117,24 +117,24 @@ pub fn (a: Authorizer) authorize(opts: azcore.TokenRequestOptions) -> policy.Req
   Ok(r)
 }
 
-pub struct BearerTokenPolicy {
-  pub credential: azcore.TokenCredential
+pub struct BearerTokenPolicy[fx: Effects] {
+  pub credential: azcore.TokenCredential[fx]
   pub scopes: List[Str]
   pub clock: Clock
   /// Send tokens over plain HTTP too (emulators and tests only).
   pub insecure_allow_http: Bool = false
   /// Extra tenants whose tokens go in `x-ms-authorization-auxiliary`.
   pub auxiliary_tenants: List[Str] = []
-  pub authorization_handler: AuthorizationHandler = AuthorizationHandler{}
-  cache: TokenCache
+  pub authorization_handler: AuthorizationHandler[fx] = AuthorizationHandler{}
+  cache: TokenCache[fx]
 }
 
-pub fn bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, insecure_allow_http: Bool = false, auxiliary_tenants: List[Str] = []) -> BearerTokenPolicy {
+pub fn bearer_token_policy[fx: Effects](credential: azcore.TokenCredential[fx], scopes: List[Str], clock: Clock, insecure_allow_http: Bool = false, auxiliary_tenants: List[Str] = []) -> BearerTokenPolicy[fx] {
   BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: insecure_allow_http, auxiliary_tenants: auxiliary_tenants, cache: token_cache(credential, scopes, clock)}
 }
 
 /// azcore's NewBearerTokenPolicy with its options.
-pub fn new_bearer_token_policy(credential: azcore.TokenCredential, scopes: List[Str], clock: Clock, opts: BearerTokenOptions = BearerTokenOptions{}) -> BearerTokenPolicy {
+pub fn new_bearer_token_policy[fx: Effects](credential: azcore.TokenCredential[fx], scopes: List[Str], clock: Clock, opts: BearerTokenOptions[fx] = BearerTokenOptions{}) -> BearerTokenPolicy[fx] {
   BearerTokenPolicy{credential: credential, scopes: scopes, clock: clock, insecure_allow_http: opts.insecure_allow_credential_with_http, authorization_handler: opts.authorization_handler, cache: token_cache(credential, scopes, clock)}
 }
 
@@ -152,7 +152,7 @@ fn (p: BearerTokenPolicy) on_request(req: policy.Request, claims: Str) -> policy
 
 /// Sends with a token, then answers a 401's challenge as azcore's
 /// handleChallenge.
-fn (p: BearerTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: BearerTokenPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   if !req.url.starts_with("https://") && !p.insecure_allow_http {
     return Err(policy.SendErr.Auth("a bearer token is sent only over HTTPS (${req.url})"))
   }

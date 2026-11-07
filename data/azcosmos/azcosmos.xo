@@ -90,7 +90,8 @@ fn escaped_path_of(u: Str) -> Str {
 
 /// Signs each request with the master key, setting x-ms-date when the
 /// request has none.
-pub struct KeyCredentialPolicy {
+// 0540: phantom fx so send can name next's effects; removed when xo ADR 0540 is accepted
+pub struct KeyCredentialPolicy[fx: Effects] {
   pub credential: KeyCredential
   pub clock: Clock
 }
@@ -99,7 +100,7 @@ fn http_date(t: Time) -> Str {
   time.format(t, time.utc(), time.RFC1123).replace(" UTC", " GMT")
 }
 
-fn (p: KeyCredentialPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: KeyCredentialPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", http_date(p.clock.now())) } else { req }
   let (rt, addr) = resource_of(escaped_path_of(dated.url))
   next.send(dated.with_header("Authorization", p.credential.authorization(dated.method, rt, addr, dated.header("x-ms-date") ?? "")))
@@ -108,17 +109,17 @@ fn (p: KeyCredentialPolicy) send(req: policy.Request, next: policy.Next) -> http
 /// Entra ID authorization: `type=aad&ver=1.0&sig=<token>`, the token
 /// from azcore's shared cache (without CAE, as Go's
 /// cosmosBearerTokenPolicy asks for none).
-pub struct AadTokenPolicy {
-  pub cache: runtime.TokenCache
+pub struct AadTokenPolicy[fx: Effects] {
+  pub cache: runtime.TokenCache[fx]
 }
 
-fn (p: AadTokenPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: AadTokenPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   let tok = p.cache.get() ?? e => return Err(policy.SendErr.Auth(e.display()))
   next.send(req.with_header("Authorization", "type=aad&ver=1.0&sig=${tok.token.reveal()}"))
 }
 
-pub struct ClientOptions {
-  pub client: policy.ClientOptions = policy.ClientOptions{}
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
   /// Regions in the order requests should go to them (`West US`); the
   /// account's first region when none matches.
   pub preferred_regions: List[Str] = []
@@ -138,14 +139,14 @@ pub const PRIORITY_LEVEL_LOW: Str = "Low"
 
 /// What every client shares: the account endpoint, the pipeline and the
 /// regional routing.
-struct Core {
+struct Core[fx: Effects] {
   endpoint: Str
-  pipeline: runtime.Pipeline
+  pipeline: runtime.Pipeline[fx]
   rand: Rand
   content_on_write: Bool
   priority_level: Str?
   throughput_bucket: Int?
-  gem: Gem
+  gem: Gem[fx]
   clock: Clock
   caches: Caches
 }
@@ -155,7 +156,7 @@ struct Core {
 /// manager's policy per call and the Cosmos retry policy before the
 /// authorization in each try. The authorization policy (and its token
 /// cache) is the same value in both.
-fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy, opts: ClientOptions) -> Core {
+fn new_core[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy[fx], opts: ClientOptions[fx]) -> Core[fx] {
   let internal = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
   let gem = new_gem(endpoint, internal, clock, rand, opts.preferred_regions)
   let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [GemPolicy{gem: gem}], per_retry: [CosmosRetryPolicy{gem: gem}, auth]}, opts.client)
@@ -163,13 +164,13 @@ fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Poli
 }
 
 /// A client with the account's master key.
-pub fn new_client_with_key(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: KeyCredential, options: ClientOptions = ClientOptions{}) -> Client {
+pub fn new_client_with_key[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: KeyCredential, options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
   Client{core: new_core(net, clock, rand, endpoint, KeyCredentialPolicy{credential: cred, clock: clock}, options)}
 }
 
 /// A client with Entra ID tokens for the account's scope
 /// (`https://<account host>/.default`).
-pub fn new_client(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcore.TokenCredential, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+pub fn new_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcore.TokenCredential[fx], options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] ! Str {
   let u = http.parse_url(endpoint) ?? e => return Err(e.display())
   let scope = "${u.scheme}://${u.host}/.default"
   Ok(Client{core: new_core(net, clock, rand, endpoint, AadTokenPolicy{cache: runtime.token_cache(cred, [scope], clock, enable_cae: false)}, options)})
@@ -177,7 +178,7 @@ pub fn new_client(net: Net, clock: Clock, rand: Rand, endpoint: Str, cred: azcor
 
 /// A client from `AccountEndpoint=...;AccountKey=...` (keys compared
 /// without case).
-pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions = ClientOptions{}) -> Client ! Str {
+pub fn new_client_from_connection_string[fx: Effects](net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] ! Str {
   var endpoint = ""
   var key: KeyCredential? = None
   let parts = connection_string.trim_end_chars(";").split(";")
@@ -199,8 +200,8 @@ pub fn new_client_from_connection_string(net: Net, clock: Clock, rand: Rand, con
 }
 
 /// A client of one Cosmos DB account.
-pub struct Client {
-  core: Core
+pub struct Client[fx: Effects] {
+  core: Core[fx]
 }
 
 pub fn (c: Client) endpoint() -> Str {

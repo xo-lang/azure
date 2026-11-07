@@ -13,8 +13,8 @@ struct SenderLink {
   gen: Int
 }
 
-pub struct Sender {
-  client: Client
+pub struct Sender[fx: Effects] {
+  client: Client[fx]
   entity: Str
   name: Str
   link: Mutex[SenderLink?]
@@ -23,7 +23,7 @@ pub struct Sender {
 
 /// A sender to a queue or a topic; its link attaches on first send, as
 /// Go's.
-pub fn (c: Client) new_sender(queue_or_topic: Str, options: NewSenderOptions = NewSenderOptions{}) -> Sender ! ServiceBusErr {
+pub fn (c: Client[fx]) new_sender(queue_or_topic: Str, options: NewSenderOptions = NewSenderOptions{}) -> Sender[fx] ! ServiceBusErr {
   if c.closed.get() {
     return Err(fatal("the client is closed", CODE_CLOSED))
   }
@@ -32,14 +32,14 @@ pub fn (c: Client) new_sender(queue_or_topic: Str, options: NewSenderOptions = N
 
 /// The link, attached again when there is none or it is on a dropped
 /// connection.
-fn (s: Sender) get() -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand) {
+fn (s: Sender[fx]) get() -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand, fx) {
   if s.closed.get() {
     return Err(fatal("the sender is closed", CODE_CLOSED))
   }
   let c = s.client
   let entity = s.entity
   let name = s.name
-  s.link.with(fn(var slot: SenderLink?) -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand) {
+  s.link.with(fn(var slot: SenderLink?) -> SenderLink ! ServiceBusErr uses (net.dial, clock, rand, fx) {
     if let Some(x) = slot {
       if x.gen == c.current_gen() {
         return Ok(x)
@@ -69,15 +69,15 @@ fn (s: Sender) recover(k: RecoveryKind) uses (net.dial, clock) {
 }
 
 /// Sends `m` on the link with retries.
-fn (s: Sender) send_amqp(m: amqp.Message, message_format: Int = 0) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
-  s.client.retry(s.client.opts.retry_options, fn(_: Int) -> () ! ServiceBusErr uses (net.dial, clock, rand) {
+fn (s: Sender[fx]) send_amqp(m: amqp.Message, message_format: Int = 0) -> () ! ServiceBusErr uses (net.dial, clock, rand, fx) {
+  s.client.retry(s.client.opts.retry_options, fn(_: Int) -> () ! ServiceBusErr uses (net.dial, clock, rand, fx) {
     let x = s.get()?
     let st = x.l.send(m, message_format: message_format) ?? e => return Err(from_amqp(e))
     match outcome(st) {
       Some(e) => Err(e)
       None => Ok(())
     }
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { s.recover(k) })
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { s.recover(k) })
 }
 
 /// The outcome of a send as an error, None when accepted.
@@ -139,8 +139,8 @@ fn int_value(v: amqp.Value) -> Int? {
 
 /// An empty batch, sized for the link (which attaches here, as Go's). A
 /// link that names no size (0, AMQP's no limit) takes no limit.
-pub fn (s: Sender) new_message_batch(options: MessageBatchOptions = MessageBatchOptions{}) -> MessageBatch ! ServiceBusErr uses (net.dial, clock, rand) {
-  let max = s.client.retry(s.client.opts.retry_options, fn(_: Int) -> Int ! ServiceBusErr uses (net.dial, clock, rand) {
+pub fn (s: Sender[fx]) new_message_batch(options: MessageBatchOptions = MessageBatchOptions{}) -> MessageBatch ! ServiceBusErr uses (net.dial, clock, rand, fx) {
+  let max = s.client.retry(s.client.opts.retry_options, fn(_: Int) -> Int ! ServiceBusErr uses (net.dial, clock, rand, fx) {
     let x = s.get()?
     let a = x.l.remote_attach() ?? return Ok(0)
     var m = a.max_message_size
@@ -152,7 +152,7 @@ pub fn (s: Sender) new_message_batch(options: MessageBatchOptions = MessageBatch
       }
     }
     Ok(m)
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { s.recover(k) })?
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { s.recover(k) })?
   Ok(MessageBatch{max_bytes: if options.max_bytes != 0 { options.max_bytes } else { max }, rand: s.client.rand})
 }
 

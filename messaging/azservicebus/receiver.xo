@@ -23,8 +23,8 @@ pub struct ReceiverOptions {
   pub sub_queue: SubQueue = SubQueue.None
 }
 
-pub struct Receiver {
-  client: Client
+pub struct Receiver[fx: Effects] {
+  client: Client[fx]
   /// The entity the links are on (`q`, `t/Subscriptions/s`, with a
   /// sub-queue suffix).
   entity: Str
@@ -58,7 +58,7 @@ fn entity_of(base: Str, sub: SubQueue) -> Str {
   }
 }
 
-fn (c: Client) receiver(entity: Str, options: ReceiverOptions, filters: List[(Str, amqp.Value)] = []) -> Receiver ! ServiceBusErr {
+fn (c: Client[fx]) receiver(entity: Str, options: ReceiverOptions, filters: List[(Str, amqp.Value)] = []) -> Receiver[fx] ! ServiceBusErr {
   if c.closed.get() {
     return Err(fatal("the client is closed", CODE_CLOSED))
   }
@@ -72,14 +72,14 @@ fn (c: Client) receiver(entity: Str, options: ReceiverOptions, filters: List[(St
 
 /// The receiving link, attached (after a put-token) when there is none
 /// or it is on a dropped connection.
-fn (r: Receiver) attached() -> RecvLink ! ServiceBusErr uses (net.dial, clock, rand) {
+fn (r: Receiver[fx]) attached() -> RecvLink ! ServiceBusErr uses (net.dial, clock, rand, fx) {
   if r.closed.get() {
     return Err(fatal("the receiver is closed", CODE_CLOSED))
   }
   let c = r.client
   let entity = r.entity
   let opts = r.opts
-  r.link.with(fn(var slot: RecvLink?) -> RecvLink ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.link.with(fn(var slot: RecvLink?) -> RecvLink ! ServiceBusErr uses (net.dial, clock, rand, fx) {
     if let Some(x) = slot {
       if x.gen == c.current_gen() {
         return Ok(x)
@@ -116,12 +116,12 @@ fn (r: Receiver) recover(k: RecoveryKind) uses (net.dial, clock) {
 }
 
 /// A receiver for a queue.
-pub fn (c: Client) new_receiver_for_queue(queue_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver ! ServiceBusErr {
+pub fn (c: Client[fx]) new_receiver_for_queue(queue_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver[fx] ! ServiceBusErr {
   c.receiver(entity_of(queue_name, options.sub_queue), options)
 }
 
 /// A receiver for a topic's subscription.
-pub fn (c: Client) new_receiver_for_subscription(topic_name: Str, subscription_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver ! ServiceBusErr {
+pub fn (c: Client[fx]) new_receiver_for_subscription(topic_name: Str, subscription_name: Str, options: ReceiverOptions = ReceiverOptions{}) -> Receiver[fx] ! ServiceBusErr {
   c.receiver(entity_of("${topic_name}/Subscriptions/${subscription_name}", options.sub_queue), options)
 }
 
@@ -140,7 +140,7 @@ pub struct ReceiveMessagesOptions {
 /// list when none came in time. A recoverable failure before the first
 /// message is retried on a new link or connection; one after it returns
 /// the messages so far and recovers for the next call.
-pub fn (r: Receiver) receive_messages(max_messages: Int, options: ReceiveMessagesOptions = ReceiveMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+pub fn (r: Receiver[fx]) receive_messages(max_messages: Int, options: ReceiveMessagesOptions = ReceiveMessagesOptions{}) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand, fx) {
   if max_messages <= 0 {
     return Err(fatal("maxMessages should be greater than 0"))
   }
@@ -153,7 +153,7 @@ pub fn (r: Receiver) receive_messages(max_messages: Int, options: ReceiveMessage
   }
   let clock = r.client.clock
   let drain_ms = r.client.opts.timeout_ms
-  r.client.retry(r.client.opts.retry_options, fn(_: Int) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand) {
+  r.client.retry(r.client.opts.retry_options, fn(_: Int) -> List[ReceivedMessage] ! ServiceBusErr uses (net.dial, clock, rand, fx) {
     let x = r.attached()?
     // Manual credit, as Go's: as much as asked for, then the rest of it
     // drained once the window closes, so no message stays locked to the
@@ -198,7 +198,7 @@ pub fn (r: Receiver) receive_messages(max_messages: Int, options: ReceiveMessage
       r.recover(se.recovery)
     }
     Ok(out)
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { r.recover(k) })
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { r.recover(k) })
 }
 
 /// Settles `m`: on the link it came on while that link is current (and

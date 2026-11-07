@@ -8,6 +8,29 @@ version has been tagged since.
 
 ## Unreleased
 
+Decision 0009 (TokenCredential's effect parameter; needs xo fb952a75a or
+later, which runs an effect-generic struct's method through an interface
+on the native backends):
+
+- `azcore.TokenCredential[fx]`, `policy.Policy[fx]`, `policy.Next[fx]`,
+  `policy.ClientOptions[fx]`, `runtime.Pipeline[fx]`,
+  `runtime.BearerTokenPolicy[fx]`, `runtime.TokenCache[fx]`,
+  `runtime.Pager[T, fx]` and `runtime.Poller[T, fx]`: a credential
+  whose token requests do more than the network (Azure Arc reads a key
+  file) passes that through to the clients built with it. Every
+  credential so far is a `TokenCredential[()]`, and a caller passing one
+  changes nothing.
+- Every client constructor, generated and hand-written, names one effect
+  parameter (`new_x[fx: Effects](..., cred: azcore.TokenCredential[fx],
+  opts: ClientOptions[fx] = ...) -> X[fx]`), so the credential's and the
+  options' effects are one. A caller's own type that fixes a client's
+  effects writes `Client[()]`.
+- Workaround until xo decision 0540 (a parameter's implicit effects
+  inside an interface method) is decided: a policy struct that calls
+  `next` carries an effect parameter its fields do not use, and a
+  caller's own policy list is written `List[policy.Policy[()]]`. Each is
+  marked `// 0540:` so removing them is a mechanical sweep.
+
 Go's azcore v1.23.0 to v1.24.0 (checked against the lines a Go program
 prints with azcore v1.24.0, `arm/resourceid_vectors_test.xo`):
 

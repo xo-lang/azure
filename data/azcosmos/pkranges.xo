@@ -195,9 +195,9 @@ fn (c: ContainerClient) cache_properties(r: ContainerResponse) {
 }
 
 /// The container's properties, read once (Go's getProperties).
-fn (c: ContainerClient) cached_properties() -> ContainerProperties ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (c: ContainerClient[fx]) cached_properties() -> ContainerProperties ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   let e = entry_of(c.core.caches.containers, c.link, None)
-  let out = e.with(fn(var v: ContainerProperties?) -> Result[ContainerProperties, azcore.CallErr] uses (net.dial, clock, rand) {
+  let out = e.with(fn(var v: ContainerProperties?) -> Result[ContainerProperties, azcore.CallErr] uses (net.dial, clock, rand, fx) {
     if let Some(p) = v {
       return Ok(p)
     }
@@ -227,10 +227,10 @@ fn (c: ContainerClient) container_rid() -> Str ! azcore.CallErr uses (net.dial, 
 }
 
 /// The container's routing map, read on first use (Go's getRoutingMap).
-fn (c: ContainerClient) routing_map() -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (c: ContainerClient[fx]) routing_map() -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   let rid = c.container_rid()?
   let e = entry_of(c.core.caches.routing, rid, None)
-  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand) {
+  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand, fx) {
     if let Some(m) = v {
       return Ok(m)
     }
@@ -248,9 +248,9 @@ fn (c: ContainerClient) routing_map() -> RoutingMap ! azcore.CallErr uses (net.d
 /// Reads the routing map again from the cached one's etag, or in full
 /// when it has none or the changes do not combine (Go's forceRefresh
 /// after invalidate: an invalidated entry refreshes in full).
-fn (c: ContainerClient) refresh_routing_map(rid: Str, invalidate: Bool) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (c: ContainerClient[fx]) refresh_routing_map(rid: Str, invalidate: Bool) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   let e = entry_of(c.core.caches.routing, rid, None)
-  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand) {
+  let out = e.with(fn(var v: RoutingMap?) -> Result[RoutingMap, azcore.CallErr] uses (net.dial, clock, rand, fx) {
     let prev = if invalidate { None } else { v }
     match refresh_routing(c.core, c.link, prev) {
       Ok(m) => {
@@ -279,7 +279,7 @@ struct FeedPage {
   not_modified: Bool = false
 }
 
-fn fetch_page(core: Core, link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand) {
+fn fetch_page[fx: Effects](core: Core[fx], link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   var hs = [("A-IM", "Incremental Feed"), ("x-ms-max-item-count", "-1")]
   if etag != "" { hs.push(("If-None-Match", etag)) }
   let resp = core.send(Call{method: "GET", path: "${link}/pkranges", headers: hs})?
@@ -293,7 +293,7 @@ fn fetch_page(core: Core, link: Str, etag: Str) -> FeedPage ! azcore.CallErr use
 
 /// Go's fetchOneChangeFeedPageWithRetry: a 429 waits 100ms per try so
 /// far (at most 5s) plus up to 50ms of jitter.
-fn fetch_page_with_retry(core: Core, link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand) {
+fn fetch_page_with_retry[fx: Effects](core: Core[fx], link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   for attempt in 0..MAX_THROTTLED_PAGE_TRIES - 1 {
     match fetch_page(core, link, etag) {
       Ok(p) => return Ok(p)
@@ -314,7 +314,7 @@ struct FeedResult {
   completed: Bool = false
 }
 
-fn fetch_all_pages(core: Core, link: Str, start_etag: Str) -> FeedResult ! azcore.CallErr uses (net.dial, clock, rand) {
+fn fetch_all_pages[fx: Effects](core: Core[fx], link: Str, start_etag: Str) -> FeedResult ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   var all: List[PkRange] = []
   var etag = start_etag
   for _ in 0..MAX_CHANGE_FEED_ITERATIONS {
@@ -330,7 +330,7 @@ fn fetch_all_pages(core: Core, link: Str, start_etag: Str) -> FeedResult ! azcor
 
 /// Go's refreshEntryDetached: the changes since `prev`'s etag combined
 /// into it, else every range from the start of the feed.
-fn refresh_routing(core: Core, link: Str, prev: RoutingMap?) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand) {
+fn refresh_routing[fx: Effects](core: Core[fx], link: Str, prev: RoutingMap?) -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if let Some(pm) = prev {
     if pm.etag != "" {
       let r = fetch_all_pages(core, link, pm.etag)?

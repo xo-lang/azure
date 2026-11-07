@@ -31,28 +31,28 @@ pub struct ConsumerClientOptions {
   pub custom_endpoint: Str = ""
 }
 
-pub struct ConsumerClient {
-  ns: Namespace
+pub struct ConsumerClient[fx: Effects] {
+  ns: Namespace[fx]
   event_hub: Str
   consumer_group: Str
   id: Str
   retry_options: RetryOptions
 }
 
-fn consumer(ns: Namespace, event_hub: Str, consumer_group: Str, options: ConsumerClientOptions) -> ConsumerClient uses rand {
+fn consumer[fx: Effects](ns: Namespace[fx], event_hub: Str, consumer_group: Str, options: ConsumerClientOptions) -> ConsumerClient[fx] uses (rand, fx) {
   let id = if options.instance_id != "" { options.instance_id } else { uuid.v4(ns.rand).display() }
   ConsumerClient{ns: ns with {custom_endpoint: options.custom_endpoint}, event_hub: event_hub, consumer_group: consumer_group, id: id, retry_options: options.retry_options}
 }
 
 /// A consumer of `event_hub` for `consumer_group` (DEFAULT_CONSUMER_GROUP
 /// for the default) with an Entra ID credential.
-pub fn new_consumer_client(net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, consumer_group: Str, credential: azcore.TokenCredential, options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient ! Str uses rand {
+pub fn new_consumer_client[fx: Effects](net: Net, clock: Clock, rand: Rand, fully_qualified_namespace: Str, event_hub: Str, consumer_group: Str, credential: azcore.TokenCredential[fx], options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient[fx] ! Str uses (rand, fx) {
   Ok(consumer(namespace(net, clock, rand, fully_qualified_namespace, true, Auth.Credential(credential), options.application_id, options.timeout_ms), event_hub, consumer_group, options))
 }
 
 /// A consumer from a connection string. The event hub is the string's
 /// EntityPath, or `event_hub` when it has none (exactly one of them).
-pub fn new_consumer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str, consumer_group: Str, options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient ! Str uses rand {
+pub fn new_consumer_client_from_connection_string(net: Net, clock: Clock, rand: Rand, connection_string: Str, event_hub: Str, consumer_group: Str, options: ConsumerClientOptions = ConsumerClientOptions{}) -> ConsumerClient[()] ! Str uses (rand) {
   let (ns, hub) = namespace_from_connection_string(net, clock, rand, connection_string, event_hub, options.application_id, options.timeout_ms)?
   Ok(consumer(ns, hub, consumer_group, options))
 }
@@ -136,8 +136,8 @@ struct ReceiverLink {
   gen: Int
 }
 
-pub struct PartitionClient {
-  ns: Namespace
+pub struct PartitionClient[fx: Effects] {
+  ns: Namespace[fx]
   event_hub: Str
   consumer_group: Str
   partition_id: Str
@@ -152,7 +152,7 @@ pub struct PartitionClient {
 }
 
 /// A client for one partition. Its link attaches on the first receive.
-pub fn (cc: ConsumerClient) new_partition_client(partition_id: Str, options: PartitionClientOptions = PartitionClientOptions{}) -> PartitionClient ! EventHubsErr {
+pub fn (cc: ConsumerClient[fx]) new_partition_client(partition_id: Str, options: PartitionClientOptions = PartitionClientOptions{}) -> PartitionClient[fx] ! EventHubsErr {
   let expr = start_expression(options.start_position) ?? e => return Err(fatal(e))
   if options.prefetch > DEFAULT_MAX_CREDIT_SIZE {
     return Err(fatal("options.Prefetch cannot exceed ${DEFAULT_MAX_CREDIT_SIZE}"))
@@ -167,7 +167,7 @@ fn (pc: PartitionClient) entity_path() -> Str {
 
 /// The link, attached again (from where the last receive ended) when
 /// there is none or it is on a dropped connection.
-fn (pc: PartitionClient) get() -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand) {
+fn (pc: PartitionClient[fx]) get() -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand, fx) {
   let ns = pc.ns
   let path = pc.entity_path()
   let expr = pc.expression.with_read(fn(e: Str) -> Str { e })
@@ -181,7 +181,7 @@ fn (pc: PartitionClient) get() -> ReceiverLink ! EventHubsErr uses (net.dial, cl
     target: pc.instance_id, properties: props, desired_capabilities: [CAPABILITY_GEO_DR_REPLICATION],
     filters: [(SELECTOR_FILTER, amqp.Value.Described(descriptor: amqp.Value.ULong(v: UInt64(SELECTOR_FILTER_CODE)), value: amqp.Value.Str(v: expr)))],
   }
-  pc.link.with(fn(var slot: ReceiverLink?) -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand) {
+  pc.link.with(fn(var slot: ReceiverLink?) -> ReceiverLink ! EventHubsErr uses (net.dial, clock, rand, fx) {
     if let Some(x) = slot {
       if x.gen == ns.current_gen() {
         return Ok(x)
@@ -226,7 +226,7 @@ pub struct ReceiveEventsOptions {
 /// scratch, as Go's; when the retries end in an error, the last try's
 /// events are returned if it had any. With prefetch off the link is
 /// given `count` credit and drained at the end.
-pub fn (pc: PartitionClient) receive_events(count: Int, options: ReceiveEventsOptions = ReceiveEventsOptions{}) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand) {
+pub fn (pc: PartitionClient[fx]) receive_events(count: Int, options: ReceiveEventsOptions = ReceiveEventsOptions{}) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand, fx) {
   if count <= 0 {
     return Err(fatal("count should be greater than 0"))
   }
@@ -238,7 +238,7 @@ pub fn (pc: PartitionClient) receive_events(count: Int, options: ReceiveEventsOp
   let deadline = clock.now().unix_millis() + options.timeout_ms
   // The events of the try that failed last (Go's `events`).
   let partial = Mutex[List[ReceivedEventData]].new([])
-  let result = pc.ns.retry(pc.retry_options, fn(_: Int) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand) {
+  let result = pc.ns.retry(pc.retry_options, fn(_: Int) -> List[ReceivedEventData] ! EventHubsErr uses (net.dial, clock, rand, fx) {
     partial.with(fn(var p: List[ReceivedEventData]) { p = [] })
     let x = pc.get()?
     var out: List[ReceivedEventData] = []
@@ -276,7 +276,7 @@ pub fn (pc: PartitionClient) receive_events(count: Int, options: ReceiveEventsOp
       }
     }
     Ok(out)
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(k) })
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { pc.recover(k) })
   let events = match result {
     Ok(v) => v
     Err(e) => {
@@ -295,11 +295,11 @@ pub fn (pc: PartitionClient) receive_events(count: Int, options: ReceiveEventsOp
 }
 
 /// Attaches the link now, with retries (Go's PartitionClient.init).
-fn (pc: PartitionClient) init() -> () ! EventHubsErr uses (net.dial, clock, rand) {
-  pc.ns.retry(pc.retry_options, fn(_: Int) -> () ! EventHubsErr uses (net.dial, clock, rand) {
+fn (pc: PartitionClient[fx]) init() -> () ! EventHubsErr uses (net.dial, clock, rand, fx) {
+  pc.ns.retry(pc.retry_options, fn(_: Int) -> () ! EventHubsErr uses (net.dial, clock, rand, fx) {
     pc.get()?
     Ok(())
-  }, fn(k: RecoveryKind) uses (net.dial, clock) { pc.recover(k) })
+  }, fn(k: RecoveryKind) uses (net.dial, clock, fx) { pc.recover(k) })
 }
 
 /// Detaches the link.

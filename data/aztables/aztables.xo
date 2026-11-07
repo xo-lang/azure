@@ -39,8 +39,8 @@ pub fn new_shared_key_credential(account_name: Str, account_key: Str) -> SharedK
   exported.new_shared_key_credential(account_name, account_key)
 }
 
-pub struct ClientOptions {
-  pub client: policy.ClientOptions = policy.ClientOptions{}
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
 }
 
 /// Whether `u` is a Cosmos DB table endpoint (Go's isCosmosEndpoint):
@@ -87,12 +87,13 @@ fn split_url(u: Str) -> (Str, Str) {
 
 /// Signs each request with SharedKeyLite, setting x-ms-date when the
 /// request has none (a caller's date is kept, as Go's does here).
-pub struct SharedKeyLitePolicy {
+// 0540: phantom fx so send can name next's effects; removed when xo ADR 0540 is accepted
+pub struct SharedKeyLitePolicy[fx: Effects] {
   pub credential: SharedKeyCredential
   pub clock: Clock
 }
 
-fn (p: SharedKeyLitePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: SharedKeyLitePolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   let dated = if (req.header("x-ms-date") ?? "") == "" { req.with_header("x-ms-date", exported.http_date(p.clock.now())) } else { req }
   let sig = p.credential.compute_hmac_sha256(string_to_sign(p.credential.account_name, dated))
   next.send(dated.with_header("Authorization", "SharedKeyLite ${p.credential.account_name}:${sig}"))
@@ -100,9 +101,10 @@ fn (p: SharedKeyLitePolicy) send(req: policy.Request, next: policy.Next) -> http
 
 /// Cosmos takes no PATCH: a PATCH goes as a POST with
 /// `X-HTTP-Method: MERGE` (Go's cosmosPatchTransformPolicy).
-pub struct CosmosPatchTransformPolicy {}
+// 0540: phantom fx so send can name next's effects; removed when xo ADR 0540 is accepted
+pub struct CosmosPatchTransformPolicy[fx: Effects] {}
 
-fn (p: CosmosPatchTransformPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (p: CosmosPatchTransformPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
   next.send(cosmos_transform(req))
 }
 
@@ -115,15 +117,15 @@ fn cosmos_transform(req: policy.Request) -> policy.Request {
 
 /// What both clients share: the service endpoint, the pipeline, and the
 /// key for SAS URLs.
-struct Core {
+struct Core[fx: Effects] {
   endpoint: Str
-  pipeline: runtime.Pipeline
+  pipeline: runtime.Pipeline[fx]
   cred: SharedKeyCredential?
   /// For the batch boundaries.
   rand: Rand
 }
 
-fn new_core(net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: List[policy.Policy], cred: SharedKeyCredential?, opts: ClientOptions) -> Core {
+fn new_core[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: List[policy.Policy[fx]], cred: SharedKeyCredential?, opts: ClientOptions[fx]) -> Core[fx] {
   var per_call: List[policy.Policy] = [azblob.VersionPolicy{version: SERVICE_VERSION}]
   if is_cosmos_endpoint(endpoint) {
     per_call.push(CosmosPatchTransformPolicy{})

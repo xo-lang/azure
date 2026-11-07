@@ -22,19 +22,19 @@ pub const SERVICE_VERSION: Str = "2026-06-06"
 pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
 
 /// The token scope (base.GetAudience).
-fn audience_scope(opts: ClientOptions) -> Str {
+fn audience_scope[fx: Effects](opts: ClientOptions[fx]) -> Str {
   if opts.audience.trim() == "" { TOKEN_SCOPE } else { "${opts.audience.trim_end_chars("/")}/.default" }
 }
 
-fn dfs_pipeline(net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy], opts: ClientOptions) -> runtime.Pipeline {
+fn dfs_pipeline[fx: Effects](net: Net, clock: Clock, rand: Rand, auth: List[policy.Policy[fx]], opts: ClientOptions[fx]) -> runtime.Pipeline[fx] {
   runtime.new_pipeline("azdatalake", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: auth}, opts.client)
 }
 
-fn shared_key_auth(clock: Clock, cred: SharedKeyCredential) -> List[policy.Policy] {
+fn shared_key_auth[fx: Effects](clock: Clock, cred: SharedKeyCredential) -> List[policy.Policy[fx]] {
   [exported.SharedKeyPolicy{credential: cred, clock: clock}]
 }
 
-fn token_auth(clock: Clock, cred: azcore.TokenCredential, opts: ClientOptions) -> List[policy.Policy] {
+fn token_auth[fx: Effects](clock: Clock, cred: azcore.TokenCredential[fx], opts: ClientOptions[fx]) -> List[policy.Policy[fx]] {
   [exported.new_storage_challenge_policy(cred, audience_scope(opts), clock, allow_http: opts.insecure_allow_credential_with_http)]
 }
 
@@ -61,24 +61,24 @@ fn dfs_get(u: Str, query: List[(Str, Str)], accept: Str) -> policy.Request {
 
 /// Pages of a list, each error as a DFS one (Go's pagers run every error
 /// through ConvertToDFSError).
-pub struct DfsPager[T] {
-  inner: runtime.Pager[T]
+pub struct DfsPager[T, fx: Effects] {
+  inner: runtime.Pager[T, fx]
 }
 
 /// Whether another page can be fetched.
-pub fn (p: DfsPager[T]) more() -> Bool {
+pub fn (p: DfsPager[T, fx]) more() -> Bool {
   p.inner.more()
 }
 
 /// The next page.
-pub fn (var p: DfsPager[T]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand) {
+pub fn (var p: DfsPager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   p.inner.next_page().map_err(to_dfs_error)
 }
 
 /// A pager that sends `first` again with `name` set to each page's
 /// marker, the query re-sorted as Go rebuilds it; a marker of "" or None
 /// ends it.
-fn marker_pager[T](pipeline: runtime.Pipeline, first: policy.Request, decode: fn(http.Response) -> T ! Str, name: Str, marker: fn(T) -> Str?) -> DfsPager[T] {
+fn marker_pager[T, fx: Effects](pipeline: runtime.Pipeline[fx], first: policy.Request, decode: fn(http.Response) -> T ! Str, name: Str, marker: fn(T) -> Str?) -> DfsPager[T, fx] {
   DfsPager{inner: runtime.new_pager_with(pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
     let m = marker(page) ?? return None
     if m == "" {
@@ -154,7 +154,7 @@ fn dfs_request(method: Str, u: Str, query: List[(Str, Str)], headers: List[(Str,
 }
 
 /// Sends `req`; a status not in `ok` is a response error, as a DFS one.
-fn dfs_send(pipeline: runtime.Pipeline, req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+fn dfs_send[fx: Effects](pipeline: runtime.Pipeline[fx], req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   let resp = pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if !ok.contains(resp.status) {
     return Err(to_dfs_error(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
