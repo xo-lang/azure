@@ -96,9 +96,10 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/resources/armdeployments | v3.0.0 (`v3`) | stable | 0 | 10993 | v3.0.0 | 0 + 3303 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
+| resourcemanager/servicebus/armservicebus | v1.2.0 | stable; newer v2.0.0-beta.4 | 0 | 14615 | v1.2.0 | 0 + 4504 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (294)
+## ARM modules not ported (293)
 
 <details><summary>The list</summary>
 
@@ -357,7 +358,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/securityinsights/armsecurityinsights | v1.2.0 | stable; newer v2.0.0-beta.6 | 23218 |
 | resourcemanager/selfhelp/armselfhelp | v1.1.0 | stable; newer v2.0.0-beta.5 | 2316 |
 | resourcemanager/serialconsole/armserialconsole | v2.0.0 | stable | 2190 |
-| resourcemanager/servicebus/armservicebus | v1.2.0 | stable; newer v2.0.0-beta.4 | 14615 |
 | resourcemanager/servicefabric/armservicefabric | v2.0.0 | stable; newer v3.0.0-beta.1 | 10935 |
 | resourcemanager/servicefabricmanagedclusters/armservicefabricmanagedclusters | v1.0.0 | stable | 18373 |
 | resourcemanager/servicefabricmesh/armservicefabricmesh | v0.6.2 | v0, deprecated | 8266 |
