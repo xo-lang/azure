@@ -42,6 +42,6 @@ Where it differs from Go v0.1.1:
   in Xo's HTTP client's words; Go's fails with `no Host in request URL`.
 - A response body that is not JSON is reported with Xo's JSON error.
 - The connection string's endpoint is read as Go's url.Parse reads it,
-  with azblob's Go URL reader: its user info and fragment are dropped.
+  with azcore's Go URL reader: its user info and fragment are dropped.
 - Go's int32 options (`message_ttl_seconds`, minutes to expire) are
   `Int`.

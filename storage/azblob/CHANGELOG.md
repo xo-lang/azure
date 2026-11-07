@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Moved to the root module's azcore, unchanged: `exported.parse_go_url`,
+`GoUrl` and its `to_str`, `go_query`, `go_escape_path`, `go_quote`,
+`is_unreserved`, `has_byte` and `all_bytes` are `azcore.parse_go_url`,
+... (so a data plane module reads URLs as Go's without depending on
+storage). `exported.is_ip_endpoint` stays.
+
 Tests only, no change to the module:
 
 - The DownloadFile cases open the existing file as Go's program does

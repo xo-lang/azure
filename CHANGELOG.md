@@ -8,6 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
+`azcore/gourl.xo`: Go's url.Parse, URL.String, URL.Query, path escaping
+and strconv.Quote (`parse_go_url`, `GoUrl`, `go_query`,
+`go_escape_path`, `go_quote` and the byte helpers), moved unchanged
+from azblob's `exported` package. azqueue, azfile and azdatalake call
+them there, and messaging/azwebpubsub no longer depends on
+storage/azblob.
+
 azidentity: Service Fabric managed identity (gap item 5): its self
 signed endpoint accepted by the IDENTITY_SERVER_THUMBPRINT pin alone
 (`tls.Verify.None`, set only with the pin hook), with a loopback TLS
