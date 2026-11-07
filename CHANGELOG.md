@@ -8,6 +8,14 @@ version has been tagged since.
 
 ## Unreleased
 
+azidentity: Service Fabric's cases run against a FakeNet TLS endpoint
+(`FakeNet.handle_tls`, xo decision 0544) presenting a certificate made by
+the test, so the client's pin is checked on every case, as Go's are
+against its httptest TLS server; the "wrong pin" case, KNOWN before,
+now matches Go. Its error now reads as Go's: on Service Fabric (MSAL
+Go's own pinned http.Client, not azcore's pipeline) a transport error
+is a url.Error, `Get "<url>": <error>`. Needs xo dbcaeaf97 or later.
+
 Every other Go ARM module, 290 of them, generated from the spec Go
 pins, at its newest Go release: each builds, type-checks, formats and
 vets, and is tested by the gate, but none is checked against Go yet

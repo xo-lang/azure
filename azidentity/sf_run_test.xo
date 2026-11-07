@@ -1,37 +1,47 @@
 // Replays the Go program's Service Fabric cases (sfvectors_test.xo): the
-// endpoint is a FakeNet handler at https://127.0.0.1:8445. FakeNet does
-// no TLS, so the pin is not checked on these requests (the "wrong pin"
-// case is KNOWN until FakeNet's handle_tls); sf_verify, the check the
-// client runs on each new connection, is tested directly below.
+// endpoint is a FakeNet TLS handler at https://127.0.0.1:8445
+// (FakeNet.handle_tls, decision 0544) presenting a self signed
+// certificate made here, whose SHA-1 thumbprint is the pin, so the
+// client's pin check runs on every case as Go's does against its
+// httptest TLS server; sf_verify is also tested directly below.
+use std/base64
 use std/crypto
 use std/http
+use std/netip
 use std/tls
+use std/x509
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 
 const SF_PORT: Str = "8445"
 
-/// A thumbprint that is well formed; FakeNet never checks it.
-const SF_PIN: Str = "00112233445566778899aabbccddeeff00112233"
-
 /// Cases whose output differs from Go's here, with the reason and this
-/// port's lines for them (which must not be Go's).
-const SF_KNOWN: Map[Str, Str] = {
-  "wrong pin": "FakeNet does no TLS, so the pin is never compared (sf_verify is tested below)",
+/// port's lines for them (which must not be Go's). None now.
+const SF_KNOWN: Map[Str, Str] = {}
+
+/// The endpoint's certificate (self signed, for 127.0.0.1) and its SHA-1
+/// thumbprint in hex, the pin Service Fabric gives its clients.
+fn sf_server_cert(os: testing.TestOs) -> (tls.TlsCert, Str) {
+  let now = os.clock.now()
+  let key = crypto.generate_key(os.rand, crypto.KeyAlg.EcdsaP256).or_fault("key")
+  let t = x509.Template{subject: x509.Name{common_name: "sf"}, not_before: now - 1h, not_after: now + 24h, ip_addresses: [netip.parse_addr("127.0.0.1").or_fault("ip")], key_usage: [x509.KeyUsage.DigitalSignature], ext_key_usage: [x509.ExtKeyUsage.ServerAuth]}
+  let cert = x509.create_certificate(os.rand, t, key.public_key(), None, key).or_fault("cert")
+  let key_pem = "-----BEGIN PRIVATE KEY-----\n${base64.encode(crypto.marshal_private_key(key))}\n-----END PRIVATE KEY-----\n".bytes()
+  (tls.cert(cert.pem(), key_pem).or_fault("pair"), crypto.digest(crypto.Hash.Sha1, cert.raw).to_hex())
 }
 
-fn sf_case(os: testing.TestOs, f: GvFake, name: Str) {
+fn sf_case(os: testing.TestOs, f: GvFake, name: Str, sf_pin: Str) {
   let s = "sf5"
   let base = "https://127.0.0.1:${SF_PORT}"
   var endpoint = "${base}/msi/token"
-  var pin = SF_PIN
+  var pin = sf_pin
   var id: UserAssigned? = None
   match name {
-    "pin colons" => pin = "00: 11: 22: 33: 44: 55: 66: 77: 88: 99: AA: BB: CC: DD: EE: FF: 00: 11: 22: 33"
+    "pin colons" => pin = (0..20).to_list().map(fn(i: Int) -> Str { sf_pin[2 * i..2 * i + 2].to_upper() }).join(": ")
     "wrong pin" => pin = "ffffffffffffffffffffffffffffffffffffffff"
     "pin not hex" => pin = "zz".repeat(20)
-    "pin short" => pin = SF_PIN[0..38]
-    "pin sha256" => pin = SF_PIN + SF_PIN[0..24]
+    "pin short" => pin = sf_pin[0..38]
+    "pin sha256" => pin = sf_pin + sf_pin[0..24]
     "http endpoint" => endpoint = "http://127.0.0.1:${SF_PORT}/msi/token"
     "no host" => endpoint = "https:///msi/token"
     "bad url" => endpoint = "https://[::1/msi/token"
@@ -54,18 +64,10 @@ fn sf_case(os: testing.TestOs, f: GvFake, name: Str) {
   }
 }
 
-/// Go's Request.Host: FakeNet's host() is "" unless the client set one,
-/// so the URL's host and port stand in.
-fn sf_host(req: http.Request) -> Str {
-  if req.host() != "" {
-    return req.host()
-  }
-  "${req.url.host}${req.url.port.map(fn(n: Int) -> Str { ":${n}" }) ?? ""}"
-}
-
 test "Service Fabric managed identity is Go's" {
   let s = "sf5"
   let f = gv_serve(os.net, s)
+  let (cert, sf_pin) = sf_server_cert(os)
   let h = fn(req: http.Request) -> http.Response {
     var hs: List[Str] = []
     for (k, v) in req.headers {
@@ -74,7 +76,7 @@ test "Service Fabric managed identity is Go's" {
         hs.push("${lk}=${v}")
       }
     }
-    gv_note(f, "${s}: SF ${req.method} ${req.escaped_path()}?${req.raw_query()} host=${sf_host(req)}\n  H ${hs.sort().join(" | ")}")
+    gv_note(f, "${s}: SF ${req.method} ${req.escaped_path()}?${req.raw_query()} host=${req.host()}\n  H ${hs.sort().join(" | ")}")
     let p = req.escaped_path()
     if p.starts_with("/redirect") {
       return http.text(302, "").with_header("Location", "/msi/token")
@@ -87,10 +89,10 @@ test "Service Fabric managed identity is Go's" {
     }
     http.text(200, "{\"access_token\":\"at-sf\",\"expires_on\":\"4102444800\",\"resource\":\"https://vault.example.test\",\"token_type\":\"Bearer\"}").with_header("Content-Type", "application/json")
   }
-  os.net.handle("GET https://127.0.0.1:${SF_PORT}/{rest...}", h)
+  os.net.handle_tls("GET https://127.0.0.1:${SF_PORT}/{rest...}", cert, h)
   let names = ["ok", "pin colons", "wrong pin", "pin not hex", "pin short", "pin sha256", "http endpoint", "no host", "bad url", "user assigned", "redirect", "500", "400", "query endpoint"]
   for n in names {
-    sf_case(os, f, n)
+    sf_case(os, f, n, sf_pin)
   }
   let want_all = GO_SF_LINES.map(fn(l: Str) -> Str { l.replace("<port>", SF_PORT) })
   let (got, want) = gv_lines(f, s, want_all)
@@ -115,7 +117,9 @@ test "Service Fabric managed identity is Go's" {
     expect((i, g[i])) == (i, w[i])
   }
   expect(g.len()) == w.len()
-  expect(gk != wk) == true
+  if !SF_KNOWN.is_empty() {
+    expect(gk != wk) == true
+  }
 }
 
 test "Service Fabric's pin accepts only the leaf whose SHA-1 is the thumbprint" {
@@ -141,7 +145,7 @@ test "Service Fabric's client pins every connection and follows no redirect" {
   let env = os.env
   env.set("IDENTITY_ENDPOINT", "https://127.0.0.1:${SF_PORT}/msi/token")
   env.set("IDENTITY_HEADER", "sf-secret")
-  env.set("IDENTITY_SERVER_THUMBPRINT", SF_PIN)
+  env.set("IDENTITY_SERVER_THUMBPRINT", "00112233445566778899aabbccddeeff00112233")
   let c = new_managed_identity_credential(env.only(["IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT"]), os.fs, os.net, os.clock, os.rand, ManagedIdentityOptions{arc_himds: ""})?
   expect(c.source is Source.ServiceFabric(..)) == true
   // the chain and name checks are off only with the pin hook set

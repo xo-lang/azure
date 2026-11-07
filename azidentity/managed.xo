@@ -547,6 +547,21 @@ fn arc_verify(id: UserAssigned?, body: Bytes) -> () ! Str {
   Ok(())
 }
 
+/// A send error as Go's http.Client reports it: a transport failure is a
+/// url.Error, `Get "<url>": <error>`, any other error as it is. Only
+/// Service Fabric's errors read this way: MSAL Go sends them with its own
+/// http.Client (the pinned one), not through azcore's pipeline, which
+/// reports the error inside (the other sources' dial errors).
+fn go_url_err(req: policy.Request, e: policy.SendErr) -> Str {
+  match e {
+    policy.SendErr.Http(he) | policy.SendErr.Final(he) => {
+      let op = if req.method == "" { "Get" } else { req.method[0..1].to_upper() + req.method[1..req.method.len()].to_lower() }
+      "${op} ${json_quote(req.url)}: ${he.display()}"
+    }
+    other => other.display()
+  }
+}
+
 pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fs.read) {
   let name = "ManagedIdentityCredential"
   let resource = resource_of(opts.scopes) ?? e => return Err(azcore.AuthErr{credential: name, msg: e})
@@ -561,7 +576,7 @@ pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions
     m.probe()?
     let first = token_request(m.source, m.id, resource)
     let req = if m.source is Source.AzureArc(..) { m.arc_challenge(first)? } else { first }
-    let resp = m.pipeline.send(req) ?? e => return Err(failed_text(name, e.display()))
+    let resp = m.pipeline.send(req) ?? e => return Err(failed_text(name, if m.source is Source.ServiceFabric(..) { go_url_err(req, e) } else { e.display() }))
     if m.source is Source.ServiceFabric(..) && resp.status >= 300 && resp.status <= 399 && resp.header("Location").is_some() {
       // Go's CheckRedirect error, on the URL the server named
       return Err(failed_text(name, "Get ${json_quote(resp.header("Location") ?? "")}: redirects are not permitted for managed identity on Service Fabric"))
