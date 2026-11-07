@@ -1,6 +1,6 @@
 # azidentity: the port against Go v1.15.0
 
-Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11), (12) and (13) are ported (azidentity/CHANGELOG.md).
+Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11), (12), (13) and (14) are ported (azidentity/CHANGELOG.md).
 Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
@@ -124,6 +124,9 @@ grant code.
     with `Authorization: Bearer <system token>` and
     `X-TFS-FedAuthRedirect: Suppress`, then its `oidcToken` as the
     client assertion.
+    Ported 2026-11-06 with 22 Go cases (constructor errors, cache and
+    tenants, the OIDC endpoint's errors with `x-msedge-ref` and
+    `x-vss-e2eid`, and Go's URL building).
 
 ## Out by decision (no change proposed)
 

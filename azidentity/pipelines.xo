@@ -1,0 +1,101 @@
+// AzurePipelinesCredential, as azidentity's (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): an Azure Pipelines job's service connection
+// (workload identity federation). Each token request that misses the
+// cache asks the pipeline's OIDC endpoint (SYSTEM_OIDCREQUESTURI) for a
+// token with the job's system access token, and sends that token as the
+// client assertion.
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const PIPELINES_NAME: Str = "AzurePipelinesCredential"
+const OIDC_API_VERSION: Str = "7.1"
+
+pub struct AzurePipelinesCredential {
+  c: Confidential
+  connection_id: Str
+  oidc_uri: Str
+  system_access_token: Secret[Str]
+}
+
+fn pipelines_err(m: Str) -> azcore.AuthErr {
+  azcore.AuthErr{credential: PIPELINES_NAME, msg: m, text: m}
+}
+
+/// NewAzurePipelinesCredential: the tenant, then each argument, then
+/// SYSTEM_OIDCREQUESTURI (unset or empty) are checked in Go's order,
+/// with Go's errors.
+pub fn new_azure_pipelines_credential(tenant_id: Str, client_id: Str, service_connection_id: Str, system_access_token: Str, env: Env, net: Net, clock: Clock, rand: Rand, opts: Options = Options{}) -> AzurePipelinesCredential ! azcore.AuthErr uses (env) {
+  if !valid_tenant(tenant_id) {
+    return Err(azcore.AuthErr{credential: PIPELINES_NAME, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  if client_id == "" {
+    return Err(pipelines_err("no client ID specified"))
+  }
+  if service_connection_id == "" {
+    return Err(pipelines_err("no service connection ID specified"))
+  }
+  if system_access_token == "" {
+    return Err(pipelines_err("no system access token specified"))
+  }
+  let u = env.get("SYSTEM_OIDCREQUESTURI") ?? ""
+  if u == "" {
+    return Err(pipelines_err("no value for environment variable SYSTEM_OIDCREQUESTURI. This should be set by Azure Pipelines"))
+  }
+  Ok(AzurePipelinesCredential{
+    c: confidential(PIPELINES_NAME, tenant_id, client_id, net, clock, rand, opts)?,
+    connection_id: service_connection_id,
+    oidc_uri: u,
+    system_access_token: Secret.new(system_access_token),
+  })
+}
+
+pub fn (a: AzurePipelinesCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let tenant = a.c.tenant_for(opts)?
+  let key = key_of(tenant, opts.scopes, opts.enable_cae)
+  if let Some(t) = a.c.cached(tenant, key, opts) {
+    return Ok(t)
+  }
+  a.c.endpoint(tenant, opts.enable_cae)?
+  let assertion = a.oidc_token()?
+  a.c.request(tenant, key, opts, [("client_assertion_type", ASSERTION_TYPE), ("client_assertion", assertion)])
+}
+
+/// The OIDC endpoint's `oidcToken`. The URL is Go's: the arguments
+/// appended as they are, then the query parsed and encoded again (azcore's
+/// EncodeQueryParams), so a connection ID with `&` or `=` adds parameters
+/// as Go's does. A missing `oidcToken` is "", as Go's json.Unmarshal
+/// leaves it.
+fn (a: AzurePipelinesCredential) oidc_token() -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let failed = fn(m: Str) -> azcore.AuthErr { failed_text(PIPELINES_NAME, m) }
+  let raw = "${a.oidc_uri}?api-version=${OIDC_API_VERSION}&serviceConnectionId=${a.connection_id}"
+  let u = match raw.cut("?") {
+    Some((before, after)) => {
+      let q = url.parse_query(after) ?? e => return Err(failed("couldn't encode OIDC URL: ${e.display()}"))
+      "${before}?${q.encode()}"
+    }
+    None => raw
+  }
+  let headers = [
+    ("Authorization", "Bearer ${a.system_access_token.reveal()}"),
+    ("X-TFS-FedAuthRedirect", "Suppress"),
+  ]
+  let req = policy.Request{method: "POST", url: u, headers: headers}
+  let resp = a.c.pipeline.send(req) ?? e => return Err(failed("couldn't send OIDC token request: ${e.display()}"))
+  if resp.status != 200 {
+    var msg = "${resp.status} ${azcore.status_text(resp.status)} response from the OIDC endpoint. Check service connection ID and Pipeline configuration."
+    for h in ["x-msedge-ref", "x-vss-e2eid"] {
+      let v = resp.header(h) ?? ""
+      if v != "" {
+        msg = msg + "\n${h}: ${v}"
+      }
+    }
+    return Err(auth_failed(PIPELINES_NAME, req.method, req.url, resp, message: msg))
+  }
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return Err(failed("unexpected response from OIDC endpoint"))
+  match doc {
+    json.Value.Object(_) => Ok(str_field(doc, "oidcToken"))
+    _ => Err(failed("unexpected response from OIDC endpoint"))
+  }
+}

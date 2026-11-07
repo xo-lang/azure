@@ -1,0 +1,86 @@
+// Replays the Go program's AzurePipelinesCredential cases
+// (pipelinesvectors_test.xo): the token host is gv_serve's, the OIDC
+// endpoint a FakeNet handler answering from a script as the Go
+// program's does.
+use std/http
+use github.com/xo-lang/azure/azcore
+
+const PIPE_JWT: Str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.e30.c2ln"
+
+test "AzurePipelinesCredential's requests and errors are Go's" {
+  let s = "pipe14"
+  let f = gv_serve(os.net, s)
+  // `status|k=v;k=v|body`, or ERR (failed by FakeNet before the handler)
+  let next = Mutex[List[Str]].new([])
+  os.net.handle("POST https://pipelines.example.test/{rest...}", fn(req: http.Request) -> http.Response {
+    var hs: List[Str] = []
+    for (k, v) in req.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
+        hs.push("${lk}=${v}")
+      }
+    }
+    let qs = req.raw_query()
+    f.log.with(fn(var l: List[Str]) { l.push("${s}: REQ POST https://pipelines.example.test${req.escaped_path()}${if qs == "" { "" } else { "?${qs}" }}\n  H ${hs.sort().join(" | ")}\n  B ${req.body.to_str_lossy()}") })
+    let spec = next.with(fn(var n: List[Str]) -> Str { if n.is_empty() { "200||{\"oidcToken\":\"${PIPE_JWT}\"}" } else { n.remove_at(0) } })
+    let parts = spec.split_n("|", 3)
+    var r = http.text(Int.parse(parts[0]) ?? 500, parts[2]).with_header("Content-Type", "application/json")
+    if parts[1] != "" {
+      for kv in parts[1].split(";") {
+        let (k, v) = kv.cut("=") ?? (kv, "")
+        r = r.with_header(k, v)
+      }
+    }
+    r
+  })
+  let env = os.env
+  let mk = fn(label: Str, tenant: Str, client: Str, conn: Str, token: Str, allowed: List[Str]) -> AzurePipelinesCredential? {
+    let r = new_azure_pipelines_credential(tenant, client, conn, token, env.only(["SYSTEM_OIDCREQUESTURI"]), os.net, os.clock, os.rand, gv_opts(allowed, nodisc: true))
+    gv_new(f, s, label, r)
+    r.ok()
+  }
+  let get = fn(label: Str, c: AzurePipelinesCredential, o: azcore.TokenRequestOptions) { gv_get(f, s, label, c.get_token(o)) }
+  let scope = fn(n: Int) -> azcore.TokenRequestOptions { azcore.TokenRequestOptions{scopes: ["https://s${n}.example.test/.default"]} }
+  // unset: the environment without it
+  gv_new(f, s, "pipe no uri", new_azure_pipelines_credential("tenant-a", "client-1", "conn-1", "sys-token", env.only([]), os.net, os.clock, os.rand, gv_opts(nodisc: true)))
+  env.set("SYSTEM_OIDCREQUESTURI", "")
+  mk("pipe empty uri", "tenant-a", "client-1", "conn-1", "sys-token", [])
+  env.set("SYSTEM_OIDCREQUESTURI", "https://pipelines.example.test/oidc")
+  mk("pipe bad tenant", "bad tenant!", "client-1", "conn-1", "sys-token", [])
+  mk("pipe no client", "tenant-a", "", "conn-1", "sys-token", [])
+  mk("pipe no conn", "tenant-a", "client-1", "", "sys-token", [])
+  mk("pipe no token", "tenant-a", "client-1", "conn-1", "", [])
+  // Go's nil options: the same as the defaults
+  mk("pipe nil options", "tenant-a", "client-1", "conn-1", "sys-token", [])
+  let c = mk("pipe", "tenant-a", "client-1", "conn-1", "sys-token", ["tenant-b"])?
+  get("pipe first", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  get("pipe cached", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  get("pipe tenant-b", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"})
+  get("pipe tenant-c", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-c"})
+  next.reset(["401|X-Msedge-Ref=ref-1;X-Vss-E2eid=e2e-1|{\"message\":\"no\"}"])
+  get("pipe 401 headers", c, scope(1))
+  next.reset(["403||forbidden"])
+  get("pipe 403", c, scope(2))
+  next.reset(["200||not json"])
+  get("pipe not json", c, scope(3))
+  next.reset(["200||{\"other\":1}"])
+  get("pipe no oidcToken", c, scope(4))
+  // FakeNet fails the request before the handler sees it; the Go
+  // program's fake logs it first
+  os.net.fail_next("POST https://pipelines.example.test/oidc", http.ClientErr.Connect("fake transport error"))
+  gv_note(f, "${s}: REQ POST https://pipelines.example.test/oidc?api-version=7.1&serviceConnectionId=conn-1\n  H authorization=Bearer sys-token | x-tfs-fedauthredirect=Suppress\n  B ")
+  get("pipe transport", c, scope(5))
+  os.net.clear_failures()
+  f.next.reset([401])
+  get("pipe token 401", c, scope(6))
+  let c2 = mk("pipe odd conn", "tenant-a", "client-1", "conn 1&x=y/+", "sys-token", [])?
+  get("pipe odd conn", c2, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  env.set("SYSTEM_OIDCREQUESTURI", "https://pipelines.example.test/oidc?a=b c")
+  let c3 = mk("pipe uri query", "tenant-a", "client-1", "conn-1", "sys-token", [])?
+  get("pipe uri query", c3, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  let (got, want) = gv_lines(f, s, GO_PIPELINES_LINES)
+  for i in 0..got.len().min(want.len()) {
+    expect((i, got[i])) == (i, want[i])
+  }
+  expect(got.len()) == want.len()
+}

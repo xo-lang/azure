@@ -7,6 +7,17 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- AzurePipelinesCredential (gap item 14), as azidentity's:
+  `new_azure_pipelines_credential(tenant_id, client_id,
+  service_connection_id, system_access_token, env, ...)`, reading
+  SYSTEM_OIDCREQUESTURI, with Go's errors in Go's order. A token request
+  that misses the cache POSTs to the OIDC endpoint with the system
+  access token and sends its `oidcToken` as the client assertion. An
+  error response is an AuthenticationFailedError naming the status and
+  any `x-msedge-ref` and `x-vss-e2eid` headers. The URL is built as Go
+  builds it: the connection ID is appended unescaped and the query is
+  then parsed and encoded again, so `&` or `=` in it adds parameters.
+  Checked against 22 Go cases (`pipelinesvectors_test.xo`).
 - OnBehalfOfCredential (gap item 13), as azidentity's with MSAL Go's
   AcquireTokenOnBehalfOf: `new_on_behalf_of_credential_with_secret`,
   `_with_certificate` and `_with_client_assertions`, with
