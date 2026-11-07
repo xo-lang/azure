@@ -92,6 +92,20 @@ Go's CHANGELOG for v1.5.1 says the API version can be selected
 here `ClientOptions.client.api_version`, which sends it as Go does (a
 vector with `2025-07-01`).
 
+**Breaking**: `resourcemanager/resources/armresources` matches Go's
+armresources/v4 v4.0.0, which Go now generates from TypeSpec (API
+version 2025-04-01; Microsoft.Resources/resources at the commit of Go's
+tsp-location.yaml). As in Go, the deployments are no longer in it:
+`DeploymentsClient` and `DeploymentOperationsClient` are gone (Go moved
+them to armdeployments, which the Xo repository does not have yet).
+Checked against Go's module: all 40 operations' requests, all 44
+models' JSON keys, every type name and all 12 enums with their values
+and order equal; its Go-backed vectors re-recorded from v4.0.0. The Xo
+module path is unchanged (decision 0001).
+
+The generator reads tspconfig.yaml's typespec-go `head-as-boolean`: a
+HEAD operation's response is `success`, false on 404, as Go's.
+
 **Breaking**: `resourcemanager/network/armnetwork` matches Go's
 armnetwork/v12 v12.1.0, which Go now generates from TypeSpec (API
 version 2026-03-01 in 20 feature files, the scale set network

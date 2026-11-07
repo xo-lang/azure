@@ -9,7 +9,7 @@ every module and fails on any difference.
 ## Go's names, as autorest.go and TypeSpec's Go emitter make them
 
 Each rule below was found by diffing a generated module's names with
-Go's (armresources v1.2.0, armstorage v4.3.0, armcompute v9.0.0,
+Go's (armresources v4.0.0, armstorage v4.3.0, armcompute v9.0.0,
 armnetwork v12.1.0, armkeyvault v1.5.0, armauthorization v2.2.0,
 azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armkeyvault's `Secret`, which is
@@ -147,6 +147,10 @@ response type equal, except armkeyvault's `Secret`, which is
   keeps its operationId's name. An action whose request is an inline
   `{ @bodyRoot x: T; }` also gets Go's unused `<Op>ParameterBody` model
   (`StopCircuitLinkFailoverTestParameterBody`).
+- The project's tspconfig.yaml options for `@azure-tools/typespec-go`
+  apply as readme.go.md's did: `head-as-boolean: true` makes a HEAD
+  operation's response `success`, true on 2xx and false on 404
+  (armresources v4's `ResourceGroupsClient.CheckExistence`).
 - Documentation keeps the spec's text, except that a GUID in it (a
   spec's example id, armstorage v4's `Ex: ...`) is written as the
   all-zero GUID: the repository holds no ids.
