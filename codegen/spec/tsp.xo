@@ -13,6 +13,11 @@ pub struct Renames {
   /// (armsubscriptions' `Client.Get(ctx, subscriptionID, ...)`), as
   /// `operationid#wire`, lower case operationId.
   pub method_params: List[Str] = []
+  /// `@@clientInitialization(Namespace, {parameters: Model}, scope)`
+  /// for Go: Model's properties, which Go's clients take in their
+  /// constructors (armalertsmanagement's `NewAlertsClient(scope, ...)`),
+  /// by wire name.
+  pub client_params: List[Str] = []
   /// `@@override(Iface.op, customOp, "go")`: the custom operation's path
   /// parameters in the order it declares them, which is Go's method's
   /// order (armcosmos' `GetSQLRoleDefinition(ctx, roleDefinitionID,
@@ -246,6 +251,10 @@ fn for_go(scope: Str) -> Bool {
   if parts.contains("go") {
     return true
   }
+  // `"!(python,java)"`: every emitter but those listed
+  if scope.trim().starts_with("!(") {
+    return !scope.trim().trim_prefix("!(").trim_suffix(")").split(",").any(fn(s: Str) -> Bool { s.trim() == "go" })
+  }
   !parts.is_empty() && parts.all(fn(s: Str) -> Bool { s.starts_with("!") }) && !parts.contains("!go")
 }
 
@@ -279,6 +288,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // `@@clientName(T, "Name")` with no scope: the name every emitter,
   // the OpenAPI one too, gives T
   let unscoped = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*\\)") ?? e => return Err(e.display())
+  let client_init = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?clientInitialization\\(\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*parameters\\s*:\\s*([A-Za-z0-9_]+)\\s*,?\\s*\\}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let type_decl = regexp.compile("(?:^|\\n)\\s*(?:enum|union|model|scalar)\\s+([A-Za-z0-9_]+)") ?? e => return Err(e.display())
   let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   // `Namespace.op` names the operation: the project's namespaces, from
@@ -555,6 +565,20 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
       r.method_params.push("${id.to_lower()}#${m[2] ?? ""}")
     }
+    for whole in client_init.find_all(text) {
+      let m = client_init.captures(whole) ?? continue
+      let scope = m[2] ?? ""
+      if scope != "" && !for_go(scope) {
+        continue
+      }
+      for t in texts {
+        for f in model_props(t, m[1] ?? "") {
+          if !r.client_params.contains(f) {
+            r.client_params.push(f)
+          }
+        }
+      }
+    }
     for whole in override_re.find_all(text) {
       let m = override_re.captures(whole) ?? continue
       if !for_go(m[3] ?? "") {
@@ -582,6 +606,21 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
   }
   Ok(r)
+}
+
+/// The property names of `model name { ... }` in `text` ([] when `text`
+/// has no such model): what a `@@clientInitialization` names.
+fn model_props(text: Str, name: Str) -> List[Str] {
+  let re = regexp.compile("(?:^|\\n)\\s*model\\s+${name}\\s*\\{([^}]*)\\}").ok() ?? return []
+  let prop = regexp.compile("(?:^|\\n)\\s*(?:@[A-Za-z.]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:").ok() ?? return []
+  let whole = re.find_all(text).get(0) ?? return []
+  let m = re.captures(whole) ?? return []
+  var out: List[Str] = []
+  for line in prop.find_all(m[1] ?? "") {
+    let c = prop.captures(line) ?? continue
+    out.push(c[1] ?? "")
+  }
+  out
 }
 
 /// The path parameters of `op name(...)` in `text`, in the order it

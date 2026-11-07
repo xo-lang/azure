@@ -121,6 +121,10 @@ pub struct Op {
   /// A success response's body is binary (`format: file` or `binary`):
   /// `Bytes` as received, in the response field `body_field`.
   pub binary_resp: Bool = false
+  /// A string response the operation also produces as `text/*`
+  /// (armautomation's `text/powershell`): TypeSpec's Go emitter reads
+  /// the body as text, unparsed.
+  pub text_resp: Bool = false
   pub body_field: Str = ""
 }
 
@@ -160,6 +164,9 @@ pub struct Custom {
   /// (`operationid#wire`, lower case operationId): TypeSpec's
   /// `@@clientLocation(Iface.op::parameters.p, Iface.op)`.
   pub method_params: List[Str] = []
+  /// TypeSpec's `@@clientInitialization` parameters for Go (wire names):
+  /// client parameters, as subscriptionId.
+  pub client_params: List[Str] = []
   /// An OpenAPI `<Model>Update` or `<Model>Patch` definition (TypeSpec's
   /// update visibility, which the autorest emitter writes as its own
   /// definition) is `<Model>` when its properties are a subset of
@@ -423,21 +430,62 @@ fn (b: Builder) alt_model(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Valu
   (b.primary, np, nx)
 }
 
+/// Every `$ref` in `v`.
+fn refs_in(v: json.Value) -> List[Str] {
+  var out: List[Str] = []
+  match v {
+    json.Value.Object(kvs) => {
+      for (k, x) in kvs {
+        if k == "\$ref" {
+          out.push(str_of(Some(x)))
+        } else {
+          out = out + refs_in(x)
+        }
+      }
+    }
+    json.Value.List(xs) => {
+      for x in xs {
+        out = out + refs_in(x)
+      }
+    }
+    _ => {}
+  }
+  out
+}
+
 /// An update visibility variant's base definition (merge_update_variants).
 fn (b: Builder) update_base(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Value) {
   if !b.custom.merge_update_variants || !p.starts_with("/definitions/") {
     return (f, p, x)
   }
   let name = spec.last(p)
+  // in an ARM module only a library model's variant
+  // (`Azure.ResourceManager.CommonTypes.ManagedServiceIdentityUpdate`):
+  // a resource's own `...Update` is a TypeSpec model Go has too
+  if !b.custom.data_plane && !name.contains(".") {
+    return (f, p, x)
+  }
   for suffix in ["Update", "Patch"] {
     if name.ends_with(suffix) && name.len() > suffix.len() {
       let base = name[0..name.len() - suffix.len()]
       let doc = b.files.get(f) ?? return (f, p, x)
-      let bx = spec.at(doc, "/definitions/${base}") ?? continue
+      // a library variant's base is the common-types definition the
+      // file refers to (`.../managedidentity.json#/definitions/
+      // ManagedServiceIdentity`)
+      let (bf, bp, bx) = match spec.at(doc, "/definitions/${base}") {
+        Some(v) => (f, "/definitions/${base}", v)
+        None => {
+          let short = base.split(".").last() ?? base
+          let r = refs_in(doc).filter(fn(r: Str) -> Bool { r.ends_with("#/definitions/${short}") }).get(0) ?? continue
+          let (f2, p2, x2) = b.deref(f, json.Value.Object([("\$ref", json.Value.Str(r))]))
+          if p2 == "" { continue }
+          (f2, p2, x2)
+        }
+      }
       let mine = fields_of(x.get("properties")).map(fn(kv: (Str, json.Value)) -> Str { kv.0 })
       let theirs = fields_of(bx.get("properties")).map(fn(kv: (Str, json.Value)) -> Str { kv.0 })
       if mine.all(fn(k: Str) -> Bool { theirs.contains(k) }) {
-        return (f, "/definitions/${base}", bx)
+        return (bf, bp, bx)
       }
     }
   }
@@ -580,7 +628,9 @@ fn (var b: Builder) strip_docs(file: Str, v: json.Value) -> json.Value {
 
 /// Whether `v` is an enum of one value that is sealed to a string.
 fn (b: Builder) sealed(v: json.Value) -> Bool {
-  if list_of(v.get("enum")).len() != 1 {
+  // an integer one (analysisservices' GatewayListStatusLive.status) is
+  // Go's plain int32
+  if list_of(v.get("enum")).len() != 1 || str_of(v.get("type")) == "integer" {
     return false
   }
   // modelAsString false always seals; unset, only with the flag.
@@ -594,7 +644,8 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   if b.sealed(v) {
     return "Str"
   }
-  if v.get("x-ms-enum").is_some() && int_enum(v) {
+  let one_int = list_of(v.get("enum")).len() == 1 && model_as_string(v) == Some(false)
+  if v.get("x-ms-enum").is_some() && int_enum(v) && !one_int {
     let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
     if name != "" {
       return b.str_enum(b.enum_name(name), v, base: "Int")
@@ -1035,7 +1086,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   // is refreshToken, not acrRefreshToken)
   let client_name = if loc == "formData" { "" } else { str_of(p.get("x-ms-client-name")) }
   let go_name = b.custom.params.get(wire) ?? (if client_name != "" { client_name } else { plain })
-  let client = wire == "subscriptionId" || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
+  let client = wire == "subscriptionId" || (b.custom.client_params.contains(wire) && loc == "path") || (str_of(p.get("x-ms-parameter-location")) == "client" && wire != "api-version" && loc == "path")
   Param{
     name: param_name(go_name),
     go_name: go_name,
@@ -1220,6 +1271,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             resp_headers: resp_headers,
             consumes: consumes,
             binary_resp: binary_resp,
+            text_resp: resp == Some("Str") && produces.any(fn(t: Str) -> Bool { t.starts_with("text/") }),
             body_field: if binary_resp { b.custom.body_fields.get(id.to_lower()) ?? "Body" } else { "" },
           })
         }

@@ -40,6 +40,13 @@ struct Service {
   /// emitter's populateTime with utc; armresources v4's older emitter
   /// keeps the offset): they are azcore.DateTimeUTC.
   pub utc_date_times: Bool = false
+  /// Go's TypeSpec module predates typespec-go's testdata/_metadata.json
+  /// (codegen/gorows): it sends Accept on every request and has no
+  /// library `...Update` visibility models (each is its base model).
+  pub go_emitter_legacy: Bool = false
+  /// Go's TypeSpec module sends a query's spaces as `+`
+  /// (codegen/gorows).
+  pub query_plus: Bool = false
 } derive Json
 
 struct Services {
@@ -161,7 +168,7 @@ fn main(os: Os) -> () ! Error {
   // tspconfig.yaml's typespec-go `stutter` (armdeployments' `resources`)
   let stutter_cfg = "${base}/${svc.spec}/tspconfig.yaml"
   let go_stutter = if svc.openapi != "" && os.fs.exists(stutter_cfg)? { go_option(os.fs.read_text(stutter_cfg)?, "stutter") ?? "" } else { "" }
-  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || cf.remove_unreferenced || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", all_definitions: cf.all_definitions, data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() }), ops: lower_keys(cf.ops), body_fields: lower_keys(cf.body_fields), merge_update_variants: cf.merge_update_variants, patch_twins: cf.patch_twins, stutter: go_stutter}
+  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || cf.remove_unreferenced || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", all_definitions: cf.all_definitions, data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() }), ops: lower_keys(cf.ops), body_fields: lower_keys(cf.body_fields), merge_update_variants: cf.merge_update_variants || svc.go_emitter_legacy, patch_twins: cf.patch_twins, stutter: go_stutter}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -202,7 +209,7 @@ fn main(os: Os) -> () ! Error {
         _ => models[m] = v
       }
     }
-    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, param_order: merged_orders(r.param_order, custom.param_order)}
+    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, client_params: r.client_params, param_order: merged_orders(r.param_order, custom.param_order)}
     source = "${svc.openapi} (from ${svc.spec})"
   } else if svc.swagger != "" {
     inputs = ["${base}/${svc.swagger}"]
@@ -269,7 +276,7 @@ fn main(os: Os) -> () ! Error {
   let api = built with {models: built.models.filter(fn(m: gen.Model) -> Bool { !cf.drop_models.contains(m.name) })}
   let tspconfig = "${base}/${svc.spec}/tspconfig.yaml"
   let head_as_boolean = svc.openapi != "" && os.fs.exists(tspconfig)? && go_option(os.fs.read_text(tspconfig)?, "head-as-boolean") == Some("true")
-  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, null_base_discriminator: cf.null_base_discriminator, allow_empty: cf.allow_empty, accept_always: cf.accept_always, query_pct20: cf.query_pct20, typespec: cf.reachable_only || svc.openapi != "", tsp_arm: svc.openapi != "" && !cf.data_plane, head_as_boolean: head_as_boolean, stutter: custom.stutter, go_package: go_package(svc.go_module, name), next_link_transform: cf.next_link_transform, private_ops: cf.private_ops, private_types: cf.private_types, header_names: lower_keys(cf.header_names)}
+  let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, null_base_discriminator: cf.null_base_discriminator, allow_empty: cf.allow_empty, accept_always: cf.accept_always || svc.go_emitter_legacy, query_pct20: cf.query_pct20, typespec: cf.reachable_only || svc.openapi != "", tsp_arm: svc.openapi != "" && !cf.data_plane, head_as_boolean: head_as_boolean, query_plus: svc.query_plus, stutter: custom.stutter, go_package: go_package(svc.go_module, name), next_link_transform: cf.next_link_transform, private_ops: cf.private_ops, private_types: cf.private_types, header_names: lower_keys(cf.header_names)}
   os.fs.create_dir_all(dir)?
   os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n" + cf.needs.map(fn(r: Str) -> Str { "require ${r} v0.1.0\n" }).join("")).bytes())?
   let m = gen.emit_models(p, api)

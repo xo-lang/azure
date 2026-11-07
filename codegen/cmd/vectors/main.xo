@@ -413,7 +413,10 @@ fn main(os: Os) -> () ! Error {
   var subs: List[Str] = []
   var enums: List[Str] = []
   for line in xo.split("\n") {
-    if line.starts_with("pub fn new_") && line.contains("[fx: Effects](net: Net, clock: Clock, rand: Rand, subscription_id: Str") {
+    // a client parameter (subscription_id, or a @@clientInitialization
+    // one: armalertsmanagement's scope), Go's program's "sub-test"
+    let (_, after_rand) = line.cut("[fx: Effects](net: Net, clock: Clock, rand: Rand, ") ?? ("", "")
+    if line.starts_with("pub fn new_") && !after_rand.starts_with("cred:") && (after_rand.cut(", ") ?? ("", "")).0.ends_with(": Str") {
       subs.push((line[7..line.len()].cut("[") ?? ("", "")).0)
     }
     if line.starts_with("pub type ") && line.ends_with(" struct(Str)") {
@@ -491,14 +494,14 @@ fn main(os: Os) -> () ! Error {
     let sn = snake(rname)
     if meth.starts_with("Begin") && m.ret.contains("Pager[") {
       let cut = index_of_panic(c.lines)
-      t = t + ["  match ${call} {", "    Ok(p0) => {", "      var p = p0", "      match p.poll_until_done(os.clock, frequency: 1s) {", "        Ok(pg0) => {", "          var pg = pg0", "          for page in [1, 2] {", "            if !pg.more() {", "              gv_note(f, \"OUT page \${page}: no more\")", "              break", "            }", "            match pg.next_page() {", "              Ok(r) => gv_note(f, \"OUT page \${page}: \${show_${sn}(r)}\")", "              Err(e) => {", "                gv_note_lines(f, \"OUT page \${page}: error: \${gv_err_text(e)}\")", "                break", "              }", "            }", "          }", "        }", "        Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "      }", "    }", "    Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "  }"]
+      t = t + ["  match ${call} {", "    Ok(p0) => {", "      var p = p0", "      gv_quiet(f, true)", "      let done = p.poll_until_done(os.clock, frequency: 1s)", "      gv_quiet(f, false)", "      match done {", "        Ok(pg0) => {", "          var pg = pg0", "          for page in [1, 2] {", "            if !pg.more() {", "              gv_note(f, \"OUT page \${page}: no more\")", "              break", "            }", "            match pg.next_page() {", "              Ok(r) => gv_note(f, \"OUT page \${page}: \${show_${sn}(r)}\")", "              Err(e) => {", "                gv_note_lines(f, \"OUT page \${page}: error: \${gv_err_text(e)}\")", "                break", "              }", "            }", "          }", "        }", "        Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "      }", "    }", "    Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "  }"]
       if cut < c.lines.len() {
         t = t + ["  // Go panics at line ${cut} (its pager has no handler); ours reads page one", "  let got = gv_log_of(f)", "  gv_compare(got[0..${cut}], GO_${i}[0..${cut}])", "  expect(got[${cut}].starts_with(\"OUT page 1: \")) == true", "}"]
         out.push(t.join("\n"))
         continue
       }
     } else if meth.starts_with("Begin") {
-      t = t + ["  match ${call} {", "    Ok(p0) => {", "      var p = p0", "      match p.poll_until_done(os.clock, frequency: 1s) {", "        Ok(r) => gv_note(f, \"OUT: \${show_${sn}(r)}\")", "        Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "      }", "    }", "    Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "  }"]
+      t = t + ["  match ${call} {", "    Ok(p0) => {", "      var p = p0", "      gv_quiet(f, true)", "      let done = p.poll_until_done(os.clock, frequency: 1s)", "      gv_quiet(f, false)", "      match done {", "        Ok(r) => gv_note(f, \"OUT: \${show_${sn}(r)}\")", "        Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "      }", "    }", "    Err(e) => gv_note_lines(f, \"OUT: error: \${gv_err_text(e)}\")", "  }"]
     } else if pager {
       t = t + ["  var pg = ${call} ?? e => fault(\"\${e}\")", "  for page in [1, 2] {", "    if !pg.more() {", "      gv_note(f, \"OUT page \${page}: no more\")", "      break", "    }", "    match pg.next_page() {", "      Ok(r) => gv_note(f, \"OUT page \${page}: \${show_${sn}(r)}\")", "      Err(e) => {", "        gv_note_lines(f, \"OUT page \${page}: error: \${gv_err_text(e)}\")", "        break", "      }", "    }", "  }"]
     } else {
@@ -508,6 +511,11 @@ fn main(os: Os) -> () ! Error {
     out.push(t.join("\n"))
   }
   var text = out.join("\n\n") + "\n"
+  // std/json only when a test uses it (a module whose every call is a
+  // shape mismatch, or has no JSON body, does not)
+  if !out[1..out.len()].any(fn(t: Str) -> Bool { t.contains("json.") }) {
+    text = text.replace("use std/json\n", "")
+  }
   let (_, after) = text.cut("use github.com/xo-lang/azure/runtime") ?? ("", "")
   if !after.contains("azcore.") {
     text = text.replace("use github.com/xo-lang/azure/azcore\n", "")

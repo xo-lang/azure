@@ -35,6 +35,24 @@ parameter order reaches the right operation (armnetwork,
 armpolicyinsights). codegen/custom/armnetwork.toml is gone: its one
 order is derived.
 
+Generator, from the batch-2 differentials against Go: TypeSpec's
+`@@clientInitialization` parameters are client parameters, taken by
+the client's constructor (armalertsmanagement's `scope`); a Go module
+written by the TypeSpec emitter before its testdata/_metadata.json
+(codegen/gorows' `go_emitter_legacy` row) sends Accept on every request
+and uses a library model's base for its `...Update` variant
+(armagricultureplatform, armarizeaiobservabilityeval); a single-value
+integer enum is a plain integer (armanalysisservices' gateway status);
+a TypeSpec string response that is also `text/*` is the body as text
+(armappcontainers, armautomation); Accept keeps the XML media types
+(armapimanagement's policy formats); and a vectors file with no JSON
+body does not import std/json. A TypeSpec module whose Go encodes a
+query's spaces as `+` (gorows' `query_plus` row: armalertsmanagement's
+emitter) does too, and a TypeSpec string body sent as `text/*` is the
+text itself (armautomation's runbook content). The vectors' fake notes
+an operation's first request only, not its poller's, as the Go program
+prints them.
+
 azidentity: Service Fabric's cases run against a FakeNet TLS endpoint
 (`FakeNet.handle_tls`, xo decision 0544) presenting a certificate made by
 the test, so the client's pin is checked on every case, as Go's are

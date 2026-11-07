@@ -3,7 +3,8 @@
 // (tsp-location.yaml: the spec commit and TypeSpec folder; autorest.md:
 // the commit, readme and tag) and its source (the api-versions its
 // clients send and each request's path, which pick the OpenAPI files;
-// whether it writes date-times in UTC).
+// whether it writes date-times in UTC; whether a TypeSpec module's
+// emitter predates its testdata/_metadata.json).
 //
 //	go run ./codegen/gorows <specs dir> < modules > rows.toml
 //
@@ -49,7 +50,7 @@ var (
 type row struct {
 	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion string
 	OpenAPIMore                                                []string
-	UTC, Seal                                                  bool
+	UTC, Seal, Legacy, QueryPlus                               bool
 }
 
 var specs string
@@ -111,6 +112,13 @@ func derive(modPath, version, dir string) row {
 	}
 	s := src.String()
 	r.UTC = reUTC.MatchString(read(filepath.Join(dir, "models_serde.go")))
+	// typespec-go before it wrote testdata/_metadata.json (its
+	// emitterVersion): Accept on every request, and no library ...Update
+	// visibility models (armagricultureplatform v0.1.0)
+	r.Legacy = exists(filepath.Join(dir, "tsp-location.yaml")) && !exists(filepath.Join(dir, "testdata", "_metadata.json"))
+	// typespec-go before it replaced the query's "+" with "%20"
+	// (armalertsmanagement's emitter 0.10.2)
+	r.QueryPlus = exists(filepath.Join(dir, "tsp-location.yaml")) && strings.Contains(s, "RawQuery = reqQP.Encode()") && !strings.Contains(s, `reqQP.Encode(), "+", "%20"`)
 	consts := map[string]string{}
 	for _, m := range reConst.FindAllStringSubmatch(s, -1) {
 		consts[m[1]] = m[2]
@@ -468,6 +476,12 @@ func format(r row) string {
 	out = append(out, q("version", "v0.1.0"))
 	if r.Seal {
 		out = append(out, "seal_single_value_enums = true")
+	}
+	if r.Legacy && r.OpenAPI != "" {
+		out = append(out, "go_emitter_legacy = true")
+	}
+	if r.QueryPlus && r.OpenAPI != "" {
+		out = append(out, "query_plus = true")
 	}
 	return strings.Join(out, "\n")
 }

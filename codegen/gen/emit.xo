@@ -50,6 +50,10 @@ pub struct Package {
   /// operation's response is `success` (armresources v4's CheckExistence),
   /// as autorest's readme.go.md option made it.
   pub head_as_boolean: Bool = false
+  /// A TypeSpec module whose Go encodes the query as url.Values does,
+  /// spaces `+` (typespec-go before strings.ReplaceAll(..., "+", "%20");
+  /// codegen/gorows' `query_plus` row).
+  pub query_plus: Bool = false
   /// A hand-written function a next link header passes through before
   /// it is joined to the endpoint (azcontainerregistry's
   /// extractNextLink, from autorest.md's replace of `result.Link = &val`).
@@ -405,10 +409,11 @@ fn resp_headers(p: Package, op: Op) -> List[(Str, Str)] {
 /// lists JSON and other types for a JSON body, autorest.go sends the
 /// JSON ones (modelerfour's media types of the schema response:
 /// azwebpubsub's `text/plain, application/json, text/json` is
-/// `application/json, text/json`).
+/// `application/json, text/json`; apimanagement's `+xml` policy types
+/// are XML, kept).
 fn accept_value(p: Package, op: Op) -> Str {
-  let jsons = op.produces.filter(fn(t: Str) -> Bool { t.contains("json") })
-  if !p.typespec && !jsons.is_empty() && jsons.len() < op.produces.len() {
+  let jsons = op.produces.filter(fn(t: Str) -> Bool { t.contains("json") || t.ends_with("xml") })
+  if !p.typespec && !jsons.is_empty() && (jsons.len() < op.produces.len() || jsons.any(fn(t: Str) -> Bool { t.ends_with("xml") })) {
     return jsons.join(", ")
   }
   let own = op.produces.filter(fn(t: Str) -> Bool { t != "application/json" })
@@ -485,6 +490,9 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   } else if op.binary_resp {
     // the body as received (Go's io.ReadCloser, read whole here)
     s = s + "  Ok(${rn}{${body_field(api, op)}: resp.body${hset}})\n"
+  } else if op.text_resp && p.typespec {
+    // the body as text (Go's `string(body)`)
+    s = s + "  Ok(${rn}{${body_field(api, op)}: resp.body.to_str_lossy()${hset}})\n"
   } else if let Some(t) = op.resp {
     let zero = if api.models.any(fn(m: Model) -> Bool { m.name == t }) { Some("${t}{}") } else if t.starts_with("List[") { Some("[]") } else if t.starts_with("Map[") { Some("{}") } else if t == "Str" { Some("\"\"") } else if t == "json.Value" { Some("json.Value.Null") } else { None }
     if let Some(z) = zero {
@@ -610,6 +618,19 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       }
       continue
     }
+    // a string TypeSpec sends as `text/*` (armautomation's runbook
+    // content): the text itself, Go's streaming.NopCloser of it
+    let tct = op.consumes.filter(fn(t: Str) -> Bool { t.starts_with("text/") })
+    if p.typespec && x.typ == "Str" && tct.len() == 1 && op.consumes.len() == 1 {
+      if x.required {
+        s = s + "  headers.push((\"Content-Type\", \"${esc(tct[0])}\"))\n"
+        body = "${x.name}.bytes()"
+      } else {
+        s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n    headers.push((\"Content-Type\", \"${esc(tct[0])}\"))\n    body = v.bytes()\n  }\n"
+        body = "body"
+      }
+      continue
+    }
     // the operation's one JSON content type (Batch's `application/json;
     // odata=minimalmetadata`); application/json when it has several
     let jct = if op.consumes.len() == 1 && op.consumes[0].contains("json") { esc(op.consumes[0]) } else { "application/json" }
@@ -624,13 +645,13 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   // joined as Go's code does (runtime.JoinPaths, which cleans the path:
   // `/{scope}/...` with scope `/keys` is `/keys/...`)
   let base = "\${runtime.join_paths(c.setup.endpoint, path)}"
-  let encoded = if p.query_pct20 || p.tsp_arm { "q.encode().replace(\"+\", \"%20\")" } else { "q.encode()" }
+  let encoded = if p.query_pct20 || (p.tsp_arm && !p.query_plus) { "q.encode().replace(\"+\", \"%20\")" } else { "q.encode()" }
   let qs_expr = if has_raw { "([${encoded}] + raw_q).join(\"&\")" } else { encoded }
   // query parameters go into a query the joined URL already has (an
   // endpoint's, a Location's), as Go's code sets them on URL.Query()
   let sets_query = s.contains("  q.add(") || s.contains("    q.add(")
   if sets_query && !has_raw {
-    let pct = if p.query_pct20 || p.tsp_arm { ", pct20: true" } else { "" }
+    let pct = if p.query_pct20 || (p.tsp_arm && !p.query_plus) { ", pct20: true" } else { "" }
     s = s + "  Ok(policy.Request{method: \"${op.method}\", url: runtime.with_query(runtime.join_paths(c.setup.endpoint, path), q${pct}), headers: headers, body: ${body}})\n}\n"
   } else {
     s = s + "  let qs = ${qs_expr}\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
@@ -700,6 +721,17 @@ pub fn emit_clients(p: Package, api: Api) -> List[File] {
   for g in groups.sort() {
     let ops = api.ops.filter(fn(o: Op) -> Bool { o.group == g })
     let has_sub = ops.any(fn(o: Op) -> Bool { o.params.any(fn(x: Param) -> Bool { x.client && x.name == "subscription_id" }) })
+    // the client's parameters: subscription_id first, then the others
+    // in the order its operations first use them (a TypeSpec
+    // `@@clientInitialization` scope)
+    var fields: List[Str] = if has_sub { ["subscription_id"] } else { [] }
+    for o in ops {
+      for x in o.params {
+        if x.client && !fields.contains(x.name) {
+          fields.push(x.name)
+        }
+      }
+    }
     let cn = client_name_in(p, g)
     var s = header(p)
     var body_text = ""
@@ -721,12 +753,12 @@ pub fn emit_clients(p: Package, api: Api) -> List[File] {
       continue
     }
     s = s + "/// ${cn}: the ${g} operations (Go's ${p.name}.${cn}).\npub struct ${cn}[fx: Effects] {\n  setup: arm.Setup[fx]\n"
-    if has_sub {
-      s = s + "  subscription_id: Str\n"
+    for f in fields {
+      s = s + "  ${f}: Str\n"
     }
     s = s + "}\n\n"
-    let sub_arg = if has_sub { "subscription_id: Str, " } else { "" }
-    let sub_set = if has_sub { ", subscription_id: subscription_id" } else { "" }
+    let sub_arg = fields.map(fn(f: Str) -> Str { "${f}: Str, " }).join("")
+    let sub_set = fields.map(fn(f: Str) -> Str { ", ${f}: ${f}" }).join("")
     s = s + "pub fn new_${snake(cn)}[fx: Effects](net: Net, clock: Clock, rand: Rand, ${sub_arg}cred: azcore.TokenCredential[fx], opts: arm.ClientOptions[fx] = arm.ClientOptions{}) -> ${cn}[fx] ! Str {\n"
     s = s + "  let setup = arm.new_pipeline(MODULE, VERSION, net, clock, rand, cred, opts)?\n  Ok(${cn}{setup: setup${sub_set}})\n}\n"
     s = s + body_text
@@ -751,7 +783,9 @@ fn go_param_name(p: Package, x: Param) -> Str {
   if GO_KEYWORDS.contains(g) {
     g = g + "Param"
   }
-  if x.client && !p.tsp_arm { "client.${g}" } else { g }
+  // TypeSpec's names its subscriptionID bare, a @@clientInitialization
+  // one as autorest does (armalertsmanagement's `client.scope`)
+  if x.client && (!p.tsp_arm || x.wire != "subscriptionId") { "client.${g}" } else { g }
 }
 
 /// autorest.go's parameter casing: the first word as written, its first
