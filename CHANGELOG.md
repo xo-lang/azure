@@ -8,6 +8,15 @@ version has been tagged since.
 
 ## Unreleased
 
+messaging/azwebpubsub v0.1.0, Go's azwebpubsub v0.1.1. The generator
+(`codegen`), for it: `custom/<module>.toml: [[replace]]` (a regular
+expression and its replacement over the generated text, as Go's
+autorest.md `where: $` directives), `Accept` with only the JSON types
+when an autorest operation produces JSON and other types (Go's
+`application/json, text/json` for generateToken), and an autorest data
+plane module's empty-parameter errors in Go's casing
+(`connectionID`). No other module changed.
+
 `policy.Request.host`: the Host sent in place of the URL's (Go's
 `Request.Raw().Host`), for azidentity's token proxy; needs xo 6797f91ba
 or later (`http.Request.with_host`).

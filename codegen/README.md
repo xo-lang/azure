@@ -214,7 +214,13 @@ response type equal, except armkeyvault's `Secret`, which is
   the `Link` header, joined to the endpoint after the named hand
   written function extracts it), and `private_ops` and `private_types`
   (Go's lower case ones, emitted as `raw_<name>` and `Raw<Name>` so a
-  hand written public wrapper keeps Go's name). `keep_definitions`
+  hand written public wrapper keeps Go's name). `[[replace]]` with
+  `pattern` (a regular expression) and `with` rewrites the generated
+  text, as Go's autorest.md `where: $` directives rewrite Go's
+  (azwebpubsub's `ClientSendToAllOptions` to `SendToAllOptions`). An
+  operation that produces JSON and other types accepts only its JSON
+  ones, and a path parameter's empty-value error names it in
+  autorest.go's casing (`connectionID`). `keep_definitions`
   keeps only the definitions whose name is one of its prefixes and
   more, before the patches (azopenai's autorest.md keeps
   `^(OnYour|Azure|...).+$`); with no paths the module is models only.

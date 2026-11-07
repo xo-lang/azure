@@ -95,6 +95,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   `sdk/messaging/eventgrid/azsystemevents` v1.1.0 (its models and
   event types generated, its Event Grid event and error hand written;
   checked against its own),
+  `sdk/messaging/azwebpubsub` v0.1.1 (its operations generated, its
+  constructors, key policy and client access URL hand written;
+  checked against its own),
   and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's

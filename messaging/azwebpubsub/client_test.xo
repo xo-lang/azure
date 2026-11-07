@@ -1,0 +1,307 @@
+// Go's calls (vectors_test.xo) made again here against the same fake:
+// every request, token and result must be Go's, but for the KNOWN lines.
+
+use std/base64
+use std/crypto
+use std/http
+use std/json
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const KEY: Str = "a-test-key-for-hs256"
+
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("aad-token"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  /// The status and body of the next responses.
+  status: Mutex[Int]
+  body: Mutex[Str]
+  /// The key tokens are verified with.
+  key: Mutex[Str]
+  now: Time
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn set(f: Fake, status: Int, body: Str = "") {
+  f.status.with(fn(var s: Int) { s = status })
+  f.body.with(fn(var b: Str) { b = body })
+}
+
+fn b64(s: Str) -> Bytes {
+  base64.decode(s, enc: base64.Base64.RawUrl) ?? _ => b""
+}
+
+/// A token as the Go program shows it: its header, its claims (keys
+/// sorted, exp as minutes from now) and whether its HS256 signature
+/// verifies with key.
+fn jwt_text(tok: Str, key: Str, now: Time) -> Str {
+  let parts = tok.split(".")
+  if parts.len() != 3 {
+    return "not a jwt: ${tok}"
+  }
+  let fields = match json.parse_value(b64(parts[1]).to_str_lossy()) {
+    Ok(json.Value.Object(fs)) => fs
+    _ => []
+  }
+  var w = json.json_writer()
+  w.object_start()
+  for (k, v) in fields.sort_by(fn(kv: (Str, json.Value)) -> Str { kv.0 }) {
+    w.key(k)
+    match v {
+      json.Value.Int(n) if k == "exp" => w.str("now+${Int(Float(n - now.unix()) / 60.0 + 0.5)}m")
+      _ => w.value(v).or_fault("value")
+    }
+  }
+  w.object_end()
+  let sig = crypto.hmac(crypto.Hash.Sha256, key.bytes(), "${parts[0]}.${parts[1]}".bytes())
+  let verified = crypto.equal(sig, b64(parts[2]))
+  "jwt ${b64(parts[0]).to_str_lossy()} ${w.finish().to_str_lossy()} verified=${verified}"
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  let key = f.key.with(fn(var k: Str) -> Str { k })
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" && lk != "traceparent" {
+      hs.push(if lk == "authorization" { "${lk}=${jwt_text(v.trim_prefix("Bearer "), key, f.now)}" } else { "${lk}=${v}" })
+    }
+  }
+  let q = req.raw_query()
+  let port = match req.url.port {
+    Some(p) => ":${p}"
+    None => ""
+  }
+  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${port}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let st = f.status.with(fn(var s: Int) -> Int { s })
+  let body = f.body.with(fn(var b: Str) -> Str { b })
+  var h: Map[Str, Str] = {"Content-Type": "application/json"}
+  if st >= 400 {
+    h["x-ms-error-code"] = "Bad"
+  }
+  http.Response{status: st, headers: h, body: body.bytes()}
+}
+
+fn err_text(e: azcore.CallErr) -> Str {
+  let t = match e {
+    azcore.CallErr.InvalidInput(m) => m
+    azcore.CallErr.Decode(m) => m
+    other => other.display()
+  }
+  t.replace("\n", "\n| ")
+}
+
+/// ok is how the Go program shows a result: `{}` for a response, `null`
+/// where it shows only the error.
+fn out[T](f: Fake, name: Str, r: Result[T, azcore.CallErr], ok: Str = "{}") {
+  let text = match r {
+    Ok(_) => ok
+    Err(e) => "error: ${err_text(e)}"
+  }
+  for line in "OUT ${name}: ${text}".split("\n") {
+    note(f, line)
+  }
+}
+
+fn url_out(f: Fake, name: Str, r: Result[GenerateClientAccessURLResponse, azcore.CallErr]) {
+  let key = f.key.with(fn(var k: Str) -> Str { k })
+  let text = match r {
+    Ok(u) => {
+      let shown = if u.token.starts_with("eyJ") { jwt_text(u.token, key, f.now) } else { u.token }
+      "base=${u.base_url} url=${u.url.replace(u.token, "<token>")} token=${shown}"
+    }
+    // the Go program prints these errors as they are
+    Err(e) => "error: ${err_text(e).replace("\n| ", "\n")}"
+  }
+  for line in "OUT url ${name}: ${text}".split("\n") {
+    note(f, line)
+  }
+}
+
+fn opts() -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn new_fake(now: Time) -> Fake {
+  Fake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new(""), key: Mutex[Str].new(KEY), now: now}
+}
+
+fn serve(net: testing.FakeNet, f: Fake) {
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for m in ["GET", "PUT", "POST", "DELETE", "HEAD"] {
+    for base in ["https://wps.example.test", "https://wps.example.test:8080", "http://wps.example.test:8080", "https://WPS.example.test"] {
+      net.handle("${m} ${base}/{rest...}", h)
+    }
+  }
+}
+
+fn log_of(f: Fake) -> List[Str] {
+  f.log.with(fn(var l: List[Str]) -> List[Str] { l })
+}
+
+/// Compares the lines, but for the KNOWN ones (Go's line, ours).
+fn compare(got: List[Str], want: List[Str], known: List[(Str, Str)]) {
+  var g = got
+  for (go_line, ours) in known {
+    let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
+    let j = g.index_of(ours) ?? fault("KNOWN line not in ours: ${ours}")
+    if i != j {
+      fault("KNOWN line ${go_line} at ${i}, ours at ${j}")
+    }
+    g[j] = go_line
+  }
+  var k = 0
+  while k < want.len() || k < g.len() {
+    let a = want.get(k) ?? "<end>"
+    let b = g.get(k) ?? "<end>"
+    if a != b {
+      fault("line ${k}:\n  go:   ${a}\n  ours: ${b}")
+    }
+    k += 1
+  }
+}
+
+test "every operation sends and returns what Go's does" {
+  let f = new_fake(os.clock.now())
+  serve(os.net, f)
+  let c = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=https://wps.example.test;AccessKey=${KEY};Version=1.0;", opts()) ?? e => fault(e)
+  note(f, "NEW cs: <nil>")
+  set(f, 200)
+  out(f, "add conn to group", c.add_connection_to_group("hub_1", "g 1/x", "conn+1"))
+  out(f, "add conns to groups", c.add_connections_to_groups("hub1", AddToGroupsRequest{groups: Some(["a", "b<"]), filter: Some("userId eq 'x'")}))
+  out(f, "add user to group", c.add_user_to_group("hub1", "g", "user@1"))
+  set(f, 204)
+  out(f, "close all", c.close_all_connections("hub1", CloseAllConnectionsOptions{excluded: Some(["c1", "c 2"]), reason: Some("bye now")}))
+  out(f, "close all none", c.close_all_connections("hub1"))
+  out(f, "close conn", c.close_connection("hub1", "c1", CloseConnectionOptions{reason: Some("r")}))
+  out(f, "close group", c.close_group_connections("hub1", "g", CloseGroupConnectionsOptions{excluded: Some(["c1"]), reason: Some("r")}))
+  out(f, "close user", c.close_user_connections("hub1", "u", CloseUserConnectionsOptions{excluded: Some(["c1"]), reason: Some("r")}))
+  set(f, 200)
+  out(f, "grant", c.grant_permission("hub1", PERMISSION_JOIN_LEAVE_GROUP, "c1", GrantPermissionOptions{target_name: Some("g")}))
+  set(f, 204)
+  out(f, "revoke", c.revoke_permission("hub1", PERMISSION_SEND_TO_GROUP, "c1"))
+  out(f, "remove conn all groups", c.remove_connection_from_all_groups("hub1", "c1"))
+  out(f, "remove conn group", c.remove_connection_from_group("hub1", "g", "c1"))
+  set(f, 200)
+  out(f, "remove conns groups", c.remove_connections_from_groups("hub1", RemoveFromGroupsRequest{groups: Some(["a"])}))
+  set(f, 204)
+  out(f, "remove user all groups", c.remove_user_from_all_groups("hub1", "u"))
+  out(f, "remove user group", c.remove_user_from_group("hub1", "g", "u"))
+  set(f, 202)
+  out(f, "send all", c.send_to_all("hub1", CONTENT_TYPE_TEXT_PLAIN, b"Hello <world>", SendToAllOptions{excluded: Some(["c1"]), filter: Some("userId ne 'a'"), message_ttl_seconds: Some(30)}))
+  out(f, "send conn", c.send_to_connection("hub1", "c1", CONTENT_TYPE_APPLICATION_JSON, b"{\"a\":1}", SendToConnectionOptions{message_ttl_seconds: Some(5)}))
+  out(f, "send group", c.send_to_group("hub1", "g", CONTENT_TYPE_APPLICATION_OCTET_STREAM, b"\x00\x01", SendToGroupOptions{excluded: Some(["c1", "c2"]), filter: Some("f")}))
+  out(f, "send user", c.send_to_user("hub1", "u", CONTENT_TYPE_TEXT_PLAIN, b"hi", SendToUserOptions{filter: Some("f"), message_ttl_seconds: Some(0)}))
+  set(f, 204)
+  out(f, "empty hub", c.close_connection("", "c1"))
+  out(f, "empty conn", c.close_connection("hub1", ""))
+  set(f, 400, "{\"code\":\"BadRequest\",\"message\":\"bad hub\",\"target\":\"hub\",\"details\":[]}")
+  out(f, "error 400", c.close_connection("hub1", "c1"))
+  set(f, 204)
+  out(f, "grant 204", c.grant_permission("hub1", PERMISSION_SEND_TO_GROUP, "c1"))
+  set(f, 200)
+  out(f, "close conn 200", c.close_connection("hub1", "c1"))
+  out(f, "send all 200", c.send_to_all("hub1", CONTENT_TYPE_TEXT_PLAIN, b"x"))
+  set(f, 404, "{\"code\":\"NotFound\",\"message\":\"no group\"}")
+  out(f, "remove group 404", c.remove_connection_from_group("hub1", "g", "c1"))
+  compare(log_of(f), OPS_GO, [])
+}
+
+test "a token credential's client: the scope and service issued tokens" {
+  let f = new_fake(os.clock.now())
+  serve(os.net, f)
+  let cred = Cred{log: f.log}
+  let c = new_client(os.net, os.clock, os.rand, "https://wps.example.test/", cred, opts())
+  note(f, "NEW cred: <nil>")
+  set(f, 204)
+  out(f, "cred close", c.close_connection("hub1", "c1"), ok: "null")
+  set(f, 200, "{\"token\":\"aad.issued.token+/=\"}")
+  url_out(f, "cred", c.generate_client_access_url("hub 1", GenerateClientAccessURLOptions{user_id: "u1", roles: ["r1", "r2"], groups: ["g1"], expiration_time_in_minutes: 30}))
+  url_out(f, "cred no user", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{}))
+  set(f, 200, "not json")
+  url_out(f, "cred bad json", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{}))
+  set(f, 401, "{\"code\":\"Unauthorized\",\"message\":\"no\"}")
+  url_out(f, "cred 401", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{}))
+  set(f, 200)
+  let c2 = new_client(os.net, os.clock, os.rand, "http://wps.example.test/", cred, opts())
+  note(f, "NEW cred http: <nil>")
+  out(f, "cred http close", c2.close_connection("hub1", "c1"), ok: "null")
+  // generated decoders report the JSON error in Xo's words
+  // runtime's bearer policy refuses plain HTTP in its own words
+  compare(log_of(f), CRED_GO, [("OUT cred http close: error: authenticated requests are not permitted for non TLS protected (https) endpoints", "OUT cred http close: error: authentication failed: a bearer token is sent only over HTTPS (http://wps.example.test/api/hubs/hub1/connections/c1?api-version=2023-07-01)"), ("OUT url cred bad json: error: unmarshalling type *azwebpubsub.TokenResponse: invalid character 'o' in literal null (expecting 'u')", "OUT url cred bad json: error: at $: invalid JSON: invalid character 'o' in literal null (expecting 'u')")])
+}
+
+test "connection strings read as Go's" {
+  let f = new_fake(os.clock.now())
+  serve(os.net, f)
+  for s in ["Endpoint=https://wps.example.test;AccessKey=k;Version=1.0;", "endpoint=https://wps.example.test/;accesskey=k", "Endpoint=https://wps.example.test;AccessKey=k==;Port=8080", "Endpoint=http://wps.example.test:443/base;AccessKey=k;Port=8080;", "Endpoint=https://wps.example.test", "AccessKey=k", "Endpoint=https://wps.example.test;AccessKey", "", ";", "Endpoint=https://wps.example.test;;AccessKey=k", "Endpoint=://bad;AccessKey=k", "Endpoint=https://wps.example.test;AccessKey=k;AccessKey=k2", "Endpoint=wps.example.test;AccessKey=k"] {
+    let quoted = json.encode_str(s).replace("\\u0026", "&").replace("\\u003c", "<").replace("\\u003e", ">")
+    match new_client_from_connection_string(os.net, os.clock, os.rand, s, opts()) {
+      Err(e) => note(f, "CS ${quoted}: error: ${e}")
+      Ok(c) => {
+        note(f, "CS ${quoted}: ok")
+        let key = if s.contains("k==") { "k==" } else if s.contains("k2") { "k2" } else { "k" }
+        f.key.with(fn(var k: Str) { k = key })
+        set(f, 204)
+        out(f, "cs close", c.close_connection("hub1", "c1"), ok: "null")
+        url_out(f, "cs", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{user_id: "u"}))
+      }
+    }
+  }
+  // Go: url.Parse reads a URL without a scheme as a path; Xo refuses it first
+  compare(log_of(f), CS_GO, [("OUT cs close: error: no Host in request URL", "OUT cs close: error: invalid URL: absolute URL required: wps.example.test/api/hubs/hub1/connections/c1?api-version=2023-07-01")])
+}
+
+test "generate_client_access_url signs as Go's" {
+  let f = new_fake(os.clock.now())
+  serve(os.net, f)
+  let c = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=https://wps.example.test;AccessKey=${KEY}", opts()) ?? e => fault(e)
+  url_out(f, "key", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{user_id: "u1", roles: ["webpubsub.joinLeaveGroup", "webpubsub.sendToGroup"], groups: ["g1", "g2"], expiration_time_in_minutes: 5}))
+  url_out(f, "key nil", c.generate_client_access_url("hub1"))
+  url_out(f, "key empty", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{}))
+  url_out(f, "key negative", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{expiration_time_in_minutes: -1}))
+  url_out(f, "key empty roles", c.generate_client_access_url("hub1", GenerateClientAccessURLOptions{roles: [], groups: []}))
+  url_out(f, "key empty hub", c.generate_client_access_url(""))
+  url_out(f, "key hub escape", c.generate_client_access_url("h/u b?#"))
+  let c2 = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=http://wps.example.test/base;AccessKey=${KEY};Port=8080", opts()) ?? e => fault(e)
+  url_out(f, "http port", c2.generate_client_access_url("hub1"))
+  let c3 = new_client_from_connection_string(os.net, os.clock, os.rand, "Endpoint=HTTPS://WPS.example.test;AccessKey=${KEY}", opts()) ?? e => fault(e)
+  url_out(f, "upper scheme", c3.generate_client_access_url("hub1"))
+  compare(log_of(f), URL_GO, [])
+}
+
+test "tokens are golang-jwt's, byte for byte (compared by SHA-256)" {
+  let a = sign_hs256(KEY, [("aud", json.Value.Str("https://wps.example.test/api/hubs/hub1/:send?api-version=2023-07-01")), ("exp", json.Value.Int(1700000000))])
+  let b = sign_hs256(KEY, [("aud", json.Value.Str("https://wps.example.test/client/hubs/hub1")), ("exp", json.Value.Int(1700000000)), ("sub", json.Value.Str("u<1>&")), ("role", str_list(["a", "b"])), ("webpubsub.group", str_list(["g"]))])
+  let hash = fn(t: Str) -> Str { crypto.digest(crypto.Hash.Sha256, t.bytes()).to_hex() }
+  expect(["SIGN <nil> ${hash(a)}", "SIGN <nil> ${hash(b)}"]) == SIGN_GO
+}
+
+test "default options ask the service for a token (Go's GenerateClientAccessURL with nil options panics)" {
+  let f = new_fake(os.clock.now())
+  serve(os.net, f)
+  let c = new_client(os.net, os.clock, os.rand, "https://wps.example.test/", Cred{log: f.log}, opts())
+  set(f, 200, "{\"token\":\"t1\"}")
+  let u = c.generate_client_access_url("hub1") ?? e => fault("${e}")
+  expect(u.url) == "wss://wps.example.test/client/hubs/hub1?access_token=t1"
+  expect(log_of(f).filter(fn(l: Str) -> Bool { l.starts_with("REQ") })) == ["REQ POST https://wps.example.test/api/hubs/hub1/:generateToken?api-version=2023-07-01&minutesToExpire=0"]
+  set(f, 200, "{}")
+  match c.generate_client_access_url("hub1") {
+    Ok(_) => fault("a response without a token")
+    Err(e) => expect(err_text(e)) == "the token response has no token"
+  }
+}

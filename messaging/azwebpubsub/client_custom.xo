@@ -1,0 +1,218 @@
+// The hand written part of azwebpubsub's Client, as Go's client_custom.go
+// and internal/ (util.go, policy_key_credential.go) of azwebpubsub v0.1.1
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md): the
+// constructors, the access key's per request token and
+// generate_client_access_url. The operations are generated (client.xo,
+// models.xo).
+
+use std/base64
+use std/crypto
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+/// The scope of Entra ID tokens for Web PubSub (Go's internal.TokenScope).
+pub const TOKEN_SCOPE: Str = "https://webpubsub.azure.com/.default"
+
+const CONNECTION_STRING_ERR: Str = "connection string is either blank or malformed. The expected connection string should contain key value pairs separated by semicolons. For example 'Endpoint=<endpoint>;AccessKey=<key>;'"
+
+struct Setup[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  endpoint: Str
+}
+
+/// Options of the constructors.
+pub struct ClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// Client: a Web PubSub service's hubs, groups, users and connections.
+pub struct Client[fx: Effects] {
+  setup: Setup[fx]
+  /// The access key of a connection string's client.
+  key: Secret[Str]? = None
+  clock: Clock
+}
+
+/// A client for the service at `endpoint`
+/// (`https://<name>.webpubsub.azure.com/`), authorized by Entra ID tokens
+/// (NewClient).
+pub fn new_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, credential: azcore.TokenCredential[fx], options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] {
+  let auth = runtime.new_bearer_token_policy(credential, [TOKEN_SCOPE], clock)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options.client)
+  Client{setup: Setup{pipeline: pl, endpoint: endpoint}, clock: clock}
+}
+
+/// A client from a connection string
+/// (`Endpoint=https://<name>.webpubsub.azure.com;AccessKey=<key>;Version=1.0;`),
+/// each request signed with the access key (NewClientFromConnectionString).
+pub fn new_client_from_connection_string[fx: Effects](net: Net, clock: Clock, rand: Rand, connection_string: Str, options: ClientOptions[fx] = ClientOptions{}) -> Client[fx] ! Str {
+  let props = parse_connection_string(connection_string)?
+  let auth = KeyCredentialPolicy{key: props.access_key, clock: clock}
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options.client)
+  Ok(Client{setup: Setup{pipeline: pl, endpoint: props.endpoint}, key: Some(props.access_key), clock: clock})
+}
+
+/// A connection string's endpoint (with a trailing `/`) and access key.
+pub struct ParsedConnectionString {
+  pub endpoint: Str
+  pub access_key: Secret[Str]
+}
+
+/// Go's internal.ParseConnectionString: `key=value` pairs separated by
+/// `;` (trailing ones removed), keys in any case, the last of a repeated
+/// key kept; `Endpoint` and `AccessKey` required, and `Port` replacing
+/// the endpoint's port.
+pub fn parse_connection_string(s: Str) -> ParsedConnectionString ! Str {
+  var trimmed = s
+  while trimmed.ends_with(";") {
+    trimmed = trimmed[0..trimmed.len() - 1]
+  }
+  var props: Map[Str, Str] = {}
+  for part in trimmed.split(";") {
+    let (k, v) = part.cut("=") ?? return Err(CONNECTION_STRING_ERR)
+    props[k.to_lower()] = v
+  }
+  var endpoint = props.get("endpoint") ?? return Err(CONNECTION_STRING_ERR)
+  let parsed = exported.parse_go_url(endpoint) ?? _ => return Err("endpoint is not a valid URL")
+  if let Some(port) = props.get("port") {
+    endpoint = (parsed with {host: "${hostname(parsed.host)}:${port}"}).to_str()
+  }
+  if !endpoint.ends_with("/") {
+    endpoint = endpoint + "/"
+  }
+  let key = props.get("accesskey") ?? return Err(CONNECTION_STRING_ERR)
+  Ok(ParsedConnectionString{endpoint: endpoint, access_key: Secret.new(key)})
+}
+
+/// Go's URL.Hostname: the host without its port and an IPv6 address
+/// without its brackets.
+fn hostname(host: Str) -> Str {
+  if host.starts_with("[") {
+    return match host.find("]") {
+      Some(i) => host[1..i]
+      None => host[1..host.len()]
+    }
+  }
+  match host.rfind(":") {
+    Some(i) => host[0..i]
+    None => host
+  }
+}
+
+/// A JSON Web Token signed with HS256, as golang-jwt's
+/// `NewWithClaims(SigningMethodHS256, MapClaims).SignedString`: the
+/// header and claims in Go's json.Marshal form (keys sorted, `<`, `>`
+/// and `&` escaped), base64url without padding.
+fn sign_hs256(key: Str, claims: List[(Str, json.Value)]) -> Str {
+  let head = base64.encode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}".bytes(), enc: base64.Base64.RawUrl)
+  var w = json.json_writer()
+  w.object_start()
+  for (k, v) in claims.sort_by(fn(c: (Str, json.Value)) -> Str { c.0 }) {
+    w.key(k)
+    w.value(v).or_fault("claims are strings, lists of strings and integers")
+  }
+  w.object_end()
+  let body = base64.encode(w.finish(), enc: base64.Base64.RawUrl)
+  let signing = "${head}.${body}"
+  let sig = crypto.hmac(crypto.Hash.Sha256, key.bytes(), signing.bytes())
+  "${signing}.${base64.encode(sig, enc: base64.Base64.RawUrl)}"
+}
+
+/// Go's strings.Replace(s, old, new, 1).
+fn replace_first(s: Str, old: Str, new: Str) -> Str {
+  match s.find(old) {
+    Some(i) => s[0..i] + new + s[i + old.len()..s.len()]
+    None => s
+  }
+}
+
+fn str_list(items: List[Str]) -> json.Value {
+  json.Value.List(items.map(fn(s: Str) -> json.Value { json.Value.Str(s) }))
+}
+
+/// Adds `Authorization: Bearer <token>` to each try, a token for the
+/// request's URL that expires in an hour (Go's KeyCredentialPolicy). It
+/// signs plain HTTP requests too, as Go's does.
+struct KeyCredentialPolicy {
+  key: Secret[Str]
+  clock: Clock
+}
+
+fn (p: KeyCredentialPolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  let exp = (p.clock.now() + 1h).unix()
+  let token = sign_hs256(p.key.reveal(), [("aud", json.Value.Str(req.url)), ("exp", json.Value.Int(exp))])
+  next.send(req with {headers: req.headers + [("Authorization", "Bearer ${token}")]})
+}
+
+/// Options of generate_client_access_url (GenerateClientAccessURLOptions).
+pub struct GenerateClientAccessURLOptions {
+  /// The client's user ID.
+  pub user_id: Str = ""
+  /// The roles of the connection: `webpubsub.joinLeaveGroup`,
+  /// `webpubsub.sendToGroup`, or either with `.<group>` for one group.
+  pub roles: List[Str] = []
+  /// Minutes until the token expires; 0 for 60.
+  pub expiration_time_in_minutes: Int = 0
+  /// The groups the client joins when it connects.
+  pub groups: List[Str] = []
+}
+
+/// The result of generate_client_access_url.
+pub struct GenerateClientAccessURLResponse {
+  /// The client's token.
+  pub token: Str
+  /// The URL the client connects to, without the token.
+  pub base_url: Str
+  /// base_url with the token in `access_token`.
+  pub url: Str
+}
+
+/// The WebSocket URL a client of hub connects to, with its token: signed
+/// with the access key for a connection string's client, otherwise issued
+/// by the service (GenerateClientAccessURL).
+pub fn (c: Client) generate_client_access_url(hub: Str, options: GenerateClientAccessURLOptions = GenerateClientAccessURLOptions{}) -> GenerateClientAccessURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  if hub == "" {
+    return Err(azcore.CallErr.InvalidInput("empty hub name is not allowed"))
+  }
+  let hub_path = url.path_escape(hub)
+  let parsed = exported.parse_go_url(c.setup.endpoint) ?? _ => return Err(azcore.CallErr.InvalidInput("endpoint is not a valid URL"))
+  let audience = "${parsed.to_str()}client/hubs/${hub_path}"
+  let ws = parsed with {scheme: replace_first(parsed.scheme.to_lower(), "http", "ws")}
+  let base_url = "${ws.to_str()}client/hubs/${hub_path}"
+  let token = match c.key {
+    Some(key) => sign_client_token(key.reveal(), audience, options, c.clock.now())?
+    None => {
+      let user_id = if options.user_id == "" { None } else { Some(options.user_id) }
+      let resp = c.raw_generate_client_token(hub, GenerateClientTokenOptions{user_id: user_id, role: Some(options.roles), group: Some(options.groups), minutes_to_expire: Some(options.expiration_time_in_minutes)})?
+      // Go dereferences the token: a response without one panics there
+      resp.token_response.token ?? return Err(azcore.CallErr.Decode("the token response has no token"))
+    }
+  }
+  Ok(GenerateClientAccessURLResponse{token: token, base_url: base_url, url: "${base_url}?access_token=${url.query_escape(token)}"})
+}
+
+/// Go's signJwtToken: aud and exp, then sub, webpubsub.group and role
+/// when given.
+fn sign_client_token(key: Str, audience: Str, options: GenerateClientAccessURLOptions, now: Time) -> Str ! azcore.CallErr {
+  let minutes = options.expiration_time_in_minutes
+  if minutes < 0 {
+    return Err(azcore.CallErr.InvalidInput("the value of ExpirationTimeInMinutes is out of range"))
+  }
+  let exp = if minutes == 0 { now + 1h } else { now + 1m * minutes }
+  var claims: List[(Str, json.Value)] = [("aud", json.Value.Str(audience)), ("exp", json.Value.Int(exp.unix()))]
+  if options.user_id != "" {
+    claims.push(("sub", json.Value.Str(options.user_id)))
+  }
+  if !options.groups.is_empty() {
+    claims.push(("webpubsub.group", str_list(options.groups)))
+  }
+  if !options.roles.is_empty() {
+    claims.push(("role", str_list(options.roles)))
+  }
+  Ok(sign_hs256(key, claims))
+}

@@ -54,7 +54,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | keyvault/internal | v0.7.1 | v0 | 310 | 310 | n/a (support module) |  |  |
 | messaging/azeventhubs | v2.0.2 (`v2`) | stable | 8706 | 10048 | v2.0.2 | 2115 |  |
 | messaging/azservicebus | v1.11.0 | stable | 12824 | 14135 | v1.11.0 | 2915 |  |
-| messaging/azwebpubsub | v0.1.1 | v0 | 332 | 2071 | missing |  |  |
+| messaging/azwebpubsub | v0.1.1 | v0 | 332 | 2071 | v0.1.1 | 218 + 1058 gen |  |
 | messaging/eventgrid/azeventgrid | v1.0.0 | stable | 127 | 574 | v1.0.0 | 132 |  |
 | messaging/eventgrid/aznamespaces | v1.0.0 | stable | 537 | 1939 | v1.0.0 | 345 |  |
 | messaging/eventgrid/azsystemevents | v1.1.0 | stable | 878 | 19101 | v1.1.0 | 243 + 5263 gen |  |
@@ -447,3 +447,7 @@ JSON, every case checked against Go's own. messaging/eventgrid/
 azsystemevents v1.1.0 is done: its models and event type constants
 generated from the TypeSpec's OpenAPI file, its Event Grid event and
 error written by hand, every spec example checked against Go's own.
+messaging/azwebpubsub v0.1.1 is done: its operations generated from
+the 2023-07-01 OpenAPI file, its constructors, access key policy and
+client access URL written by hand, every public call checked against
+Go's own.

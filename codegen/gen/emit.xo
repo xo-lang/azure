@@ -284,8 +284,16 @@ fn resp_headers(p: Package, op: Op) -> List[(Str, Bool)] {
 
 /// The Accept value: the operation's `produces` but `application/json`
 /// when it lists others (TypeSpec's Go emitter, from the success and
-/// error content types), else `application/json`.
-fn accept_value(op: Op) -> Str {
+/// error content types), else `application/json`. From a swagger that
+/// lists JSON and other types for a JSON body, autorest.go sends the
+/// JSON ones (modelerfour's media types of the schema response:
+/// azwebpubsub's `text/plain, application/json, text/json` is
+/// `application/json, text/json`).
+fn accept_value(p: Package, op: Op) -> Str {
+  let jsons = op.produces.filter(fn(t: Str) -> Bool { t.contains("json") })
+  if !p.typespec && !jsons.is_empty() && jsons.len() < op.produces.len() {
+    return jsons.join(", ")
+  }
   let own = op.produces.filter(fn(t: Str) -> Bool { t != "application/json" })
   if own.is_empty() { "application/json" } else { own.join(", ") }
 }
@@ -396,7 +404,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   // autorest.go: Accept when any response, the error one too, has a
   // schema; TypeSpec's emitter: when the success response has a body
   let accept = if (p.data_plane && !grouped(p)) || p.tsp_arm { op.resp.is_some() || p.accept_always } else { op.accept }
-  let accept_h = if accept { "(\"Accept\", \"${esc(accept_value(op))}\")" } else { "" }
+  let accept_h = if accept { "(\"Accept\", \"${esc(accept_value(p, op))}\")" } else { "" }
   s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [${accept_h}]\n"
   // TypeSpec's Go emitter keeps the path's query (`?$expand=Properties`)
   // in the URL it parses, and each query parameter then replaces its
@@ -603,7 +611,9 @@ const GO_KEYWORDS: List[Str] = ["break", "case", "chan", "const", "continue", "d
 /// (`settingName`).
 fn go_param_name(p: Package, x: Param) -> Str {
   let n = if x.go_name != "" { x.go_name } else { x.wire }
-  if p.data_plane {
+  // TypeSpec's Go emitter keeps the name as written; autorest.go's
+  // casing applies to swagger specs, data plane too (`connectionID`)
+  if p.data_plane && p.typespec {
     return n
   }
   var g = uncap_go(n)
