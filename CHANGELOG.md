@@ -55,8 +55,10 @@ v1.4.0), checked against the lines a Go program prints with v1.5.1
   (v1.4.0's emitter sent it on every operation), and a space in the
   query is `%20`, not `+`, as v1.5.1's emitter writes it.
 
-Go's CHANGELOG for v1.5.1 names a `serviceVersion` option; v1.5.1's
-code has none, so neither has this port.
+Go's CHANGELOG for v1.5.1 says the API version can be selected
+(`serviceVersion`); in Go's code that is `azcore.ClientOptions.APIVersion`,
+here `ClientOptions.client.api_version`, which sends it as Go does (a
+vector with `2025-07-01`).
 
 The generator (`codegen`), every generated module regenerated:
 
