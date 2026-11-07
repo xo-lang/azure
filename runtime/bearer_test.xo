@@ -46,12 +46,20 @@ test "the bearer policy refuses plain HTTP unless allowed" {
   let cred = Counting{calls: Atomic.new(0), clock: os.clock}
   let p = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock)]}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: 0}})
   let r = p.send(policy.Request{method: "GET", url: "http://example.test/x"})
-  expect(r.is_err()) == true
+  // azcore v1.23.0's checkHTTPSForAuth text, not retried
+  match r {
+    Ok(_) => fault("sent over plain HTTP")
+    Err(e) => expect("${e}") == "authorized requests are not permitted for non-TLS protected (https) endpoints"
+  }
   expect(cred.calls.get()) == 0
+  // the scheme in any case, as Go's URL.Scheme compared lower case
+  let upper = capture(os.net, "https://upper.example.test/x")
+  expect(p.send(policy.Request{method: "GET", url: "HTTPS://upper.example.test/x"})?.status) == 200
+  expect(upper.with_read(fn(xs: List[http.Request]) -> Int { xs.len() })) == 1
   let seen = capture(os.net, "http://emulator.test/x")
   let open = new_pipeline("armtest", "v0.1.0", os.net, os.clock, os.rand, PipelineOptions{per_retry: [bearer_token_policy(cred, ["s"], os.clock, insecure_allow_http: true)]}, policy.ClientOptions{})
   expect(open.send(policy.Request{method: "GET", url: "http://emulator.test/x"})?.status) == 200
-  expect(seen.with_read(fn(xs: List[http.Request]) -> Str { xs[0].header("Authorization") ?? "" })) == "Bearer tok-home-1"
+  expect(seen.with_read(fn(xs: List[http.Request]) -> Str { xs[0].header("Authorization") ?? "" })) == "Bearer tok-home-2"
 }
 
 test "auxiliary tenants' tokens go in x-ms-authorization-auxiliary" {

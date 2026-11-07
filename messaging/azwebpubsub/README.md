@@ -40,8 +40,7 @@ Where it differs from Go v0.1.1:
   token is an error, where Go's panics.
 - A request to an endpoint without a scheme (`wps.example.test`) fails
   in Xo's HTTP client's words; Go's fails with `no Host in request URL`.
-- A bearer token over plain HTTP is refused with runtime's message; a
-  response body that is not JSON is reported with Xo's JSON error.
+- A response body that is not JSON is reported with Xo's JSON error.
 - The connection string's endpoint is read as Go's url.Parse reads it,
   with azblob's Go URL reader: its user info and fragment are dropped.
 - Go's int32 options (`message_ttl_seconds`, minutes to expire) are
