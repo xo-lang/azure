@@ -47,6 +47,38 @@ pub struct Confidential {
   hosts: Mutex[Map[Str, Bool]]
   /// Token endpoints resolved per MSAL client and tenant (`cae|tenant`).
   endpoints: Mutex[Map[Str, Str]]
+  /// Workload identity's Azure Kubernetes token proxy: every request
+  /// goes to it.
+  pub proxy: TokenProxy? = None
+}
+
+/// `u` as sent: to the token proxy when there is one.
+fn (c: Confidential) target(u: Str) -> Str {
+  match c.proxy {
+    Some(p) => p.rewrite(u)
+    None => u
+  }
+}
+
+/// Sends `req` through the pipeline; with a token proxy, to the proxy
+/// on its client, with the URL's own authority as the Host (Go's
+/// transport keeps Request.Host while it rewrites the URL).
+fn (c: Confidential) send(req: policy.Request) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  match c.proxy {
+    Some(p) => policy.Next{policies: c.pipeline.policies, transport: p.current()}.send(req with {url: p.rewrite(req.url), host: authority_of(req.url)})
+    None => c.pipeline.send(req)
+  }
+}
+
+/// The host and port of an absolute URL (Go's URL.Host).
+fn authority_of(u: Str) -> Str {
+  let after = u.cut("://").map(fn(x: (Str, Str)) -> Str { x.1 }) ?? u
+  let end = after.find("/") ?? after.find("?") ?? after.len()
+  let a = after[0..end]
+  match a.cut("@") {
+    Some((_, h)) => h
+    None => a
+  }
 }
 
 /// Go's error for a tenant that is not a tenant ID or domain.
@@ -150,7 +182,7 @@ fn (c: Confidential) discovery_url(tenant: Str) -> Str {
 /// for the OpenID configuration ends in an empty query (`?`); Xo's URL
 /// has no empty query, so that `?` is not sent.
 fn (c: Confidential) msal_get(u: Str) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
-  c.pipeline.send(policy.Request{method: "GET", url: u, headers: [("client-request-id", uuid.v4(c.rand).display()), ("return-client-request-id", "false")]})
+  c.send(policy.Request{method: "GET", url: u, headers: [("client-request-id", uuid.v4(c.rand).display()), ("return-client-request-id", "false")]})
 }
 
 /// azidentity's error without a response: `<credential>: <msg>` and the
@@ -200,7 +232,7 @@ pub fn (c: Confidential) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcor
     let du = c.discovery_url(tenant)
     let r = c.msal_get(du) ?? e => return Err(unresolved(e.display()))
     if r.status != 200 {
-      return Err(auth_failed(c.name, "GET", du, r))
+      return Err(auth_failed(c.name, "GET", c.target(du), r))
     }
     let doc = json.parse_value(r.body.to_str_lossy()) ?? e => return Err(unresolved(e.display()))
     oidc = str_field(doc, "tenant_discovery_endpoint")
@@ -219,7 +251,7 @@ pub fn (c: Confidential) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcor
   }
   let r = c.msal_get(oidc) ?? e => return Err(unresolved(e.display()))
   if r.status != 200 {
-    return Err(auth_failed(c.name, "GET", oidc, r))
+    return Err(auth_failed(c.name, "GET", c.target(oidc), r))
   }
   let doc = json.parse_value(r.body.to_str_lossy()) ?? e => return Err(unresolved(e.display()))
   let auth_ep = str_field(doc, "authorization_endpoint")
@@ -306,9 +338,9 @@ pub fn (c: Confidential) request_rt(tenant: Str, key: Str, opts: azcore.TokenReq
     ("return-client-request-id", "false"),
   ]
   let req = policy.Request{method: "POST", url: c.endpoint(tenant, opts.enable_cae)?, headers: headers, body: body.bytes()}
-  let resp = c.pipeline.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display(), failed: true})
+  let resp = c.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display(), failed: true})
   if resp.status != 200 {
-    return Err(auth_failed(c.name, req.method, req.url, resp))
+    return Err(auth_failed(c.name, req.method, c.target(req.url), resp))
   }
   let t = parse_token_response(c.name, resp, c.clock.now())?
   c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {

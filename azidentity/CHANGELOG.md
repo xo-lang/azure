@@ -7,6 +7,20 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- Workload identity's Azure Kubernetes token proxy (gap item 10), as
+  azidentity's internal/customtokenproxy: with
+  `WorkloadIdentityOptions.enable_azure_proxy`, every request goes to
+  AZURE_KUBERNETES_TOKEN_PROXY (an https URL with no user, query or
+  fragment; its path joined before the request's, the query kept), with
+  the authority's host as the request's Host, AZURE_KUBERNETES_SNI_NAME
+  as the TLS server name (std/http's `with_server_name` and
+  `Request.with_host`, decision 0541), and the CA of
+  AZURE_KUBERNETES_CA_FILE (read again before each token request, the
+  client rebuilt when its bytes change, an empty file keeping the last)
+  or AZURE_KUBERNETES_CA_DATA. Go's errors for the settings, in Go's
+  order. Checked against a Go program's requests through a local TLS
+  proxy (`proxyvectors_test.xo`); FakeNet does no TLS, so the server
+  name is checked on the proxy's client.
 - AzurePipelinesCredential (gap item 14), as azidentity's:
   `new_azure_pipelines_credential(tenant_id, client_id,
   service_connection_id, system_access_token, env, ...)`, reading

@@ -14,7 +14,7 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   SSEResponse;
   arm/internal/resource: ResourceID, ResourceType),
   `sdk/azidentity` (client secret, client certificate, workload
-  identity, managed identity, environment, chained and default
+  identity and its Azure Kubernetes token proxy, managed identity, environment, chained and default
   credentials, with MSAL's token requests), `sdk/storage/azblob`
   v1.8.3 (the Blob client's container, blob, block and list calls, hand
   written ahead of the generator; the service, container, blob and

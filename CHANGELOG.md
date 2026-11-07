@@ -8,6 +8,10 @@ version has been tagged since.
 
 ## Unreleased
 
+`policy.Request.host`: the Host sent in place of the URL's (Go's
+`Request.Raw().Host`), for azidentity's token proxy; needs xo 6797f91ba
+or later (`http.Request.with_host`).
+
 The generator (`codegen`), for messaging/eventgrid/azsystemevents:
 `all_definitions` (a models only TypeSpec module keeps every
 definition), `drop_models` (Go's hand written replacements),

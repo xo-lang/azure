@@ -1,0 +1,185 @@
+// Workload identity's Azure Kubernetes token proxy, as azidentity's
+// internal/customtokenproxy (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): with `enable_azure_proxy`, AZURE_KUBERNETES_TOKEN_PROXY
+// names an https proxy that every request of the credential goes to
+// instead (its path joined before the request's, the query kept), trusting
+// the CA in AZURE_KUBERNETES_CA_FILE or AZURE_KUBERNETES_CA_DATA, with
+// AZURE_KUBERNETES_SNI_NAME as the TLS server name.
+use std/http
+
+pub const K8S_TOKEN_PROXY: Str = "AZURE_KUBERNETES_TOKEN_PROXY"
+pub const K8S_SNI_NAME: Str = "AZURE_KUBERNETES_SNI_NAME"
+pub const K8S_CA_FILE: Str = "AZURE_KUBERNETES_CA_FILE"
+pub const K8S_CA_DATA: Str = "AZURE_KUBERNETES_CA_DATA"
+
+/// The proxy's origin and path, its TLS settings, and the client built
+/// from the CA last read (Go's transport: a CA file is read again on
+/// each use and the client rebuilt when its bytes change).
+pub struct TokenProxy {
+  /// `https://host[:port]`
+  pub origin: Str
+  /// The proxy URL's escaped path, `/` when it has none.
+  pub path: Str
+  pub sni_name: Str
+  pub ca_file: Str
+  net: Net
+  timeout: Duration
+  /// The CA bytes the client trusts, and the client.
+  state: Mutex[(Bytes, http.Client)]
+}
+
+/// Go's Configure: None when AZURE_KUBERNETES_TOKEN_PROXY is unset or
+/// empty (an error if the other three are set), else the proxy, or Go's
+/// error for a bad URL, two CA sources, or a CA that does not parse.
+pub fn token_proxy_from_env(env: Env, fs: Fs, net: Net, timeout: Duration) -> TokenProxy? ! Str uses (env, fs.read) {
+  let get = fn(n: Str) -> Str { env.get(n) ?? "" }
+  let proxy = get(K8S_TOKEN_PROXY)
+  let sni = get(K8S_SNI_NAME)
+  let ca_file = get(K8S_CA_FILE)
+  let ca_data = get(K8S_CA_DATA)
+  if proxy == "" {
+    if sni != "" || ca_file != "" || ca_data != "" {
+      return Err("AZURE_KUBERNETES_TOKEN_PROXY is not set but other custom endpoint-related environment variables are present")
+    }
+    return Ok(None)
+  }
+  let (origin, path) = parse_proxy_url(proxy)?
+  if ca_file != "" && ca_data != "" {
+    return Err("only one of AZURE_KUBERNETES_CA_FILE and AZURE_KUBERNETES_CA_DATA can be specified")
+  }
+  let base = http.client(net, timeout)
+  let state = if ca_file != "" {
+    let b = read_ca_file(fs, ca_file)?
+    if b.is_empty() {
+      return Err("CA file ${json_quote(ca_file)} is empty")
+    }
+    (b, with_ca(base, b, sni) ?? _ => return Err("parse CA file ${json_quote(ca_file)}: no valid certificates found"))
+  } else if ca_data != "" {
+    (ca_data.bytes(), with_ca(base, ca_data.bytes(), sni) ?? _ => return Err("parse CA data: no valid certificates found"))
+  } else {
+    (b"", base.with_server_name(sni))
+  }
+  Ok(Some(TokenProxy{origin: origin, path: path, sni_name: sni, ca_file: ca_file, net: net, timeout: timeout, state: Mutex.new(state)}))
+}
+
+fn read_ca_file(fs: Fs, path: Str) -> Bytes ! Str uses fs.read {
+  fs.read(path) ?? e => Err("read CA file ${json_quote(path)}: open ${e.display()}")
+}
+
+/// The client trusting the certificates of `pem`, as Go's
+/// AppendCertsFromPEM (an error when none parses), with `sni` as its TLS
+/// server name ("" the URL's host).
+fn with_ca(c: http.Client, pem: Bytes, sni: Str) -> http.Client ! Str {
+  Ok((c.with_roots(pem) ?? e => return Err(e.display())).with_server_name(sni))
+}
+
+/// Go's %q of a path or URL with no quote, backslash or control byte in
+/// it: the text in double quotes.
+fn json_quote(s: Str) -> Str {
+  "\"${s}\""
+}
+
+/// parseAndValidate: an https URL without user info, query or fragment.
+/// The texts are Go's; of url.Parse's own errors, only a bad port's is
+/// given in Go's words.
+fn parse_proxy_url(s: Str) -> (Str, Str) ! Str {
+  let (scheme, rest) = match s.cut("://") {
+    Some((a, b)) => (a, b)
+    None => ("", s)
+  }
+  let scheme_l = scheme.to_lower()
+  // the authority ends at the first /, ? or #
+  var end = rest.len()
+  for (i, b) in rest.bytes().indexed() {
+    if b == 0x2f || b == 0x3f || b == 0x23 {
+      end = i
+      break
+    }
+  }
+  let authority = if scheme == "" { "" } else { rest[0..end] }
+  let tail = if scheme == "" { rest } else { rest[end..rest.len()] }
+  let (no_frag, frag) = tail.cut("#") ?? (tail, "")
+  let (path, query) = no_frag.cut("?") ?? (no_frag, "")
+  let hostport = match authority.cut("@") {
+    Some((_, h)) => h
+    None => authority
+  }
+  if let Some((_, port)) = hostport.cut(":") {
+    if !port.runes().all(fn(r: Rune) -> Bool { r >= '0' && r <= '9' }) {
+      return Err("failed to parse custom token proxy URL ${json_quote(s)}: parse ${json_quote(s)}: invalid port \":${port}\" after host")
+    }
+  }
+  if scheme_l != "https" {
+    return Err("custom token endpoint must use https scheme, got ${json_quote(scheme_l)}")
+  }
+  if authority.contains("@") {
+    return Err("custom token endpoint URL ${json_quote(s)} must not contain user info")
+  }
+  if query != "" {
+    return Err("custom token endpoint URL ${json_quote(s)} must not contain a query")
+  }
+  if frag != "" {
+    return Err("custom token endpoint URL ${json_quote(s)} must not contain a fragment")
+  }
+  Ok(("https://${hostport}", if path == "" { "/" } else { path }))
+}
+
+/// The client to send with now: with a CA file, the file is read again
+/// and a client built when its bytes changed (an empty file keeps the
+/// last client), as Go's getTokenTransporter.
+pub fn (p: TokenProxy) client(fs: Fs) -> http.Client ! Str uses fs.read {
+  if p.ca_file == "" {
+    return Ok(p.state.with_read(fn(s: (Bytes, http.Client)) -> http.Client { s.1 }))
+  }
+  let b = read_ca_file(fs, p.ca_file)?
+  if b.is_empty() {
+    return Ok(p.state.with_read(fn(s: (Bytes, http.Client)) -> http.Client { s.1 }))
+  }
+  let (old, c) = p.state.with_read(fn(s: (Bytes, http.Client)) -> (Bytes, http.Client) { s })
+  if b == old {
+    return Ok(c)
+  }
+  let next = with_ca(http.client(p.net, p.timeout), b, p.sni_name) ?? _ => return Err("parse CA file ${json_quote(p.ca_file)}: no valid certificates found")
+  p.state.with(fn(var s: (Bytes, http.Client)) { s = (b, next) })
+  Ok(next)
+}
+
+/// The client the last `client` call settled on.
+pub fn (p: TokenProxy) current() -> http.Client {
+  p.state.with_read(fn(s: (Bytes, http.Client)) -> http.Client { s.1 })
+}
+
+/// rewriteProxyRequestURL: `u` sent to the proxy, the proxy's path
+/// joined before u's path (Go's URL.JoinPath, which cleans the result
+/// and keeps a final slash), u's query kept.
+pub fn (p: TokenProxy) rewrite(u: Str) -> Str {
+  let after = u.cut("://").map(fn(x: (Str, Str)) -> Str { x.1 }) ?? u
+  let (rest, query) = after.cut("?") ?? (after, "")
+  let path = match rest.find("/") {
+    Some(i) => rest[i..rest.len()]
+    None => ""
+  }
+  let joined = join_path(p.path, path)
+  "${p.origin}${joined}${if query == "" { "" } else { "?${query}" }}"
+}
+
+/// Go's URL.JoinPath of a base path and one element: path.Join's clean
+/// of both, `/` first, and a final slash kept when the element has one.
+fn join_path(base: Str, elem: Str) -> Str {
+  var parts: List[Str] = []
+  for seg in "${base}/${elem}".split("/") {
+    if seg == "" || seg == "." {
+      continue
+    }
+    if seg == ".." {
+      if !parts.is_empty() {
+        parts.pop()
+      }
+      continue
+    }
+    parts.push(seg)
+  }
+  let out = "/" + parts.join("/")
+  let trailing = if elem != "" { elem.ends_with("/") } else { base.ends_with("/") }
+  if trailing && out != "/" { out + "/" } else { out }
+}

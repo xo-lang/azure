@@ -1,0 +1,127 @@
+// Replays the Go program's token proxy cases (proxyvectors_test.xo):
+// the proxy is a FakeNet handler at https://127.0.0.1:8443, the CA file
+// and the token file on MemFs under /pxy (the Go program's <dir>).
+// The proxy sees the authority's Host. FakeNet does no TLS (a handler
+// has no tls_state), so each PROXY line is compared up to ` sni=`, and
+// the SNI from AZURE_KUBERNETES_SNI_NAME is checked on the proxy's
+// client (tls_options) instead.
+use std/crypto
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const PXY_PORT: Str = "8443"
+
+fn pxy_mask(body: Str) -> Str {
+  let (a, rest) = body.cut("client_assertion=") ?? return body
+  let tail = match rest.cut("&") {
+    Some((_, t)) => "&${t}"
+    None => ""
+  }
+  "${a}client_assertion=<jwt>${tail}"
+}
+
+fn pxy_line(l: Str) -> Str {
+  if l.starts_with("pxy10: PROXY ") {
+    return l.cut(" sni=").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? l
+  }
+  l
+}
+
+test "workload identity's Azure Kubernetes token proxy is Go's" {
+  let s = "pxy10"
+  let f = gv_serve(os.net, s)
+  let ca = crypto.pem_encode(crypto.pem_decode(TEST_PEM)[0])?
+  let proxy = "https://127.0.0.1:${PXY_PORT}"
+  let h = fn(req: http.Request) -> http.Response {
+    var hs: List[Str] = []
+    for (k, v) in req.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" && lk != "client-request-id" {
+        hs.push("${lk}=${v}")
+      }
+    }
+    gv_note(f, "${s}: PROXY ${req.method} ${req.escaped_path()}?${req.raw_query()} host=${req.host()} sni=\n  H ${hs.sort().join(" | ")}\n  B ${pxy_mask(req.body.to_str_lossy())}")
+    let p = req.escaped_path()
+    if p.ends_with("openid-configuration") {
+      return http.text(200, "{\"token_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/authorize\",\"issuer\":\"https://login.example.test/tenant-a/v2.0\"}")
+    }
+    if p.ends_with("fail/tenant-a/oauth2/v2.0/token") {
+      return http.text(401, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad\",\"error_codes\":[7000215]}")
+    }
+    http.text(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-proxy\"}")
+  }
+  os.net.handle("GET ${proxy}/{rest...}", h)
+  os.net.handle("POST ${proxy}/{rest...}", h)
+  let fs = os.fs
+  fs.write("/pxy/pxy-fed", b"fed-token-1")?
+  fs.write("/pxy/pxy-ca.pem", ca.bytes())?
+  let cases: List[(Str, List[(Str, Str)], Bool)] = [
+    ("sni without proxy", [(K8S_SNI_NAME, "proxy.example.test")], false),
+    ("ca data without proxy", [(K8S_CA_DATA, "x")], false),
+    ("http", [(K8S_TOKEN_PROXY, "http://proxy.example.test")], false),
+    ("bad url", [(K8S_TOKEN_PROXY, "https://proxy.example.test:bad")], false),
+    ("no scheme", [(K8S_TOKEN_PROXY, "proxy.example.test")], false),
+    ("user", [(K8S_TOKEN_PROXY, "https://:@proxy.example.test")], false),
+    ("query", [(K8S_TOKEN_PROXY, "https://proxy.example.test/?a=b")], false),
+    ("empty query", [(K8S_TOKEN_PROXY, "https://proxy.example.test/?")], false),
+    ("fragment", [(K8S_TOKEN_PROXY, "https://proxy.example.test/#f")], false),
+    ("both cas", [(K8S_TOKEN_PROXY, "https://proxy.example.test"), (K8S_CA_FILE, "/pxy/pxy-ca.pem"), (K8S_CA_DATA, ca)], false),
+    ("bad ca data", [(K8S_TOKEN_PROXY, "https://proxy.example.test"), (K8S_CA_DATA, "not pem")], false),
+    ("missing ca file", [(K8S_TOKEN_PROXY, "https://proxy.example.test"), (K8S_CA_FILE, "/pxy/pxy-missing.pem")], false),
+    ("ca data", [(K8S_TOKEN_PROXY, proxy), (K8S_SNI_NAME, "proxy.example.test"), (K8S_CA_DATA, ca)], true),
+    ("ca file base path", [(K8S_TOKEN_PROXY, "${proxy}/base/"), (K8S_SNI_NAME, "proxy.example.test"), (K8S_CA_FILE, "/pxy/pxy-ca.pem")], true),
+    ("proxy 401", [(K8S_TOKEN_PROXY, "${proxy}/fail"), (K8S_SNI_NAME, "proxy.example.test"), (K8S_CA_DATA, ca)], true),
+  ]
+  let client = policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}, retry: policy.RetryOptions{max_retries: -1}}
+  let wopts = WorkloadIdentityOptions{tenant_id: "tenant-a", client_id: "client-1", token_file_path: "/pxy/pxy-fed", enable_azure_proxy: true, opts: Options{client: client, disable_instance_discovery: true}}
+  let env = os.env
+  for (name, vars, get) in cases {
+    var names: List[Str] = []
+    for (k, v) in vars {
+      env.set(k, v)
+      names.push(k)
+    }
+    let r = new_workload_identity_credential_from_env(env.only(names), fs, os.net, os.clock, os.rand, wopts)
+    gv_new(f, s, "pxy ${name}", r)
+    if get {
+      if let Ok(w) = r {
+        gv_get(f, s, "pxy ${name}", w.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+      }
+    }
+  }
+  let w = new_workload_identity_credential_from_env(env.only([]), fs, os.net, os.clock, os.rand, wopts with {opts: gv_opts(nodisc: true)})
+  gv_new(f, s, "pxy unset", w)
+  gv_get(f, s, "pxy unset", w?.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  env.set(K8S_SNI_NAME, "proxy.example.test")
+  gv_new(f, s, "pxy not enabled", new_workload_identity_credential_from_env(env.only([K8S_SNI_NAME]), fs, os.net, os.clock, os.rand, wopts with {opts: gv_opts(nodisc: true), enable_azure_proxy: false}))
+  let want_all = GO_PROXY_LINES.map(fn(l: Str) -> Str { l.replace("<port>", PXY_PORT).replace("<dir>", "/pxy") })
+  let (got0, want0) = gv_lines(f, s, want_all)
+  let got = got0.map(pxy_line)
+  let want = want0.map(pxy_line)
+  for i in 0..got.len().min(want.len()) {
+    expect((i, got[i])) == (i, want[i])
+  }
+  expect(got.len()) == want.len()
+}
+
+test "the token proxy's client sends AZURE_KUBERNETES_SNI_NAME as its TLS server name" {
+  let ca = crypto.pem_encode(crypto.pem_decode(TEST_PEM)[0])?
+  let fs = os.fs
+  fs.write("/pxs/ca.pem", ca.bytes())?
+  let env = os.env
+  env.set(K8S_TOKEN_PROXY, "https://127.0.0.1:${PXY_PORT}")
+  env.set(K8S_SNI_NAME, "proxy.example.test")
+  env.set(K8S_CA_DATA, ca)
+  let p = (token_proxy_from_env(env.only([K8S_TOKEN_PROXY, K8S_SNI_NAME, K8S_CA_DATA]), fs, os.net, 5s)?)?
+  expect(p.current().tls_options()) == http.TlsOptions{server_name: "proxy.example.test", verify_conn: false, custom_roots: true, client_cert: false}
+  // a CA file read again keeps the name on the new client
+  env.set(K8S_CA_FILE, "/pxs/ca.pem")
+  let q = (token_proxy_from_env(env.only([K8S_TOKEN_PROXY, K8S_SNI_NAME, K8S_CA_FILE]), fs, os.net, 5s)?)?
+  fs.write("/pxs/ca.pem", (ca + ca).bytes())?
+  expect(q.client(fs)?.tls_options().server_name) == "proxy.example.test"
+  // no SNI name, no CA: the URL's host and the system roots
+  let r = (token_proxy_from_env(env.only([K8S_TOKEN_PROXY]), fs, os.net, 5s)?)?
+  expect(r.current().tls_options()) == http.TlsOptions{server_name: "", verify_conn: false, custom_roots: false, client_cert: false}
+}

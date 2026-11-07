@@ -1,7 +1,7 @@
 # azidentity: the port against Go v1.15.0
 
-Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11), (12), (13) and (14) are ported (azidentity/CHANGELOG.md).
-Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
+Status (2026-11-07): (1), (2), (3), (4), (6), (7), (8), (9), (10), (11), (12), (13) and (14) are ported (azidentity/CHANGELOG.md).
+Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) is unblocked: std/tls and std/http have `verify_conn`, `with_server_name` and `Request.with_host` (decision 0541). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
 credentials grant by hand, no MSAL).
@@ -90,7 +90,8 @@ Ranked by how many callers meet the gap first.
     (`EnableAzureProxy`): the token request goes to
     `AZURE_KUBERNETES_TOKEN_PROXY`, with `AZURE_KUBERNETES_SNI_NAME` and
     a CA from `AZURE_KUBERNETES_CA_FILE` or `AZURE_KUBERNETES_CA_DATA`.
-    std has `tls.roots`; the SNI override needs checking in std/http.
+    Ported 2026-11-07, with std/http's `with_server_name` and
+    `Request.with_host` (decision 0541).
 
 ## In scope, owner decision pending
 
