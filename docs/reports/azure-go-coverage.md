@@ -84,11 +84,11 @@ shipped a newer major whose spec our generator has not been run on.
 | Go module | latest | kind | Go hand-written lines | Go lines | our port | our lines (hand + generated) | popularity |
 |---|---|---|---:|---:|---|---|---|
 | resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 7 | 14114 | v2.2.0 | 0 + 3714 gen |  |
-| resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v6.4.0 (behind v9.0.0) | 0 + 28864 gen |  |
+| resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v7.3.0 (behind v9.0.0) | 0 + 30342 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v1.5.0 (behind v2.1.0) | 0 + 3981 gen |  |
-| resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v8.0.0 (behind v12.1.0) | 0 + 54158 gen |  |
+| resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v9.0.0 (behind v12.1.0) | 0 + 55189 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v1.2.0 (behind v4.0.0) | 0 + 5395 gen |  |
-| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v1.8.1 (behind v4.3.0) | 0 + 9570 gen |  |
+| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v2.0.0 (behind v4.3.0) | 0 + 9741 gen |  |
 
 ## ARM modules not ported (302)
 

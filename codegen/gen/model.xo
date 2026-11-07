@@ -166,6 +166,9 @@ pub struct Builder {
   files: Map[Str, json.Value]
   models: List[Model] = []
   enums: List[StrEnum] = []
+  /// Each string enum's values with their sort keys, so a second
+  /// x-ms-enum of the same name adds its values (modelerfour's union).
+  enum_keys: Map[Str, List[(Str, (Str, Str, Str))]] = {}
   polys: List[Poly] = []
   known: Map[Str, Str] = {}
   /// The package's api-version: the first input file with operations.
@@ -455,7 +458,8 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
 }
 
 fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str {
-  if b.known.contains(name) {
+  let merging = b.enum_keys.contains(name)
+  if b.known.contains(name) && !merging {
     return name
   }
   b.known[name] = name
@@ -472,7 +476,7 @@ fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str
       }
       let n = str_of(x.get("name"))
       let raw = if n != "" { n } else { value }
-      keyed.push((part(raw), (screaming(raw), value, str_of(x.get("description")))))
+      keyed.push((value_part(raw), (screaming(raw), value, str_of(x.get("description")))))
     }
   } else {
     for x in list_of(v.get("enum")) {
@@ -481,13 +485,31 @@ fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str
         other => other.encode()
       }
       let raw = if base == "Int" { number_name(value) } else { value }
-      keyed.push((part(raw), (screaming(raw), value, "")))
+      keyed.push((value_part(raw), (screaming(raw), value, "")))
     }
   }
+  // Two x-ms-enums of one name are one type with every value of both,
+  // as modelerfour merges them (armstorage's ProvisioningState: the
+  // account's three and the task assignment's eight); the first's
+  // documentation stays.
+  if merging {
+    var before = b.enum_keys.get(name) ?? []
+    for k in keyed {
+      if !before.any(fn(x: (Str, (Str, Str, Str))) -> Bool { x.1.1 == k.1.1 }) {
+        before.push(k)
+      }
+    }
+    keyed = before
+  }
+  b.enum_keys[name] = keyed
   var vals = keyed.sort_by(fn(k: (Str, (Str, Str, Str))) -> Str { k.0 }).map(fn(k: (Str, (Str, Str, Str))) -> (Str, Str, Str) { k.1 })
   let dropped = b.custom.drop_values.get(name) ?? []
   vals = vals.filter(fn(x: (Str, Str, Str)) -> Bool { !dropped.contains(x.1) })
-  b.enums.push(StrEnum{name: name, values: vals, doc: doc_of(v), base: base})
+  if merging {
+    b.enums = b.enums.map(fn(e: StrEnum) -> StrEnum { if e.name == name { e with {values: vals} } else { e } })
+  } else {
+    b.enums.push(StrEnum{name: name, values: vals, doc: doc_of(v), base: base})
+  }
   name
 }
 
@@ -596,7 +618,10 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     seen.push(wire)
     let raw_client = str_of(prop.get("x-ms-client-name"))
     let client = b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
-    var typ = b.custom.alt_fields.get("${def}.${wire}") ?? b.type_of(pf, prop, "${name}${pascal(wire)}")
+    // an inline schema is named after the definition's key, not its
+    // x-ms-client-name (modelerfour names it before the rename: Compute's
+    // Operation, renamed OperationValue, has an OperationDisplay)
+    var typ = b.custom.alt_fields.get("${def}.${wire}") ?? b.type_of(pf, prop, "${def}${pascal(wire)}")
     let go_name = if client != "" { client } else { wire }
     if typ == "Str" {
       // `Model.field` first (one model's), then the field in every model.

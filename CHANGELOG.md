@@ -89,6 +89,40 @@ Go's CHANGELOG for v1.5.1 says the API version can be selected
 here `ClientOptions.client.api_version`, which sends it as Go does (a
 vector with `2025-07-01`).
 
+**Breaking**: three ARM modules follow Go's next major (the Xo module
+paths are unchanged: no module has been tagged, decision 0001):
+
+- `resourcemanager/storage/armstorage` matches Go's armstorage/v2
+  v2.0.0 (readme tag package-2025-01, API version 2025-01-01).
+- `resourcemanager/compute/armcompute` matches Go's armcompute/v7
+  v7.3.0 (package-2025-03-03; 2025-04-01, disks 2025-01-02). As Go's
+  build.go asks, only the types operations reach are generated, and
+  `VirtualMachines.begin_delete`'s poller ends at the Location header
+  (the spec's `final-state-via: location`).
+- `resourcemanager/network/armnetwork` matches Go's armnetwork/v9
+  v9.0.0 (package-2025-05-01, 2025-05-01).
+- Each was checked against Go's module: every operation's request (the
+  method, path, query and headers each sends) and every type, enum
+  value and enum order equal (the documented `ErrorModel` aside); each
+  module's Go-backed vectors re-recorded from the Go majors.
+
+The generator, for these regenerations (no other module changes):
+
+- The last 4 enum differences with Go are gone: two x-ms-enums of one
+  name are one type (`ProvisioningState`), a constant that starts with
+  a number says it in words (`NETWORK_API_VERSION_TWO_THOUSAND_TWENTY_11_01`,
+  Go's `TwoThousandTwenty1101`), and `*` is `ASTERISK`
+  (`SECURITY_RULE_PROTOCOL_ASTERISK`, was `EMPTY`), sorted by that name.
+- readme.go.md directives: `where:` paths into a definition's
+  properties, `delete $["k"]` statements, and a `delete` under
+  `where: $.definitions` dropping a definition.
+- An inline schema is named after its definition's key, not the
+  definition's `x-ms-client-name` (`OperationValueDisplay`).
+- `codegen/custom/armcompute.toml`: `reachable_only` for Go's
+  `-removeUnreferencedTypes`. Its other flag,
+  `-alwaysSetBodyParamRequired`, changes nothing in v7.3.0: an optional
+  body stays in the options struct in Go's code, as here.
+
 The generator (`codegen`), every generated module regenerated:
 
 - **Behavior change**: an enum's constants and its

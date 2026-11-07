@@ -1,7 +1,9 @@
 // The directives of a readme.go.md (autorest's swagger-document
-// transforms) that are plain assignments: `where: $.definitions.X` (or
-// `$.definitions["X"]`) with `transform: $['a']['b'] = 'v'` statements,
-// or `set:` on such a path, and autorest's `rename-model` and
+// transforms) that are plain assignments or deletions: `where:
+// $.definitions.X` (or `$.definitions["X"]`, or a path under it such as
+// `$.definitions.X.properties.y`) with `transform: $['a']['b'] = 'v'`
+// and `delete $['a']` statements, `where: $.definitions` with `delete
+// $['X']` (the definition dropped), and autorest's `rename-model` and
 // `where-model` + `rename-property`. They rename types and fields for Go
 // (decision 0002, amendment 2). Any other directive is reported, not
 // applied.
@@ -18,6 +20,8 @@ pub struct Assign {
   pub definition: Str
   pub keys: List[Str]
   pub value: json.Value
+  /// `delete $[...]`: the key removed instead of set.
+  pub delete: Bool = false
 }
 
 /// `rename-model`, or with a `model`, `where-model` + `rename-property`
@@ -51,7 +55,8 @@ pub fn tag_directives(readme: Str, tag: Str) -> Directives ! Str {
 }
 
 fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
-  let where_re = regexp.compile("^\\$\\.definitions(?:\\.([A-Za-z0-9_]+)|\\[['\"]([^'\"]+)['\"]\\])$") ?? e => return Err(e.display())
+  let where_re = regexp.compile("^\\$\\.definitions(?:\\.([A-Za-z0-9_]+)|\\[['\"]([^'\"]+)['\"]\\])((?:\\.[A-Za-z0-9_]+)*)$") ?? e => return Err(e.display())
+  let del = regexp.compile("delete\\s+\\$((?:\\[['\"][^'\"]+['\"]\\])+)") ?? e => return Err(e.display())
   let stmt = regexp.compile("\\$((?:\\[['\"][^'\"]+['\"]\\])+)\\s*=\\s*(?:'([^']*)'|\"([^\"]*)\"|(true|false))") ?? e => return Err(e.display())
   let key = regexp.compile("\\[['\"]([^'\"]+)['\"]\\]") ?? e => return Err(e.display())
   var out = Directives{}
@@ -73,9 +78,9 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
             Some(json.Value.Str(s)) => s
             _ => ""
           }
-          let def = match where_re.captures(w) {
-            Some(m) => m[1] ?? m[2] ?? ""
-            None => ""
+          let (def, under) = match where_re.captures(w) {
+            Some(m) => (m[1] ?? m[2] ?? "", (m[3] ?? "").split(".").filter(fn(x: Str) -> Bool { x != "" }))
+            None => ("", [])
           }
           let from = match d.get("from") {
             Some(json.Value.Str(f)) => if f == "swagger-document" { "" } else { f }
@@ -105,16 +110,33 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
               n += 1
             }
           }
+          let keys_of = fn(path: Str) -> List[Str] { key.find_all(path).map(fn(k: Str) -> Str { key.captures(k).and_then(fn(c: List[Str?]) -> Str? { c[1] }) ?? "" }) }
           if def != "" && tr != "" {
+            // in the transform's order: a deletion before an assignment
+            // to the same object (`delete $["$ref"]; $["type"] = ...`)
+            for whole in del.find_all(tr) {
+              let m = del.captures(whole) ?? continue
+              out.assigns.push(Assign{from: from, definition: def, keys: under + keys_of(m[1] ?? ""), value: json.Value.Null, delete: true})
+              n += 1
+            }
             for whole in stmt.find_all(tr) {
               let m = stmt.captures(whole) ?? continue
-              let keys = key.find_all(m[1] ?? "").map(fn(k: Str) -> Str { key.captures(k).and_then(fn(c: List[Str?]) -> Str? { c[1] }) ?? "" })
               let value = match m[4] {
                 Some(b) => json.Value.Bool(b == "true")
                 None => json.Value.Str(m[2] ?? m[3] ?? "")
               }
-              out.assigns.push(Assign{from: from, definition: def, keys: keys, value: value})
+              out.assigns.push(Assign{from: from, definition: def, keys: under + keys_of(m[1] ?? ""), value: value})
               n += 1
+            }
+          } else if w == "$.definitions" && tr != "" {
+            // `delete $["X"]`: the definition dropped
+            for whole in del.find_all(tr) {
+              let m = del.captures(whole) ?? continue
+              let ks = keys_of(m[1] ?? "")
+              if ks.len() == 1 {
+                out.assigns.push(Assign{from: from, definition: ks[0], keys: [], value: json.Value.Null, delete: true})
+                n += 1
+              }
             }
           }
           if n == 0 && go {
@@ -165,6 +187,23 @@ pub fn set_at(v: json.Value, keys: List[Str], value: json.Value) -> json.Value {
   json.Value.Object(out)
 }
 
+/// `v` without the key at `keys` (unchanged when it is not there).
+pub fn remove_at(v: json.Value, keys: List[Str]) -> json.Value {
+  if keys.is_empty() {
+    return v
+  }
+  let fs = match v {
+    json.Value.Object(fs) => fs
+    other => return other
+  }
+  let k = keys[0]
+  if keys.len() == 1 {
+    return json.Value.Object(fs.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != k }))
+  }
+  let rest = keys[1..keys.len()]
+  json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { if f.0 == k { (f.0, remove_at(f.1, rest)) } else { f } }))
+}
+
 /// `doc` (the file `file`) with the assignments to its definitions
 /// applied, and how many.
 pub fn apply(doc: json.Value, file: Str, assigns: List[Assign]) -> (json.Value, Int) {
@@ -175,7 +214,7 @@ pub fn apply(doc: json.Value, file: Str, assigns: List[Assign]) -> (json.Value, 
       continue
     }
     if d.get("definitions").and_then(fn(x: json.Value) -> json.Value? { x.get(a.definition) }).is_some() {
-      d = set_at(d, ["definitions", a.definition] + a.keys, a.value)
+      d = if a.delete { remove_at(d, ["definitions", a.definition] + a.keys) } else { set_at(d, ["definitions", a.definition] + a.keys, a.value) }
       n += 1
     }
   }

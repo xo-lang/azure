@@ -9,8 +9,8 @@ every module and fails on any difference.
 ## Go's names, as autorest.go and TypeSpec's Go emitter make them
 
 Each rule below was found by diffing a generated module's names with
-Go's (armresources v1.2.0, armstorage v1.8.1, armcompute v6.4.0,
-armnetwork v8.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
+Go's (armresources v1.2.0, armstorage v2.0.0, armcompute v7.3.0,
+armnetwork v9.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
 azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armnetwork's `Error` and armkeyvault's
 `Secret`, which are `ErrorModel` and `SecretModel` by the last rule).
@@ -35,6 +35,17 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   `derive Json(via: json.Value)`; encoding writes the subtype's value.
 - An enum's constants, and its `possible_<type>_values()`, are sorted
   by Go constant name, case and all, as Go's `Possible<Type>Values`.
+- Two x-ms-enums of one name are one type with every value of both, as
+  modelerfour merges them (armstorage's `ProvisioningState`: the
+  account's three values and the task assignment's eight); the first's
+  documentation stays.
+- A constant name that starts with a number says the number in words,
+  as autorest's fixLeadingNumber (`2020-11-01` is
+  `TWO_THOUSAND_TWENTY_11_01`, Go's `TwoThousandTwenty1101`); a value of
+  symbols only is named as autorest names it (`*` is `ASTERISK`).
+- An inline schema's type is named after the definition key it sits
+  under, not the definition's `x-ms-client-name` (armcompute's
+  `OperationValueDisplay`).
 - An integer x-ms-enum is a newtype of Int whose constants are named in
   words (`FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE`), as Go's int32.
 - An object definition with no properties, parent or map values is
@@ -67,7 +78,8 @@ response type equal, except armnetwork's `Error` and armkeyvault's
 - allOf parents and `default` (error) response schemas are emitted;
   `x-ms-external` definitions are not; autorest modules emit every
   definition of their input files; TypeSpec ones, and autorest ones
-  whose build.go passes `-removeUnreferencedTypes` (armkeyvault), only
+  whose build.go passes `-removeUnreferencedTypes` (armkeyvault,
+  armcompute), only
   what operations reach, without allOf parents of their own
   (`custom/<module>.toml: reachable_only`).
 - An enum of one value with `modelAsString: false` is a plain string;
@@ -76,7 +88,9 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   of that kind is a constant (`blobServices/default`).
 - readme.go.md directives that assign values under `$.definitions.X`
   are applied (armstorage's `CorsRuleAllowedMethodsItem`), scoped by
-  `from:`, and so are `rename-model` and `where-model` +
+  `from:`, with `where:` paths into a definition and `delete $["k"]`
+  statements (a `delete` under `where: $.definitions` drops the
+  definition: armcompute's `Expand`), and so are `rename-model` and `where-model` +
   `rename-property` (which renames the wire key too); others are printed
   as not applied. readme.md's directives in blocks without a condition
   or for the row's tag apply first (armnetwork's
