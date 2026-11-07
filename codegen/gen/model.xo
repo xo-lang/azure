@@ -628,10 +628,11 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
     _ => {
       let props = fields_of(v.get("properties"))
       if props.is_empty() && v.get("allOf").is_none() {
-        if let Some(ap) = v.get("additionalProperties") {
-          if let json.Value.Object(_) = ap {
-            return "Map[Str, ${b.type_of(file, ap, "${hint}Value")}]"
-          }
+        match v.get("additionalProperties") {
+          Some(json.Value.Object(fs)) => return "Map[Str, ${b.type_of(file, json.Value.Object(fs), "${hint}Value")}]"
+          // `true` is `{}`: Go's map[string]any
+          Some(json.Value.Bool(true)) => return "Map[Str, json.Value]"
+          _ => {}
         }
         return "json.Value"
       }
@@ -772,8 +773,11 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value, inline: Bool = fal
     return "Str"
   }
   // An object with no properties, parent, or map values is any JSON, as
-  // modelerfour reads it (Go's `any`): NspAssociationReconcile.
-  if !inline && list_of(v.get("enum")).is_empty() && fields_of(v.get("properties")).is_empty() && v.get("allOf").is_none() && v.get("additionalProperties").is_none() && v.get("discriminator").is_none() && (str_of(v.get("type")) == "object" || str_of(v.get("type")) == "") {
+  // modelerfour reads it (Go's `any`): NspAssociationReconcile, and
+  // armmachinelearning's PartialUserAssignedIdentity (`additionalProperties:
+  // false`; from TypeSpec, Go keeps that an empty struct:
+  // armiotoperations' DataflowEndpointAuthenticationAnonymous).
+  if !inline && list_of(v.get("enum")).is_empty() && fields_of(v.get("properties")).is_empty() && v.get("allOf").is_none() && (v.get("additionalProperties").is_none() || (!b.custom.tsp && v.get("additionalProperties") == Some(json.Value.Bool(false)))) && v.get("discriminator").is_none() && (str_of(v.get("type")) == "object" || str_of(v.get("type")) == "") {
     b.ids[id] = "json.Value"
     return "json.Value"
   }
@@ -835,12 +839,16 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     return b.inline(file, v, def)
   }
   if props.is_empty() && v.get("allOf").is_none() {
-    if let Some(ap) = v.get("additionalProperties") {
-      if let json.Value.Object(_) = ap {
-        let m = "Map[Str, ${b.type_of(file, ap, "${def}Value")}]"
-        b.known[name] = m
-        return m
-      }
+    // `additionalProperties: true` is `{}`, Go's map[string]any
+    // (armapimanagement's ContentItemContractProperties)
+    let ap = match v.get("additionalProperties") {
+      Some(json.Value.Bool(true)) => Some(json.Value.Object([]))
+      other => other
+    }
+    if let Some(json.Value.Object(fs)) = ap {
+      let m = "Map[Str, ${b.type_of(file, json.Value.Object(fs), "${def}Value")}]"
+      b.known[name] = m
+      return m
     }
   }
   // mark before the fields, for recursive types
