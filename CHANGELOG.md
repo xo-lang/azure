@@ -23,6 +23,12 @@ prints with azcore v1.24.0, `arm/resourceid_vectors_test.xo`):
 - `azcore.parse_date_time` reads a time's offset with std's
   `Time.rfc3339_offset` (xo 25bbebd9a or later) instead of its own
   parse; the results are unchanged.
+- `ResponseError`'s text and `status_text` use std (xo 9eb0bf0a6 or
+  later; required from here on): `json.indent` keeps a body's trailing
+  white space as Go's does, so azcore no longer adds it back (on an
+  older xo it would now be missing), and `status_text` is
+  `http.status_text` (the same text for every code 0 to 999). The text
+  is unchanged.
 
 Not ported from v1.24.0 (this port has no logging or tracing policies):
 the log sanitizer and tracing attribute changes. The `streaming` SSE
