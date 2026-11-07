@@ -8,9 +8,9 @@ version has been tagged since.
 
 ## Unreleased
 
-Decision 0009 (TokenCredential's effect parameter; needs xo fb952a75a or
-later, which runs an effect-generic struct's method through an interface
-on the native backends):
+Decision 0009 (TokenCredential's effect parameter; needs xo 86dd0ce25 or
+later: fb952a75a runs an effect-generic struct's method through an
+interface on the native backends, and 86dd0ce25 is xo decision 0540):
 
 - `azcore.TokenCredential[fx]`, `policy.Policy[fx]`, `policy.Next[fx]`,
   `policy.ClientOptions[fx]`, `runtime.Pipeline[fx]`,
@@ -25,11 +25,14 @@ on the native backends):
   opts: ClientOptions[fx] = ...) -> X[fx]`), so the credential's and the
   options' effects are one. A caller's own type that fixes a client's
   effects writes `Client[()]`.
-- Workaround until xo decision 0540 (a parameter's implicit effects
-  inside an interface method) is decided: a policy struct that calls
-  `next` carries an effect parameter its fields do not use, and a
-  caller's own policy list is written `List[policy.Policy[()]]`. Each is
-  marked `// 0540:` so removing them is a mechanical sweep.
+- A policy is a plain struct whose `send` takes `next: policy.Next`
+  (xo decision 0540: a parameter written without its effect argument
+  satisfies `Policy[fx]`'s `next: Next[fx]`). The phantom effect
+  parameter each policy carried before 0540 (`struct P[fx: Effects]`,
+  23 types in 32 declarations) is gone. A caller's list of its own
+  policies is still written `List[policy.Policy[()]]`: that is the type
+  a pure client's options hold, and `List[policy.Policy]` would leave
+  its effects open.
 
 Go's azcore v1.23.0 to v1.24.0 (checked against the lines a Go program
 prints with azcore v1.24.0, `arm/resourceid_vectors_test.xo`):

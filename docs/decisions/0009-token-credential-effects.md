@@ -185,6 +185,11 @@ branch, and decision 0009's call sites were written as azblob tests
   `fn (p: P[fx]) send(req, next: policy.Next[fx]) ... uses (..., fx)`),
   and a caller's list of its own policies is written
   `List[policy.Policy[()]]`. With 0540, neither changes.
+- Update (2026-11-06): 0540 was accepted (xo 86dd0ce25) and the
+  phantom parameters were removed: every policy is a plain struct with
+  `send(req, next: policy.Next) ... uses (net.dial, clock, rand)`. The
+  `List[policy.Policy[()]]` lists stay, as they name the effects of a
+  pure client's options (`List[policy.Policy]` there is XO0701).
 
 ## Consequences
 
