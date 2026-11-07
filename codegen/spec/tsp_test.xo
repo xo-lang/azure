@@ -147,7 +147,14 @@ test "@@override by an interface's operation, its undecorated path property in o
   let ops = "interface Profiles {\n  @operationId(\"NetworkExperimentProfiles_CreateOrUpdate\")\n  createOrUpdate is ArmResourceCreateOrReplaceAsync<Profile>;\n}\n"
   let client = "interface ProfilesOverrides {\n  /**\n   * override: x\n   */\n  replaceCreateOrUpdate(\n    ...ApiVersionParameter,\n    #suppress \"x\" \"y\"\n    profileName: string,\n    ...ResourceGroupParameter,\n    @query(\"q\")\n    q?: string,\n    parameters: Microsoft.Network.Profile,\n  ): ArmResourceUpdatedResponse<Profile>;\n}\n@@override(\n  Profiles.createOrUpdate,\n  ProfilesOverrides.replaceCreateOrUpdate,\n  \"go,javascript\"\n);\n"
   let r = renames([ops, client]) ?? e => fault(e)
-  expect(r.param_order.get("networkexperimentprofiles_createorupdate")) == Some(["profileName", "resourceGroupName", "parameters"])
+  expect(r.param_order.get("networkexperimentprofiles_createorupdate")) == Some(["profileName", "resourceGroupName", "q", "parameters"])
+}
+
+test "a property @@clientLocation moves onto an override's operation is the method's (armmanagementgroups)" {
+  let ops = "interface Subs {\n  @operationId(\"ManagementGroupSubscriptions_Create\")\n  create is ArmResourceCreateOrReplaceSync<S>;\n}\n"
+  let client = "op putCustomized(\n  @path\n  groupId: string,\n  ...PutSubscriptionId,\n): S;\n@@override(Subs.create, putCustomized);\n@@clientLocation(PutSubscriptionId.subscriptionId, putCustomized);\n"
+  let r = renames([ops, client]) ?? e => fault(e)
+  expect(r.method_params) == ["managementgroupsubscriptions_create#subscriptionId"]
 }
 
 test "an unscoped @@clientLocation's group may be quoted (armnetwork)" {
@@ -202,4 +209,29 @@ test "ArmResourcePatch's body is the resource (armcommvaultcontentstore)" {
   let r = renames([main]) ?? e => fault(e)
   expect(r.patch_bodies.get("cloudaccounts_update")) == Some("CloudAccount")
   expect(r.patch_bodies.len()) == 1
+}
+
+test "@@segment on ResourceGroupParameter is Go's resource group segment; written routes keep theirs (armmonitor)" {
+  let compat = "@@TypeSpec.Rest.segment(\n  Azure.ResourceManager.ResourceGroupParameter.resourceGroupName,\n  \"resourcegroups\"\n);\n"
+  let main = "interface A {\n  @get\n  @route(\"/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Insights/x/{n}\")\n  g is Op;\n}\nalias O = Legacy.RoutedOperations<P, Q, ResourceRoute = #{\n    route: \"/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/microsoft.Insights/y/{m}\",\n  }\n>;\n"
+  let r = renames([compat, main]) ?? e => fault(e)
+  expect(r.rg_segment) == "resourcegroups"
+  expect(r.routes.len()) == 2
+  let none = renames([main]) ?? e => fault(e)
+  expect(none.rg_segment) == ""
+}
+
+test "a template interface's ArmResourcePatch body is the extending interface's resource (armdiscovery)" {
+  let shared = "interface DiscoveryResource<\n  T extends Azure.ResourceManager.Foundations.TrackedResource,\n  P extends {},\n  L extends {} = T\n> {\n  get is ArmResourceRead<T>;\n  update is ArmResourcePatchAsync<T, P>;\n}\n"
+  let tool = "@armResourceOperations\ninterface Tools extends DiscoveryResource<Tool, ToolProperties> {}\n"
+  let r = renames([tool, shared]) ?? e => fault(e)
+  expect(r.patch_bodies.get("tools_update")) == Some("Tool")
+  expect(r.patch_bodies.len()) == 1
+}
+
+test "a negation-scoped @@clientName names the overridden operation's operationId (armguestconfiguration)" {
+  let main = "namespace Microsoft.GuestConfiguration;\ninterface GuestConfigurationAssignments {\n  reportsGet is Ops.ActionSync<A, void>;\n}\n"
+  let client = "@@clientLocation(\n  GuestConfigurationAssignments.reportsGet,\n  \"GuestConfigurationAssignmentReports\"\n);\n@@clientName(\n  GuestConfigurationAssignments.reportsGet,\n  \"Get\",\n  \"!csharp\"\n);\nop reportsGetCustomized(\n  ...Azure.ResourceManager.ResourceGroupParameter,\n  @path\n  assignmentName: string,\n  @path\n  @pattern(\"^[a-z]$\")\n  vmName: string,\n): void;\n@@override(\n  GuestConfigurationAssignments.reportsGet,\n  reportsGetCustomized\n);\n"
+  let r = renames([main, client]) ?? e => fault(e)
+  expect(r.param_order.get("guestconfigurationassignmentreports_get")) == Some(["resourceGroupName", "assignmentName", "vmName"])
 }

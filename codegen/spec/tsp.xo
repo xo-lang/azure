@@ -82,6 +82,15 @@ pub struct Renames {
   /// definition not among them is the OpenAPI emitter's own (a visibility
   /// variant, armdisconnectedoperations' BillingConfigurationUpdate).
   pub declared: List[Str] = []
+  /// `@@segment(Azure.ResourceManager.ResourceGroupParameter.resourceGroupName,
+  /// "x")`: Go's emitter routes every ARM template operation through
+  /// `/x/{resourceGroupName}` (armmonitor's `resourcegroups`); "" when
+  /// the project has none.
+  pub rg_segment: Str = ""
+  /// The routes a project writes out (`@route("...")`, a
+  /// RoutedOperations `route: "..."`) with `{resourceGroupName}`: they
+  /// keep their own segment.
+  pub routes: List[Str] = []
 }
 
 /// Each operation in an interface of `text` that carries decorator `dec`
@@ -142,6 +151,43 @@ fn interface_chunks(text: Str) -> List[Str] {
       let i = out.len() - 1
       out[i] = out[i] + line + "\n"
     }
+  }
+  out
+}
+
+/// A template interface's parameter names from its chunk
+/// (`DiscoveryResource<T extends R, P extends {}, L extends {} = T> {`:
+/// T, P, L); [] for an interface that is not a template.
+fn template_params(chunk: Str) -> List[Str] {
+  let b = chunk.bytes()
+  var i = ident_prefix(chunk).len()
+  while i < b.len() && (b[i] == 32 || b[i] == 9 || b[i] == 10) {
+    i += 1
+  }
+  if i >= b.len() || b[i] != 60 {
+    return []
+  }
+  var out: List[Str] = []
+  var depth = 0
+  i += 1
+  var start = i
+  while i < b.len() {
+    let ch = b[i]
+    if ch == 60 || ch == 123 {
+      depth += 1
+    } else if (ch == 62 || ch == 125) && depth > 0 {
+      depth -= 1
+    } else if ch == 62 || (ch == 44 && depth == 0) {
+      let name = ident_prefix(chunk[start..i].trim_start())
+      if name != "" {
+        out.push(name)
+      }
+      if ch == 62 {
+        return out
+      }
+      start = i + 1
+    }
+    i += 1
   }
   out
 }
@@ -305,6 +351,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // the OpenAPI one too, gives T
   let unscoped = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*\\)") ?? e => return Err(e.display())
   let client_init = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?clientInitialization\\(\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*parameters\\s*:\\s*([A-Za-z0-9_]+)\\s*,?\\s*\\}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
+  let extends_re = regexp.compile("^([A-Za-z0-9_]+)\\s+extends\\s+([A-Za-z0-9_.]+)\\s*<([^>{]*)>") ?? e => return Err(e.display())
   let patch_op = regexp.compile("\\b([A-Za-z0-9_]+)\\s+is\\s+ArmResourcePatch(?:Async|Sync)\\s*<\\s*([A-Za-z0-9_.]+)") ?? e => return Err(e.display())
   let op_group = regexp.compile("@operationGroup\\(\\s*\"([^\"]*)\"\\s*\\)[^{]*?interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
   let type_decl = regexp.compile("(?:^|\\n)\\s*(?:enum|union|model|scalar)\\s+([A-Za-z0-9_]+)") ?? e => return Err(e.display())
@@ -320,7 +367,39 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // `@@clientLocation(Iface.op, Group)` with no scope: `iface.op` (lower
   // case) to Group
   var moved: Map[Str, Str] = {}
+  let rg_seg = regexp.compile("@@(?:TypeSpec\\.Rest\\.)?segment\\(\\s*(?:Azure\\.ResourceManager\\.)?ResourceGroupParameter\\.resourceGroupName\\s*,\\s*\"([^\"]+)\"\\s*\\)") ?? e => return Err(e.display())
+  let route_re = regexp.compile("(?:@route\\(|\\broute:)\\s*\"([^\"]*\\{resourceGroupName\\}[^\"]*)\"") ?? e => return Err(e.display())
+  var rg_segment = ""
+  var routes: List[Str] = []
+  // a template interface's `op is ArmResourcePatch*<P, ...>` with P one
+  // of its parameters: the interface's name to (op, P's position)
+  var tmpl_patches: Map[Str, List[(Str, Int)]] = {}
   for text in texts {
+    let tchunks = interface_chunks(text)
+    for ci in 1..tchunks.len() {
+      let params = template_params(tchunks[ci])
+      if params.len() == 0 {
+        continue
+      }
+      var ps: List[(Str, Int)] = []
+      for whole in patch_op.find_all(tchunks[ci]) {
+        let m = patch_op.captures(whole) ?? continue
+        for k in 0..params.len() {
+          if params[k] == (m[2] ?? "") {
+            ps.push((m[1] ?? "", k))
+          }
+        }
+      }
+      if ps.len() > 0 {
+        tmpl_patches[ident_prefix(tchunks[ci])] = ps
+      }
+    }
+    for whole in rg_seg.find_all(text) {
+      rg_segment = (rg_seg.captures(whole) ?? continue)[1] ?? ""
+    }
+    for whole in route_re.find_all(text) {
+      routes.push((route_re.captures(whole) ?? continue)[1] ?? "")
+    }
     for whole in unscoped_loc.find_all(text) {
       let m = unscoped_loc.captures(whole) ?? continue
       let segs = (m[1] ?? "").split(".")
@@ -357,7 +436,17 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // each declared type's name, and the name the OpenAPI file gives it
   var types: List[Str] = []
   var emitted: Map[Str, Str] = {}
+  // `@@clientName(Iface.op, "Name", "!csharp")`: a scope of negations
+  // only names the OpenAPI operation too (armguestconfiguration's
+  // GuestConfigurationAssignmentReports_Get)
+  var neg_named: Map[Str, Str] = {}
   for text in texts {
+    for whole in aug.find_all(text) {
+      let m = aug.captures(whole) ?? continue
+      if (m[3] ?? "").split(",").all(fn(x: Str) -> Bool { x.trim().starts_with("!") }) {
+        neg_named[strip_namespace(m[1] ?? "", namespaces)] = m[2] ?? ""
+      }
+    }
     for whole in type_decl.find_all(text) {
       let n = (type_decl.captures(whole) ?? continue)[1] ?? ""
       if n != "" && !types.contains(n) {
@@ -402,6 +491,27 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     let chunks = interface_chunks(text)
     for ci in 1..chunks.len() {
       let iface = ident_prefix(chunks[ci])
+      // `interface Tools extends DiscoveryResource<Tool, ToolProperties>`
+      // (armdiscovery): the template's patch operations, with its
+      // arguments
+      match extends_re.captures(chunks[ci]) {
+        Some(m) if (m[1] ?? "") == iface => {
+          let args = (m[3] ?? "").split(",").map(fn(a: Str) -> Str {
+            let t = a.trim()
+            t.split(".").last() ?? t
+          })
+          for (op, k) in tmpl_patches.get((m[2] ?? "").split(".").last() ?? "") ?? [] {
+            if k < args.len() && op != "" {
+              let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+              r.patch_bodies[id.to_lower()] = args[k]
+            }
+          }
+        }
+        _ => {}
+      }
+      if template_params(chunks[ci]).len() > 0 {
+        continue
+      }
       for whole in patch_op.find_all(chunks[ci]) {
         let m = patch_op.captures(whole) ?? continue
         let op = m[1] ?? ""
@@ -674,7 +784,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       // for every emitter, the OpenAPI one's operationId too, and an
       // unscoped `@@clientName(Iface.op, "Name")` renames its part
       // (armnetwork's PrivateDnsZoneGroups_List)
-      let opn = emitted.get("${iface}.${op}") ?? op
+      let opn = emitted.get("${iface}.${op}") ?? neg_named.get("${iface}.${op}") ?? op
       let id = ids.get("${iface}.${op}".to_lower()) ?? "${moved.get("${iface}.${op}".to_lower()) ?? iface}_${opn[0..1].to_upper()}${opn[1..opn.len()]}"
       for t in texts {
         let order = override_path_order(t, m[2] ?? "")
@@ -683,8 +793,24 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
           break
         }
       }
+      // `@@clientLocation(Model.prop, customOp)`: the property moves onto
+      // the custom operation, so it is the overridden operation's method
+      // parameter (armmanagementgroups' subscriptionId)
+      let custom_op = (m[2] ?? "").split(".").last() ?? ""
+      let moved_to = regexp.compile("@@clientLocation\\(\\s*[A-Za-z0-9_]+\\.([A-Za-z0-9_]+)\\s*,\\s*${custom_op}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)").ok() ?? continue
+      for t in texts {
+        for w in moved_to.find_all(t) {
+          let c = moved_to.captures(w) ?? continue
+          let sc = c[2] ?? ""
+          if sc == "" || for_go(sc) {
+            r.method_params.push("${id.to_lower()}#${c[1] ?? ""}")
+          }
+        }
+      }
     }
   }
+  r.rg_segment = rg_segment
+  r.routes = routes
   Ok(r)
 }
 
@@ -740,8 +866,7 @@ fn override_path_order(text: Str, name: Str) -> List[Str] {
   }
   var out: List[Str] = []
   var path = false
-  // a decorator other than @path (`@query`, `@header`, `@body`) on the
-  // next property
+  // a `@body` or `@bodyRoot` on the next property
   var other = false
   for raw in body.split("\n") {
     let l = raw.trim()
@@ -763,12 +888,15 @@ fn override_path_order(text: Str, name: Str) -> List[Str] {
       path = false
     } else if l.starts_with("@path") {
       path = true
-    } else if l.starts_with("@") {
+    } else if l.starts_with("@body") {
       other = true
+    } else if l.starts_with("@") {
+      // `@header`, `@query`, `@pattern`...: the property is still one of
+      // the method's (armdeviceprovisioningservices' ifMatch)
     } else if l.contains(":") && !l.starts_with("@") && !l.starts_with("#") && !l.starts_with("//") && !l.starts_with("*") && !l.starts_with("/*") {
       // a property with no decorator is a path parameter when the route
-      // has it (armfrontdoor's profileName); the caller reorders path
-      // parameters only
+      // has it (armfrontdoor's profileName), else a header or query one;
+      // the caller reorders the method's required parameters only
       if path || !other {
         out.push(l[0..(l.find(":") ?? 0)].trim().trim_suffix("?"))
       }

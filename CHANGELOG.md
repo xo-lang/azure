@@ -65,6 +65,30 @@ that name (armchaos' executionDetails); TypeSpec's
 file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
 list and map arguments (armbilling, armcdn, armcognitiveservices).
 
+Generator, from the batch-4c differentials against Go: `@@override`'s
+order also places required header and query parameters
+(armdeviceprovisioningservices' ifMatch, armappservice's environmentName
+and subscriptionName); a `@@clientLocation(Model.prop, customOp)` makes
+the property the overridden operation's method parameter
+(armmanagementgroups); a negation-scoped `@@clientName` names the
+overridden operation's operationId (armguestconfiguration's reports); a
+`text/plain` body of a string enum sends the value's bytes
+(armmarketplace); ARM responses carry their declared headers on every
+operation that is not long-running, and keep an `x-ms-` prefix in the
+field name outside TypeSpec and data-plane modules (armmigrate,
+armapimanagement's ETag); `@@segment` on
+`ResourceGroupParameter.resourceGroupName` routes every ARM template
+operation through that segment while written routes keep theirs
+(armmonitor's `resourcegroups`); a template interface's
+`ArmResourcePatch` body reaches the interfaces that extend it, and the
+TypeSpec walk reads a sibling folder whose name only starts with the
+project's (armdiscovery's Discovery.Management.Shared); an
+`ArmResponse<ErrorResponse>` success is Go's `ArmResponseErrorResponse`
+envelope with no Accept (armresiliencemanagement). The vectors tool
+writes a body Go embeds but the module lacks as a note instead of
+failing, and scripts/refresh.sh keeps a module's old vectors when the
+tool fails.
+
 Generator, from the batch-4 differentials against Go: `@@override`'s
 parameter order also reaches an unscoped override, a namespace's own
 operation, an operation moved by a negation-scoped `@@clientLocation`

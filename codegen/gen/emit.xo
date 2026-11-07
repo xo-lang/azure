@@ -393,7 +393,8 @@ fn header_field(p: Package, wire: Str) -> Str {
     return n
   }
   var w = wire
-  if w.to_lower().starts_with("x-ms-") {
+  // autorest.go's ARM modules keep it (armmigrate's XMSRequestID)
+  if w.to_lower().starts_with("x-ms-") && (p.typespec || p.data_plane) {
     w = w[5..w.len()]
   }
   let n = snake(w.split("-").map(fn(x: Str) -> Str { cap(x) }).join(""))
@@ -401,11 +402,12 @@ fn header_field(p: Package, wire: Str) -> Str {
   if n == "e_tag" { "etag" } else { n }
 }
 
-/// The headers a response struct carries: TypeSpec's Go emitter writes
-/// a field for each header of a success response, but not on a
-/// long-running operation (its result is the final body).
+/// The headers a response struct carries: Go's emitters write a field
+/// for each header of a success response (autorest.go's ARM modules too:
+/// armmigrate's XMSRequestID), but not on a long-running operation (its
+/// result is the final body).
 fn resp_headers(p: Package, op: Op) -> List[(Str, Str)] {
-  if (p.typespec || grouped(p)) && !op.lro { op.resp_headers.sort_by(fn(h: (Str, Str)) -> Str { header_field(p, h.0) }) } else { [] }
+  if !op.lro { op.resp_headers.sort_by(fn(h: (Str, Str)) -> Str { header_field(p, h.0) }) } else { [] }
 }
 
 /// The Accept value: the operation's `produces` but `application/json`
@@ -544,7 +546,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   // autorest.go: Accept when any response, the error one too, has a
   // schema; TypeSpec's emitter: when the success response has a body
-  let accept = if (p.data_plane && !grouped(p)) || p.tsp_arm { op.resp.is_some() || p.accept_always } else { op.accept }
+  let accept = if (p.data_plane && !grouped(p)) || p.tsp_arm { (op.resp.is_some() || p.accept_always) && !op.error_body } else { op.accept }
   let accept_h = if accept { "(\"Accept\", \"${esc(accept_value(p, op))}\")" } else { "" }
   s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [${accept_h}]\n"
   // TypeSpec's Go emitter keeps the path's query (`?$expand=Properties`)
@@ -626,12 +628,15 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
     // a string TypeSpec sends as `text/*` (armautomation's runbook
     // content): the text itself, Go's streaming.NopCloser of it
     let tct = op.consumes.filter(fn(t: Str) -> Bool { t.starts_with("text/") })
-    if p.typespec && x.typ == "Str" && tct.len() == 1 && op.consumes.len() == 1 {
+    // a string enum too, its value (armmarketplace's Operation payload)
+    let str_enum = api.enums.any(fn(e: StrEnum) -> Bool { e.name == x.typ && e.base == "Str" })
+    if p.typespec && (x.typ == "Str" || str_enum) && tct.len() == 1 && op.consumes.len() == 1 {
+      let text = fn(v: Str) -> Str { if str_enum { "${v}.0.bytes()" } else { "${v}.bytes()" } }
       if x.required {
         s = s + "  headers.push((\"Content-Type\", \"${esc(tct[0])}\"))\n"
-        body = "${x.name}.bytes()"
+        body = text(x.name)
       } else {
-        s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n    headers.push((\"Content-Type\", \"${esc(tct[0])}\"))\n    body = v.bytes()\n  }\n"
+        s = s + "  var body = b\"\"\n  if let Some(v) = options.${x.name} {\n    headers.push((\"Content-Type\", \"${esc(tct[0])}\"))\n    body = ${text("v")}\n  }\n"
         body = "body"
       }
       continue

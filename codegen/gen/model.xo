@@ -102,6 +102,11 @@ pub struct Op {
   pub lro: Bool = false
   /// Whether a response has a body schema (Go sends Accept then).
   pub accept: Bool = true
+  /// A TypeSpec ARM success response of `ArmResponse<ErrorResponse>`
+  /// (armresiliencemanagement's RecoveryJobs.cancel): Go's emitter keeps
+  /// the envelope as a model, `ArmResponseErrorResponse{Body}`, and sends
+  /// no Accept.
+  pub error_body: Bool = false
   /// A pageable long-running operation: its result is a pager whose
   /// first page is the operation's final response (Go's
   /// `Poller[*Pager[T]]`).
@@ -173,6 +178,10 @@ pub struct Custom {
   /// TypeSpec's ARM actions Go routes by another name (spec.Renames'
   /// action_routes): operationId, lower case, to (old segment, new).
   pub action_routes: Map[Str, (Str, Str)] = {}
+  /// TypeSpec's resource group segment for Go (spec.Renames' rg_segment)
+  /// and the routes that keep their own (spec.Renames' routes).
+  pub rg_segment: Str = ""
+  pub routes: List[Str] = []
   /// TypeSpec's `op is ArmResourcePatch(Async|Sync)<R, P>`: operationId,
   /// lower case, to R, Go's body type.
   pub patch_bodies: Map[Str, Str] = {}
@@ -1085,10 +1094,16 @@ fn (b: Builder) required_of(file: Str, v: json.Value, depth: Int) -> List[Str] {
 /// `params` with those whose wire names `order` lists put in its order,
 /// in the places they held together; the others stay where they are.
 fn reordered(params: List[Param], order: List[Str]) -> List[Param] {
+  // a path parameter, or a required header or query one, named by its
+  // wire or Go name (armdeviceprovisioningservices' ifMatch, the
+  // If-Match header)
+  let named = fn(q: Param, w: Str) -> Bool {
+    (q.loc == "path" || (q.required && (q.loc == "header" || q.loc == "query"))) && (q.wire == w || q.go_name.to_lower() == w.to_lower())
+  }
   var listed: List[Param] = []
   for w in order {
     for q in params {
-      if q.wire == w && q.loc == "path" {
+      if named(q, w) && !listed.any(fn(x: Param) -> Bool { x.wire == q.wire && x.loc == q.loc }) {
         listed.push(q)
       }
     }
@@ -1096,7 +1111,7 @@ fn reordered(params: List[Param], order: List[Str]) -> List[Param] {
   var out: List[Param] = []
   var next = 0
   for q in params {
-    if q.loc == "path" && order.contains(q.wire) && next < listed.len() {
+    if order.any(fn(w: Str) -> Bool { named(q, w) }) && next < listed.len() {
       out.push(listed[next])
       next += 1
     } else {
@@ -1318,6 +1333,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // too, has a schema
           var accept = false
           var resp_headers: List[(Str, Str)] = []
+          var error_body = false
           let produces = list_of(o.get("produces")).map(fn(x: json.Value) -> Str { str_of(Some(x)) }).filter(fn(t: Str) -> Bool { t != "" })
           // an operation that produces only a binary type sends no Accept
           // for its error schema alone (ACR's DeleteBlob)
@@ -1351,6 +1367,10 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
                   if is_binary(Some(s)) {
                     resp = Some("Bytes")
                     binary_resp = true
+                  } else if b.custom.tsp && !b.custom.data_plane && str_of(s.get("\$ref")).contains("common-types/") && str_of(s.get("\$ref")).ends_with("/definitions/ErrorResponse") {
+                    let env = json.Value.Object([("type", json.Value.Str("object")), ("properties", json.Value.Object([("body", s)])), ("required", json.Value.List([json.Value.Str("body")]))])
+                    resp = Some(b.type_of(file, env, "ArmResponseErrorResponse"))
+                    error_body = true
                   } else {
                     resp = Some(b.type_of(file, s, "${group}${name}Response"))
                   }
@@ -1381,10 +1401,10 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             group: group,
             name: name,
             method: method.to_upper(),
-            path: match b.custom.action_routes.get(id.to_lower()) {
+            path: rg_routed(b.custom, match b.custom.action_routes.get(id.to_lower()) {
               Some((old, new)) if path.ends_with("/${old}") => path[0..path.len() - old.len()] + new
               _ => path
-            },
+            }),
             params: params,
             ok: okc.sort(),
             resp: resp,
@@ -1395,6 +1415,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             paged_lro: pg.is_some() && lro,
             final_state: fsv,
             accept: accept,
+            error_body: error_body,
             status_poller: lro && b.custom.status_pollers.contains(id.to_lower()),
             doc: doc_of(o),
             produces: produces,
@@ -1672,4 +1693,14 @@ fn (b: Builder) has_extra(file: Str, v: json.Value, depth: Int) -> Bool {
     }
   }
   false
+}
+
+/// A path with the TypeSpec project's resource group segment
+/// (Custom.rg_segment) unless the project writes the route out.
+fn rg_routed(c: Custom, path: Str) -> Str {
+  let rg = "/resourceGroups/{resourceGroupName}"
+  if c.rg_segment == "" || !path.contains(rg) || c.routes.any(fn(r: Str) -> Bool { path.to_lower().starts_with(r.to_lower()) }) {
+    return path
+  }
+  path.replace(rg, "/${c.rg_segment}/{resourceGroupName}")
 }

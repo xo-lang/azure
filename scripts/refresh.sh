@@ -133,7 +133,12 @@ for d in $changed; do
   # the module's vectors as they were, put back if the new ones fail
   had_vec=0; [ -f "$d/govectors_test.xo" ] && { had_vec=1; cp "$d/govectors_test.xo" "$work/$n.old_vectors"; }
   had_fake=0; [ -f "$d/client_test.xo" ] && { had_fake=1; cp "$d/client_test.xo" "$work/$n.old_fake"; }
-  "$work/vectors" "$work/$n.go.out" "$resp" "$d" "$d/govectors_test.xo" "$(basename "$d") $mv" "$(awk '/sdk\/azcore / { print $2 }' "$work/$n.prog/go.mod")" > /dev/null
+  # a vectors program that stops is that module's failure, not the batch's
+  if ! "$work/vectors" "$work/$n.go.out" "$resp" "$d" "$d/govectors_test.xo" "$(basename "$d") $mv" "$(awk '/sdk\/azcore / { print $2 }' "$work/$n.prog/go.mod")" > "$work/$n.vectors" 2>&1; then
+    if [ $had_vec -eq 1 ]; then cp "$work/$n.old_vectors" "$d/govectors_test.xo"; else rm -f "$d/govectors_test.xo"; fi
+    echo "$d vectors-failed: $(grep -m1 'fault' "$work/$n.vectors" | cut -c1-120)" >> "$work/result"
+    continue
+  fi
   # the fake the vectors run against is generated too: always the template
   cp codegen/govec/client_test.xo.txt "$d/client_test.xo"
   "$xo" fmt "$d" > /dev/null || true
