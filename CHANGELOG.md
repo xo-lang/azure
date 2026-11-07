@@ -28,6 +28,20 @@ Not ported from v1.24.0 (this port has no logging or tracing policies):
 the log sanitizer and tracing attribute changes. The `streaming` SSE
 reader is planned as its own change.
 
+Go's zero time (year 1, which services send for "unset"; Xo's `Time`
+covers 1677 to 2262 by design, ADR 0364) is recognized in one place:
+
+- `azcore.is_go_zero_time`, `is_go_zero_time_rfc3339` and
+  `is_go_zero_time_rfc1123` match its text (any all-zero fraction, `Z`
+  or a zero offset or none; an HTTP date with any weekday and `GMT` or
+  `UTC`), and `azcore.GO_ZERO_TIME_RFC3339` writes it. azqueue's own
+  copies, azservicebus admin's text match and azdatalake's literal now
+  use them.
+- **Behavior change** (`messaging/azservicebus/admin`): an entity time
+  of `0001-01-01T00:00:00Z` (or with a zero fraction or offset) is
+  None, as `0001-01-01T00:00:00` was. It was a parse error; Go reads it
+  as its zero time.
+
 `security/keyvault/azsecrets` follows Go's azsecrets v1.5.1 (was
 v1.4.0), checked against the lines a Go program prints with v1.5.1
 (`govectors_test.xo`):

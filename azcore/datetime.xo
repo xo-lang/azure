@@ -138,3 +138,47 @@ pub fn parse_base64url(s: Str) -> Base64URL ! Str {
   let b = base64.decode(s.trim_end_chars("="), base64.Base64.RawUrl) ?? e => return Err(e.display())
   Ok(Base64URL(b))
 }
+
+/// Go's zero time (January 1 of year 1, midnight UTC) in RFC 3339, as
+/// Go writes `time.Time{}` where a service or a signature expects a time.
+pub const GO_ZERO_TIME_RFC3339: Str = "0001-01-01T00:00:00Z"
+
+/// Whether `text` is Go's zero time, January 1 of year 1 at midnight
+/// UTC, which Azure services send for "unset", in either form below.
+/// Xo's Time is int64 nanoseconds, years 1677 to 2262 (ADR 0364), so it
+/// cannot hold that time; a port matches its text instead and reads it
+/// as no time. Where a field has one wire form, use that form's check,
+/// so text in the other form stays the parse error Go gives.
+pub fn is_go_zero_time(text: Str) -> Bool {
+  is_go_zero_time_rfc1123(text) || is_go_zero_time_rfc3339(text)
+}
+
+/// Go's zero time as an HTTP date (RFC 1123 or 7231): `<any weekday>,
+/// 01 Jan 0001 00:00:00` and `GMT` or `UTC`; Go's time.Parse does not
+/// check the weekday.
+pub fn is_go_zero_time_rfc1123(text: Str) -> Bool {
+  let (_, rest) = text.cut(", ") ?? return false
+  rest == "01 Jan 0001 00:00:00 GMT" || rest == "01 Jan 0001 00:00:00 UTC"
+}
+
+/// Go's zero time in RFC 3339 or ISO 8601: `0001-01-01T00:00:00`, `T` or
+/// a space (any case), any all-zero fraction, then nothing, `Z` or a
+/// zero offset.
+pub fn is_go_zero_time_rfc3339(text: Str) -> Bool {
+  let u = text.to_upper()
+  if u.len() < 19 || u[0..10] != "0001-01-01" || (u[10..11] != "T" && u[10..11] != " ") || u[11..19] != "00:00:00" {
+    return false
+  }
+  var rest = u[19..u.len()]
+  if rest.starts_with(".") {
+    var i = 1
+    while i < rest.len() && rest[i..i + 1] == "0" {
+      i = i + 1
+    }
+    if i == 1 {
+      return false
+    }
+    rest = rest[i..rest.len()]
+  }
+  rest == "" || rest == "Z" || rest == "+00:00" || rest == "-00:00"
+}
