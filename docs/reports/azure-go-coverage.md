@@ -85,7 +85,7 @@ shipped a newer major whose spec our generator has not been run on.
 |---|---|---|---:|---:|---|---|---|
 | resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 7 | 14114 | v2.2.0 | 0 + 3714 gen |  |
 | resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v9.0.0 | 0 + 31271 gen |  |
-| resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v1.5.0 (behind v2.1.0) | 0 + 3981 gen |  |
+| resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
@@ -432,7 +432,7 @@ Our line counts above are from before these catch-ups.
    Namespaces is Event Grid's current pull and push model. The
    typespec generator path already covers this shape.
 
-Next after those: the ARM majors (armkeyvault v2; armstorage v4,
-armcompute v9, armnetwork v12 and armresources v4 are done) by
-regenerating from the specs, then containers/azcontainerregistry (v0, 680 hand-written lines)
+The ARM majors (armstorage v4, armcompute v9, armnetwork v12,
+armresources v4 and armkeyvault v2) are done by regenerating from the
+specs. Next: then containers/azcontainerregistry (v0, 680 hand-written lines)
 and ai/azopenai (v0, 284).

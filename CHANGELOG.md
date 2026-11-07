@@ -8,6 +8,10 @@ version has been tagged since.
 
 ## Unreleased
 
+`azcore.DateTimeUTC`: a `date-time` read as `azcore.DateTime` reads it
+(the offset kept in `offset`) and written in UTC, as Go's TypeSpec
+emitter writes an ARM module's times (`populateTime` with `utc`).
+
 Decision 0009 (TokenCredential's effect parameter; needs xo 86dd0ce25 or
 later: fb952a75a runs an effect-generic struct's method through an
 interface on the native backends, and 86dd0ce25 is xo decision 0540):
@@ -91,6 +95,30 @@ Go's CHANGELOG for v1.5.1 says the API version can be selected
 (`serviceVersion`); in Go's code that is `azcore.ClientOptions.APIVersion`,
 here `ClientOptions.client.api_version`, which sends it as Go does (a
 vector with `2025-07-01`).
+
+**Breaking**: `resourcemanager/keyvault/armkeyvault` matches Go's
+armkeyvault/v2 v2.1.0, which Go now generates from TypeSpec (API
+version 2026-05-15; Microsoft.KeyVault/KeyVault at the commit of Go's
+tsp-location.yaml). Checked against Go's module: all 48 operations'
+requests, every method's parameters in order, all 93 models' JSON keys,
+every type name (`Secret` is `SecretModel`, as before) and all 28
+enums with their values and order equal; its Go-backed vectors
+re-recorded from v2.1.0. As in Go, `get_deleted` and
+`begin_purge_deleted` take the name before the location. The Xo module
+path is unchanged (decision 0001).
+
+**Breaking**, armstorage, armcompute, armnetwork and armkeyvault, as Go
+v4.3.0, v9.0.0, v12.1.0 and v2.1.0: their `date-time` fields are
+`azcore.DateTimeUTC`, written in UTC; a PUT's or PATCH's optional body
+is a parameter of the method (armstorage's `TableClient.create` and
+`update`, `BlobContainersClient.create_or_update_immutability_policy`;
+armnetwork's `IpamPoolsClient.update`,
+`StaticCidrsClient.create`, `VerifierWorkspacesClient.update`);
+`DeletedAccountsClient.get` takes the name before the location, and
+`PrivateLinkServicesClient.begin_check_private_link_service_visibility_by_resource_group`
+the location before the resource group. Every method's parameters were
+compared with Go's in order. The generator: `utc_date_times` in
+services.toml, `param_order` in custom TOML.
 
 **Breaking**: `resourcemanager/resources/armresources` matches Go's
 armresources/v4 v4.0.0, which Go now generates from TypeSpec (API

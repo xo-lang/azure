@@ -146,12 +146,18 @@ pub struct Custom {
   pub replace_types: Map[Str, Str] = {}
   /// Parameters dropped from every operation (wire names).
   pub drop_params: List[Str] = []
+  /// operationId (lower case) to its path parameters' wire names in Go's
+  /// order (custom `param_order`).
+  pub param_order: Map[Str, List[Str]] = {}
   /// Path parameters that may be empty (wire names).
   pub allow_empty: List[Str] = []
   /// autorest's modelerfour `seal-single-value-enum-by-default`: an
   /// enum with one value is that string (a required parameter, a
   /// constant), not a type.
   pub seal_single_value_enums: Bool = false
+  /// `date-time` fields are azcore.DateTimeUTC, written in UTC as Go's
+  /// module writes them.
+  pub utc_date_times: Bool = false
   /// A module TypeSpec emits: a definition key qualified by a namespace
   /// (`Azure.ResourceManager.CommonTypes.Encryption`) is named by its
   /// last segment, the TypeSpec type's own name, as Go's emitter does.
@@ -512,7 +518,7 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   }
   match str_of(v.get("type")) {
     "string" => match str_of(v.get("format")) {
-      "date-time" => "azcore.DateTime"
+      "date-time" => if b.custom.utc_date_times { "azcore.DateTimeUTC" } else { "azcore.DateTime" }
       "date-time-rfc1123" => "azcore.DateTimeRFC1123"
       "base64url" => "azcore.Base64URL"
       "byte" => "Bytes"
@@ -759,6 +765,30 @@ fn (b: Builder) properties(file: Str, v: json.Value) -> List[(Str, json.Value, S
   out
 }
 
+/// `params` with those whose wire names `order` lists put in its order,
+/// in the places they held together; the others stay where they are.
+fn reordered(params: List[Param], order: List[Str]) -> List[Param] {
+  var listed: List[Param] = []
+  for w in order {
+    for q in params {
+      if q.wire == w && q.loc == "path" {
+        listed.push(q)
+      }
+    }
+  }
+  var out: List[Param] = []
+  var next = 0
+  for q in params {
+    if q.loc == "path" && order.contains(q.wire) && next < listed.len() {
+      out.push(listed[next])
+      next += 1
+    } else {
+      out.push(q)
+    }
+  }
+  out
+}
+
 fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   let (f, _, p) = b.deref(file, raw)
   let wire = str_of(p.get("name"))
@@ -849,6 +879,15 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             }
             params = params.filter(fn(q: Param) -> Bool { q.wire != p.wire || q.loc != p.loc })
             params.push(p)
+          }
+          // TypeSpec's Go emitter takes a PUT's or PATCH's optional body as
+          // a parameter of the method, as a required one (armstorage's
+          // TableClient.Create); an action's stays in the options.
+          if b.custom.tsp && !b.custom.data_plane && (method == "put" || method == "patch") {
+            params = params.map(fn(q: Param) -> Param { if q.loc == "body" { q with {required: true} } else { q } })
+          }
+          if let Some(order) = b.custom.param_order.get(id.to_lower()) {
+            params = reordered(params, order)
           }
           var okc: List[Int] = []
           var resp: Str? = None

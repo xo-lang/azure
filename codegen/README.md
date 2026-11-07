@@ -10,7 +10,7 @@ every module and fails on any difference.
 
 Each rule below was found by diffing a generated module's names with
 Go's (armresources v4.0.0, armstorage v4.3.0, armcompute v9.0.0,
-armnetwork v12.1.0, armkeyvault v1.5.0, armauthorization v2.2.0,
+armnetwork v12.1.0, armkeyvault v2.1.0, armauthorization v2.2.0,
 azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armkeyvault's `Secret`, which is
 `SecretModel` by the last rule).
@@ -151,6 +151,21 @@ response type equal, except armkeyvault's `Secret`, which is
   apply as readme.go.md's did: `head-as-boolean: true` makes a HEAD
   operation's response `success`, true on 2xx and false on 404
   (armresources v4's `ResourceGroupsClient.CheckExistence`).
+- `utc_date_times` in a services.toml row: Go's module writes its
+  `date-time` fields in UTC (the TypeSpec Go emitter's `populateTime`
+  with `utc`: armstorage v4, armcompute v9, armnetwork v12, armkeyvault
+  v2; armresources v4 came from an older emitter that keeps the
+  offset), so they are `azcore.DateTimeUTC`, which reads as
+  `azcore.DateTime` and writes UTC.
+- A PUT's or PATCH's optional body is a parameter of the method, as Go's
+  TypeSpec emitter takes it (armstorage's `TableClient.Create`); an
+  action's optional body stays in the options.
+- `custom/<module>.toml: param_order` gives an operation's path
+  parameters in Go's order where Go's emitter orders them otherwise
+  than the path (armkeyvault's `VaultsClient.GetDeleted(vaultName,
+  location)`; the order comes from how the TypeSpec templates compose
+  the parameters, which the OpenAPI file does not keep). Every method's
+  required parameters were compared with Go's in order.
 - Documentation keeps the spec's text, except that a GUID in it (a
   spec's example id, armstorage v4's `Ex: ...`) is written as the
   all-zero GUID: the repository holds no ids.
