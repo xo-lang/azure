@@ -30,7 +30,8 @@ move already; TypeSpec `unknown` is `json.Value`; an object with no properties a
 `map[string]any`), and from autorest one with `additionalProperties:
 false` is `json.Value` (Go's `any`); readme.go.md
 directives on `$.parameters` apply; a `$ref` resolves against a base
-path that has `..` in it. codegen/fetch-specs.sh also fetches the files
+path that has `..` in it; an email address in a spec's documentation is
+written at example.com, as GUIDs and IP addresses already were. codegen/fetch-specs.sh also fetches the files
 the specs' relative `$ref`s and a readme's input files name outside the
 row's folder. codegen/gorows derives a services.toml row from Go's
 module (tsp-location.yaml or autorest.md, and the api-versions and
