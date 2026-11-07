@@ -1,0 +1,285 @@
+// Go's SSE runs (ssevectors_test.xo) made again here: the same scripted
+// bodies and connections, then the same responses through a pipeline on
+// FakeNet; every frame, event, cursor and result must be Go's.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/streaming
+
+enum Item {
+  Data(b: Bytes)
+  Fail(e: http.ClientErr)
+}
+
+/// A body handing out its items as Go's scripted reader does: a chunk
+/// in reads of at most `max`, an error every time once reached.
+struct FakeBody {
+  items: Mutex[List[Item]]
+}
+
+fn (b: FakeBody) read(max: Int) -> Bytes? ! http.ClientErr uses net.dial {
+  b.items.with(fn(var l: List[Item]) -> Bytes? ! http.ClientErr {
+    let it = l.get(0) ?? return Ok(None)
+    match it {
+      Item.Fail(e) => Err(e)
+      Item.Data(d) => {
+        if d.len() > max {
+          l = [Item.Data(d[max..d.len()])] + l[1..l.len()]
+          return Ok(Some(d[0..max]))
+        }
+        l = l[1..l.len()]
+        Ok(Some(d))
+      }
+    }
+  })
+}
+
+fn (b: FakeBody) close() {}
+
+enum Conn {
+  Chunks(items: List[Item])
+  Complete
+  Refused
+}
+
+fn chunks(s: List[Bytes]) -> Conn {
+  Conn.Chunks(s.map(fn(b: Bytes) -> Item { Item.Data(b) }))
+}
+
+struct Log {
+  lines: Mutex[List[Str]]
+  /// Clock sleeps already reported.
+  slept: Mutex[Int]
+}
+
+fn note(l: Log, s: Str) {
+  l.lines.with(fn(var x: List[Str]) { x.push(s) })
+}
+
+/// Each sleep since the last report, as Go's reconnect log line (a delay
+/// above zero only).
+fn report_sleeps(l: Log, clock: testing.FakeClock) {
+  let all = clock.sleeps()
+  let from = l.slept.with(fn(var n: Int) -> Int {
+    let was = n
+    n = all.len()
+    was
+  })
+  for i in from..all.len() {
+    if all[i] > 0s {
+      note(l, "RECONNECT ${all[i].millis()}ms")
+    }
+  }
+}
+
+fn short(b: Bytes) -> Str {
+  if b.len() > 100 { "len:${b.len()}" } else { b.quote() }
+}
+
+fn ps(s: Str?) -> Str {
+  match s {
+    Some(v) => v.quote()
+    None => "<nil>"
+  }
+}
+
+fn pi(n: Int?) -> Str {
+  match n {
+    Some(v) => "${v}"
+    None => "<nil>"
+  }
+}
+
+fn decoder(l: Log) -> fn(streaming.SSEFrame) -> streaming.Decoded[Bytes] ! Str {
+  fn(f: streaming.SSEFrame) -> streaming.Decoded[Bytes] ! Str {
+    let data = f.data ?? b""
+    let shown = match f.data {
+      Some(d) => short(d)
+      None => "<nil>"
+    }
+    note(l, "FRAME type=${f.type_.quote()} data=${shown} id=${ps(f.id)} retry=${pi(f.retry)}")
+    if data == b"[DONE]" {
+      return Ok(streaming.Decoded.Stop)
+    }
+    if f.type_ == "bad" {
+      return Err("bad frame")
+    }
+    if f.type_ == "end" {
+      return Ok(streaming.Decoded.Final(data))
+    }
+    Ok(streaming.Decoded.Event(data))
+  }
+}
+
+fn err_text(e: streaming.SSEErr) -> Str {
+  match e {
+    streaming.SSEErr.TooLong => "toolong"
+    streaming.SSEErr.Read(_) => "read"
+    streaming.SSEErr.Decode(m) => "decode: ${m}"
+    streaming.SSEErr.Call(azcore.CallErr.InvalidInput(m)) => "connect: ${m}"
+    streaming.SSEErr.Call(azcore.CallErr.Response(re)) => "response error ${re.status_code} ${re.error_code}"
+    _ => "error ${e.display()}"
+  }
+}
+
+fn drive[fx: Effects](l: Log, r: Result[streaming.SSEReader[Bytes, fx], streaming.SSEErr], limit: Int, after_close: Bool) uses (net.dial, clock, fx) {
+  var reader = match r {
+    Ok(x) => x
+    Err(e) => {
+      note(l, "NEW ${err_text(e)}")
+      return
+    }
+  }
+  for _ in 0..limit {
+    match reader.next() {
+      Ok(Some(v)) => note(l, "EVENT ${short(v)} last=${reader.last_event_id().quote()}")
+      Ok(None) => {
+        note(l, "NEXT EOF last=${reader.last_event_id().quote()}")
+        break
+      }
+      Err(e) => {
+        note(l, "NEXT ${err_text(e)} last=${reader.last_event_id().quote()}")
+        break
+      }
+    }
+  }
+  reader.close()
+  if after_close {
+    let t = match reader.next() {
+      Ok(None) => "EOF"
+      Ok(Some(_)) => "event"
+      Err(e) => err_text(e)
+    }
+    note(l, "AFTER CLOSE ${t}")
+  }
+}
+
+fn run(l: Log, clock: testing.FakeClock, name: Str, conns: List[Conn], reconnect: Bool, options: streaming.SSEReaderOptions = streaming.SSEReaderOptions{}) uses (net.dial, clock) {
+  note(l, "CASE ${name}")
+  let left = Mutex.new(conns)
+  let connect = fn(last: Str) -> streaming.Body? ! streaming.SSEErr {
+    report_sleeps(l, clock)
+    note(l, "CONNECT ${last.quote()}")
+    let c = left.with(fn(var x: List[Conn]) -> Conn? {
+      let first = x.get(0) ?? return None
+      x = x[1..x.len()]
+      Some(first)
+    }) ?? return Ok(None)
+    match c {
+      Conn.Complete => Ok(None)
+      Conn.Refused => Err(streaming.SSEErr.Call(azcore.CallErr.InvalidInput("connect refused")))
+      Conn.Chunks(items) => {
+        let b: streaming.Body = FakeBody{items: Mutex.new(items)}
+        Ok(Some(b))
+      }
+    }
+  }
+  drive(l, streaming.new_sse_reader(connect, streaming.SSEHandler{decode: decoder(l), reconnect: reconnect}, clock, options), 20, true)
+}
+
+fn ms(n: Int) -> streaming.SSEReaderOptions {
+  streaming.SSEReaderOptions{reconnect_delay: Duration.from_millis(n)}
+}
+
+fn rep(c: Str, n: Int) -> Bytes {
+  c.repeat(n).bytes()
+}
+
+test "the SSE reader and sse_response do what Go's do" {
+  let l = Log{lines: Mutex.new([]), slept: Mutex.new(0)}
+  let c = os.clock
+  let unexpected = http.ClientErr.Protocol("unexpected EOF")
+  let reset = http.ClientErr.Connect("connection reset")
+  run(l, c, "basic", [chunks([b"data: a\n\n"])], false)
+  run(l, c, "fields", [chunks([b"event: e\ndata: l1\ndata: l2\nid: 7\nretry: 15\n\n"])], false)
+  run(l, c, "line ends", [chunks([b"data: x\r", b"\ndata: y\r\r", b"data: z\r\n\r\ndata: w\n\r\n"])], false)
+  run(l, c, "cr at chunk end", [chunks([b"data: a\r", b"\r", b"\n", b"data: b\r", b"\n\r", b"\n"])], false)
+  run(l, c, "bom", [chunks([b"\xEF\xBB\xBFdata: bom\n\n\xEF\xBB\xBFdata: second\n\n"])], false)
+  run(l, c, "bom split", [chunks([b"\xEF\xBB", b"\xBFdata: s\n\n"])], false)
+  run(l, c, "comments and bare fields", [chunks([b":hb\n: x\ndata\n\nevent\ndata:\n\n"])], false)
+  run(l, c, "spaces", [chunks([b"data:nospace\n\ndata:  two\n\ndata: \n\n"])], false)
+  run(l, c, "ids", [chunks([b"id: 1\ndata: a\n\nid: x\x00y\ndata: b\n\nid\ndata: c\n\nid: 9\n\n"])], false, streaming.SSEReaderOptions{last_event_id: "seed"})
+  run(l, c, "retry values", [chunks([b"retry: 1a\nretry: -1\nretry: \nretry: 99999999999999999999\nretry: 007\ndata: r\n\n"])], false)
+  run(l, c, "metadata only", [chunks([b"id: m\nretry: 5\n\nevent: e\n\n"])], false)
+  run(l, c, "unfinished", [chunks([b"data: a\n\ndata: tail"])], false)
+  run(l, c, "unknown fields", [chunks([b"foo: bar\ndata: a\nbaz\n\n"])], false)
+  run(l, c, "done sentinel", [chunks([b"data: a\n\ndata: [DONE]\n\ndata: never\n\n"])], false)
+  run(l, c, "terminal", [chunks([b"event: end\ndata: last\n\ndata: never\n\n"])], false)
+  run(l, c, "decode error", [chunks([b"event: bad\ndata: x\n\n"])], false)
+  run(l, c, "read error", [Conn.Chunks([Item.Data(b"data: a\n\ndata: part"), Item.Fail(unexpected)])], false)
+  run(l, c, "net error", [Conn.Chunks([Item.Data(b"data: a\n\n"), Item.Fail(reset)])], false)
+  run(l, c, "complete at once", [Conn.Complete], false)
+  run(l, c, "connect fails", [Conn.Refused], false)
+  run(l, c, "negative delay", [], false, ms(-1))
+  run(l, c, "reconnect", [
+    chunks([b"id: 1\nretry: 2\ndata: a\n\n"]),
+    Conn.Chunks([Item.Data(b"data: b\nid: 2\n\ndata: partial"), Item.Fail(unexpected)]),
+    Conn.Chunks([Item.Data(b"retry: 0\n\n"), Item.Fail(reset)]),
+    Conn.Complete,
+  ], true, ms(1))
+  run(l, c, "reconnect default delay", [chunks([b"data: a\n\n"]), chunks([b"data: b\n\n"]), Conn.Complete], true)
+  run(l, c, "reconnect option delay", [chunks([b"data: a\n\n"]), chunks([b"id: \n\n"]), Conn.Complete], true, ms(4))
+  run(l, c, "reconnect fails", [chunks([b"data: a\n\n"]), Conn.Refused], true, ms(1))
+  run(l, c, "reconnect no event", [chunks([b": only a comment\n"]), chunks([b"data: b\n\n"]), Conn.Complete], true, ms(1))
+  run(l, c, "reconnect decode error", [chunks([b"event: bad\ndata: x\n\n"]), chunks([b"data: b\n\n"])], true, ms(1))
+  run(l, c, "reconnect terminal", [chunks([b"event: end\ndata: z\n\n"]), chunks([b"data: b\n\n"])], true, ms(1))
+  run(l, c, "reconnect too long", [chunks([rep("a", 1048576)]), chunks([b"data: b\n\n"])], true, ms(1))
+  run(l, c, "longest line", [chunks([b"data: " + rep("a", 1048569) + b"\n\n"])], false)
+  run(l, c, "line too long", [chunks([b"data: " + rep("a", 1048570) + b"\n\n"])], false)
+  run(l, c, "long event", [chunks([b"data: " + rep("a", 600000) + b"\ndata: " + rep("b", 600000) + b"\n\n"])], false)
+
+  // the same through a pipeline, its transport on FakeNet
+  let responses: Mutex[List[http.Response]] = Mutex.new([])
+  os.net.handle("GET https://sse.example.test/{rest...}", fn(req: http.Request) -> http.Response {
+    let q = req.raw_query()
+    note(l, "REQ GET https://sse.example.test${req.escaped_path()}${if q == "" { "" } else { "?${q}" }} last-event-id=${(req.header("Last-Event-ID") ?? "").quote()} accept=${(req.header("Accept") ?? "").quote()}")
+    responses.with(fn(var x: List[http.Response]) -> http.Response {
+      let first = x.get(0) ?? http.Response{status: 599, headers: {}, body: b""}
+      x = x[1..x.len()]
+      first
+    })
+  })
+  let resp = fn(status: Int, ct: Str, body: Str, more: Map[Str, Str]) -> http.Response {
+    var h = more
+    if ct != "-" {
+      h["Content-Type"] = ct
+    }
+    http.Response{status: status, headers: h, body: body.bytes()}
+  }
+  let pl = fn(retries: Int) -> Pipeline {
+    new_pipeline("ssetest", "v0.0.0", os.net, os.clock, os.rand, PipelineOptions{}, policy.ClientOptions{retry: policy.RetryOptions{max_retries: retries, retry_delay: 0s}})
+  }
+  let through = fn(name: Str, p: Pipeline, reconnect: Bool, rs: List[http.Response]) {
+    note(l, "CASE ${name}")
+    responses.reset(rs)
+    let connect = fn(last: Str) -> streaming.Body? ! streaming.SSEErr uses (net.dial, clock, rand) {
+      report_sleeps(l, c)
+      var headers = [("Accept", "text/event-stream")]
+      if last != "" {
+        headers.push(("Last-Event-ID", last))
+      }
+      let req = streamed(policy.Request{method: "GET", url: "https://sse.example.test/events?x=1", headers: headers})
+      sse_response(req, p.send(req), [200])
+    }
+    drive(l, streaming.new_sse_reader(connect, streaming.SSEHandler{decode: decoder(l), reconnect: reconnect}, c, ms(1)), 10, false)
+  }
+  through("sse ok", pl(-1), false, [resp(200, "text/event-stream", "id: 1\ndata: a\n\ndata: b\n\n", {})])
+  through("sse charset", pl(-1), false, [resp(200, "text/event-stream; charset=utf-8", "data: c\n\n", {})])
+  through("sse upper case", pl(-1), false, [resp(200, "Text/Event-Stream", "data: u\n\n", {})])
+  through("sse json", pl(-1), false, [resp(200, "application/json", "{}", {})])
+  through("sse no content type", pl(-1), false, [resp(200, "-", "data: n\n\n", {})])
+  through("sse bad content type", pl(-1), false, [resp(200, "text/event-stream; charset", "data: n\n\n", {})])
+  through("sse 204", pl(-1), false, [resp(204, "-", "", {})])
+  through("sse 302", pl(-1), false, [resp(302, "text/event-stream", "data: r\n\n", {"Location": "/elsewhere"})])
+  through("sse 400", pl(-1), false, [resp(400, "application/json", "{\"error\":{\"code\":\"BadThing\",\"message\":\"no\"}}", {"x-ms-error-code": "Bad"})])
+  through("sse retried 503", pl(1), false, [resp(503, "application/json", "{}", {}), resp(200, "text/event-stream", "data: after\n\n", {})])
+  through("sse reconnect", pl(-1), true, [resp(200, "text/event-stream", "retry: 0\nid: first\ndata: one\n\n", {}), resp(200, "text/event-stream", "data: two\n\n", {}), resp(204, "-", "", {})])
+  through("sse reconnect error", pl(-1), true, [resp(200, "text/event-stream", "id: e1\ndata: one\n\n", {}), resp(500, "application/json", "{}", {"x-ms-error-code": "Down"})])
+
+  let got = l.lines.with_read(fn(x: List[Str]) -> List[Str] { x })
+  for i in 0..(if got.len() < SSE_GO.len() { got.len() } else { SSE_GO.len() }) {
+    expect(got[i]) == SSE_GO[i]
+  }
+  expect(got.len()) == SSE_GO.len()
+}

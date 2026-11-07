@@ -19,6 +19,42 @@ pub struct Request {
   /// Request.SetOperationValue): a client tells its own policies about
   /// the operation, such as Cosmos DB's `cosmos.write`.
   pub values: Map[Str, Str] = {}
+  /// Where the transport leaves the response's body unread, for a
+  /// server-sent events stream (azcore's runtime.SkipBodyDownload); None
+  /// reads every body whole.
+  pub stream: StreamSlot? = None
+}
+
+/// A streamed response's body, left by the transport for the caller
+/// (runtime.sse_response takes it). A request carrying one is sent with
+/// `http.Client.open`: a response below 400 keeps its body on the stream
+/// (the Response's own body is empty), and an error response's body is
+/// read whole, as azcore reads it for the error. Copies share the slot.
+pub struct StreamSlot {
+  stream: Mutex[http.ClientStream?]
+}
+
+pub fn stream_slot() -> StreamSlot {
+  StreamSlot{stream: Mutex.new(None)}
+}
+
+/// The stream the transport left, once; None when there is none.
+pub fn (s: StreamSlot) take() -> http.ClientStream? {
+  s.stream.with(fn(var x: http.ClientStream?) -> http.ClientStream? {
+    let had = x
+    x = None
+    had
+  })
+}
+
+/// Keeps `st`, closing a stream an earlier try left (a retry's).
+fn (s: StreamSlot) put(st: http.ClientStream) {
+  s.stream.with(fn(var x: http.ClientStream?) {
+    if let Some(old) = x {
+      old.close()
+    }
+    x = Some(st)
+  })
 }
 
 /// The first value of header `name` (any case).
@@ -91,7 +127,19 @@ pub fn (n: Next) send(req: Request) -> http.Response ! SendErr uses (net.dial, c
   if hreq.header("Accept-Encoding").is_none() {
     hreq = hreq.with_header("Accept-Encoding", "identity")
   }
-  n.transport.send(hreq) ?? e => Err(SendErr.Http(e))
+  let slot = req.stream ?? return n.transport.send(hreq) ?? e => Err(SendErr.Http(e))
+  let st = n.transport.open(hreq) ?? e => return Err(SendErr.Http(e))
+  let head = st.head()
+  if head.status >= 400 {
+    let body = st.read_all() ?? e => {
+      st.close()
+      return Err(SendErr.Http(e))
+    }
+    st.close()
+    return Ok(http.Response{status: head.status, headers: head.headers, body: body})
+  }
+  slot.put(st)
+  Ok(http.Response{status: head.status, headers: head.headers, body: b""})
 }
 
 /// azcore's retry options and defaults.

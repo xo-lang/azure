@@ -35,10 +35,10 @@ Found: 40 data-plane and support families and 308 ARM families.
 
 | Go module | latest | kind | Go hand-written lines | Go lines | our port | our lines (hand + generated) | popularity |
 |---|---|---|---:|---:|---|---|---|
-| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | missing (needs azcore SSE streaming) |  |  |
+| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | missing |  |  |
 | ai/azopenaiassistants | v0.4.0 | v0, deprecated | 1546 | 13412 | missing |  |  |
 | ai/azopenaiextensions | v0.2.0 | v0, deprecated | 290 | 3840 | missing |  |  |
-| azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 except SSE streaming (deferred) | 2156 |  |
+| azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 | 2686 |  |
 | azidentity | v1.15.0 | stable | 4100 | 4100 | partial | 638 |  |
 | azidentity/cache | v0.4.0 | v0 | 595 | 595 | missing |  |  |
 | batch/azbatch | v0.1.0 | v0 | 66 | 24575 | missing |  |  |
@@ -403,10 +403,10 @@ shipped a newer major whose spec our generator has not been run on.
 
 ## Proposed next three
 
-Status (2026-11-06): (1) is under way. azcore v1.24.0 is ported but
-for its SSE stream reader (`streaming/sse.go`), deferred with the lead:
-our pipeline reads a body whole, so SSE becomes its own slice, a
-streaming body first, when a module we port needs it (azopenai would).
+Status (2026-11-07): (1) is under way. azcore v1.24.0 is ported,
+its SSE stream reader (`streaming/sse.go`) included since 2026-11-07:
+a request can leave its response body on a stream
+(`runtime.streamed`), read as it arrives.
 azfile v1.7.2, azqueue v2.1.2 and azsecrets v1.5.1 are done; azidentity
 v1.15.0 (2) is next.
 Our line counts above are from before these catch-ups.
@@ -437,5 +437,6 @@ armresources v4 and armkeyvault v2) are done by regenerating from the
 specs. containers/azcontainerregistry v0.2.3 is done: its operations
 generated from the swagger with Go's autorest.md directives as JSON
 patches, and its challenge policy, chunk upload and digest helpers
-written by hand, with requests checked against Go's own. Next: azcore's
-SSE streaming, then ai/azopenai (v0, 284) on top of it.
+written by hand, with requests checked against Go's own. azcore's SSE
+streaming is done (the reader, SSEResponse, and a streamed response
+body in the pipeline). Next: ai/azopenai (v0, 284) on top of it.

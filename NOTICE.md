@@ -9,7 +9,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   runtime: the pipeline, retry, telemetry, request ID and bearer token
   policies, the key and SAS credential policies, pagers, pollers,
   ResponseError, TokenCredential, KeyCredential, SASCredential;
-  messaging: CloudEvent; runtime/datetime: RFC7231;
+  messaging: CloudEvent; runtime/datetime: RFC7231; streaming: the
+  server-sent events reader of v1.24.0's sse.go, and runtime's
+  SSEResponse;
   arm/internal/resource: ResourceID, ResourceType),
   `sdk/azidentity` (client secret, client certificate, workload
   identity, managed identity, environment, chained and default

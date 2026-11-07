@@ -8,6 +8,24 @@ version has been tagged since.
 
 ## Unreleased
 
+Server-sent events, as azcore v1.24.0:
+
+- `streaming`: `SSEReader[T, fx]` (`new_sse_reader`, `next`,
+  `last_event_id`, `close`) over a `Body` read as it arrives, with Go's
+  parser (CRLF, LF and a lone CR, a BOM on the first line, comments,
+  `event`, `data`, `id` and `retry`, a 1 MiB line limit), its decoder
+  results (`Decoded.Event`, `Final`, `Stop`) and its reconnection (the
+  server's `retry` or the reader's delay, the cursor passed to the
+  connector). `SSEFrame`, `SSEHandler`, `SSEReaderOptions`, `SSEErr`,
+  `StreamBody` and `bytes_body`.
+- `policy.Request.stream` (a `policy.StreamSlot`): the transport sends
+  such a request with `http.Client.open` and leaves a response below
+  400 on the stream, as azcore's SkipBodyDownload; an error response is
+  read whole. `runtime.streamed(req)` adds the slot.
+- `runtime.sse_response`: Go's SSEResponse (a 204 is the end, a status
+  outside the operation's is its ResponseError, a Content-Type other
+  than `text/event-stream` is refused with Go's message).
+
 `runtime.with_query`: a generated operation's URL with its query
 parameters set on a query the joined URL already has, as Go's generated
 `reqQP := req.Raw().URL.Query(); reqQP.Set(...)` does (the whole query

@@ -1,0 +1,423 @@
+// Server-sent events, as azcore v1.24.0's streaming/sse.go (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): a text/event-stream
+// body parsed into frames as it arrives, each data frame decoded into
+// the operation's event type, and a continuous stream reopened after it
+// ends when the operation allows it.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+
+/// The longest line the parser takes (Go's bufio.Scanner buffer of
+/// 1 MiB); a longer one is TooLong. Several data lines make one event,
+/// so an event may be longer.
+const MAX_LINE: Int = 1048576
+
+/// How much of the body one read asks for.
+const READ_SIZE: Int = 32768
+
+/// One server-sent event frame (Go's SSEFrame): the wire fields only;
+/// the operation's decoder makes its typed event from it.
+pub struct SSEFrame {
+  /// The `event` field; empty for the default `message` type.
+  pub type_: Str = ""
+  /// The frame's `data` lines joined by newlines; None for a frame with
+  /// no data line, which is never decoded.
+  pub data: Bytes? = None
+  /// The `id` field when the frame has one (an empty one resets the
+  /// reader's cursor); `last_event_id` is the reader's cursor.
+  pub id: Str? = None
+  /// The `retry` field: the reconnection delay in milliseconds.
+  pub retry: Int? = None
+}
+
+/// Why a stream failed.
+pub enum SSEErr {
+  /// The reader's options are not valid.
+  Config(msg: Str)
+  /// Opening the stream failed: the request, or a response the
+  /// operation does not expect.
+  Call(e: azcore.CallErr)
+  /// The response is not `text/event-stream`.
+  ContentType(msg: Str)
+  /// Reading the body failed (a connection reset, a body cut short).
+  Read(e: http.ClientErr)
+  /// A line longer than 1 MiB (Go's bufio.ErrTooLong).
+  TooLong
+  /// The decoder refused a frame.
+  Decode(msg: Str)
+}
+
+pub fn (e: SSEErr) display() -> Str {
+  match e {
+    Config(m) => m
+    Call(ce) => ce.display()
+    ContentType(m) => m
+    Read(he) => he.display()
+    TooLong => "bufio.Scanner: token too long"
+    Decode(m) => m
+  }
+}
+
+/// A response body read as it arrives; the reader closes it.
+pub interface Body {
+  /// The next bytes, at most `max`, None at the end.
+  fn read(self, max: Int) -> Bytes? ! http.ClientErr uses net.dial
+  fn close(self)
+}
+
+/// An open HTTP response's body (`http.Client.open`).
+pub struct StreamBody {
+  pub stream: http.ClientStream
+}
+
+fn (b: StreamBody) read(max: Int) -> Bytes? ! http.ClientErr uses net.dial {
+  b.stream.read(max)
+}
+
+fn (b: StreamBody) close() {
+  b.stream.close()
+}
+
+/// A body already read whole, handed out in reads.
+pub struct BytesBody {
+  rest: Mutex[Bytes?]
+}
+
+pub fn bytes_body(data: Bytes) -> BytesBody {
+  BytesBody{rest: Mutex.new(Some(data))}
+}
+
+fn (b: BytesBody) read(max: Int) -> Bytes? ! http.ClientErr uses net.dial {
+  Ok(b.rest.with(fn(var r: Bytes?) -> Bytes? {
+    let d = r ?? return None
+    if d.is_empty() {
+      r = None
+      return None
+    }
+    let n = if d.len() < max { d.len() } else { max }
+    r = Some(d[n..d.len()])
+    Some(d[0..n])
+  }))
+}
+
+fn (b: BytesBody) close() {
+  b.rest.reset(None)
+}
+
+/// What a decoder makes of a frame (Go's Decode results).
+pub enum Decoded[T] {
+  /// An event; the stream goes on.
+  Event(value: T)
+  /// The last event (Go's terminal): delivered, then the stream ends.
+  Final(value: T)
+  /// The stream ends with no event (Go's io.EOF from Decode), as for a
+  /// `[DONE]` sentinel.
+  Stop
+}
+
+/// The operation's decoder and whether its stream reconnects (Go's
+/// SSEHandler).
+pub struct SSEHandler[T] {
+  pub decode: fn(SSEFrame) -> Decoded[T] ! Str
+  /// Reopen a continuous stream after it ends or its read fails. A
+  /// finite operation (an AI generation) must leave it false: its end is
+  /// its completion, and reopening it would repeat the work.
+  pub reconnect: Bool = false
+}
+
+/// Go's SSEReaderOptions.
+pub struct SSEReaderOptions {
+  /// The first cursor, passed to the first open.
+  pub last_event_id: Str = ""
+  /// The delay before reopening when the server sent no `retry` field;
+  /// zero for the default 3 seconds. A server's `retry`, zero included,
+  /// takes its place until another replaces it.
+  pub reconnect_delay: Duration = 0s
+}
+
+/// The parser of one connection's body (Go's sseScanner over a
+/// bufio.Scanner splitting at CRLF, LF and a lone CR).
+struct Scanner {
+  body: Body
+  buf: Bytes = b""
+  eof: Bool = false
+  /// A read error, returned once the buffered lines are used.
+  failed: http.ClientErr? = None
+  last_id: Str = ""
+  retry: Int = -1
+  first_line: Bool = true
+  skip_lf: Bool = false
+}
+
+/// The next line without its terminator; None at the end of the body.
+/// A line still unterminated at the end is a line, as bufio.Scanner
+/// gives one; the read error, if any, comes after the buffered lines.
+fn (var s: Scanner) line() -> Bytes? ! SSEErr uses net.dial {
+  while true {
+    var start = 0
+    if s.skip_lf && !s.buf.is_empty() {
+      s.skip_lf = false
+      if s.buf[0] == 10 {
+        start = 1
+      }
+    }
+    var i = start
+    while i < s.buf.len() {
+      let c = s.buf[i]
+      if c == 10 || c == 13 {
+        let token = s.buf[start..i]
+        if c == 13 {
+          // a CR ends the line; an LF after it is swallowed next time
+          s.skip_lf = true
+        }
+        s.buf = s.buf[i + 1..s.buf.len()]
+        return Ok(Some(token))
+      }
+      i += 1
+    }
+    s.buf = s.buf[start..s.buf.len()]
+    if s.eof {
+      if !s.buf.is_empty() {
+        let token = s.buf
+        s.buf = b""
+        return Ok(Some(token))
+      }
+      if let Some(e) = s.failed {
+        return Err(SSEErr.Read(e))
+      }
+      return Ok(None)
+    }
+    if s.buf.len() >= MAX_LINE {
+      return Err(SSEErr.TooLong)
+    }
+    let room = MAX_LINE - s.buf.len()
+    match s.body.read(if room < READ_SIZE { room } else { READ_SIZE }) {
+      Ok(Some(more)) => s.buf = s.buf + more
+      Ok(None) => s.eof = true
+      Err(e) => {
+        s.eof = true
+        s.failed = Some(e)
+      }
+    }
+  }
+  Ok(None)
+}
+
+/// The next frame, a metadata-only one included; None at the end of the
+/// body (an unfinished frame is dropped).
+fn (var s: Scanner) next() -> SSEFrame? ! SSEErr uses net.dial {
+  var frame = SSEFrame{}
+  var data = b""
+  var have_data = false
+  while let Some(raw) = s.line()? {
+    var line = raw
+    if s.first_line {
+      line = line.trim_prefix(b"\xEF\xBB\xBF")
+      s.first_line = false
+    }
+    if line.is_empty() {
+      if let Some(id) = frame.id {
+        s.last_id = id
+      }
+      if have_data {
+        frame = frame with {data: Some(data[0..data.len() - 1])}
+      }
+      return Ok(Some(frame))
+    }
+    if line[0] == 58 {
+      // a comment
+      continue
+    }
+    let (field, value) = split_field(line)
+    if field == b"event" {
+      frame = frame with {type_: value.to_str_lossy()}
+    } else if field == b"data" {
+      data = data + value + b"\n"
+      have_data = true
+    } else if field == b"id" {
+      // an id with a NUL is ignored
+      if !value.contains(b"\x00") {
+        frame = frame with {id: Some(value.to_str_lossy())}
+      }
+    } else if field == b"retry" {
+      if is_ascii_digits(value) {
+        if let Some(n) = Int.parse(value.to_str_lossy()) {
+          frame = frame with {retry: Some(n)}
+          s.retry = n
+        }
+      }
+    }
+  }
+  Ok(None)
+}
+
+/// A line's field and value: before and after the first `:`, one space
+/// after it dropped; a line without `:` is a field with an empty value.
+fn split_field(line: Bytes) -> (Bytes, Bytes) {
+  match line.find(b":") {
+    Some(i) => (line[0..i], line[i + 1..line.len()].trim_prefix(b" "))
+    None => (line, b"")
+  }
+}
+
+fn is_ascii_digits(b: Bytes) -> Bool {
+  if b.is_empty() {
+    return false
+  }
+  for i in 0..b.len() {
+    if b[i] < 48 || b[i] > 57 {
+      return false
+    }
+  }
+  true
+}
+
+/// Typed, forward-only events of a server-sent events response (Go's
+/// SSEReader): `next` until it returns None, then `close`.
+pub struct SSEReader[T, fx: Effects] {
+  connect: fn(Str) -> Body? ! SSEErr uses fx
+  decode: fn(SSEFrame) -> Decoded[T] ! Str
+  reconnect: Bool
+  clock: Clock
+  scanner: Scanner? = None
+  done: Bool = false
+  last_id: Str = ""
+  retry: Int = -1
+  delay: Duration = 3s
+}
+
+/// Opens the stream through `connect` and returns its reader (Go's
+/// NewSSEReader). `connect` opens the stream, or reopens it from the
+/// cursor it is given (empty when there is no checkpoint); None means the
+/// service says the stream is complete (a 204). It must send through the
+/// client's pipeline, which retries the request; the reader does not
+/// retry a failed open. Its effects are the reader's `fx`; the open's error is returned here. A stream that is
+/// complete at once (a 204) gives a reader with no events.
+pub fn new_sse_reader[T, fx: Effects](connect: fn(Str) -> Body? ! SSEErr uses fx, handler: SSEHandler[T], clock: Clock, options: SSEReaderOptions = SSEReaderOptions{}) -> SSEReader[T, fx] ! SSEErr uses (net.dial, clock, fx) {
+  if options.reconnect_delay < 0s {
+    return Err(SSEErr.Config("streaming: ReconnectDelay must not be negative"))
+  }
+  var r = SSEReader{connect: connect, decode: handler.decode, reconnect: handler.reconnect, clock: clock, last_id: options.last_event_id, delay: if options.reconnect_delay > 0s { options.reconnect_delay } else { 3s }}
+  match r.open() {
+    Ok(_) => Ok(r)
+    Err(e) => {
+      r.stop()
+      Err(e)
+    }
+  }
+}
+
+/// The next event; None when the stream is complete. A Final event comes
+/// once before None; a decoder's Stop ends it with no event. A stream
+/// that reconnects reopens after its body ends or a read fails, after
+/// the server's `retry` delay or the reader's. A failed open, a decoder
+/// error or a line over 1 MiB ends the stream with the error.
+pub fn (var r: SSEReader[T, fx]) next() -> T? ! SSEErr uses (net.dial, clock, fx) {
+  while true {
+    if r.done {
+      return Ok(None)
+    }
+    var sc = r.scanner ?? return Ok(None)
+    let got = sc.next()
+    r.last_id = sc.last_id
+    if sc.retry >= 0 {
+      r.retry = sc.retry
+    }
+    r.scanner = Some(sc)
+    let frame = match got {
+      Ok(Some(f)) => f
+      Ok(None) => {
+        if r.reconnect {
+          r.reopen()?
+          continue
+        }
+        r.stop()
+        return Ok(None)
+      }
+      Err(e) => {
+        let transport = match e {
+          SSEErr.Read(_) => true
+          SSEErr.Config(_) | SSEErr.Call(_) | SSEErr.ContentType(_) | SSEErr.TooLong | SSEErr.Decode(_) => false
+        }
+        if r.reconnect && transport {
+          r.reopen()?
+          continue
+        }
+        r.stop()
+        return Err(e)
+      }
+    }
+    if frame.data.is_none() {
+      continue
+    }
+    match (r.decode)(frame) {
+      Err(m) => {
+        r.stop()
+        return Err(SSEErr.Decode(m))
+      }
+      Ok(Decoded.Stop) => {
+        r.stop()
+        return Ok(None)
+      }
+      Ok(Decoded.Final(v)) => {
+        r.stop()
+        return Ok(Some(v))
+      }
+      Ok(Decoded.Event(v)) => return Ok(Some(v))
+    }
+  }
+  Ok(None)
+}
+
+/// The resumption cursor: the first one, then each complete frame's id.
+pub fn (r: SSEReader[T, fx]) last_event_id() -> Str {
+  r.last_id
+}
+
+/// Ends the stream and closes its body; `next` returns None after it.
+pub fn (var r: SSEReader[T, fx]) close() {
+  r.stop()
+}
+
+fn (var r: SSEReader[T, fx]) stop() {
+  r.done = true
+  if let Some(sc) = r.scanner {
+    sc.body.close()
+  }
+}
+
+/// The delay before reopening: the server's `retry` (milliseconds, at
+/// most the longest Duration), else the reader's.
+fn (r: SSEReader[T, fx]) reopen_delay() -> Duration {
+  if r.retry < 0 {
+    return r.delay
+  }
+  // Go's limit: (1<<63 - 1) / time.Millisecond
+  if r.retry > 9223372036854 {
+    return Duration.from_nanos(9223372036854775807)
+  }
+  Duration.from_millis(r.retry)
+}
+
+/// Closes the body, waits, and opens again from the cursor.
+fn (var r: SSEReader[T, fx]) reopen() -> () ! SSEErr uses (net.dial, clock, fx) {
+  if let Some(sc) = r.scanner {
+    sc.body.close()
+  }
+  let d = r.reopen_delay()
+  if d > 0s {
+    r.clock.sleep(d)
+  }
+  r.open()
+}
+
+fn (var r: SSEReader[T, fx]) open() -> () ! SSEErr uses (net.dial, clock, fx) {
+  if r.done {
+    return Ok(())
+  }
+  match (r.connect)(r.last_id)? {
+    None => r.stop()
+    Some(body) => r.scanner = Some(Scanner{body: body, last_id: r.last_id})
+  }
+  Ok(())
+}

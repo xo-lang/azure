@@ -1,0 +1,59 @@
+// A server-sent events response checked for its stream, as azcore
+// v1.24.0's runtime.SSEResponse (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md).
+
+use std/http
+use std/mime
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/streaming
+
+/// A request whose response body is left on a stream for an SSE reader
+/// (azcore's SkipBodyDownload): `req` with a stream slot.
+pub fn streamed(req: policy.Request) -> policy.Request {
+  req with {stream: Some(policy.stream_slot())}
+}
+
+/// The body of `sent`, the response to `req` (sent with `streamed`), for
+/// an SSE connector, as Go's SSEResponse: a 204 closes the stream and is
+/// None (the stream is complete), whatever `status_codes` says; any other
+/// status must be one of `status_codes` and the Content-Type
+/// `text/event-stream`. A rejected stream is closed: a status the
+/// operation does not expect is its ResponseError (a status below 400
+/// without its body, which is never read), a wrong Content-Type is
+/// ContentType with Go's message.
+pub fn sse_response(req: policy.Request, sent: Result[http.Response, policy.SendErr], status_codes: List[Int]) -> streaming.Body? ! streaming.SSEErr {
+  let resp = sent ?? e => return Err(streaming.SSEErr.Call(azcore.CallErr.Send(e)))
+  let stream = match req.stream {
+    Some(slot) => slot.take()
+    None => None
+  }
+  let drop = fn() {
+    if let Some(st) = stream {
+      st.close()
+    }
+  }
+  if resp.status == 204 {
+    drop()
+    return Ok(None)
+  }
+  if !status_codes.contains(resp.status) {
+    drop()
+    return Err(streaming.SSEErr.Call(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
+  }
+  // Go's Header.Get: the first value
+  let content_type = resp.header_values("Content-Type").first() ?? ""
+  let mt = mime.parse_media_type(content_type) ?? e => {
+    drop()
+    return Err(streaming.SSEErr.ContentType("invalid SSE Content-Type ${content_type.quote()}: ${e.display()}"))
+  }
+  if mt.kind != "text/event-stream" {
+    drop()
+    return Err(streaming.SSEErr.ContentType("unexpected SSE Content-Type ${content_type.quote()}"))
+  }
+  match stream {
+    Some(st) => Ok(Some(streaming.StreamBody{stream: st}))
+    // a request sent without a stream slot: its body was read whole
+    None => Ok(Some(streaming.bytes_body(resp.body)))
+  }
+}
