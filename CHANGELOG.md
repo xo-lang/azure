@@ -8,6 +8,15 @@ version has been tagged since.
 
 ## Unreleased
 
+Constant fields encode as Go's: a model field Go marks CONSTANT (a
+one-value enum sealed to a string) is written as its constant, always
+when required and when set when optional, whatever it holds. This fixes
+a check-name request sent without its `type` (armstorage, armkeyvault,
+armcontainerregistry), armcosmos's `databaseAccountOfferType`, and
+armcompute's `Usage.unit` and unattend content names. Checked against a
+local Go program over each Go module (`constant_test.xo` in the five
+modules).
+
 Polymorphic models encode as Go's: a subtype encoded on its own (not
 through its `<Base>Classification` enum) now writes its discriminator
 value, as Go's MarshalJSON always does, and a base type in armcosmos,

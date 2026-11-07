@@ -11,6 +11,12 @@ pub struct Field {
   pub wire: Str
   pub typ: Str
   pub doc: Str = ""
+  /// Go's CONSTANT field (a one-value enum sealed to a string): the
+  /// value Go's MarshalJSON writes in place of the field's, "" for none.
+  pub constant: Str = ""
+  /// The schema, or an allOf parent, lists it as required: Go writes a
+  /// constant one always, an optional one only when set.
+  pub required: Bool = false
 }
 
 pub struct Model {
@@ -809,6 +815,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
   }
   var fields: List[Field] = []
   var seen: List[Str] = []
+  let required = b.required_of(file, v, 0)
   for (wire, prop, pf) in b.properties(file, v) {
     if seen.contains(wire) {
       continue
@@ -835,7 +842,12 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
       // step swaps): a hand-written one, by `Model.field` only
       typ = t
     }
-    fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop)})
+    let (_, _, target) = b.deref(pf, prop)
+    let constant = match list_of(target.get("enum")).get(0) {
+      Some(json.Value.Str(c)) if typ == "Str" && b.sealed(target) => c
+      _ => ""
+    }
+    fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop), constant: constant, required: constant != "" && required.contains(wire)})
   }
   let private = b.custom.models.values().any(fn(r: Str) -> Bool { is_unexported(r) && reserve(r) == name })
   b.models.push(Model{name: name, fields: fields, doc: doc_of(v), private: private, extra: !fields.is_empty() && b.has_extra(file, v, 0)})
@@ -852,6 +864,23 @@ fn (b: Builder) properties(file: Str, v: json.Value) -> List[(Str, json.Value, S
   }
   for (k, p) in fields_of(v.get("properties")) {
     out.push((k, p, file))
+  }
+  out
+}
+
+/// The required property names of a schema and its allOf parents.
+fn (b: Builder) required_of(file: Str, v: json.Value, depth: Int) -> List[Str] {
+  var out: List[Str] = []
+  if depth < 20 {
+    for parent in list_of(v.get("allOf")) {
+      let (f, _, x) = b.deref(file, parent)
+      out = out + b.required_of(f, x, depth + 1)
+    }
+  }
+  for r in list_of(v.get("required")) {
+    if let json.Value.Str(s) = r {
+      out.push(s)
+    }
   }
   out
 }

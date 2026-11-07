@@ -271,7 +271,8 @@ pub fn emit_models(p: Package, api: Api) -> File {
       s = s + doc("  ", f.doc) + (if m.patch { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": json.Patch[${f.typ}] = json.Patch.Absent\n" } else { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n" })
     }
     let disc = if m.patch { None } else { disc_of(api, m.name, p.null_base_discriminator) }
-    if (m.extra && !m.patch) || disc.is_some() {
+    let consts = !m.patch && m.fields.any(fn(f: Field) -> Bool { f.constant != "" })
+    if (m.extra && !m.patch) || disc.is_some() || consts {
       s = s + emit_extra(m, disc)
     } else {
       s = s + "} derive Json\n"
@@ -809,10 +810,11 @@ fn disc_of(api: Api, name: Str, null_base: Bool) -> (Str, Str, Bool)? {
   None
 }
 
-/// The end of a model with Go's AdditionalProperties or a
-/// discriminator: the extra field, its JSON through a private twin of
-/// the named fields, then the discriminator and the unknown keys inline
-/// (Go's MarshalJSON and UnmarshalJSON).
+/// The end of a model with Go's AdditionalProperties, a discriminator
+/// or a CONSTANT field: the extra field, its JSON through a private twin
+/// of the named fields (constants as Go writes them), then the
+/// discriminator and the unknown keys inline (Go's MarshalJSON and
+/// UnmarshalJSON).
 fn emit_extra(m: Model, disc: (Str, Str, Bool)? = None) -> Str {
   let sn = snake(m.name)
   let known = "${m.name}Known"
@@ -826,7 +828,11 @@ fn emit_extra(m: Model, disc: (Str, Str, Bool)? = None) -> Str {
   s = s + "} derive Json\n"
   s = s + "\nfn ${sn}_json(x: ${m.name}) -> json.Value {\n  let known = ${known}{\n"
   for f in fs {
-    s = s + "    ${f.name}: x.${f.name},\n"
+    // Go writes a CONSTANT field as its constant: always when
+    // required, when set when optional
+    let c = "\"${esc(f.constant)}\""
+    let value = if f.constant == "" { "x.${f.name}" } else if f.required { "Some(${c})" } else { "x.${f.name}.map(fn(_: Str) -> Str { ${c} })" }
+    s = s + "    ${f.name}: ${value},\n"
   }
   let v = match disc {
     Some((tag, _, true)) => "with_discriminator_value(json.to_value(known), \"${esc(tag)}\")"

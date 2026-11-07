@@ -173,6 +173,13 @@ response type equal, except armkeyvault's `Secret`, which is
   `additional_properties: Map[Str, json.Value]?`, the keys no field
   names, kept on decode and written inline on encode, keys sorted
   (armcosmos v4's ServiceResourceProperties and its four subtypes).
+- A model field whose schema is a one-value enum sealed to a string
+  (Go's CONSTANT field, a `Str?` here) is written as Go writes it: its
+  constant always when the schema requires it, else its constant when
+  set, whatever the field holds (armstorage's
+  `AccountCheckNameAvailabilityParameters.type`, armcompute's
+  `Usage.unit`, armcosmos's `databaseAccountOfferType`). Decoding keeps
+  the value as sent.
 - `utc_date_times` in a services.toml row: Go's module writes its
   `date-time` fields in UTC (the TypeSpec Go emitter's `populateTime`
   with `utc`: armstorage v4, armcompute v9, armnetwork v12, armkeyvault
