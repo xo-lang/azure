@@ -1,5 +1,18 @@
 # azblob changes
 
+## Unreleased
+
+Tests only, no change to the module:
+
+- The DownloadFile cases open the existing file as Go's program does
+  (written first, then `Fs.open_rw`, Go's `os.OpenFile` with `O_RDWR`)
+  instead of writing the old contents through a `create` handle.
+- A new case from the same Go program: a blob that changes partway,
+  downloaded over a longer file, leaves the file's later bytes as they
+  were (`01234567 content here`), as Go's.
+
+The tests need xo c8d1eb2f2 (`Fs.open_rw`) or later.
+
 ## v0.12.0
 
 New: the block blob client and file transfers, as azblob v1.8.3's.
