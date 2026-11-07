@@ -29,13 +29,12 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
   effectful as its sources, and a chain without managed identity stays
   `[()]`. New options `arc_token_dir` and `arc_himds` replace the
   platform's paths (tests point them at MemFs).
-- Differs from Go on purpose: on Linux, a key path through `..` is
-  refused (`invalid file path, expected a file in <dir> named without ..,
-  got <path>`). Go checks the path by its text and then lets the OS
-  resolve `..`, which can leave the token directory through a link. If
-  the directory before `..` is missing, the error is still Go's stat
-  error. Not ported: Go's `couldn't parse` error for an IDENTITY_ENDPOINT
-  that is not a URL (here the text before `?` is the base), and the text
+- Differs from Go on purpose: outside Windows, a key path with a `..`
+  element is refused (`invalid file path, expected a file in <dir> named
+  without .., got <path>`); when the directory before `..` is missing,
+  the error is Go's stat error. Not ported: Go's `couldn't parse` error
+  for an IDENTITY_ENDPOINT that is not a URL (here the text before `?`
+  is the base), and the text
   of OS errors on Windows (they are the Linux ones).
 
 - ManagedIdentityCredential inside DefaultAzureCredential probes IMDS
