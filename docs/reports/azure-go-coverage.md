@@ -90,12 +90,13 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
+| resourcemanager/privatedns/armprivatedns | v2.0.0 (`v2`) | stable | 0 | 4414 | v2.0.0 | 0 + 1245 gen |  |
 | resourcemanager/resources/armdeployments | v3.0.0 (`v3`) | stable | 0 | 10993 | v3.0.0 | 0 + 3303 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (297)
+## ARM modules not ported (296)
 
 <details><summary>The list</summary>
 
@@ -313,7 +314,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/powerbiprivatelinks/armpowerbiprivatelinks | v2.1.0 | stable | 4270 |
 | resourcemanager/powerplatform/armpowerplatform | v0.4.0 | v0 | 4744 |
 | resourcemanager/previewalertrule/armpreviewalertrule | v0.1.0 | v0 | 1331 |
-| resourcemanager/privatedns/armprivatedns | v2.0.0 | stable | 4414 |
 | resourcemanager/programenrollment/armprogramenrollment | v0.1.0 | v0 | 2056 |
 | resourcemanager/programmableconnectivity/armprogrammableconnectivity | v0.1.0 | v0 | 4172 |
 | resourcemanager/prometheusrulegroups/armprometheusrulegroups | v0.1.0 | v0 | 1606 |

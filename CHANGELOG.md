@@ -8,6 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/privatedns/armprivatedns v2.0.0, Go's armprivatedns/v2
+v2.0.0 (private DNS zones, record sets and virtual network links;
+TypeSpec, API version 2024-06-01): generated with no generator change.
+All 17 calls of its three clients checked against a local Go program's
+requests and results (azcore v1.23.3), the long-running ones through
+poll_until_done.
+
 resourcemanager/containerregistry/armcontainerregistry v3.0.0, Go's
 armcontainerregistry/v3 v3.0.0 (registries, replications, webhooks,
 tokens, scope maps, cache rules, credential sets, connected registries;
