@@ -1,7 +1,12 @@
 # 0009: An effect parameter on TokenCredential, for credentials that read files
 
-Status: Proposed (Xo Azure 1, 2026-11-06; the lead's direction, for the
-owner to decide)
+Status: Accepted (owner, 2026-11-06, through the lead; proposed by Xo
+Azure 1, 2026-11-06). It depended on native support for XO1201 (a
+method of an effect-generic struct through an interface); Lang 1's fix
+is on xo main as fb952a75a (2026-11-06, golden `iface_effect_generic`),
+so the generic `BearerTokenPolicy[fx]` and `Pipeline[fx]` are built on
+an xo at that commit or later. No part of azcore is shipped for the Go
+backend only.
 
 ## Context
 

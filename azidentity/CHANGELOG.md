@@ -7,6 +7,46 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- ManagedIdentityCredential inside DefaultAzureCredential probes IMDS
+  first, as Go: a `GET` of the token endpoint with no query and no
+  `Metadata` header, 1 s, no retries. Any answer ends the probing; a
+  timeout is unavailable (`managed identity timed out. See
+  https://aka.ms/azsdk/go/identity/troubleshoot#dac for more
+  information`), another failure unavailable with its text, and either
+  probes again on the next call. The token request then has the normal
+  retries.
+- Managed identity errors are Go's: an IMDS 400 for a user-assigned
+  identity is the AuthenticationFailedError block opened by `the
+  requested identity isn't assigned to this resource`; for the system
+  identity it is unavailable (`failed to authenticate a system assigned
+  identity. The endpoint responded with <body>`); a 403 that says
+  `unreachable` is unavailable (`unexpected response "<body>"`, Docker
+  Desktop's proxy); other statuses are the AuthenticationFailedError
+  block, and a transport error is `ManagedIdentityCredential: <err>. To
+  troubleshoot, visit ...#managed-id`.
+- **Behavior change**: a managed identity token response is read as
+  MSAL Go reads it: `expires_on` (Unix seconds as a number or string,
+  or `01/02/2006 15:04:05`, `2006-01-02 15:04:05` or RFC 3339 in UTC)
+  wins over `expires_in`; `expires_in` and `refresh_in` are the value's
+  JSON text through strconv.Atoi (`"3600"` and `3600`, not `3600.5` or
+  `1e3`), with Go's `unix time(...) could not be converted ...` error;
+  names match without case and the last of a name wins. Without
+  `refresh_in` a token living over 2 hours refreshes at half its life.
+  A response with no `access_token` gives an empty token, which is not
+  cached (before: an error). A body that is not JSON, a bad value, or no
+  expiry is `error parsing the json error: ...`; under
+  DefaultAzureCredential, from IMDS, it is unavailable (something else
+  answers there), else the AuthenticationFailedError.
+- **Behavior change**: the managed identity request's query is sorted
+  by name, as MSAL Go encodes it, and Azure ML sends `clientid=` empty
+  for the system identity.
+- Differences: Go marks a credential as chained by its type
+  (DefaultAzureCredential and ChainedTokenCredential); Xo has no
+  downcast, so DefaultAzureCredential sets the new
+  `ManagedIdentityOptions.chained`, and a ManagedIdentityCredential put
+  in `new_chained_token_credential` by hand gets the standalone texts
+  unless `chained` is set. The aggregate error's own text is item (7).
+
 - `parse_certificates(data, password = "")` is Go's ParseCertificates:
   a PEM file, or a PKCS #12 file (`.pfx`) opened with `password`
   through std's `x509.parse_pkcs12` (3DES and 40 bit RC2, as Go's

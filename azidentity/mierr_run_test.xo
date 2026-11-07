@@ -1,0 +1,147 @@
+// Replays the Go program's managed identity error cases
+// (mivectors_test.xo) against a fake IMDS. Requests are read from
+// FakeNet's log, so a request FakeNet fails is listed as Go lists it.
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// `status|body` as a reply.
+fn mi_reply(spec: Str) -> http.Response {
+  let (st, body) = spec.cut("|") ?? (spec, "")
+  http.text(Int.parse(st) ?? 500, body)
+}
+
+/// The requests FakeNet saw from `from` on, as the Go program prints them.
+fn mi_reqs(net: testing.FakeNet, section: Str, from: Int) -> List[Str] {
+  var out: List[Str] = []
+  let rs = net.requests()
+  for i in from..rs.len() {
+    let r = rs[i]
+    var hs: List[Str] = []
+    for (k, v) in r.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" && lk != "host" {
+        hs.push("${lk}=${v}")
+      }
+    }
+    let qs = r.raw_query()
+    out = out + ["${section}: REQ ${r.method} http://169.254.169.254${r.escaped_path()}${if qs == "" { "" } else { "?${qs}" }}", "  H ${hs.sort().join(" | ")}", "  B ${r.body.to_str_lossy()}"]
+  }
+  out
+}
+
+fn mi_out(section: Str, label: Str, r: Result[azcore.AccessToken, azcore.AuthErr]) -> List[Str] {
+  match r {
+    Ok(t) => ["${section}: OUT ${label}: token=${t.token.reveal()} expires=<t>"]
+    Err(e) => {
+      let kind = if e.failed { "auth failed" } else { "error" }
+      let ls = e.display().split("\n")
+      ["${section}: OUT ${label}: ${kind}: ${ls[0]}"] + ls[1..ls.len()].map(fn(l: Str) -> Str { "${section}: | ${l}" })
+    }
+  }
+}
+
+const MI_TOKEN: Str = "{\"access_token\":\"mi-1\",\"expires_on\":\"1893456000\",\"resource\":\"https://vault.example.test\",\"token_type\":\"Bearer\"}"
+const NOT_FOUND: Str = "{\"error\":\"invalid_request\",\"error_description\":\"Identity not found\"}"
+
+/// One case: `probe` and `imds` answer the probe and the token request
+/// (`ERR` a transport error, `HANG` a timeout, else `status|body`); a
+/// `dac` case is the credential as DefaultAzureCredential builds it.
+fn mi_case(os: testing.TestOs, name: Str, probe: Str, imds: Str, id: UserAssigned?, dac: Bool, app: Bool) -> List[Str] {
+  let section = "mierr-${name}"
+  let token_url = if app { "GET http://169.254.169.254/msi/token" } else { "GET ${IMDS_ENDPOINT}" }
+  let calls = Atomic[Int].new(0)
+  os.net.handle("GET http://169.254.169.254/{rest...}", fn(req: http.Request) -> http.Response {
+    calls.add(1)
+    if req.raw_query() == "" { mi_reply(probe) } else { mi_reply(imds) }
+  })
+  let arm = fn(spec: Str) {
+    if spec == "ERR" {
+      os.net.fail_next(token_url, http.ClientErr.Connect("dial tcp 169.254.169.254:80: connect: host is down"))
+    } else if spec == "HANG" {
+      os.net.fail_next(token_url, http.ClientErr.Timeout)
+    }
+  }
+  let env = os.env
+  let m = new_managed_identity_credential(env.only(if app { ["IDENTITY_ENDPOINT", "IDENTITY_HEADER"] } else { [] }), os.net, os.clock, os.rand, ManagedIdentityOptions{id: id, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, probe: dac, chained: dac})
+  var out = ["${section}: NEW ${name}: <nil>"]
+  let rounds = if dac { [name, "${name} again"] } else { [name] }
+  for label in rounds {
+    let before = os.net.requests().len()
+    // a probe goes first while the credential is still probing
+    if dac && (label == name || probe == "ERR" || probe == "HANG") {
+      arm(probe)
+    }
+    arm(imds)
+    let r = m.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]})
+    os.net.clear_failures()
+    out = out + mi_reqs(os.net, section, before) + mi_out(section, label, r)
+  }
+  out
+}
+
+test "managed identity errors and DefaultAzureCredential's IMDS probe are Go's" {
+  var got: List[Str] = []
+  let cases: List[(Str, Str, Str, UserAssigned?, Bool, Bool)] = [
+    ("400-system", "", "400|${NOT_FOUND}", None, false, false),
+    ("400-client-id", "", "400|${NOT_FOUND}", Some(UserAssigned.ClientId("cid-1")), false, false),
+    ("400-empty", "", "400|", None, false, false),
+    ("403-unreachable", "", "403|connecting to 169.254.169.254:80: connecting to 169.254.169.254:80: dial tcp 169.254.169.254:80: connectex: A socket operation was attempted to an unreachable network.", None, false, false),
+    ("403-other", "", "403|{\"error\":\"forbidden\"}", None, false, false),
+    ("500", "", "500|{\"error\":\"server_error\"}", None, false, false),
+    ("not-json", "", "200|<html>hello</html>", None, false, false),
+    ("no-token", "", "200|{\"token_type\":\"Bearer\"}", None, false, false),
+    ("neterr", "", "ERR", None, false, false),
+    ("dac-probe-err", "ERR", "", None, true, false),
+    ("dac-probe-hang", "HANG", "", None, true, false),
+    ("dac-probe-400", "400|{\"error\":\"bad_request\"}", "200|${MI_TOKEN}", None, true, false),
+    ("dac-not-json", "400|{}", "200|<html>hello</html>", None, true, false),
+    ("dac-400-system", "400|{}", "400|${NOT_FOUND}", None, true, false),
+    ("dac-500", "400|{}", "500|{\"error\":\"server_error\"}", None, true, false),
+    ("403-unreachabl", "", "403|host unreachabl", None, false, false),
+    ("dac-no-token", "400|{}", "200|{\"token_type\":\"Bearer\"}", None, true, false),
+    ("no-access", "", "200|{\"expires_in\":\"3600\",\"token_type\":\"Bearer\"}", None, false, false),
+    ("dac-no-access", "400|{}", "200|{\"expires_in\":\"3600\",\"token_type\":\"Bearer\"}", None, true, false),
+    // App Service, its endpoint on the fake's host: no probe, and its
+    // errors are never IMDS's
+    ("app-400", "", "400|${NOT_FOUND}", None, false, true),
+    ("dac-app-not-json", "", "200|<html>hello</html>", None, true, true),
+  ]
+  os.env.set("IDENTITY_ENDPOINT", "http://169.254.169.254/msi/token")
+  os.env.set("IDENTITY_HEADER", "hdr-1")
+  for (name, probe, imds, id, dac, app) in cases {
+    got = got + mi_case(os, name, probe, imds, id, dac, app)
+  }
+  expect(got) == GO_MI_LINES
+}
+
+/// A time as miexpvectors_test.xo writes it: "now+N" seconds when within
+/// two days of now, else Unix seconds.
+fn mi_rel(t: Time, now: Time) -> Str {
+  let d = t.unix() - now.unix()
+  if d.abs() <= 172800 {
+    if d < 0 { "now${d}" } else { "now+${d}" }
+  } else {
+    "${t.unix()}"
+  }
+}
+
+test "managed identity token responses are read as MSAL Go reads them" {
+  for (body, want) in GO_MI_EXPIRY {
+    os.net.handle("GET http://169.254.169.254/{rest...}", fn(req: http.Request) -> http.Response { http.text(200, body) })
+    let m = new_managed_identity_credential(os.env.only([]), os.net, os.clock, os.rand, ManagedIdentityOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}})
+    let now = os.clock.now()
+    let got = match m.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]}) {
+      Ok(t) => {
+        let r = match t.refresh_on {
+          None => "none"
+          Some(r) if (r.unix() - (now.unix() + (t.expires_on.unix() - now.unix()) / 2)).abs() <= 1 => "half"
+          Some(r) => mi_rel(r, now)
+        }
+        "expires=${mi_rel(t.expires_on, now)} refresh=${r}"
+      }
+      Err(e) => e.display()
+    }
+    expect("${body} ${got}") == "${body} ${want}"
+  }
+}

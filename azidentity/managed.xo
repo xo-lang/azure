@@ -6,6 +6,10 @@
 // Service Fabric (it pins the server's certificate) and Azure Arc (it
 // reads a key file the server names) come later (decision 0003).
 
+use std/http
+use std/json
+use std/time
+use std/timego
 use std/url
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
@@ -30,15 +34,27 @@ pub enum UserAssigned {
 pub struct ManagedIdentityOptions {
   pub id: UserAssigned? = None
   pub client: policy.ClientOptions = policy.ClientOptions{}
-  /// Inside DefaultAzureCredential: one quick try at IMDS (1 s, no
-  /// retries), so a machine without it moves on.
+  /// Inside DefaultAzureCredential: before the first IMDS token request,
+  /// a probe (a GET with no query or Metadata header, 1 s, no retries);
+  /// any answer means IMDS is there, no answer means unavailable, and a
+  /// failed probe is tried again on the next call, as Go's.
   pub probe: Bool = false
+  /// In a chain (DefaultAzureCredential sets it): an IMDS answer that is
+  /// not JSON is unavailable, so the chain goes on (something else
+  /// listens there). Go's NewChainedTokenCredential sets this on any
+  /// ManagedIdentityCredential it is given; an Xo chain cannot see the
+  /// type of its sources, so a ChainedTokenCredential built by hand
+  /// leaves it as the credential was built.
+  pub chained: Bool = false
 }
 
 pub struct ManagedIdentityCredential {
   pub source: Source
   id: UserAssigned?
   pipeline: runtime.Pipeline
+  probe_pipeline: runtime.Pipeline
+  probing: Mutex[Bool]
+  chained: Bool
   clock: Clock
   cache: Mutex[List[(Str, azcore.AccessToken)]]
 }
@@ -60,14 +76,15 @@ pub fn source_of(env: Env) -> Source uses env {
 
 pub fn new_managed_identity_credential(env: Env, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential uses env {
   let src = source_of(env)
-  var client = opts.client
-  if opts.probe && src is Source.Imds {
-    client = client with {timeout: 1s, retry: client.retry with {max_retries: 0}}
-  } else {
-    // IMDS answers 404 and 410 while it starts (MSAL retries them)
-    client = client with {retry: client.retry with {status_codes: client.retry.status_codes + [404, 410]}}
+  // IMDS answers 404 and 410 while it starts (MSAL retries them)
+  let client = opts.client with {retry: opts.client.retry with {status_codes: opts.client.retry.status_codes + [404, 410]}}
+  let probe_client = opts.client with {timeout: 1s, retry: opts.client.retry with {max_retries: -1}}
+  ManagedIdentityCredential{
+    source: src, id: opts.id,
+    pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client),
+    probe_pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, probe_client),
+    probing: Mutex.new(opts.probe && src is Source.Imds), chained: opts.chained, clock: clock, cache: Mutex.new([]),
   }
-  ManagedIdentityCredential{source: src, id: opts.id, pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client), clock: clock, cache: Mutex.new([])}
 }
 
 /// The resource of a scope (`https://vault.azure.net/.default` is
@@ -79,23 +96,150 @@ pub fn resource_of(scopes: List[Str]) -> Str ! Str {
   Ok(scopes[0].trim_suffix("/.default"))
 }
 
-/// The request for `resource` from `src`.
+/// The request for `resource` from `src`, its query sorted by key as
+/// MSAL Go encodes it (url.Values.Encode).
 pub fn token_request(src: Source, id: UserAssigned?, resource: Str) -> policy.Request {
-  let r = url.query_escape(resource)
-  let ua = fn(names: (Str, Str, Str)) -> Str {
+  let ua = fn(names: (Str, Str, Str)) -> List[(Str, Str)] {
     match id {
-      Some(UserAssigned.ClientId(v)) => "&${names.0}=${url.query_escape(v)}"
-      Some(UserAssigned.ObjectId(v)) => "&${names.1}=${url.query_escape(v)}"
-      Some(UserAssigned.ResourceId(v)) => "&${names.2}=${url.query_escape(v)}"
-      None => ""
+      Some(UserAssigned.ClientId(v)) => [(names.0, v)]
+      Some(UserAssigned.ObjectId(v)) => [(names.1, v)]
+      Some(UserAssigned.ResourceId(v)) => [(names.2, v)]
+      None => []
     }
   }
-  match src {
-    Imds => policy.Request{method: "GET", url: "${IMDS_ENDPOINT}?api-version=2018-02-01&resource=${r}${ua(("client_id", "object_id", "msi_res_id"))}", headers: [("Metadata", "true")]}
-    AppService(endpoint, header) => policy.Request{method: "GET", url: "${endpoint}?api-version=2019-08-01&resource=${r}${ua(("client_id", "object_id", "mi_res_id"))}", headers: [("X-IDENTITY-HEADER", header.reveal())]}
-    AzureMl(endpoint, secret) => policy.Request{method: "GET", url: "${endpoint}?api-version=2017-09-01&resource=${r}${ua(("clientid", "object_id", "mi_res_id"))}", headers: [("secret", secret.reveal())]}
-    CloudShell(endpoint) => policy.Request{method: "POST", url: endpoint, headers: [("Metadata", "true"), ("Content-Type", "application/x-www-form-urlencoded")], body: "resource=${r}".bytes()}
+  let query = fn(pairs: List[(Str, Str)]) -> Str {
+    pairs.sort_by(fn(p: (Str, Str)) -> Str { p.0 }).map(fn(p: (Str, Str)) -> Str { "${url.query_escape(p.0)}=${url.query_escape(p.1)}" }).join("&")
   }
+  match src {
+    Imds => policy.Request{method: "GET", url: "${IMDS_ENDPOINT}?${query([("api-version", "2018-02-01"), ("resource", resource)] + ua(("client_id", "object_id", "msi_res_id")))}", headers: [("Metadata", "true")]}
+    AppService(endpoint, header) => policy.Request{method: "GET", url: "${endpoint}?${query([("api-version", "2019-08-01"), ("resource", resource)] + ua(("client_id", "object_id", "mi_res_id")))}", headers: [("X-IDENTITY-HEADER", header.reveal())]}
+    // Azure ML always sends clientid, empty for the system-assigned identity
+    AzureMl(endpoint, secret) => {
+      let extra = match id {
+        None => [("clientid", "")]
+        Some(_) => ua(("clientid", "object_id", "mi_res_id"))
+      }
+      policy.Request{method: "GET", url: "${endpoint}?${query([("api-version", "2017-09-01"), ("resource", resource)] + extra)}", headers: [("secret", secret.reveal())]}
+    }
+    CloudShell(endpoint) => policy.Request{method: "POST", url: endpoint, headers: [("Metadata", "true"), ("Content-Type", "application/x-www-form-urlencoded")], body: "resource=${url.query_escape(resource)}".bytes()}
+  }
+}
+
+const MI_NAME: Str = "ManagedIdentityCredential"
+
+/// azidentity's credentialUnavailableError: `<credential>: <msg>`; a
+/// chain goes on to its next credential.
+fn mi_unavailable(msg: Str) -> azcore.AuthErr {
+  azcore.AuthErr{credential: MI_NAME, msg: msg, text: "${MI_NAME}: ${msg}", unavailable: true}
+}
+
+/// The probe of a credential inside DefaultAzureCredential: Ok once
+/// something answers at IMDS (any status), and every call after that.
+fn (m: ManagedIdentityCredential) probe() -> () ! azcore.AuthErr uses (net.dial, clock, rand) {
+  if !m.probing.with_read(fn(p: Bool) -> Bool { p }) {
+    return Ok(())
+  }
+  match m.probe_pipeline.send(policy.Request{method: "GET", url: IMDS_ENDPOINT}) {
+    Ok(_) => {
+      m.probing.reset(false)
+      Ok(())
+    }
+    Err(policy.SendErr.Http(http.ClientErr.Timeout)) => Err(mi_unavailable("managed identity timed out. See https://aka.ms/azsdk/go/identity/troubleshoot#dac for more information"))
+    Err(e) => Err(mi_unavailable(e.display()))
+  }
+}
+
+/// MSAL Go's reading of a managed identity token response (its
+/// TokenResponse.UnmarshalJSON and authResultFromToken), with its only
+/// errors: a body that is not JSON, a bad duration or expires_on, or no
+/// expiry. Unlike the token endpoint's, a response without access_token
+/// gives an empty token.
+fn mi_token(resp: http.Response, now: Time) -> azcore.AccessToken ! Str {
+  let _ = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err("error parsing the json error: ${e.msg.trim_prefix("invalid JSON: ")}")
+  // encoding/json decodes the members in the body's order, matching
+  // names without case and the last of a name winning; the first bad
+  // duration ends the decoding. A duration reads the value's text.
+  var expires_in: Time? = None
+  var refresh: Time? = None
+  var expires_on: json.Value? = None
+  var token = ""
+  var r = json.tokens(resp.body)
+  if let Ok(Some(json.Token.ObjectStart)) = r.next() {
+    while r.more() {
+      let k = match r.next() {
+        Ok(Some(json.Token.Key(k))) => k.to_lower()
+        _ => break
+      }
+      let from = r.offset()
+      if r.skip().is_err() {
+        break
+      }
+      let raw = resp.body[from..r.offset()].to_str_lossy().trim().trim_prefix(":").trim()
+      if k == "expires_in" {
+        expires_in = Some(mi_duration(raw, now).map_err(fn(e: Str) -> Str { "error parsing the json error: ${e}" })?)
+      } else if k == "refresh_in" {
+        refresh = Some(mi_duration(raw, now).map_err(fn(e: Str) -> Str { "error parsing the json error: ${e}" })?)
+      } else if k == "expires_on" {
+        expires_on = json.parse_value(raw).ok()
+      } else if k == "access_token" {
+        if let Ok(json.Value.Str(t)) = json.parse_value(raw) {
+          token = t
+        }
+      }
+    }
+  }
+  let on: Time? = match expires_on {
+    Some(json.Value.Str(t)) if t != "" => match Int.parse(t) {
+      Some(n) => Some(Time.from_unix(n))
+      None => Some(mi_expires_on(t) ?? return Err("error parsing the json error: invalid ExpiresOn format: ${t}"))
+    }
+    Some(json.Value.Int(n)) => Some(Time.from_unix(n))
+    Some(json.Value.Num(f)) => Some(Time.from_unix(Int(f)))
+    _ => None
+  }
+  let expires = on ?? expires_in ?? return Err("error parsing the json error: expires_in and expires_on are both missing or invalid")
+  // without refresh_in, half the lifetime when that is over 2 hours
+  if refresh.is_none() && expires.unix_millis() - now.unix_millis() > 2 * 3600 * 1000 {
+    refresh = Some(Time.from_unix_millis(now.unix_millis() + (expires.unix_millis() - now.unix_millis()) / 2))
+  }
+  Ok(azcore.AccessToken{token: Secret.new(token), expires_on: expires, refresh_on: refresh})
+}
+
+/// MSAL Go's DurationTime: strconv.Atoi of the value's JSON text
+/// without its quotes, as seconds from now.
+fn mi_duration(raw: Str, now: Time) -> Time ! Str {
+  let text = raw.trim_chars("\"")
+  let n = Int.parse(text) ?? return Err("unix time(${raw}) could not be converted from string to int: strconv.Atoi: parsing ${json.encode_str(text)}: invalid syntax")
+  Ok(Time.from_unix_millis(now.unix_millis() + n * 1000))
+}
+
+/// The date forms MSAL Go accepts for expires_on, in UTC without an
+/// offset (MSAL .NET issue 4963).
+fn mi_expires_on(t: Str) -> Time? {
+  for layout in ["01/02/2006 15:04:05", "2006-01-02 15:04:05", "2006-01-02T15:04:05.999999999Z07:00"] {
+    if let Ok(at) = timego.parse(t, layout, time.utc()) {
+      return Some(at)
+    }
+  }
+  None
+}
+
+/// The error for a token request that did not give a token, as
+/// azidentity's managedIdentityClient.GetToken sorts MSAL's errors.
+fn (m: ManagedIdentityCredential) token_err(req: policy.Request, resp: http.Response) -> azcore.AuthErr {
+  let imds = m.source is Source.Imds
+  if imds && resp.status == 400 {
+    if m.id.is_some() {
+      return auth_failed(MI_NAME, req.method, req.url, resp, message: "the requested identity isn't assigned to this resource")
+    }
+    let body = resp.body.to_str_lossy()
+    return mi_unavailable("failed to authenticate a system assigned identity${if body == "" { "" } else { ". The endpoint responded with ${body}" }}")
+  }
+  if imds && resp.status == 403 && resp.body.to_str_lossy().contains("unreachable") {
+    // Docker Desktop's proxy answers IMDS with 403
+    return mi_unavailable("unexpected response ${json.encode_str(resp.body.to_str_lossy())}")
+  }
+  auth_failed(MI_NAME, req.method, req.url, resp)
 }
 
 pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
@@ -109,17 +253,25 @@ pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions
         return Ok(t)
       }
     }
-    let resp = match m.pipeline.send(token_request(m.source, m.id, resource)) {
-      Ok(r) => r
-      // no endpoint here: a chain tries the next credential
-      Err(e) => return Err(azcore.AuthErr{credential: name, msg: "no managed identity endpoint answered: ${e.display()}", unavailable: true})
+    m.probe()?
+    let req = token_request(m.source, m.id, resource)
+    let resp = m.pipeline.send(req) ?? e => return Err(failed_text(name, e.display()))
+    if resp.status < 200 || resp.status > 299 {
+      return Err(m.token_err(req, resp))
     }
-    if resp.status == 400 && m.source is Source.Imds && m.id.is_none() {
-      return Err(azcore.AuthErr{credential: name, msg: "IMDS has no system-assigned identity here (HTTP 400)", unavailable: true})
+    let t = mi_token(resp, now) ?? msg => {
+      if m.chained && m.source is Source.Imds {
+        // something other than IMDS answered: the chain goes on
+        return Err(mi_unavailable(msg))
+      }
+      return Err(failed_text(name, msg))
     }
-    let t = parse_token_response(name, resp, now)?
-    xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != resource })
-    xs.push((resource, t))
+    // MSAL Go never serves an empty token from its cache (its
+    // dac-no-access vector: the second call asks again)
+    if t.token.reveal() != "" {
+      xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != resource })
+      xs.push((resource, t))
+    }
     Ok(t)
   })
 }

@@ -13,4 +13,4 @@ deleted.
 - [0006](0006-xo-gaps.md): Xo gaps: AMQP 1.0, PKCS#12, JWT header fields, closures with effects, hex formatting (Accepted)
 - [0007](0007-license-and-hygiene.md): MIT, attribution to Microsoft's MIT sources, the trademark notice, no sensitive data, checks before every push (Accepted)
 - [0008](0008-continuous-integration.md): a weekly workflow: newest Xo, newest specs, every check, merge and tag on green, no Azure in CI (Accepted)
-- [0009](0009-token-credential-effects.md): an effect parameter on TokenCredential (decision 0534's pattern), so Azure Arc's managed identity can read its key file; needs the native backends to dispatch an effect-generic struct's method through an interface (Proposed)
+- [0009](0009-token-credential-effects.md): an effect parameter on TokenCredential (decision 0534's pattern), so Azure Arc's managed identity can read its key file; needs the native backends to dispatch an effect-generic struct's method through an interface (Accepted; the native support is on xo main as fb952a75a)
