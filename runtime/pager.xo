@@ -32,6 +32,9 @@ pub struct Pager[T, fx: Effects] {
   /// The error of a failed fetch: the pager's terminal state (azcore
   /// v1.23.0), `more` false and every later `next_page` this error.
   failed: azcore.CallErr? = None
+  /// For `new_next_link_pager`: the client endpoint a next link is sent
+  /// against (azcore's NewRequestForNextLink).
+  link_endpoint: Str? = None
 }
 
 /// The pager with `page` as its first page, fetched by its first
@@ -58,6 +61,21 @@ pub fn new_pager[T, fx: Effects](pipeline: Pipeline[fx], first: policy.Request, 
     // the first request's headers, Accept among them, are not sent again
     Some(policy.Request{method: "GET", url: encode_query(link)})
   })
+}
+
+/// A pager that GETs each page's next link as TypeSpec's Go emitter
+/// does (azcore's NewRequestForNextLink): the link's query encoded with
+/// a space as `%20`, a relative link joined to `endpoint`, and a link
+/// that does not parse failing the pager.
+pub fn new_next_link_pager[T, fx: Effects](pipeline: Pipeline[fx], first: policy.Request, decode: fn(http.Response) -> T ! Str, endpoint: Str, next_link: fn(T) -> Str?) -> Pager[T, fx] {
+  let p = new_pager_with(pipeline, first, decode, fn(prev: policy.Request, page: T) -> policy.Request? {
+    let link = next_link(page) ?? return None
+    if link == "" {
+      return None
+    }
+    Some(policy.Request{method: "GET", url: link})
+  })
+  p with {link_endpoint: Some(endpoint)}
 }
 
 /// A pager that sends the first request again with query parameter
@@ -94,8 +112,17 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
       return Ok(page)
     }
   }
-  let req = if !p.started { p.first } else {
+  var req = if !p.started { p.first } else {
     p.pending ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
+  }
+  if p.started {
+    if let Some(ep) = p.link_endpoint {
+      req = new_request_for_next_link("GET", ep, req.url) ?? e => {
+        let ce = azcore.CallErr.InvalidInput(e)
+        p.failed = Some(ce)
+        return Err(ce)
+      }
+    }
   }
   let page = match p.fetch(req) {
     Ok(v) => v

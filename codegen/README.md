@@ -9,7 +9,7 @@ every module and fails on any difference.
 ## Go's names, as autorest.go and TypeSpec's Go emitter make them
 
 Each rule below was found by diffing a generated module's names with
-Go's (armresources v1.2.0, armstorage v2.0.0, armcompute v7.3.0,
+Go's (armresources v1.2.0, armstorage v4.3.0, armcompute v7.3.0,
 armnetwork v9.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
 azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armnetwork's `Error` and armkeyvault's
@@ -102,7 +102,28 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   `field_types` key may name one model's field (`"certificate.id"`).
 - TypeSpec modules take Go's `@@clientName`/`@clientName` renames from
   the .tsp files, and `custom/<module>.toml` mirrors Go's own
-  post-generation transforms.
+  post-generation transforms. A decorator applies when its scope names
+  Go (`"go"`, `"go, java"`, `"csharp,go"`) or only negates others; a
+  dotted target under `Azure.` or `TypeSpec.` is a library type
+  (`Azure.ResourceManager.CommonTypes.Encryption` is `ArmEncryption` in
+  armstorage), any other `Model.Property` a field.
+- An ARM module from TypeSpec (an `openapi` row, armstorage v4) is
+  written as TypeSpec's Go emitter writes it: only the types operations
+  reach; a namespace-qualified definition key named by its last segment
+  (`Azure.ResourceManager.CommonTypes.KeyEncryptionKeyIdentity`); a
+  repeated word kept (`BlobServicePropertiesProperties`); a library
+  model that `@@alternateType` replaces with the project's model used in
+  its place (armstorage's `UserAssignedIdentity`); a client parameter's
+  empty-value error naming it bare (`subscriptionID`); Accept only when
+  a 2xx response has a body; the query's spaces as `%20`; and each next
+  page from `runtime.new_next_link_pager` (azcore's
+  NewRequestForNextLink: the link's query re-encoded with `%20`).
+- Documentation keeps the spec's text, except that a GUID in it (a
+  spec's example id, armstorage v4's `Ex: ...`) is written as the
+  all-zero GUID: the repository holds no ids.
+- Two definitions of one name are compared by shape; in a module that
+  keeps only reachable types, an allOf parent is compared by its own
+  shape, so comparing does not emit it.
 - A TypeSpec module's `@client({...}, "go") interface X { name is
   NS.Group.op; }` blocks name its Go operations: only the operations
   listed are generated, under those names, on one `Client` (azadmin's

@@ -31,6 +31,11 @@ pub struct Package {
   /// TypeSpec's Go emitter (custom `reachable_only`): responses carry
   /// their headers, and a HEAD operation fails on any status but its own.
   pub typespec: Bool = false
+  /// An ARM module that TypeSpec's Go emitter writes (an `openapi` row):
+  /// a client parameter's empty-value error names it bare
+  /// (`subscriptionID`), Accept is sent only when a 2xx response has a
+  /// body, and the query's spaces are `%20`.
+  pub tsp_arm: Bool = false
 }
 
 /// A string literal's contents.
@@ -40,8 +45,50 @@ pub fn esc(s: Str) -> Str {
 
 /// A one-line doc comment, or none.
 fn doc(indent: Str, text: Str) -> Str {
-  let t = text.replace("\r", "").replace("\n", " ").replace("\t", " ").trim()
+  let t = zero_guids(text.replace("\r", "").replace("\n", " ").replace("\t", " ").trim())
   if t == "" { "" } else { "${indent}/// ${t}\n" }
+}
+
+/// `s` with every GUID (8-4-4-4-12 hex digits) written as the all-zero
+/// GUID: a spec's example ids (`Ex: f83c6b1b-...`) are not copied into
+/// the repository's documentation.
+pub fn zero_guids(s: Str) -> Str {
+  let b = s.bytes()
+  let hex = fn(c: UInt8) -> Bool { (c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46) }
+  let groups = [8, 4, 4, 4, 12]
+  var out = ""
+  var last = 0
+  var i = 0
+  while i + 36 <= b.len() {
+    var j = i
+    var ok = i == 0 || !hex(b[i - 1])
+    for (k, g) in groups.indexed() {
+      if !ok {
+        break
+      }
+      for _ in 0..g {
+        if !hex(b[j]) {
+          ok = false
+          break
+        }
+        j += 1
+      }
+      if ok && k < 4 {
+        if b[j] != 0x2d {
+          ok = false
+        }
+        j += 1
+      }
+    }
+    if ok && (j == b.len() || !hex(b[j])) {
+      out = out + s[last..i] + "00000000-0000-0000-0000-000000000000"
+      last = j
+      i = j
+    } else {
+      i += 1
+    }
+  }
+  out + s[last..s.len()]
 }
 
 fn header(p: Package) -> Str {
@@ -292,7 +339,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   // autorest.go: Accept when any response, the error one too, has a
   // schema; TypeSpec's emitter: when the success response has a body
-  let accept = if p.data_plane { op.resp.is_some() || p.accept_always } else { op.accept }
+  let accept = if p.data_plane || p.tsp_arm { op.resp.is_some() || p.accept_always } else { op.accept }
   let accept_h = if accept { "(\"Accept\", \"${esc(accept_value(op))}\")" } else { "" }
   s = s + "  var q = url.values()\n  var headers: List[(Str, Str)] = [${accept_h}]\n"
   // a reserved (x-ms-skip-url-encoding) query parameter goes after the
@@ -334,7 +381,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   // joined as Go's code does (runtime.JoinPaths, which cleans the path:
   // `/{scope}/...` with scope `/keys` is `/keys/...`)
   let base = "\${runtime.join_paths(c.setup.endpoint, path)}"
-  let encoded = if p.query_pct20 { "q.encode().replace(\"+\", \"%20\")" } else { "q.encode()" }
+  let encoded = if p.query_pct20 || p.tsp_arm { "q.encode().replace(\"+\", \"%20\")" } else { "q.encode()" }
   let qs_expr = if has_raw { "([${encoded}] + raw_q).join(\"&\")" } else { encoded }
   s = s + "  let qs = ${qs_expr}\n  Ok(policy.Request{method: \"${op.method}\", url: \"${base}\${if qs == \"\" { \"\" } else { \"?\${qs}\" }}\", headers: headers, body: ${body}})\n}\n"
   let ok = op.ok.map(fn(n: Int) -> Str { "${n}" }).join(", ")
@@ -350,7 +397,7 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       (Some(nl), Some(t)) => if is_model(api, t) { "fn(r: ${rn}) -> Str? { r.${body_field(api, op)}.${snake(nl)} }" } else { "fn(r: ${rn}) -> Str? { None }" }
       _ => "fn(r: ${rn}) -> Str? { None }"
     }
-    s = s + "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n"
+    s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}))\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" })
   } else if op.lro && op.paged_lro {
     // Go's Poller[*Pager[T]]: the final response is the first page, and
     // the pager GETs each page's nextLink after it.
@@ -448,7 +495,7 @@ fn go_param_name(p: Package, x: Param) -> Str {
   if GO_KEYWORDS.contains(g) {
     g = g + "Param"
   }
-  if x.client { "client.${g}" } else { g }
+  if x.client && !p.tsp_arm { "client.${g}" } else { g }
 }
 
 /// autorest.go's parameter casing: the first word as written, its first

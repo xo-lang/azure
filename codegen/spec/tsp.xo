@@ -23,6 +23,9 @@ pub struct Renames {
   pub field_types: Map[Str, Str] = {}
   /// `@alternateType(Type, "go")` on a parameter: its wire name to Type.
   pub param_types: Map[Str, Str] = {}
+  /// `@@alternateType(Azure.X.Model, Project.Model, "go")`: a library
+  /// model (by its name) to the project's model that Go uses in its place.
+  pub model_types: Map[Str, Str] = {}
 }
 
 /// TypeSpec's scalar names as Xo types; a model or union keeps its name.
@@ -60,15 +63,37 @@ fn strip_namespace(target: Str, namespaces: List[Str]) -> Str {
   if best == "" { target } else { target[best.len() + 1..target.len()] }
 }
 
+/// A decorator's scope (`"go"`, `"go, java"`, `"csharp,go"`, `"!csharp"`)
+/// covers Go: Go is listed, or only negations are and Go's is not.
+fn for_go(scope: Str) -> Bool {
+  let parts = scope.split(",").map(fn(s: Str) -> Str { s.trim() }).filter(fn(s: Str) -> Bool { s != "" })
+  if parts.contains("go") {
+    return true
+  }
+  !parts.is_empty() && parts.all(fn(s: Str) -> Bool { s.starts_with("!") }) && !parts.contains("!go")
+}
+
+/// A dotted target naming a library type
+/// (`Azure.ResourceManager.CommonTypes.Encryption`), not a property
+/// (`Contact.EmailAddress`, whose property is capitalized too).
+fn names_type(target: Str) -> Bool {
+  if !target.starts_with("Azure.") && !target.starts_with("TypeSpec.") {
+    return false
+  }
+  let last = target.split(".").last() ?? ""
+  last != "" && last[0..1] >= "A" && last[0..1] <= "Z"
+}
+
 /// The Go renames in `texts` (the project's .tsp files).
 pub fn renames(texts: List[Str]) -> Renames ! Str {
-  let aug = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
-  let inline = regexp.compile("(?:^|[^@])@clientName\\(\\s*\"([^\"]+)\"\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
+  let aug = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
+  let inline = regexp.compile("(?:^|[^@])@clientName\\(\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let loc = regexp.compile("@(?:path|query|header)\\(\\s*\"([^\"]+)\"") ?? e => return Err(e.display())
-  let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*,\\s*\"go\"\\s*\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
+  let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
-  let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
-  let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
+  let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let alt_model = regexp.compile("@@alternateType\\(\\s*(Azure\\.[A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   // `Namespace.op` names the operation: the project's namespaces, from
   // every file, are stripped from a target before it is read.
@@ -84,7 +109,11 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   var r = Renames{}
   for text in texts {
     for whole in client.find_all(text) {
-      let body = (client.captures(whole) ?? continue)[1] ?? ""
+      let cc = client.captures(whole) ?? continue
+      if !for_go(cc[1] ?? "") {
+        continue
+      }
+      let body = cc[2] ?? ""
       for m in member.find_all(body) {
         let c = member.captures(m) ?? continue
         let name = c[1] ?? ""
@@ -95,17 +124,34 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
     for whole in alt_field.find_all(text) {
       let m = alt_field.captures(whole) ?? continue
+      if !for_go(m[3] ?? "") {
+        continue
+      }
       r.field_types[m[1] ?? ""] = xo_type(m[2] ?? "")
+    }
+    for whole in alt_model.find_all(text) {
+      let m = alt_model.captures(whole) ?? continue
+      let from = m[1] ?? ""
+      let to = m[2] ?? ""
+      if for_go(m[3] ?? "") && names_type(from) && (to.split(".").last() ?? "").len() > 0 && to.split(".").last().map(fn(s: Str) -> Bool { s[0..1] >= "A" && s[0..1] <= "Z" }) == Some(true) {
+        r.model_types[from.split(".").last() ?? from] = to.split(".").last() ?? to
+      }
     }
     for whole in alt_param.find_all(text) {
       let m = alt_param.captures(whole) ?? continue
-      r.param_types[m[2] ?? ""] = xo_type(m[1] ?? "")
+      if !for_go(m[2] ?? "") {
+        continue
+      }
+      r.param_types[m[3] ?? ""] = xo_type(m[1] ?? "")
     }
     for whole in aug.find_all(text) {
       let m = aug.captures(whole) ?? continue
+      if !for_go(m[3] ?? "") {
+        continue
+      }
       let target = strip_namespace(m[1] ?? "", namespaces)
       let name = m[2] ?? ""
-      if target.contains(".") {
+      if target.contains(".") && !names_type(target) {
         r.fields[target] = name
       } else if target != "" && target[0..1] >= "a" && target[0..1] <= "z" {
         r.ops[target.to_lower()] = name
@@ -117,6 +163,9 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     // comment end and its declaration.
     for seg in text.replace("{", ";").replace("*/", ";").split(";") {
       let m = inline.captures(seg) ?? continue
+      if !for_go(m[2] ?? "") {
+        continue
+      }
       let w = loc.captures(seg) ?? continue
       r.params[w[1] ?? ""] = m[1] ?? ""
     }

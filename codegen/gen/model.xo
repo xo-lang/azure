@@ -152,6 +152,13 @@ pub struct Custom {
   /// enum with one value is that string (a required parameter, a
   /// constant), not a type.
   pub seal_single_value_enums: Bool = false
+  /// A module TypeSpec emits: a definition key qualified by a namespace
+  /// (`Azure.ResourceManager.CommonTypes.Encryption`) is named by its
+  /// last segment, the TypeSpec type's own name, as Go's emitter does.
+  pub tsp: Bool = false
+  /// A common-types model (by name) to the project's model Go uses in
+  /// its place (`@@alternateType`: armstorage's UserAssignedIdentity).
+  pub alt_models: Map[Str, Str] = {}
   /// Enum values Go's transforms delete, by enum: wire values.
   pub drop_values: Map[Str, List[Str]] = {}
   /// A data-plane module: operations without a group stay on its Client.
@@ -164,6 +171,8 @@ pub struct Custom {
 pub struct Builder {
   custom: Custom = Custom{}
   files: Map[Str, json.Value]
+  /// The first input file (build's).
+  primary: Str = ""
   models: List[Model] = []
   enums: List[StrEnum] = []
   /// Each string enum's values with their sort keys, so a second
@@ -209,7 +218,13 @@ fn dedup_words(s: Str) -> Str {
 /// An x-ms-enum's type name: Go keeps the package name in it
 /// (armstorage's StorageAccountExpand).
 fn (b: Builder) enum_name(s: Str) -> Str {
-  b.custom.models.get(s).map(fn(r: Str) -> Str { reserve(r) }) ?? pascal(s)
+  b.custom.models.get(s).map(fn(r: Str) -> Str { reserve(r) }) ?? pascal(b.local(s))
+}
+
+/// A TypeSpec module's namespace-qualified definition key without its
+/// namespace; any other name as it is.
+fn (b: Builder) local(s: Str) -> Str {
+  if b.custom.tsp && s.contains(".") { s.split(".").last() ?? s } else { s }
 }
 
 /// `n` without the package name in front (when more follows it).
@@ -229,7 +244,8 @@ fn (b: Builder) type_name(s: Str, dedup: Bool = true) -> Str {
   if let Some(r) = b.custom.models.get(s) {
     return reserve(r)
   }
-  let n = pascal(if dedup { dedup_words(s) } else { s })
+  let l = b.local(s)
+  let n = pascal(if dedup && !b.custom.tsp { dedup_words(l) } else { l })
   let k = b.stutter.len()
   if k > 0 && n.len() > k && n[0..k].to_lower() == b.stutter {
     let rest = n[k..n.len()]
@@ -294,10 +310,24 @@ fn (b: Builder) deref(file: Str, v: json.Value) -> (Str, Str, json.Value) {
   (f, p, x)
 }
 
+/// A common-types definition that `@@alternateType` replaces: the
+/// project's definition of the name it gives, in the first input file.
+fn (b: Builder) alt_model(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Value) {
+  if !f.contains("/common-types/") || !p.starts_with("/definitions/") {
+    return (f, p, x)
+  }
+  let to = b.custom.alt_models.get(spec.last(p)) ?? return (f, p, x)
+  let np = "/definitions/${to}"
+  let doc = b.files.get(b.primary) ?? return (f, p, x)
+  let nx = spec.at(doc, np) ?? return (f, p, x)
+  (b.primary, np, nx)
+}
+
 /// The Xo type of a schema; `hint` names an inline object.
 pub fn (var b: Builder) type_of(file: Str, v: json.Value, hint: Str) -> Str {
   if str_of(v.get("$ref")) != "" {
-    let (f, p, x) = b.deref(file, v)
+    let (f0, p0, x0) = b.deref(file, v)
+    let (f, p, x) = b.alt_model(f0, p0, x0)
     if p.starts_with("/definitions/") {
       let t = b.named(f, spec.last(p), x)
       // A struct with a discriminator stands for its subtypes too.
@@ -373,6 +403,28 @@ fn (var b: Builder) strip_docs(file: Str, v: json.Value) -> json.Value {
       var out: List[(Str, json.Value)] = []
       for (k, x) in fs.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }) {
         if k == "description" || k == "title" || k == "x-ms-examples" {
+          continue
+        }
+        // a reachable-only module emits no allOf parent: compare the
+        // parent's own shape, not the type it would be
+        if k == "allOf" && b.custom.reachable_only {
+          var ps: List[json.Value] = []
+          for parent in list_of(Some(x)) {
+            if str_of(parent.get("$ref")) != "" {
+              let (pf, pp, pv) = b.deref(file, parent)
+              let id = "${pf}#${spec.last(pp)}"
+              if b.shaping.contains(id) {
+                ps.push(json.Value.Str(id))
+              } else {
+                b.shaping.push(id)
+                ps.push(b.strip_docs(pf, pv))
+                b.shaping.pop()
+              }
+            } else {
+              ps.push(b.strip_docs(file, parent))
+            }
+          }
+          out.push((k, json.Value.List(ps)))
           continue
         }
         if k == "$ref" {
@@ -691,6 +743,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
 
 /// The package's operations from `files` (its input files).
 pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
+  b.primary = inputs.get(0) ?? ""
   var ops: List[Op] = []
   var version = ""
   // The default group (operations without one) is named after the

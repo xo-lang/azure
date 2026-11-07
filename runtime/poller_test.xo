@@ -183,3 +183,28 @@ test "an empty first Azure-AsyncOperation field is no async operation, as azcore
   var p = new_poller(pl(os.net, os.clock, os.rand), req, first, "", "armtest.RestartResponse", name_of)?
   expect(p.poll_until_done(os.clock, frequency: 1s)?) == "l25"
 }
+
+test "a next link pager sends each link as NewRequestForNextLink makes it" {
+  let seen = Mutex[List[Str]].new([])
+  os.net.handle("GET ${BASE}/n/{rest...}", fn(r: http.Request) -> http.Response {
+    let q = r.raw_query()
+    seen.with(fn(var xs: List[Str]) { xs.push("${r.escaped_path()}?${q}") })
+    match r.escaped_path() {
+      "/n/first" => http.text(200, "{\"value\":[{\"name\":\"a\"}],\"nextLink\":\"${BASE}/n/two?skip=a b&api-version=1\"}")
+      "/n/two" => http.text(200, "{\"value\":[{\"name\":\"b\"}],\"nextLink\":\"/n/three?x=1\"}")
+      _ => http.text(200, "{\"value\":[{\"name\":\"c\"}],\"nextLink\":\"/n/four?a=%zz\"}")
+    }
+  })
+  var p = new_next_link_pager(pl(os.net, os.clock, os.rand), policy.Request{method: "GET", url: "${BASE}/n/first"}, page_of, BASE, fn(pg: Page) -> Str? { pg.next })
+  var all: List[Str] = []
+  for _ in 0..3 {
+    all = all + p.next_page()?.names
+  }
+  expect(all) == ["a", "b", "c"]
+  // the space as %20, the query sorted; a relative link on the endpoint
+  expect(seen.with_read(fn(xs: List[Str]) -> List[Str] { xs })) == ["/n/first?", "/n/two?api-version=1&skip=a%20b", "/n/three?x=1"]
+  // a link whose query does not decode fails the pager, with no request
+  expect(p.next_page().is_err()) == true
+  expect(p.more()) == false
+  expect(seen.with_read(fn(xs: List[Str]) -> Int { xs.len() })) == 3
+}

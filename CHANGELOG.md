@@ -89,6 +89,31 @@ Go's CHANGELOG for v1.5.1 says the API version can be selected
 here `ClientOptions.client.api_version`, which sends it as Go does (a
 vector with `2025-07-01`).
 
+**Breaking**: `resourcemanager/storage/armstorage` matches Go's
+armstorage/v4 v4.3.0, which Go now generates from TypeSpec (API version
+2026-09-01; Microsoft.Storage/Storage at the commit of Go's
+tsp-location.yaml). Checked against Go's module: all 139 operations'
+requests, all 299 models' JSON keys, every type name and all 108 enums
+with their values and order equal; its Go-backed vectors re-recorded
+from v4.3.0. The Xo module path is unchanged (nothing is tagged,
+decision 0001).
+
+The generator, for ARM modules from TypeSpec (`codegen/README.md` has
+the rules): only reachable types; library definitions named by their
+TypeSpec name; repeated words kept; model-level `@@alternateType`;
+`subscriptionID` in the empty-parameter error; Accept only with a 2xx
+body; `%20` in queries; decorator scope lists (`"go, java"`). A GUID in
+a spec's documentation is written as the all-zero GUID. Of the
+other modules only azappconfig's generated layer changes: its error
+types are `ErrorModel` and `InnerError` (were
+`AzureCoreFoundationsError` and `AzureCoreFoundationsInnerError`),
+Go's `Error` and `InnerError` by the `Model` rule.
+
+`runtime.new_next_link_pager`: a pager whose next requests are azcore's
+NewRequestForNextLink (the link's query re-encoded with a space as
+`%20`, a relative link joined to the endpoint, a link that does not
+parse failing the pager), as TypeSpec's Go emitter pages.
+
 **Breaking**: three ARM modules follow Go's next major (the Xo module
 paths are unchanged: no module has been tagged, decision 0001):
 

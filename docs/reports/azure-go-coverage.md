@@ -88,7 +88,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v1.5.0 (behind v2.1.0) | 0 + 3981 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v9.0.0 (behind v12.1.0) | 0 + 55189 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v1.2.0 (behind v4.0.0) | 0 + 5395 gen |  |
-| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v2.0.0 (behind v4.3.0) | 0 + 9741 gen |  |
+| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
 ## ARM modules not ported (302)
 
