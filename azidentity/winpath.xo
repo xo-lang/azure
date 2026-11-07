@@ -1,0 +1,282 @@
+// Go's path/filepath as it is on Windows (Copyright 2010 The Go Authors,
+// BSD license; NOTICE.md): Clean, Dir, Base, Ext and Join, from
+// internal/filepathlite and path/filepath's join. MSAL Go builds Azure
+// Arc's Windows token directory with Join and checks the key file the
+// agent names with Base, Ext and Dir, so the port does the same on every
+// OS: `winpath_vectors_test.xo` holds Go's results for these inputs.
+//
+// Paths are bytes, as in Go; every place a path is cut is at an ASCII
+// separator, a dot or a colon, so slicing a Str there is safe.
+
+fn win_sep(c: UInt8) -> Bool {
+  c == 0x2f || c == 0x5c
+}
+
+fn win_upper(c: UInt8) -> UInt8 {
+  if c >= 0x61 && c <= 0x7a { c - 0x20 } else { c }
+}
+
+/// pathHasPrefixFold: `s` starts with `prefix` ignoring case, any
+/// separator matching any, and the prefix ends at a separator or the end.
+fn win_has_prefix_fold(s: Str, prefix: Str) -> Bool {
+  let b = s.bytes()
+  let p = prefix.bytes()
+  if b.len() < p.len() {
+    return false
+  }
+  var i = 0
+  while i < p.len() {
+    if win_sep(p[i]) {
+      if !win_sep(b[i]) {
+        return false
+      }
+    } else if win_upper(p[i]) != win_upper(b[i]) {
+      return false
+    }
+    i = i + 1
+  }
+  !(b.len() > p.len() && !win_sep(b[p.len()]))
+}
+
+/// uncLen: the length of a UNC path's volume, `\\host\share`, the host
+/// starting at `prefix_len`.
+fn win_unc_len(s: Str, prefix_len: Int) -> Int {
+  let b = s.bytes()
+  var count = 0
+  var i = prefix_len
+  while i < b.len() {
+    if win_sep(b[i]) {
+      count = count + 1
+      if count == 2 {
+        return i
+      }
+    }
+    i = i + 1
+  }
+  b.len()
+}
+
+/// volumeNameLen: a drive (`C:`), a UNC volume (`\\host\share`), or a
+/// device path's prefix (`\\.\X`, `\\?\X`, `\??\X`, `\\.\UNC\host\share`).
+fn win_volume_len(s: Str) -> Int {
+  let b = s.bytes()
+  let n = b.len()
+  if n >= 2 && b[1] == 0x3a {
+    return 2
+  }
+  if n == 0 || !win_sep(b[0]) {
+    return 0
+  }
+  if win_has_prefix_fold(s, "\\\\.\\UNC") {
+    return win_unc_len(s, 8)
+  }
+  if win_has_prefix_fold(s, "\\\\.") || win_has_prefix_fold(s, "\\\\?") || win_has_prefix_fold(s, "\\??") {
+    if n == 3 {
+      return 3
+    }
+    var i = 4
+    while i < n {
+      if win_sep(b[i]) {
+        return i
+      }
+      i = i + 1
+    }
+    return n
+  }
+  if n >= 2 && win_sep(b[1]) {
+    return win_unc_len(s, 2)
+  }
+  0
+}
+
+fn win_from_slash(s: Str) -> Str {
+  s.replace("/", "\\")
+}
+
+/// Go's lazybuf: the output so far, and whether it has stopped being a
+/// prefix of the input (postClean looks only at an output that has).
+struct WinBuf {
+  path: Str
+  out: Str
+  diverged: Bool
+}
+
+fn (var b: WinBuf) push(s: Str) {
+  if !b.diverged {
+    let w = b.out.len()
+    let pb = b.path.bytes()
+    if !(w + s.len() <= pb.len() && pb[w..w + s.len()] == s.bytes()) {
+      b.diverged = true
+    }
+  }
+  b.out = b.out + s
+}
+
+/// filepath.Clean on Windows.
+fn win_clean(path: Str) -> Str {
+  let vol_len = win_volume_len(path)
+  let p = path[vol_len..]
+  if p == "" {
+    let ob = path.bytes()
+    if vol_len > 1 && win_sep(ob[0]) && win_sep(ob[1]) {
+      return win_from_slash(path)
+    }
+    return path + "."
+  }
+  let pb = p.bytes()
+  let n = pb.len()
+  let rooted = win_sep(pb[0])
+  var out = WinBuf{path: p, out: "", diverged: false}
+  var r = 0
+  var dotdot = 0
+  if rooted {
+    out.push("\\")
+    r = 1
+    dotdot = 1
+  }
+  while r < n {
+    if win_sep(pb[r]) {
+      r = r + 1
+    } else if pb[r] == 0x2e && (r + 1 == n || win_sep(pb[r + 1])) {
+      r = r + 1
+    } else if pb[r] == 0x2e && pb[r + 1] == 0x2e && (r + 2 == n || win_sep(pb[r + 2])) {
+      r = r + 2
+      if out.out.len() > dotdot {
+        let ob = out.out.bytes()
+        var w = out.out.len() - 1
+        while w > dotdot && !win_sep(ob[w]) {
+          w = w - 1
+        }
+        out.out = out.out[..w]
+      } else if !rooted {
+        if out.out.len() > 0 {
+          out.push("\\")
+        }
+        out.push("..")
+        dotdot = out.out.len()
+      }
+    } else {
+      if rooted && out.out.len() != 1 || !rooted && out.out.len() != 0 {
+        out.push("\\")
+      }
+      let start = r
+      while r < n && !win_sep(pb[r]) {
+        r = r + 1
+      }
+      out.push(p[start..r])
+    }
+  }
+  if out.out.len() == 0 {
+    out.push(".")
+  }
+  // postClean: keep a relative path from becoming a drive or a root
+  // local device path
+  var res = out.out
+  if vol_len == 0 && out.diverged {
+    let ob = res.bytes()
+    var i = 0
+    var colon = false
+    while i < ob.len() && !win_sep(ob[i]) {
+      if ob[i] == 0x3a {
+        colon = true
+        break
+      }
+      i = i + 1
+    }
+    if colon {
+      res = ".\\" + res
+    } else if ob.len() >= 3 && win_sep(ob[0]) && ob[1] == 0x3f && ob[2] == 0x3f {
+      res = "\\." + res
+    }
+  }
+  win_from_slash(path[..vol_len] + res)
+}
+
+/// filepath.VolumeName on Windows.
+fn win_volume_name(path: Str) -> Str {
+  win_from_slash(path[..win_volume_len(path)])
+}
+
+/// filepath.Dir on Windows.
+fn win_dir(path: Str) -> Str {
+  let vol = win_volume_name(path)
+  let b = path.bytes()
+  var i = b.len() - 1
+  while i >= vol.len() && !win_sep(b[i]) {
+    i = i - 1
+  }
+  let dir = win_clean(path[vol.len()..i + 1])
+  if dir == "." && vol.len() > 2 {
+    return vol
+  }
+  vol + dir
+}
+
+/// filepath.Base on Windows.
+fn win_base(path: Str) -> Str {
+  if path == "" {
+    return "."
+  }
+  var p = path
+  while p.len() > 0 && win_sep(p.bytes()[p.len() - 1]) {
+    p = p[..p.len() - 1]
+  }
+  p = p[win_volume_name(p).len()..]
+  let b = p.bytes()
+  var i = b.len() - 1
+  while i >= 0 && !win_sep(b[i]) {
+    i = i - 1
+  }
+  if i >= 0 {
+    p = p[i + 1..]
+  }
+  if p == "" {
+    return "\\"
+  }
+  p
+}
+
+/// filepath.Ext on Windows.
+fn win_ext(path: Str) -> Str {
+  let b = path.bytes()
+  var i = b.len() - 1
+  while i >= 0 && !win_sep(b[i]) {
+    if b[i] == 0x2e {
+      return path[i..]
+    }
+    i = i - 1
+  }
+  ""
+}
+
+/// filepath.Join on Windows.
+fn win_join(elems: List[Str]) -> Str {
+  var s = ""
+  var last: UInt8? = None
+  for e0 in elems {
+    var e = e0
+    if s.len() == 0 {
+      // the first non-empty element is added as it is
+    } else if last.map(win_sep) ?? false {
+      while e.len() > 0 && win_sep(e.bytes()[0]) {
+        e = e[1..]
+      }
+      if s.len() == 1 && e.starts_with("??") && (e.len() == 2 || win_sep(e.bytes()[2])) {
+        s = s + ".\\"
+      }
+    } else if last == Some(0x3a) {
+      // `C:` and `f` join as `C:f`
+    } else {
+      s = s + "\\"
+      last = Some(0x5c)
+    }
+    if e.len() > 0 {
+      s = s + e
+      last = Some(e.bytes()[e.len() - 1])
+    }
+  }
+  if s.len() == 0 {
+    return ""
+  }
+  win_clean(s)
+}

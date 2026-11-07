@@ -7,6 +7,37 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- ManagedIdentityCredential supports Azure Arc (gap item 11; decision
+  0009). It is selected after App Service, Azure ML and Cloud Shell, when
+  `IDENTITY_ENDPOINT` and `IMDS_ENDPOINT` are set or the agent's himds
+  file exists. The credential then makes MSAL Go's two requests: a `GET`
+  of `IDENTITY_ENDPOINT` (else `http://127.0.0.1:40342/...`, keeping the
+  endpoint's own query) with `api-version=2020-06-01`, answered 401 with
+  `WWW-Authenticate: Basic realm=<path>`; then the same request with
+  `Authorization: Basic <key>`. The key file must be a `.key` file
+  directly in the token directory (`/var/opt/azcmagent/tokens`, or
+  `%ProgramData%\AzureConnectedMachineAgent\Tokens` joined as Go's
+  filepath on Windows) and at most 4096 bytes. Each failure is MSAL Go's
+  text. A user-assigned identity must be confirmed in the token response
+  (`client_id`, `object_id`, or `msi_res_id` then `mi_res_id`, compared
+  ignoring case), as in MSAL Go v1.10.1. The 49 Go cases are in
+  `arcvectors_test.xo`.
+- **Breaking**: `new_managed_identity_credential` takes an `Fs` after
+  `env`, and the credential is a `TokenCredential[fs.read]` (it may read
+  Arc's key file). `DefaultAzureCredential` is a
+  `ChainedTokenCredential[fs.read]`. `ChainedTokenCredential[fx]` is as
+  effectful as its sources, and a chain without managed identity stays
+  `[()]`. New options `arc_token_dir` and `arc_himds` replace the
+  platform's paths (tests point them at MemFs).
+- Differs from Go on purpose: on Linux, a key path through `..` is
+  refused (`invalid file path, expected a file in <dir> named without ..,
+  got <path>`). Go checks the path by its text and then lets the OS
+  resolve `..`, which can leave the token directory through a link. If
+  the directory before `..` is missing, the error is still Go's stat
+  error. Not ported: Go's `couldn't parse` error for an IDENTITY_ENDPOINT
+  that is not a URL (here the text before `?` is the base), and the text
+  of OS errors on Windows (they are the Linux ones).
+
 - ManagedIdentityCredential inside DefaultAzureCredential probes IMDS
   first, as Go: a `GET` of the token endpoint with no query and no
   `Metadata` header, 1 s, no retries. Any answer ends the probing; a

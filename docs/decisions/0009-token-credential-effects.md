@@ -145,6 +145,12 @@ natively:
 A generic `ChainedTokenCredential[fx]` dispatched through
 `TokenCredential` does not.
 
+With fb952a75a it does: azidentity's `ChainedTokenCredential[fx]` is
+generic, and DefaultAzureCredential is a
+`ChainedTokenCredential[fs.read]` holding the Arc-capable managed
+identity credential (2026-11-06, gap item 11; native, LLVM and Go
+backends).
+
 ## Call-site check (2026-11-06, on xo fb952a75a)
 
 Before azcore's types change, azblob was moved to this shape on a

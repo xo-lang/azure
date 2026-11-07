@@ -1,0 +1,175 @@
+// Replays the Go program's Azure Arc cases (arcvectors_test.xo) against a
+// fake Arc agent on FakeNet, the token directory and the himds file on
+// the test's MemFs (never the machine's). Requests are read from
+// FakeNet's log, so a request FakeNet fails is listed as Go lists it.
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const ARC_TOKENS: Str = "/tokens"
+
+/// `status|WWW-Authenticate|body` (`www` true) or `status|body` as a
+/// reply.
+fn arc_reply(spec: Str, www: Bool) -> http.Response {
+  let parts = spec.split_n("|", 3)
+  let code = Int.parse(parts[0]) ?? 500
+  if !www || parts.len() == 2 {
+    return http.text(code, parts[1]).with_header("Content-Type", "application/json")
+  }
+  let r = http.text(code, parts[2]).with_header("Content-Type", "application/json")
+  if parts[1] == "" { r } else { r.with_header("WWW-Authenticate", parts[1]) }
+}
+
+/// The requests FakeNet saw from `from` on, as the Go program prints them.
+fn arc_reqs(net: testing.FakeNet, section: Str, from: Int) -> List[Str] {
+  var out: List[Str] = []
+  let rs = net.requests()
+  for i in from..rs.len() {
+    let r = rs[i]
+    var hs: List[Str] = []
+    for (k, v) in r.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" && lk != "host" {
+        hs.push("${lk}=${v}")
+      }
+    }
+    let qs = r.raw_query()
+    out = out + ["${section}: REQ ${r.method} http://${r.url.host}${r.url.port.map(fn(n: Int) -> Str { ":${n}" }) ?? ""}${r.escaped_path()}${if qs == "" { "" } else { "?${qs}" }}", "  H ${hs.sort().join(" | ")}"]
+  }
+  out
+}
+
+fn arc_case(os: testing.TestOs, c: ArcCase) -> List[Str] {
+  let section = "arc-${c.name}"
+  let fs = os.fs
+  fs.remove_all(ARC_TOKENS) ?? _ => ()
+  for (name, data) in c.files {
+    fs.write("${ARC_TOKENS}/${name}", data.bytes()) ?? e => return ["${section}: write ${e.display()}"]
+  }
+  if c.himds {
+    fs.write("${ARC_TOKENS}/himds", b"") ?? e => return ["${section}: write ${e.display()}"]
+  }
+  let endpoint = if c.endpoint == "" { ARC_ENDPOINT } else { c.endpoint }
+  let token_url = "GET ${endpoint.cut("?").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? endpoint}"
+  let refused = http.ClientErr.Connect("dial tcp 127.0.0.1:40342: connect: connection refused")
+  let reply = fn(req: http.Request) -> http.Response {
+    if req.headers.get("Authorization").is_some() {
+      arc_reply(c.arc2, false)
+    } else {
+      // the next request is the one with the key
+      if c.arc2 == "ERR" {
+        os.net.fail_next(token_url, refused)
+      }
+      arc_reply(c.arc1, true)
+    }
+  }
+  os.net.handle("GET http://127.0.0.1:40342/{rest...}", reply)
+  os.net.handle("GET http://arc.example.test:40342/{rest...}", reply)
+  // anything else is IMDS, which the Go program answers 500
+  os.net.handle("GET http://169.254.169.254/{rest...}", fn(req: http.Request) -> http.Response { http.text(500, "{\"error\":\"imds\"}") })
+  if c.arc1 == "ERR" {
+    os.net.fail_next(token_url, refused)
+  }
+  let env = os.env
+  env.set("IDENTITY_ENDPOINT", endpoint)
+  env.set("IMDS_ENDPOINT", "http://127.0.0.1:40342")
+  let id = match c.id_kind {
+    "client" => Some(UserAssigned.ClientId(c.id))
+    "object" => Some(UserAssigned.ObjectId(c.id))
+    "resource" => Some(UserAssigned.ResourceId(c.id))
+    _ => None
+  }
+  let m = new_managed_identity_credential(env.only(if c.env { ["IDENTITY_ENDPOINT", "IMDS_ENDPOINT"] } else { [] }), fs, os.net, os.clock, os.rand, ManagedIdentityOptions{
+    id: id, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}},
+    probe: c.dac, chained: c.dac, arc_token_dir: Some(ARC_TOKENS), arc_himds: Some("${ARC_TOKENS}/himds"),
+  })
+  let before = os.net.requests().len()
+  let r = m.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]})
+  os.net.clear_failures()
+  ["${section}: NEW ${c.name}: <nil>"] + arc_reqs(os.net, section, before) + mi_out(section, c.name, r)
+}
+
+test "Azure Arc managed identity is MSAL Go's" {
+  var got: List[Str] = []
+  for c in GO_ARC_CASES {
+    got = got + arc_case(os, c)
+  }
+  // line by line, so a failure names the first lines that differ
+  for i in 0..got.len().min(GO_ARC_LINES.len()) {
+    expect((i, got[i])) == (i, GO_ARC_LINES[i])
+  }
+  expect(got.len()) == GO_ARC_LINES.len()
+}
+
+test "Azure Arc's paths on each platform" {
+  expect(arc_paths(TargetOs.Linux, "")) == ("/var/opt/azcmagent/tokens", "/opt/azcmagent/bin/himds")
+  expect(arc_paths(TargetOs.Windows, "C:\\ProgramData")) == ("C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens", "C:\\ProgramData\\AzureConnectedMachineAgent\\himds.exe")
+  expect(arc_paths(TargetOs.Darwin, "")) == ("", "")
+}
+
+test "Azure Arc's key path checks on Windows are Go's filepath's" {
+  let (dir, _) = arc_paths(TargetOs.Windows, "C:\\ProgramData")
+  let ok = "C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens\\a.key"
+  expect(arc_key_path("Basic realm=${ok}", dir, TargetOs.Windows)) == Ok(ok)
+  // Dir cleans and turns / into \, so these are in the directory too
+  expect(arc_key_path("Basic realm=C:/ProgramData/AzureConnectedMachineAgent/Tokens/a.key", dir, TargetOs.Windows)) == Ok("C:/ProgramData/AzureConnectedMachineAgent/Tokens/a.key")
+  expect(arc_key_path("Basic realm=C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens\\sub\\..\\a.key", dir, TargetOs.Windows)) == Ok("C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens\\sub\\..\\a.key")
+  // the comparison is exact, so another case is another directory
+  expect(arc_key_path("Basic realm=c:\\programdata\\azureconnectedmachineagent\\tokens\\a.key", dir, TargetOs.Windows)) == Err("invalid file path, expected C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens, got c:\\programdata\\azureconnectedmachineagent\\tokens")
+  expect(arc_key_path("Basic realm=C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens\\a.txt", dir, TargetOs.Windows)) == Err("invalid file extension, expected .key, got .txt")
+  expect(arc_key_path("Basic realm=\\\\server\\share\\a.key", dir, TargetOs.Windows)) == Err("invalid file path, expected C:\\ProgramData\\AzureConnectedMachineAgent\\Tokens, got \\\\server\\share\\")
+  expect(arc_key_path("Basic realm=/var/opt/azcmagent/tokens/a.key", "", TargetOs.Darwin)) == Err("platform not supported, expected linux or windows")
+}
+
+test "an Azure Arc key path through .. is refused where Go would follow it" {
+  let fs = os.fs
+  fs.write("${ARC_TOKENS}/sub/x", b"x")?
+  fs.write("${ARC_TOKENS}/a.key", b"secret-1")?
+  let c = ArcCase{name: "dotdot-sub", arc1: "401|Basic realm=/tokens/sub/../a.key|", arc2: "200|{}", files: [("a.key", "secret-1"), ("sub/x", "x")], id_kind: "", id: "", env: true, endpoint: "", himds: false, dac: false}
+  let lines = arc_case(os, c)
+  expect(lines.any(fn(l: Str) -> Bool { l.contains("invalid file path, expected a file in /tokens named without .., got /tokens/sub/../a.key") })) == true
+  // the key was never sent
+  expect(lines.any(fn(l: Str) -> Bool { l.contains("authorization=") })) == false
+}
+
+test "an Azure Arc token is cached for its resource" {
+  let c = GO_ARC_CASES[0]
+  expect(c.name) == "ok"
+  let fs = os.fs
+  fs.write("${ARC_TOKENS}/a.key", b"secret-1")?
+  os.net.handle("GET http://127.0.0.1:40342/{rest...}", fn(req: http.Request) -> http.Response {
+    if req.headers.get("Authorization").is_some() { arc_reply(c.arc2, false) } else { arc_reply(c.arc1, true) }
+  })
+  let env = os.env
+  env.set("IDENTITY_ENDPOINT", ARC_ENDPOINT)
+  env.set("IMDS_ENDPOINT", "http://127.0.0.1:40342")
+  let m = new_managed_identity_credential(env.only(["IDENTITY_ENDPOINT", "IMDS_ENDPOINT"]), fs, os.net, os.clock, os.rand, ManagedIdentityOptions{arc_token_dir: Some(ARC_TOKENS), arc_himds: Some("")})
+  let opts = azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]}
+  expect(m.get_token(opts)?.token.reveal()) == "arc-1"
+  let n = os.net.requests().len()
+  // the key file is gone; the cached token does not need it
+  fs.remove("${ARC_TOKENS}/a.key")?
+  expect(m.get_token(opts)?.token.reveal()) == "arc-1"
+  expect(os.net.requests().len()) == n
+}
+
+test "DefaultAzureCredential is a TokenCredential[fs.read] that reaches Azure Arc" {
+  let fs = os.fs
+  fs.write("${ARC_TOKENS}/a.key", b"secret-1")?
+  os.net.handle("GET http://127.0.0.1:40342/{rest...}", fn(req: http.Request) -> http.Response {
+    if req.headers.get("Authorization") == Some("Basic secret-1") { arc_reply(GO_ARC_CASES[0].arc2, false) } else { arc_reply("401|Basic realm=/tokens/a.key|", true) }
+  })
+  let env = os.env
+  env.set("IDENTITY_ENDPOINT", ARC_ENDPOINT)
+  env.set("IMDS_ENDPOINT", "http://127.0.0.1:40342")
+  env.set("AZURE_TOKEN_CREDENTIALS", "ManagedIdentityCredential")
+  let d: azcore.TokenCredential[fs.read] = new_default_azure_credential(env.only(["IDENTITY_ENDPOINT", "IMDS_ENDPOINT", "AZURE_TOKEN_CREDENTIALS"]), fs, os.net, os.clock, os.rand)?
+  // DefaultAzureCredential has no token directory option, so this
+  // platform's applies: none on macOS, and on Linux /tokens is not
+  // /var/opt/azcmagent/tokens, so nothing is read either way
+  let msg = match d.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]}) {
+    Ok(_) => "a token"
+    Err(e) => e.display()
+  }
+  expect(msg.contains("platform not supported, expected linux or windows") || msg.contains("invalid file path, expected /var/opt/azcmagent/tokens, got /tokens")) == true
+}

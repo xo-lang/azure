@@ -2,12 +2,15 @@
 // identity sources (MIT, Copyright (c) Microsoft Corporation;
 // NOTICE.md), chosen from the environment when the credential is built:
 // App Service (IDENTITY_ENDPOINT and IDENTITY_HEADER), Azure ML
-// (MSI_ENDPOINT and MSI_SECRET), Cloud Shell (MSI_ENDPOINT), else IMDS.
-// Service Fabric (it pins the server's certificate) and Azure Arc (it
-// reads a key file the server names) come later (decision 0003).
+// (MSI_ENDPOINT and MSI_SECRET), Cloud Shell (MSI_ENDPOINT), Azure Arc
+// (IDENTITY_ENDPOINT and IMDS_ENDPOINT, or the agent's himds file), else
+// IMDS. Service Fabric (it pins the server's certificate) comes later.
+// Azure Arc reads the key file its agent names, so the credential is a
+// TokenCredential[fs.read] (decision 0009).
 
 use std/http
 use std/json
+use std/path as gopath
 use std/time
 use std/timego
 use std/url
@@ -17,11 +20,18 @@ use github.com/xo-lang/azure/runtime
 
 pub const IMDS_ENDPOINT: Str = "http://169.254.169.254/metadata/identity/oauth2/token"
 
+/// The Azure Arc agent's endpoint when IDENTITY_ENDPOINT is not set.
+pub const ARC_ENDPOINT: Str = "http://127.0.0.1:40342/metadata/identity/oauth2/token"
+
+/// The most bytes an Azure Arc key file may have.
+pub const ARC_MAX_KEY_SIZE: Int = 4096
+
 pub enum Source {
   Imds
   AppService(endpoint: Str, header: Secret[Str])
   AzureMl(endpoint: Str, secret: Secret[Str])
   CloudShell(endpoint: Str)
+  AzureArc(endpoint: Str)
 }
 
 /// A user-assigned identity, or None for the system-assigned one.
@@ -46,10 +56,35 @@ pub struct ManagedIdentityOptions {
   /// type of its sources, so a ChainedTokenCredential built by hand
   /// leaves it as the credential was built.
   pub chained: Bool = false
+  /// Azure Arc's token directory, where its agent writes the key files
+  /// it names; None is the platform's (`arc_paths`). Only a key file in
+  /// exactly this directory is read. Tests point it at a MemFs
+  /// directory.
+  pub arc_token_dir: Str? = None
+  /// The Azure Arc agent's himds file, whose presence selects Azure Arc;
+  /// None is the platform's (`arc_paths`), "" never selects it.
+  pub arc_himds: Str? = None
+}
+
+/// Azure Arc's token directory and himds file on `os`, as MSAL Go's
+/// getAzureArcPlatformPath and getAzureArcHimdsFilePath: on Windows under
+/// `program_data` (%ProgramData%), joined as Go's filepath.Join; ("", "")
+/// where the agent does not run, so Azure Arc reports "platform not
+/// supported".
+pub fn arc_paths(os: TargetOs, program_data: Str) -> (Str, Str) {
+  match os {
+    Linux => ("/var/opt/azcmagent/tokens", "/opt/azcmagent/bin/himds")
+    Windows => (win_join([program_data, "AzureConnectedMachineAgent", "Tokens"]), win_join([program_data, "AzureConnectedMachineAgent", "himds.exe"]))
+    Darwin => ("", "")
+    Wasi => ("", "")
+  }
 }
 
 pub struct ManagedIdentityCredential {
   pub source: Source
+  fs: Fs
+  arc_dir: Str
+  arc_os: TargetOs
   id: UserAssigned?
   pipeline: runtime.Pipeline[()]
   probe_pipeline: runtime.Pipeline[()]
@@ -59,8 +94,9 @@ pub struct ManagedIdentityCredential {
   cache: Mutex[List[(Str, azcore.AccessToken)]]
 }
 
-/// The source the environment `env` names.
-pub fn source_of(env: Env) -> Source uses env {
+/// The source the environment `env` names; `himds` is whether the Azure
+/// Arc agent's himds file exists.
+pub fn source_of(env: Env, himds: Bool = false) -> Source uses env {
   let get = fn(k: Str) -> Str { env.get(k) ?? "" }
   if get("IDENTITY_ENDPOINT") != "" && get("IDENTITY_HEADER") != "" {
     return Source.AppService(endpoint: get("IDENTITY_ENDPOINT"), header: Secret.new(get("IDENTITY_HEADER")))
@@ -71,16 +107,27 @@ pub fn source_of(env: Env) -> Source uses env {
     }
     return Source.CloudShell(endpoint: get("MSI_ENDPOINT"))
   }
+  if get("IDENTITY_ENDPOINT") != "" && get("IMDS_ENDPOINT") != "" || himds {
+    // MSAL Go reads IDENTITY_ENDPOINT again for each request
+    return Source.AzureArc(endpoint: if get("IDENTITY_ENDPOINT") != "" { get("IDENTITY_ENDPOINT") } else { ARC_ENDPOINT })
+  }
   Source.Imds
 }
 
-pub fn new_managed_identity_credential(env: Env, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential uses env {
-  let src = source_of(env)
+pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential uses (env, fs.read) {
+  let (dir, himds) = arc_paths(target.os, env.get("ProgramData") ?? "")
+  let arc_himds = opts.arc_himds ?? himds
+  // Go's os.Stat: any file or directory there, followed through links
+  let found = match fs.stat(arc_himds) {
+    Ok(Some(_)) => true
+    _ => false
+  }
+  let src = source_of(env, himds: arc_himds != "" && found)
   // IMDS answers 404 and 410 while it starts (MSAL retries them)
   let client = opts.client with {retry: opts.client.retry with {status_codes: opts.client.retry.status_codes + [404, 410]}}
   let probe_client = opts.client with {timeout: 1s, retry: opts.client.retry with {max_retries: -1}}
   ManagedIdentityCredential{
-    source: src, id: opts.id,
+    source: src, id: opts.id, fs: fs, arc_dir: opts.arc_token_dir ?? dir, arc_os: target.os,
     pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client),
     probe_pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, probe_client),
     probing: Mutex.new(opts.probe && src is Source.Imds), chained: opts.chained, clock: clock, cache: Mutex.new([]),
@@ -122,6 +169,32 @@ pub fn token_request(src: Source, id: UserAssigned?, resource: Str) -> policy.Re
       policy.Request{method: "GET", url: "${endpoint}?${query([("api-version", "2017-09-01"), ("resource", resource)] + extra)}", headers: [("secret", secret.reveal())]}
     }
     CloudShell(endpoint) => policy.Request{method: "POST", url: endpoint, headers: [("Metadata", "true"), ("Content-Type", "application/x-www-form-urlencoded")], body: "resource=${url.query_escape(resource)}".bytes()}
+    // the endpoint's own query is kept, with api-version, resource and
+    // the identity set over it (MSAL Go's createAzureArcAuthRequest)
+    AzureArc(endpoint) => {
+      let (no_frag, frag) = match endpoint.cut("#") {
+        Some((a, f)) => (a, "#${f}")
+        None => (endpoint, "")
+      }
+      let (base, raw) = no_frag.cut("?") ?? (no_frag, "")
+      // Go's URL.Query keeps the pairs that parse
+      var v = url.values()
+      for pair in raw.split("&") {
+        if let Ok(q) = url.parse_query(pair) {
+          for k in q.keys() {
+            for x in q.all(k) {
+              v.add(k, x)
+            }
+          }
+        }
+      }
+      v.set("api-version", "2020-06-01")
+      v.set("resource", resource)
+      for (k, x) in ua(("client_id", "object_id", "msi_res_id")) {
+        v.set(k, x)
+      }
+      policy.Request{method: "GET", url: "${base}?${v.encode()}${frag}", headers: [("Metadata", "true")]}
+    }
   }
 }
 
@@ -242,11 +315,141 @@ fn (m: ManagedIdentityCredential) token_err(req: policy.Request, resp: http.Resp
   auth_failed(MI_NAME, req.method, req.url, resp)
 }
 
-pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+/// The key file `WWW-Authenticate` names, checked as MSAL Go's
+/// getAzureArcSecretKey checks it before reading: `Basic realm=<path>`, a
+/// `.key` file directly in `dir`, the token directory on `os` ("" where
+/// Azure Arc does not run). Paths are Go's filepath on `os`.
+pub fn arc_key_path(header: Str, dir: Str, os: TargetOs) -> Str ! Str {
+  if dir == "" {
+    return Err("platform not supported, expected linux or windows")
+  }
+  // strings.Split's second part: up to the next "Basic realm=", if any
+  let parts = header.split("Basic realm=")
+  if parts.len() < 2 {
+    return Err("basic realm= not found in the string, instead found: ${header}")
+  }
+  let path = parts[1]
+  let (in_dir, name, ext) = match os {
+    Windows => (win_dir(path), win_base(path), win_ext(win_base(path)))
+    _ => (gopath.dir(path), gopath.base(path), gopath.ext(gopath.base(path)))
+  }
+  if !name.ends_with(".key") {
+    return Err("invalid file extension, expected .key, got ${ext}")
+  }
+  if dir != in_dir {
+    return Err("invalid file path, expected ${dir}, got ${in_dir}")
+  }
+  Ok(path)
+}
+
+/// Azure Arc's challenge (MSAL Go's acquireTokenForAzureArc and
+/// getAzureArcSecretKey): `req` is answered 401 with
+/// `WWW-Authenticate: Basic realm=<path>`, the path of a `.key` file in
+/// the token directory of at most 4096 bytes; the request again with
+/// `Authorization: Basic <the file's text>` gets the token. Each check
+/// fails with MSAL Go's text.
+fn (m: ManagedIdentityCredential) arc_challenge(req: policy.Request) -> policy.Request ! azcore.AuthErr uses (net.dial, clock, rand, fs.read) {
+  let fail = fn(msg: Str) -> azcore.AuthErr { failed_text(MI_NAME, msg) }
+  let resp = m.pipeline.send(req) ?? e => return Err(fail(e.display()))
+  if resp.status != 401 {
+    return Err(fail("expected a 401 response, received ${resp.status}"))
+  }
+  let header = resp.header("WWW-Authenticate") ?? ""
+  if header == "" {
+    return Err(fail("response has no www-authenticate header"))
+  }
+  let path = arc_key_path(header, m.arc_dir, m.arc_os) ?? msg => return Err(fail(msg))
+  // Linux resolves `..` after walking the directory before it, which
+  // MSAL Go's lexical check does not see (a link there leads out of the
+  // token directory); an Fs resolves it by text. A missing directory
+  // before `..` fails as Go's stat does, and any other `..` is refused,
+  // where Go would read the file. Windows resolves `..` by text, as an Fs.
+  let segs = path.split("/")
+  if m.arc_os != TargetOs.Windows && segs.contains("..") {
+    for (i, seg) in segs.indexed() {
+      if seg == ".." && i > 1 {
+        let before = segs[..i].join("/")
+        match m.fs.stat(before) {
+          Ok(Some(d)) if d.is_dir => ()
+          Ok(Some(_)) => return Err(fail("failed to get metadata for ${path} due to error: stat ${path}: not a directory"))
+          _ => return Err(fail("failed to get metadata for ${path} due to error: stat ${path}: no such file or directory"))
+        }
+      }
+    }
+    return Err(fail("invalid file path, expected a file in ${m.arc_dir} named without .., got ${path}"))
+  }
+  // os.Stat's and os.ReadFile's errors name their operation
+  let info = match m.fs.stat(path) {
+    Ok(Some(i)) => i
+    Ok(None) => return Err(fail("failed to get metadata for ${path} due to error: stat ${path}: no such file or directory"))
+    Err(e) => return Err(fail("failed to get metadata for ${path} due to error: stat ${e.display()}"))
+  }
+  if info.size > ARC_MAX_KEY_SIZE {
+    return Err(fail("invalid secret file size, expected ${ARC_MAX_KEY_SIZE}, file size was ${info.size}"))
+  }
+  let key = m.fs.read(path) ?? e => {
+    let op = if e is FsErr.IsDir(..) { "read" } else { "open" }
+    return Err(fail("failed to read ${json.encode_str(path)} due to error: ${op} ${e.display()}"))
+  }
+  // an empty key sends no Authorization header, as MSAL Go's
+  let k = key.to_str_lossy()
+  Ok(if k == "" { req } else { req with {headers: req.headers + [("Authorization", "Basic ${k}")]} })
+}
+
+/// The first of `keys` whose member is a non-empty string in the token
+/// response, a name's last member counting (MSAL Go reads its
+/// TokenResponse.AdditionalFields, a map).
+fn arc_echo(body: Bytes, keys: List[Str]) -> Str {
+  var found: Map[Str, Str] = {}
+  var r = json.tokens(body)
+  if let Ok(Some(json.Token.ObjectStart)) = r.next() {
+    while r.more() {
+      let k = match r.next() {
+        Ok(Some(json.Token.Key(k))) => k
+        _ => break
+      }
+      let from = r.offset()
+      if r.skip().is_err() {
+        break
+      }
+      let raw = body[from..r.offset()].to_str_lossy().trim().trim_prefix(":").trim()
+      found.put(k, match json.parse_value(raw) {
+        Ok(json.Value.Str(v)) => v
+        _ => ""
+      })
+    }
+  }
+  for k in keys {
+    let v = found.get(k) ?? ""
+    if v != "" {
+      return v
+    }
+  }
+  ""
+}
+
+/// MSAL Go's verifyAzureArcUserAssignedIdentity: an agent that ignores a
+/// user-assigned identity answers for the system-assigned one, so the
+/// token response must name the identity asked for (ignoring case).
+fn arc_verify(id: UserAssigned?, body: Bytes) -> () ! Str {
+  let (keys, want) = match id {
+    None => return Ok(())
+    Some(UserAssigned.ClientId(v)) => (["client_id"], v)
+    Some(UserAssigned.ObjectId(v)) => (["object_id"], v)
+    Some(UserAssigned.ResourceId(v)) => (["msi_res_id", "mi_res_id"], v)
+  }
+  let echoed = arc_echo(body, keys)
+  if echoed == "" || !echoed.equal_fold(want) {
+    return Err("azure arc did not confirm the requested user-assigned managed identity in the token response; the agent likely does not support user-assigned managed identities and returned the system-assigned identity")
+  }
+  Ok(())
+}
+
+pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fs.read) {
   let name = "ManagedIdentityCredential"
   let resource = resource_of(opts.scopes) ?? e => return Err(azcore.AuthErr{credential: name, msg: e})
   // one call fetches while the others wait for its token
-  m.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  m.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fs.read) {
     let now = m.clock.now()
     for (k, t) in xs {
       if k == resource && !azcore.needs_refresh(t, now) {
@@ -254,7 +457,8 @@ pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions
       }
     }
     m.probe()?
-    let req = token_request(m.source, m.id, resource)
+    let first = token_request(m.source, m.id, resource)
+    let req = if m.source is Source.AzureArc(..) { m.arc_challenge(first)? } else { first }
     let resp = m.pipeline.send(req) ?? e => return Err(failed_text(name, e.display()))
     if resp.status < 200 || resp.status > 299 {
       return Err(m.token_err(req, resp))
@@ -265,6 +469,9 @@ pub fn (m: ManagedIdentityCredential) get_token(opts: azcore.TokenRequestOptions
         return Err(mi_unavailable(msg))
       }
       return Err(failed_text(name, msg))
+    }
+    if m.source is Source.AzureArc(..) {
+      arc_verify(m.id, resp.body) ?? msg => return Err(failed_text(name, msg))
     }
     // MSAL Go never serves an empty token from its cache (its
     // dac-no-access vector: the second call asks again)
