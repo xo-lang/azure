@@ -66,6 +66,17 @@ pub struct Renames {
   /// which the OpenAPI file carries as x-ms-client-name: `Model.name`
   /// (that client name) to the property's own name, Go's.
   pub not_go_fields: Map[Str, Str] = {}
+  /// An ARM action re-declared under another name in a Go
+  /// `@operationGroup` interface (`executionDetails is
+  /// ExperimentExecutions.getExecutionDetails`), with no `@action`: Go's
+  /// emitter routes it by the new name (armchaos'
+  /// `.../executionDetails`, the OpenAPI file's `.../getExecutionDetails`).
+  /// The operationId, lower case, to (the path's last segment, Go's).
+  pub action_routes: Map[Str, (Str, Str)] = {}
+  /// `op is ArmResourcePatchAsync<R, P>` (or Sync): Go's body is the
+  /// resource R itself; the OpenAPI file has an `RUpdate` visibility
+  /// variant (armcommvaultcontentstore). The operationId, lower case, to R.
+  pub patch_bodies: Map[Str, Str] = {}
 }
 
 /// Each operation in an interface of `text` that carries decorator `dec`
@@ -289,6 +300,8 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // the OpenAPI one too, gives T
   let unscoped = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*\\)") ?? e => return Err(e.display())
   let client_init = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?clientInitialization\\(\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*parameters\\s*:\\s*([A-Za-z0-9_]+)\\s*,?\\s*\\}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
+  let patch_op = regexp.compile("\\b([A-Za-z0-9_]+)\\s+is\\s+ArmResourcePatch(?:Async|Sync)\\s*<\\s*([A-Za-z0-9_.]+)") ?? e => return Err(e.display())
+  let op_group = regexp.compile("@operationGroup\\(\\s*\"([^\"]*)\"\\s*\\)[^{]*?interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
   let type_decl = regexp.compile("(?:^|\\n)\\s*(?:enum|union|model|scalar)\\s+([A-Za-z0-9_]+)") ?? e => return Err(e.display())
   let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   // `Namespace.op` names the operation: the project's namespaces, from
@@ -365,6 +378,40 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
           }
           r.client_ops[id.to_lower()] = name[0..1].to_upper() + name[1..name.len()]
         }
+      }
+    }
+    let chunks = interface_chunks(text)
+    for ci in 1..chunks.len() {
+      let iface = ident_prefix(chunks[ci])
+      for whole in patch_op.find_all(chunks[ci]) {
+        let m = patch_op.captures(whole) ?? continue
+        let op = m[1] ?? ""
+        let res = strip_namespace(m[2] ?? "", namespaces)
+        if op == "" || res == "" {
+          continue
+        }
+        let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+        r.patch_bodies[id.to_lower()] = res.split(".").last() ?? res
+      }
+    }
+    for whole in op_group.find_all(text) {
+      let g = op_group.captures(whole) ?? continue
+      if !for_go(g[1] ?? "") {
+        continue
+      }
+      for m in member.find_all(g[2] ?? "") {
+        let c = member.captures(m) ?? continue
+        let name = c[1] ?? ""
+        let t = strip_namespace(c[2] ?? "", namespaces)
+        let (iface, op) = t.cut(".") ?? continue
+        if name == "" || name == op || op.contains(".") {
+          continue
+        }
+        if !texts.any(fn(x: Str) -> Bool { plain_action(x, op) }) {
+          continue
+        }
+        let id = ids.get(t.to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+        r.action_routes[id.to_lower()] = (op, name)
       }
     }
     for whole in alt_field.find_all(text) {
@@ -606,6 +653,20 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
   }
   Ok(r)
+}
+
+/// Whether `text` declares operation `op` as an ARM action
+/// (`op is ArmResourceAction...<`) with no `@action` among its
+/// decorators: its route is its name.
+fn plain_action(text: Str, op: Str) -> Bool {
+  let decl = regexp.compile("(?:^|[;{}])([^;{}]*?)\\b${op}\\s+is\\s+ArmResourceAction[A-Za-z]*\\s*<").ok() ?? return false
+  for whole in decl.find_all(text) {
+    let m = decl.captures(whole) ?? continue
+    if !(m[1] ?? "").contains("@action(") {
+      return true
+    }
+  }
+  false
 }
 
 /// The property names of `model name { ... }` in `text` ([] when `text`

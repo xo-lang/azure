@@ -81,6 +81,9 @@ pub struct Param {
   /// A body sent as it is (`format: binary` or `file`; Go's
   /// io.ReadSeekCloser), not as JSON.
   pub binary: Bool = false
+  /// A `format: date` parameter: a Time written as its date
+  /// (runtime.date_text).
+  pub date: Bool = false
 }
 
 pub struct Op {
@@ -167,6 +170,12 @@ pub struct Custom {
   /// TypeSpec's `@@clientInitialization` parameters for Go (wire names):
   /// client parameters, as subscriptionId.
   pub client_params: List[Str] = []
+  /// TypeSpec's ARM actions Go routes by another name (spec.Renames'
+  /// action_routes): operationId, lower case, to (old segment, new).
+  pub action_routes: Map[Str, (Str, Str)] = {}
+  /// TypeSpec's `op is ArmResourcePatch(Async|Sync)<R, P>`: operationId,
+  /// lower case, to R, Go's body type.
+  pub patch_bodies: Map[Str, Str] = {}
   /// An OpenAPI `<Model>Update` or `<Model>Patch` definition (TypeSpec's
   /// update visibility, which the autorest emitter writes as its own
   /// definition) is `<Model>` when its properties are a subset of
@@ -453,16 +462,20 @@ fn refs_in(v: json.Value) -> List[Str] {
   out
 }
 
-/// An update visibility variant's base definition (merge_update_variants).
+/// An update visibility variant's base definition (merge_update_variants,
+/// or a TypeSpec ARM module's library variant).
 fn (b: Builder) update_base(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Value) {
-  if !b.custom.merge_update_variants || !p.starts_with("/definitions/") {
+  if !p.starts_with("/definitions/") {
     return (f, p, x)
   }
   let name = spec.last(p)
-  // in an ARM module only a library model's variant
-  // (`Azure.ResourceManager.CommonTypes.ManagedServiceIdentityUpdate`):
-  // a resource's own `...Update` is a TypeSpec model Go has too
-  if !b.custom.data_plane && !name.contains(".") {
+  // A TypeSpec ARM module's library variant
+  // (`Azure.ResourceManager.CommonTypes.ManagedServiceIdentityUpdate`)
+  // is always its base: no Go module has one (every emitter version;
+  // armcommvaultcontentstore, armagricultureplatform). A resource's own
+  // `...Update` is a TypeSpec model Go has too.
+  let library = b.custom.tsp && !b.custom.data_plane && name.contains(".")
+  if !library && !(b.custom.merge_update_variants && b.custom.data_plane) {
     return (f, p, x)
   }
   for suffix in ["Update", "Patch"] {
@@ -1040,6 +1053,10 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     // modelerfour gathers a form's fields into one schema, POST's
     // `PostContentSchema`, and names an inline enum after its field
     b.custom.param_types.get(wire) ?? b.inline(f, p, "PostContentSchema${pascal_part(wire)}")
+  } else if loc != "body" && str_of(p.get("format")) == "date" {
+    // Go's time.Time, written by t.Format("2006-01-02") (armbilling's
+    // periodStartDate)
+    "Time"
   } else if loc == "header" && str_of(p.get("format")) == "date-time-rfc7231" {
     // TypeSpec's rfc7231 header (Batch's ocp-date): Go's *time.Time,
     // written by t.Format(time.RFC1123)
@@ -1097,6 +1114,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     skip_encoding: bool_of(p.get("x-ms-skip-url-encoding")),
     multi: str_of(p.get("collectionFormat")) == "multi" && loc == "query",
     client: client,
+    date: loc != "body" && str_of(p.get("format")) == "date",
     constant: constant,
     opt_constant: if !required && sealed_one && wire != "api-version" { one_lit } else { None },
     doc: doc_of(p),
@@ -1160,6 +1178,16 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // TableClient.Create); an action's stays in the options.
           if b.custom.tsp && !b.custom.data_plane && (method == "put" || method == "patch") {
             params = params.map(fn(q: Param) -> Param { if q.loc == "body" { q with {required: true} } else { q } })
+          }
+          // TypeSpec's ArmResourcePatch<R, P>: Go's body is R itself, not
+          // the OpenAPI file's `RUpdate` visibility variant
+          // (armcommvaultcontentstore's CloudAccounts.BeginUpdate)
+          if let Some(r) = b.custom.patch_bodies.get(id.to_lower()) {
+            let has_def = b.files.get(file).and_then(fn(d: json.Value) -> json.Value? { spec.at(d, "/definitions/${r}") }).is_some()
+            if has_def {
+              let rt = b.type_of(file, json.Value.Object([("\$ref", json.Value.Str("#/definitions/${r}"))]), r)
+              params = params.map(fn(q: Param) -> Param { if q.loc == "body" { q with {typ: rt} } else { q } })
+            }
           }
           // a client parameter moved onto this operation is the method's
           params = params.map(fn(q: Param) -> Param { if q.client && b.custom.method_params.contains("${id.to_lower()}#${q.wire}") { q with {client: false} } else { q } })
@@ -1254,7 +1282,10 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             group: group,
             name: name,
             method: method.to_upper(),
-            path: path,
+            path: match b.custom.action_routes.get(id.to_lower()) {
+              Some((old, new)) if path.ends_with("/${old}") => path[0..path.len() - old.len()] + new
+              _ => path
+            },
             params: params,
             ok: okc.sort(),
             resp: resp,
@@ -1515,6 +1546,13 @@ fn header_kind(hv: json.Value) -> Str {
   }
 }
 
+/// An additionalProperties schema that is any value: `{}`, or a bare
+/// `{"type": "object"}` (armazurearcdata's K8sResourceRequirements),
+/// which modelerfour also reads as any.
+fn untyped_object(fs: List[(Str, json.Value)]) -> Bool {
+  fs.all(fn(f: (Str, json.Value)) -> Bool { (f.0 == "type" && f.1 == json.Value.Str("object")) || f.0 == "description" })
+}
+
 /// Whether `v` or one of its allOf parents has an untyped
 /// `additionalProperties` (`{}` or `true`), Go's AdditionalProperties.
 fn (b: Builder) has_extra(file: Str, v: json.Value, depth: Int) -> Bool {
@@ -1522,7 +1560,7 @@ fn (b: Builder) has_extra(file: Str, v: json.Value, depth: Int) -> Bool {
     return false
   }
   match v.get("additionalProperties") {
-    Some(json.Value.Object(fs)) if fs.is_empty() => return true
+    Some(json.Value.Object(fs)) if untyped_object(fs) => return true
     Some(json.Value.Bool(true)) => return true
     _ => {}
   }

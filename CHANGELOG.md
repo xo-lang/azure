@@ -38,10 +38,8 @@ order is derived.
 Generator, from the batch-2 differentials against Go: TypeSpec's
 `@@clientInitialization` parameters are client parameters, taken by
 the client's constructor (armalertsmanagement's `scope`); a Go module
-written by the TypeSpec emitter before its testdata/_metadata.json
-(codegen/gorows' `go_emitter_legacy` row) sends Accept on every request
-and uses a library model's base for its `...Update` variant
-(armagricultureplatform, armarizeaiobservabilityeval); a single-value
+whose every request sends Accept (codegen/gorows' `accept_always` row)
+does too (armagricultureplatform, armarizeaiobservabilityeval); a single-value
 integer enum is a plain integer (armanalysisservices' gateway status);
 a TypeSpec string response that is also `text/*` is the body as text
 (armappcontainers, armautomation); Accept keeps the XML media types
@@ -52,6 +50,20 @@ emitter) does too, and a TypeSpec string body sent as `text/*` is the
 text itself (armautomation's runbook content). The vectors' fake notes
 an operation's first request only, not its poller's, as the Go program
 prints them.
+
+Generator, from the batch-3 differentials: a TypeSpec ARM module's
+library `...Update` variant (`Azure.ResourceManager.CommonTypes.
+ManagedServiceIdentityUpdate`) is always its base model, as in every Go
+module (armcommvaultcontentstore); Accept on every request comes from
+Go's own requests (gorows' `accept_always` row: armazurestackhcivm);
+an untyped `additionalProperties: {"type": "object"}` is Go's
+AdditionalProperties (armazurearcdata); a `format: date` parameter is a
+Time sent as its date, `2006-01-02` (armbilling); an ARM action
+re-declared under another name in a Go `@operationGroup` is routed by
+that name (armchaos' executionDetails); TypeSpec's
+`ArmResourcePatch<R, P>` takes R itself as its body, not the OpenAPI
+file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
+list and map arguments (armbilling, armcdn, armcognitiveservices).
 
 azidentity: Service Fabric's cases run against a FakeNet TLS endpoint
 (`FakeNet.handle_tls`, xo decision 0544) presenting a certificate made by
