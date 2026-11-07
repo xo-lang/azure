@@ -181,6 +181,22 @@ response type equal, except armkeyvault's `Secret`, which is
   `@alternateType(type, "go")` on a parameter give Go's type; a
   `field_types` entry wins over it where Go's transforms undo it
   (azcertificates' `CertificateOperation.error`).
+- A TypeSpec data plane module (azbatch): a `@client` block with no
+  language scope counts for Go, its members name operations by their
+  namespace-free target, and a member's stacked inline `@clientName`
+  takes the Go-scoped one. `custom/<module>.toml: param_names` and
+  `header_names` give Go's casing of a parameter and of a response
+  header's field (`OCPDate`, `ocp_batch_file_is_directory`);
+  `merge_update_variants` makes an OpenAPI `...Update` or `...Patch`
+  variant its base type, as Go's emitter does; `patch_twins = false`
+  sends a PATCH body as plain JSON. Response headers are typed as Go
+  reads them (`Int`, `Bool` by strconv.ParseBool, `Time` by RFC 1123),
+  RFC 1123 and 7231 header parameters are `Time` written in UTC as
+  Go's `t.Format(time.RFC1123)`, a `date-time-rfc7231` field is
+  `azcore.DateTimeRFC7231` (Go's `datetime.RFC7231`), a binary
+  response gets Go's `content_type`, and a JSON body's Content-Type is
+  the operation's one consumed type (`application/json;
+  odata=minimalmetadata`). `private_ops` applies to pagers too.
 - `custom/<module>.toml: status_pollers` names the operations whose
   poller is Go's hand written restorePoller (`runtime.new_status_poller`).
 - A model's fields are declared sorted by wire name, the order Go's

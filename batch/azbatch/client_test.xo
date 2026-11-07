@@ -1,0 +1,155 @@
+// The fake the Go calls of govectors_test.xo are made again against:
+// the same response headers as the Go program's fake, each test's status
+// and body, and every request noted in the Go program's form.
+
+use std/http
+use std/testing
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const EP: Str = "https://batch.example.test"
+
+struct Cred {}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  status: Mutex[Int]
+  body: Mutex[Str]
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn set(f: Fake, status: Int, body: Str) {
+  f.status.with(fn(var s: Int) { s = status })
+  f.body.with(fn(var b: Str) { b = body })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" && lk != "traceparent" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  let q = req.raw_query()
+  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let st = f.status.with(fn(var s: Int) -> Int { s })
+  let body = f.body.with(fn(var b: Str) -> Str { b })
+  note_lines(f, "  SERVED ${st} ${body}")
+  let h: Map[Str, Str] = {
+    "client-request-id": "crid-1",
+    "request-id": "rid-1",
+    "ETag": "\"0x8D\"",
+    "Last-Modified": "Fri, 06 Nov 2026 10:00:00 GMT",
+    "DataServiceId": "https://batch.example.test/jobs/j1",
+    "ocp-batch-file-isdirectory": "false",
+    "ocp-batch-file-mode": "0755",
+    "ocp-batch-file-url": "https://batch.example.test/f",
+    "ocp-creation-time": "Thu, 05 Nov 2026 09:00:00 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "${body.bytes().len()}",
+  }
+  http.Response{status: st, headers: h, body: body.bytes()}
+}
+
+fn new_fake(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new("")}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for m in ["GET", "PUT", "POST", "DELETE", "HEAD", "PATCH"] {
+    net.handle("${m} ${EP}/{rest...}", h)
+  }
+  f
+}
+
+fn opts() -> ClientOptions {
+  ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn log_of(f: Fake) -> List[Str] {
+  f.log.with(fn(var l: List[Str]) -> List[Str] { l })
+}
+
+/// An error as the Go program prints it: continuation lines after `| `.
+fn err_text(e: azcore.CallErr) -> Str {
+  let t = match e {
+    azcore.CallErr.InvalidInput(m) => m
+    azcore.CallErr.Decode(m) => m
+    other => other.display()
+  }
+  t.replace("\n", "\n| ")
+}
+
+fn note_lines(f: Fake, s: Str) {
+  for line in s.split("\n") {
+    note(f, line)
+  }
+}
+
+/// A time as the Go program prints one (RFC 3339, UTC).
+fn t3339(t: Time) -> Str {
+  time.format(t, time.utc(), time.RFC3339)
+}
+
+/// Go's %q of printable ASCII text with `\n`.
+fn go_q(b: Bytes) -> Str {
+  "\"${b.to_str_lossy().replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+fn at3339(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()) ?? e => fault("time ${s}: ${e}")
+}
+
+/// Compares the lines, but for the KNOWN ones (Go's line, ours).
+fn compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
+  var g = got
+  for (go_line, ours) in known {
+    let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
+    let j = g.index_of(ours) ?? fault("KNOWN line not in ours: ${ours}")
+    if i != j {
+      fault("KNOWN line ${go_line} at ${i}, ours at ${j}")
+    }
+    g[j] = go_line
+  }
+  var k = 0
+  while k < want.len() || k < g.len() {
+    let a = want.get(k) ?? "<end>"
+    let b = g.get(k) ?? "<end>"
+    if a != b {
+      fault("line ${k}:\n  go:   ${a}\n  ours: ${b}")
+    }
+    k += 1
+  }
+}
+
+test "a plain HTTP endpoint gets no token unless insecure_allow_credential_with_http" {
+  let f = Fake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new("{}")}
+  os.net.handle("GET http://batch.example.test/{rest...}", fn(req: http.Request) -> http.Response { answer(f, req) })
+  let refused = new_client(os.net, os.clock, os.rand, "http://batch.example.test", Cred{}, opts())
+  match refused.get_job("j1") {
+    Ok(_) => fault("sent a token over plain HTTP")
+    Err(e) => expect(e.display().contains("authorized requests are not permitted for non-TLS protected (https) endpoints")) == true
+  }
+  expect(log_of(f).len()) == 0
+  let allowed = new_client(os.net, os.clock, os.rand, "http://batch.example.test", Cred{}, opts() with {insecure_allow_credential_with_http: true})
+  let _r = allowed.get_job("j1") ?? e => fault("${e}")
+  expect(log_of(f).any(fn(l: Str) -> Bool { l.contains("authorization=Bearer tok") })) == true
+}
+
+test "the default options and the token scope" {
+  expect(TOKEN_SCOPE) == "https://batch.core.windows.net//.default"
+  let f = new_fake(os.net)
+  set(f, 200, "{}")
+  let c = new_client(os.net, os.clock, os.rand, EP, Cred{})
+  let _r = c.get_job("j1") ?? e => fault("${e}")
+  expect(log_of(f)[0]) == "REQ GET https://batch.example.test/jobs/j1?api-version=2024-07-01.20.0"
+}

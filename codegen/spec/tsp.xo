@@ -233,7 +233,8 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let aug = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let inline = regexp.compile("(?:^|[^@])@clientName\\(\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let loc = regexp.compile("@(?:path|query|header)\\(\\s*\"([^\"]+)\"") ?? e => return Err(e.display())
-  let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
+  let bare_loc = regexp.compile("@(?:path|query)\\b(?:\\s*\\(\\s*\\))?[\\s\\S]*?([A-Za-z0-9_]+)\\??\\s*:\\s*[A-Za-z]") ?? e => return Err(e.display())
+  let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
@@ -284,15 +285,25 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   for text in texts {
     for whole in client.find_all(text) {
       let cc = client.captures(whole) ?? continue
-      if !for_go(cc[1] ?? "") {
-        continue
+      // a block without a scope is every language's, Go's too (Batch)
+      if let Some(scope) = cc[1] {
+        if !for_go(scope) {
+          continue
+        }
       }
       let body = cc[2] ?? ""
       for m in member.find_all(body) {
         let c = member.captures(m) ?? continue
         let name = c[1] ?? ""
         if name != "" {
-          r.client_ops[operation_id(c[2] ?? "").to_lower()] = name[0..1].to_upper() + name[1..name.len()]
+          // `Iface.op` after the project's namespace (Batch's
+          // `Azure.Batch.Pools.createPool`) is Iface_Op or its @operationId
+          let t = strip_namespace(c[2] ?? "", namespaces)
+          let id = match t.cut(".") {
+            Some((iface, op)) if !op.contains(".") => ids.get(t.to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+            _ => operation_id(c[2] ?? "")
+          }
+          r.client_ops[id.to_lower()] = name[0..1].to_upper() + name[1..name.len()]
         }
       }
     }
@@ -367,13 +378,27 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
     // A parameter's decorators sit between the previous `;`, `{` or
     // comment end and its declaration.
+    // Several may be stacked, one per language (Batch's timeOut); a bare
+    // `@query` or `@path` sends the property's own name.
     for seg in text.replace("{", ";").replace("*/", ";").split(";") {
-      let m = inline.captures(seg) ?? continue
-      if !for_go(m[2] ?? "") {
+      var go_name = ""
+      for whole in inline.find_all(seg) {
+        let m = inline.captures(whole) ?? continue
+        if for_go(m[2] ?? "") {
+          go_name = m[1] ?? ""
+        }
+      }
+      if go_name == "" {
         continue
       }
-      let w = loc.captures(seg) ?? continue
-      r.params[w[1] ?? ""] = m[1] ?? ""
+      let wire = match loc.captures(seg) {
+        Some(w) => w[1] ?? ""
+        None => match bare_loc.captures(seg) {
+          Some(b) => b[1] ?? ""
+          None => continue
+        }
+      }
+      r.params[wire] = go_name
     }
   }
   // an unscoped property rename is Go's too, unless Go has its own

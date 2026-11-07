@@ -98,7 +98,9 @@ pub struct Op {
   pub produces: List[Str] = []
   /// The headers of its success responses (wire names, in order) and
   /// whether each is an integer.
-  pub resp_headers: List[(Str, Bool)] = []
+  /// Each success header and its kind: "int", "bool", "time" (RFC 1123)
+  /// or "" (text).
+  pub resp_headers: List[(Str, Str)] = []
   /// The operation's `consumes` content types (a binary body's
   /// Content-Type).
   pub consumes: List[Str] = []
@@ -136,6 +138,15 @@ pub struct Api {
 pub struct Custom {
   /// operationId (any case) to Go's operation name.
   pub ops: Map[Str, Str] = {}
+  /// An OpenAPI `<Model>Update` or `<Model>Patch` definition (TypeSpec's
+  /// update visibility, which the autorest emitter writes as its own
+  /// definition) is `<Model>` when its properties are a subset of
+  /// `<Model>`'s, as Go's emitter, which reads the TypeSpec, has it.
+  pub merge_update_variants: Bool = false
+  /// False: a PATCH body's models are plain (each field optional, None
+  /// left out), as Go's are when the body is not a merge patch (Batch
+  /// sends `application/json; odata=minimalmetadata`).
+  pub patch_twins: Bool = true
   /// A TypeSpec `@client` block's operations (operationId, lower case)
   /// to Go's names; when set, the others are left out and these are on
   /// the package's Client.
@@ -243,7 +254,8 @@ pub fn builder(files: Map[Str, json.Value], package: Str, custom: Custom = Custo
   let p = package.to_lower()
   // autorest.go drops a data plane package's name from its groups too,
   // without its `az` (azcontainerregistry's ContainerRegistryBlob is Blob)
-  let stem = if p.starts_with("arm") { p[3..p.len()] } else if custom.data_plane && !custom.tsp && p.starts_with("az") { p[2..p.len()] } else { p }
+  // TypeSpec's Go emitter too (azbatch's BatchJob is Job)
+  let stem = if p.starts_with("arm") { p[3..p.len()] } else if custom.data_plane && p.starts_with("az") { p[2..p.len()] } else { p }
   Builder{files: files, custom: custom, stutter: stem}
 }
 
@@ -262,7 +274,10 @@ fn dedup_words(s: Str) -> Str {
 /// An x-ms-enum's type name: Go keeps the package name in it
 /// (armstorage's StorageAccountExpand).
 fn (b: Builder) enum_name(s: Str) -> Str {
-  b.custom.models.get(s).map(fn(r: Str) -> Str { reserve(r) }) ?? pascal(b.local(s))
+  // TypeSpec's Go emitter drops a data plane package's name from enums
+  // too (azbatch's BatchJobState is JobState)
+  let n = pascal(b.local(s))
+  b.custom.models.get(s).map(fn(r: Str) -> Str { reserve(r) }) ?? (if b.custom.data_plane && b.custom.tsp { b.unstutter(n) } else { n })
 }
 
 /// A TypeSpec module's namespace-qualified definition key without its
@@ -386,11 +401,33 @@ fn (b: Builder) alt_model(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Valu
   (b.primary, np, nx)
 }
 
+/// An update visibility variant's base definition (merge_update_variants).
+fn (b: Builder) update_base(f: Str, p: Str, x: json.Value) -> (Str, Str, json.Value) {
+  if !b.custom.merge_update_variants || !p.starts_with("/definitions/") {
+    return (f, p, x)
+  }
+  let name = spec.last(p)
+  for suffix in ["Update", "Patch"] {
+    if name.ends_with(suffix) && name.len() > suffix.len() {
+      let base = name[0..name.len() - suffix.len()]
+      let doc = b.files.get(f) ?? return (f, p, x)
+      let bx = spec.at(doc, "/definitions/${base}") ?? continue
+      let mine = fields_of(x.get("properties")).map(fn(kv: (Str, json.Value)) -> Str { kv.0 })
+      let theirs = fields_of(bx.get("properties")).map(fn(kv: (Str, json.Value)) -> Str { kv.0 })
+      if mine.all(fn(k: Str) -> Bool { theirs.contains(k) }) {
+        return (f, "/definitions/${base}", bx)
+      }
+    }
+  }
+  (f, p, x)
+}
+
 /// The Xo type of a schema; `hint` names an inline object.
 pub fn (var b: Builder) type_of(file: Str, v: json.Value, hint: Str) -> Str {
   if str_of(v.get("$ref")) != "" {
     let (f0, p0, x0) = b.deref(file, v)
-    let (f, p, x) = b.alt_model(f0, p0, x0)
+    let (f1, p1, x1) = b.alt_model(f0, p0, x0)
+    let (f, p, x) = b.update_base(f1, p1, x1)
     if p.starts_with("/definitions/") {
       let t = b.named(f, spec.last(p), x)
       // A struct with a discriminator stands for its subtypes too.
@@ -551,6 +588,8 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
     "string" => match str_of(v.get("format")) {
       "date-time" => if b.custom.utc_date_times { "azcore.DateTimeUTC" } else { "azcore.DateTime" }
       "date-time-rfc1123" => "azcore.DateTimeRFC1123"
+      // typespec-go's datetime.RFC7231 (armstorage v4's FileShareProperties)
+      "date-time-rfc7231" => "azcore.DateTimeRFC7231"
       "base64url" => "azcore.Base64URL"
       "byte" => "Bytes"
       _ => "Str"
@@ -833,7 +872,8 @@ fn reordered(params: List[Param], order: List[Str]) -> List[Param] {
 /// and received as it is.
 fn is_binary(v: json.Value?) -> Bool {
   let f = str_of(v.and_then(fn(x: json.Value) -> json.Value? { x.get("format") }))
-  f == "binary" || f == "file"
+  let t = str_of(v.and_then(fn(x: json.Value) -> json.Value? { x.get("type") }))
+  f == "binary" || f == "file" || t == "file"
 }
 
 fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
@@ -853,6 +893,10 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     // modelerfour gathers a form's fields into one schema, POST's
     // `PostContentSchema`, and names an inline enum after its field
     b.custom.param_types.get(wire) ?? b.inline(f, p, "PostContentSchema${pascal(wire)}")
+  } else if loc == "header" && str_of(p.get("format")) == "date-time-rfc7231" {
+    // TypeSpec's rfc7231 header (Batch's ocp-date): Go's *time.Time,
+    // written by t.Format(time.RFC1123)
+    "Time"
   } else {
     b.custom.param_types.get(wire) ?? b.inline(f, p, pascal(wire))
   }
@@ -974,7 +1018,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // autorest.go sends Accept when any response, the error one
           // too, has a schema
           var accept = false
-          var resp_headers: List[(Str, Bool)] = []
+          var resp_headers: List[(Str, Str)] = []
           let produces = list_of(o.get("produces")).map(fn(x: json.Value) -> Str { str_of(Some(x)) }).filter(fn(t: Str) -> Bool { t != "" })
           // an operation that produces only a binary type sends no Accept
           // for its error schema alone (ACR's DeleteBlob)
@@ -999,8 +1043,8 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             if n >= 200 && n < 300 {
               okc.push(n)
               for (h, hv) in fields_of(b.deref(file, r).2.get("headers")) {
-                if !resp_headers.any(fn(x: (Str, Bool)) -> Bool { x.0 == h }) {
-                  resp_headers.push((h, str_of(hv.get("type")) == "integer"))
+                if !resp_headers.any(fn(x: (Str, Str)) -> Bool { x.0 == h }) {
+                  resp_headers.push((h, header_kind(hv)))
                 }
               }
               if resp.is_none() {
@@ -1014,6 +1058,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
                 }
               }
             }
+          }
+          // typespec-go reads a binary body's media type into ContentType
+          // (the tsp's implicit content-type header), absent from the
+          // OpenAPI headers (azbatch's GetNodeFile)
+          if b.custom.tsp && binary_resp && !resp_headers.any(fn(x: (Str, Str)) -> Bool { x.0.to_lower() == "content-type" }) {
+            resp_headers.push(("content-type", ""))
           }
           let pg = o.get("x-ms-pageable")
           let lro = bool_of(o.get("x-ms-long-running-operation"))
@@ -1063,7 +1113,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
       }
     }
   }
-  let patched = patch_only(ops, b.models, b.polys)
+  let patched = if b.custom.patch_twins { patch_only(ops, b.models, b.polys) } else { #{} }
   let models = with_twins(b.models, patched, b.polys)
   Api{api_version: version, ops: ops, models: models, enums: b.enums, polys: b.polys, report: b.report}
 }
@@ -1252,5 +1302,22 @@ fn model_as_string(p: json.Value) -> Bool? {
   match p.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("modelAsString") }) {
     Some(json.Value.Bool(t)) => Some(t)
     _ => None
+  }
+}
+
+/// A response header's kind, as Go's emitter reads it: an integer (or a
+/// string of format int64, Content-Length), a boolean, an RFC 1123 time,
+/// or text.
+fn header_kind(hv: json.Value) -> Str {
+  let t = str_of(hv.get("type"))
+  let f = str_of(hv.get("format"))
+  if t == "integer" || f == "int64" || f == "int32" {
+    "int"
+  } else if t == "boolean" {
+    "bool"
+  } else if f == "date-time-rfc7231" || f == "date-time-rfc1123" {
+    "time"
+  } else {
+    ""
   }
 }

@@ -8,6 +8,22 @@ version has been tagged since.
 
 ## Unreleased
 
+batch/azbatch v0.1.0, Go's azbatch v0.1.0. The generator (`codegen`),
+for it: a TypeSpec data plane module's `@client` block without a
+language scope and its members' inline `@clientName` for Go;
+`custom/<module>.toml` `param_names`, `header_names`,
+`merge_update_variants` and `patch_twins`; `private_ops` on pagers;
+typed response headers (`Int`, `Bool`, `Time`) and RFC 1123 header
+parameters as `Time` (`runtime.parse_rfc1123_header`,
+`runtime.rfc1123_header_text`, written in UTC as Go's); a binary
+TypeSpec response's `content_type`; a JSON body's Content-Type from
+the operation's one consumed type; `type: file` as binary; a doc's
+IPv4 example outside the ranges check-public allows written in
+192.0.2.0/24 (azbatch's `BatchNetworkSecurityGroupRule`). armstorage
+v4: the three `FileShareProperties` downgrade times are
+`azcore.DateTimeRFC7231`, as Go's `datetime.RFC7231` (were `Str`). No
+other module changed.
+
 messaging/azwebpubsub v0.1.0, Go's azwebpubsub v0.1.1. The generator
 (`codegen`), for it: `custom/<module>.toml: [[replace]]` (a regular
 expression and its replacement over the generated text, as Go's

@@ -41,7 +41,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 | 2686 |  |
 | azidentity | v1.15.0 | stable | 4100 | 4100 | partial | 638 |  |
 | azidentity/cache | v0.4.0 | v0 | 595 | 595 | missing |  |  |
-| batch/azbatch | v0.1.0 | v0 | 66 | 24575 | missing |  |  |
+| batch/azbatch | v0.1.0 | v0 | 66 | 24575 | v0.1.0 | 64 + 9385 gen |  |
 | cognitiveservices/azopenai | v0.1.2 | v0, deprecated | 619 | 3309 | missing |  |  |
 | containers/azcontainerregistry | v0.2.3 | v0 | 680 | 3753 | v0.2.3 | 454 + 1471 gen |  |
 | data/azappconfig | v2.3.0 (`v2`) | stable | 1972 | 5620 | v2.3.0 | 875 + 1870 gen |  |
@@ -450,4 +450,6 @@ error written by hand, every spec example checked against Go's own.
 messaging/azwebpubsub v0.1.1 is done: its operations generated from
 the 2023-07-01 OpenAPI file, its constructors, access key policy and
 client access URL written by hand, every public call checked against
-Go's own.
+Go's own. batch/azbatch v0.1.0 is done: generated from the TypeSpec's
+2024-07-01.20.0 OpenAPI file but for its constructor, every public call
+checked against Go's own.
