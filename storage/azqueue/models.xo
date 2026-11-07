@@ -6,6 +6,7 @@
 // written as a start and an end tag.
 
 use std/xml
+use github.com/xo-lang/azure/storage/azblob/exported
 use github.com/xo-lang/azure/storage/azblob/sas as blobsas
 
 const XML_HEADER: Str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -193,6 +194,9 @@ fn child_int(e: xml.Element, name: Str) -> Int? {
   child_text(e, name).and_then(fn(t: Str) -> Int? { Int.parse(t) })
 }
 
+// Go v2's generated models leave a time that reads as Go's zero time
+// (year 1, which Xo's Time cannot hold, or an empty element) unset;
+// check_times has let only those through unparsed.
 fn child_1123(e: xml.Element, name: Str) -> Time? {
   child_text(e, name).and_then(fn(t: Str) -> Time? { rfc1123(t) })
 }
@@ -212,7 +216,7 @@ fn metrics_of(e: xml.Element, name: Str) -> Metrics? {
 /// The elements Go's generated models read as HTTP dates.
 const RFC1123_ELEMENTS: List[Str] = ["InsertionTime", "ExpirationTime", "TimeNextVisible", "LastSyncTime"]
 /// The elements they read as ISO 8601 times (an access policy's).
-const RFC3339_ELEMENTS: List[Str] = ["Start", "Expiry"]
+const RFC3339_ELEMENTS: List[Str] = ["Start", "Expiry", "SignedStart", "SignedExpiry"]
 
 /// `text` as XML, with Go's error for a body that is not XML or a date
 /// that does not parse, named for the Go type it decodes (`ty`).
@@ -226,13 +230,14 @@ fn parse_xml(text: Str, ty: Str) -> xml.Element ! Str {
 fn check_times(e: xml.Element) -> () ! Str {
   for n in e.children {
     if let xml.Node.Elem(c) = n {
-      if RFC1123_ELEMENTS.contains(c.name.local) {
+      // an empty element is no time (Go v2's UnmarshalText)
+      if RFC1123_ELEMENTS.contains(c.name.local) && c.text() != "" && !is_zero_1123(c.text()) {
         let t = c.text()
         if rfc1123(t).is_none() {
           return Err(rfc1123_err(t))
         }
       }
-      if RFC3339_ELEMENTS.contains(c.name.local) {
+      if RFC3339_ELEMENTS.contains(c.name.local) && c.text() != "" && !is_zero_3339(c.text()) {
         rfc3339_strict(c.text())?
       }
       check_times(c)?
@@ -305,4 +310,26 @@ pub fn parse_peeked(text: Str) -> List[PeekedMessage] ! Str {
   Ok(messages_of(text, "MessagesClientPeekResponse")?.map(fn(m: xml.Element) -> PeekedMessage {
     PeekedMessage{message_id: child_text(m, "MessageId"), insertion_time: child_1123(m, "InsertionTime"), expiration_time: child_1123(m, "ExpirationTime"), dequeue_count: child_int(m, "DequeueCount"), message_text: child_text(m, "MessageText")}
   }))
+}
+
+// User delegation keys (beyond Go azqueue v2.1.2, which has the call
+// only in its generated layer).
+
+/// The times a user delegation key is valid, as ISO 8601 text, and the
+/// delegated user's tenant (Go's generated KeyInfo).
+pub struct KeyInfo {
+  pub expiry: Str? = None
+  pub delegated_user_tenant_id: Str? = None
+  pub start: Str? = None
+}
+
+/// The request body, as Go's generated GetUserDelegationKey writes it.
+pub fn key_info_xml(k: KeyInfo) -> Str {
+  XML_HEADER + el("KeyInfo", opt_str("Expiry", k.expiry) + opt_str("DelegatedUserTid", k.delegated_user_tenant_id) + opt_str("Start", k.start))
+}
+
+fn parse_user_delegation_key(text: Str) -> exported.UserDelegationKey ! Str {
+  let d = parse_xml(text, "UserDelegationKey")?
+  let s = fn(n: Str) -> Str { child_text(d, n) ?? "" }
+  Ok(exported.UserDelegationKey{signed_oid: s("SignedOid"), signed_tid: s("SignedTid"), signed_start: child_3339(d, "SignedStart") ?? Time.UNIX_EPOCH, signed_expiry: child_3339(d, "SignedExpiry") ?? Time.UNIX_EPOCH, signed_service: s("SignedService"), signed_version: s("SignedVersion"), value: Secret.new(s("Value")), signed_delegated_user_tenant_id: s("SignedDelegatedUserTid")})
 }

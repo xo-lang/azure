@@ -1,5 +1,38 @@
 # azqueue changes
 
+## Unreleased
+
+Follows Go's `sdk/storage/azqueue/v2` v2.1.2 (was azqueue v1.0.1). The
+Go programs behind every vector file were rerun on v2.1.2 and the
+vectors regenerated; each change below is checked against Go's output.
+
+- REST API version 2026-04-06 (was 2024-08-04).
+- `get_sas_url` on a URL that already has a query joins the SAS with
+  `&` and keeps a fragment last (Go v2.1.1); before, a second `?` made a
+  broken URL. A service URL gets its `/` before the query.
+- Queue URLs from a service client or a connection string join the
+  queue name as azcore v1.23's JoinPaths does: a root's query goes
+  after the name with `&`.
+- An access policy's `Start` and `Expiry` are read as Go v2's
+  dateTimeRFC3339: a space for the `T` (with or without a zone), a
+  one-digit hour, a fraction after `.` or `,`; a field out of range is
+  Go's error (`parsing time "x": hour out of range`, and month, day,
+  minute, second), and text after a zoneless time is Go's `extra text`.
+- An empty time element, and Go's zero time, read as no time, as Go
+  v2's generated models leave them (an empty one was an error).
+- A message count past 64 bits is Go's `value out of range` error, not
+  `invalid syntax`; one past 32 bits was already read (Go v2 made it
+  int64).
+- A SAS start or expiry is written in UTC, which this port always did;
+  Go v2.1.2 now does too (v1.0.1 wrote a zoned time's wall clock with a
+  `Z`), so its vectors include that case again.
+
+Added: user delegation SAS (`sign_with_user_delegation`, the
+`sduoid` and `skdutid` parameters, `QueueSignatureValues`'s object and
+correlation IDs), checked against Go v2.1.2's own SignWithUserDelegation
+(`udvectors_test.xo`), and `ServiceClient.get_user_delegation_credential`
+with `KeyInfo`, beyond Go (see the README).
+
 ## v0.4.0
 
 Behavior fix: a response header that repeats is read as Go's

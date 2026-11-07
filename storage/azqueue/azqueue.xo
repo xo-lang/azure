@@ -1,11 +1,10 @@
-// Azure Queue Storage, as azqueue v1.0.1 (MIT, Copyright (c) Microsoft
+// Azure Queue Storage, as azqueue v2.1.2 (MIT, Copyright (c) Microsoft
 // Corporation; NOTICE.md): the ServiceClient and QueueClient over the
-// REST API version 2024-08-04, their options and responses, connection
+// REST API version 2026-04-06, their options and responses, connection
 // strings and URL parts. The Shared Key credential and policy are
 // azblob's (`exported`), signing with azqueue's byte-order header sort.
 
 use std/http
-use std/path
 use std/time
 use std/url
 use github.com/xo-lang/azure/azcore
@@ -17,8 +16,8 @@ use github.com/xo-lang/azure/storage/azqueue/sas
 
 pub const VERSION: Str = "v0.4.0"
 
-/// The REST API version the calls are written for (azqueue v1.0.1's).
-pub const SERVICE_VERSION: Str = "2024-08-04"
+/// The REST API version the calls are written for (azqueue v2.1.2's).
+pub const SERVICE_VERSION: Str = "2026-04-06"
 
 /// The scope of a token for Storage.
 pub const TOKEN_SCOPE: Str = "https://storage.azure.com/.default"
@@ -85,32 +84,11 @@ fn core_with_no_credential(net: Net, clock: Clock, rand: Rand, u: Str, opts: Cli
   Core{url: u, pipeline: pipeline(net, clock, rand, [], opts), cred: None}
 }
 
-/// `root` with `segment` joined to its path, as azcore v1.21.0's
-/// runtime.JoinPaths with one path: the root's query split off at its
-/// first `?` (only the part before any second `?` is kept), the segment
-/// cleaned as path.Join cleans it (a trailing `/` kept), and one `/`
-/// between them.
+/// `root` with `segment` joined to its path, as Go v2.1.2's azcore
+/// (v1.23) runtime.JoinPaths: a root's query goes after the segment's
+/// own with `&`.
 fn join_paths(root: Str, segment: Str) -> Str {
-  var r = root
-  var qps = ""
-  if r.contains("?") {
-    let parts = r.split("?")
-    r = parts[0]
-    qps = parts[1]
-  }
-  var p = if segment == "" { "" } else { path.clean(segment) }
-  if segment.ends_with("/") && !p.ends_with("/") {
-    p = p + "/"
-  }
-  if qps != "" {
-    p = "${p}?${qps}"
-  }
-  if r.ends_with("/") && p.starts_with("/") {
-    r = r[0..r.len() - 1]
-  } else if !r.ends_with("/") && !p.starts_with("/") {
-    p = "/" + p
-  }
-  r + p
+  runtime.join_paths(root, segment)
 }
 
 /// `u` with `query` merged into the query it has, the keys sorted as Go's
@@ -177,19 +155,134 @@ fn rfc1123(v: Str) -> Time? {
   time.parse(v.replace(" GMT", " UTC"), time.RFC1123, time.utc()).ok()
 }
 
-/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time, as Go's
-/// generated timeRFC3339 reads it: upper-cased, UTC when it has no zone.
+/// An ISO 8601 time (`2026-11-05T00:00:00.0000000Z`) as a Time, as Go
+/// v2's generated dateTimeRFC3339 reads it: upper-cased, a space allowed
+/// for the `T`, UTC when it has no zone.
 fn rfc3339(v: Str) -> Time? {
   rfc3339_strict(v).ok()
 }
 
-/// As rfc3339, with Go's error up to the layout (an empty text is one).
+/// As rfc3339, with Go's error: a field out of range is Go's `parsing
+/// time "x": hour out of range`; any other is Go's text up to the
+/// layout.
 fn rfc3339_strict(v: Str) -> Time ! Str {
   let u = v.to_upper()
   let tz = tz_offset(u)
-  let layout = if tz { "2006-01-02T15:04:05.999999999Z07:00" } else { "2006-01-02T15:04:05.999999999" }
-  let t = Time.parse_rfc3339(if tz { u } else { "${u}Z" }) ?? return Err("parsing time ${go_quote(u)} as ${go_quote(layout)}")
-  Ok(t)
+  let has_t = u.contains("T")
+  let layout = match (tz, has_t) {
+    (true, true) => "2006-01-02T15:04:05.999999999Z07:00"
+    (true, false) => "2006-01-02 15:04:05.999999999Z07:00"
+    (false, true) => "2006-01-02T15:04:05.999999999"
+    (false, false) => "2006-01-02 15:04:05.999999999"
+  }
+  let bad = Err("parsing time ${go_quote(u)} as ${go_quote(layout)}")
+  let sep = if has_t { "T" } else { " " }
+  let f = time_fields(u, sep) ?? return bad
+  if let Some(name) = f.out_of_range {
+    return Err("parsing time ${go_quote(u)}: ${name} out of range")
+  }
+  if !tz && f.rest_at < u.len() {
+    return Err("parsing time ${go_quote(u)}: extra text: ${go_quote(u[f.rest_at..u.len()])}")
+  }
+  // Go's layout takes a one-digit hour; RFC 3339 does not
+  var text = "${u[0..10]}T${if f.hour_digits == 1 { "0" } else { "" }}${u[11..u.len()]}"
+  if !tz {
+    text = "${text}Z"
+  }
+  if f.day > days_in(f.month, f.year) {
+    // Go checks the day against the month after the rest has parsed
+    Time.parse_rfc3339("${text[0..8]}01${text[10..text.len()]}") ?? return bad
+    return Err("parsing time ${go_quote(u)}: day out of range")
+  }
+  Time.parse_rfc3339(text) ?? return bad
+}
+
+struct TimeFields {
+  year: Int
+  month: Int
+  day: Int
+  hour_digits: Int
+  out_of_range: Str? = None
+  /// Where the text goes on after the seconds and any fraction.
+  rest_at: Int = 0
+}
+
+fn digits_at(s: Str, i: Int, n: Int) -> Int? {
+  if s.len() < i + n {
+    return None
+  }
+  let part = s[i..i + n]
+  for c in part.bytes() {
+    if c < 0x30 || c > 0x39 {
+      return None
+    }
+  }
+  Int.parse(part)
+}
+
+/// The date and time fields of `u` in Go's layout order, stopping at
+/// the first one out of range (Go's time.Parse reports that one); None
+/// when the text does not have the layout's shape that far.
+fn time_fields(u: Str, sep: Str) -> TimeFields? {
+  let year = digits_at(u, 0, 4)?
+  if u.len() < 5 || u[4..5] != "-" { return None }
+  let month = digits_at(u, 5, 2)?
+  if month < 1 || month > 12 { return Some(TimeFields{year: year, month: month, day: 0, hour_digits: 2, out_of_range: Some("month")}) }
+  if u.len() < 8 || u[7..8] != "-" { return None }
+  let day = digits_at(u, 8, 2)?
+  if day < 1 || day > 31 { return Some(TimeFields{year: year, month: month, day: day, hour_digits: 2, out_of_range: Some("day")}) }
+  if u.len() < 11 || u[10..11] != sep { return None }
+  let hour_digits = if digits_at(u, 12, 1).is_some() { 2 } else { 1 }
+  let hour = digits_at(u, 11, hour_digits)?
+  let f = TimeFields{year: year, month: month, day: day, hour_digits: hour_digits}
+  if hour >= 24 { return Some(f with {out_of_range: Some("hour")}) }
+  let m = 11 + hour_digits
+  if u.len() < m + 1 || u[m..m + 1] != ":" { return None }
+  let minute = digits_at(u, m + 1, 2)?
+  if minute >= 60 { return Some(f with {out_of_range: Some("minute")}) }
+  if u.len() < m + 4 || u[m + 3..m + 4] != ":" { return None }
+  let second = digits_at(u, m + 4, 2)?
+  if second >= 60 { return Some(f with {out_of_range: Some("second")}) }
+  var end = m + 6
+  // a fraction after `.` or `,`, as Go's time.Parse reads one
+  if u.len() > end + 1 && (u[end..end + 1] == "." || u[end..end + 1] == ",") && digits_at(u, end + 1, 1).is_some() {
+    end = end + 1
+    while digits_at(u, end, 1).is_some() { end = end + 1 }
+  }
+  Some(f with {rest_at: end})
+}
+
+fn days_in(month: Int, year: Int) -> Int {
+  match month {
+    2 => if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 29 } else { 28 }
+    4 | 6 | 9 | 11 => 30
+    _ => 31
+  }
+}
+
+/// Whether an HTTP date is Go's zero time, January 1 of year 1 at
+/// midnight UTC (Go's time.Parse does not check the weekday).
+fn is_zero_1123(v: Str) -> Bool {
+  let (_, rest) = v.cut(", ") ?? return false
+  rest == "01 Jan 0001 00:00:00 GMT" || rest == "01 Jan 0001 00:00:00 UTC"
+}
+
+/// Whether an ISO 8601 time, as rfc3339 reads it, is Go's zero time:
+/// `0001-01-01` at midnight, any zero fraction, in UTC or with a zero
+/// offset.
+fn is_zero_3339(v: Str) -> Bool {
+  let u = v.to_upper()
+  if u.len() < 19 || u[0..10] != "0001-01-01" || (u[10..11] != "T" && u[10..11] != " ") || u[11..19] != "00:00:00" {
+    return false
+  }
+  var rest = u[19..u.len()]
+  if rest.starts_with(".") {
+    var i = 1
+    while i < rest.len() && rest[i..i + 1] == "0" { i = i + 1 }
+    if i == 1 { return false }
+    rest = rest[i..rest.len()]
+  }
+  rest == "" || rest == "Z" || rest == "+00:00" || rest == "-00:00"
 }
 
 /// Go's tzOffsetRegex, `(Z|z|\+|-)(\d+:\d+)*"*$`, on upper-cased text.
@@ -295,4 +388,57 @@ pub type URLParts = sas.URLParts
 /// The parts of `u` (azqueue.ParseURL, which is sas.ParseURL).
 pub fn parse_url(u: Str) -> URLParts ! Str {
   sas.parse_url(u)
+}
+
+/// Why Go's strconv.ParseInt(v, 10, 64) rejects `v`: digits (with an
+/// optional sign) too large for 64 bits are out of range, anything
+/// else is not a number.
+fn parse_int_err(v: Str) -> Str {
+  let d = if v.starts_with("+") || v.starts_with("-") { v[1..v.len()] } else { v }
+  if d == "" {
+    return "invalid syntax"
+  }
+  for c in d.bytes() {
+    if c < 0x30 || c > 0x39 {
+      return "invalid syntax"
+    }
+  }
+  "value out of range"
+}
+
+// SAS URLs, as Go's storage/internal/sasurl (azqueue v2.1.1).
+
+fn cut_fragment(u: Str) -> (Str, Str) {
+  match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+}
+
+/// `query` after `u`'s own query with `&` (or `?` when it has none),
+/// before its fragment (sasurl.Append).
+fn append_sas(u: Str, query: Str) -> Str {
+  if query == "" {
+    return u
+  }
+  let (base, fragment) = cut_fragment(u)
+  let sep = if base.contains("?") { "&" } else { "?" }
+  "${base}${sep}${query}${fragment}"
+}
+
+/// As append_sas, with a `/` after the account URL's path
+/// (sasurl.AppendToAccountURL).
+fn append_sas_to_account_url(u: Str, query: Str) -> Str {
+  let (base, fragment) = cut_fragment(u)
+  var (path, raw_query, has_query) = match base.cut("?") {
+    Some((a, b)) => (a, b, true)
+    None => (base, "", false)
+  }
+  if !path.ends_with("/") {
+    path = path + "/"
+  }
+  if has_query {
+    path = "${path}?${raw_query}"
+  }
+  append_sas(path, query) + fragment
 }

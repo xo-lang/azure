@@ -1,0 +1,93 @@
+// User delegation SAS and keys against Go v2.1.2's own output
+// (udvectors_test.xo): the key request Go's generated client sends and
+// the key it reads, every SignWithUserDelegation case, and the sduoid
+// and skdutid parameters read back.
+
+use std/http
+use std/time
+use std/url
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azqueue/sas
+
+const UD_EP: Str = "https://acct1.queue.example.test/"
+
+const UDK_1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>oid-1</SignedOid><SignedTid>tid-1</SignedTid><SignedStart>2026-11-05T00:00:00Z</SignedStart><SignedExpiry>2026-11-07T00:00:00Z</SignedExpiry><SignedService>q</SignedService><SignedVersion>2026-04-06</SignedVersion><Value>dWRrLWtleQ==</Value><SignedDelegatedUserTid>dtid-1</SignedDelegatedUserTid></UserDelegationKey>"
+
+const UDK_2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><UserDelegationKey><SignedOid>oid-2</SignedOid><SignedTid>tid-2</SignedTid><SignedStart>2026-11-05 00:00:00</SignedStart><SignedExpiry>2026-11-07t01:00:00+01:00</SignedExpiry><SignedService>q</SignedService><SignedVersion>2026-04-06</SignedVersion><Value>dWRrLWtleQ==</Value></UserDelegationKey>"
+
+fn ud_line(name: Str, r: Result[sas.QueryParameters, Str]) -> List[Str] {
+  match r {
+    Ok(p) => ["== ${name}", "  ${p.encode()}"]
+    Err(e) => ["== ${name}", "  error ${e}"]
+  }
+}
+
+fn udc(tenant: Str) -> exported.UserDelegationCredential {
+  exported.new_user_delegation_credential("acct1", exported.UserDelegationKey{
+    signed_oid: "oid-1", signed_tid: "tid-1", signed_start: at("2026-11-05T00:00:00Z"), signed_expiry: at("2026-11-07T00:00:00Z"),
+    signed_service: "q", signed_version: "2026-04-06", value: Secret.new("dWRrLWtleQ=="), signed_delegated_user_tenant_id: tenant,
+  })
+}
+
+test "user delegation keys and SAS are Go v2.1.2's" {
+  let log = Mutex[List[Str]].new([])
+  let n = Mutex[Int].new(0)
+  os.net.handle("POST ${UD_EP}", fn(req: http.Request) -> http.Response {
+    let i = n.with(fn(var c: Int) -> Int {
+      c = c + 1
+      c
+    })
+    var qv = url.values()
+    for k in req.url.query.keys().sort() {
+      qv.add(k, req.url.query.get(k) ?? "")
+    }
+    let lines = ["REQ ${req.method} ${req.path}?${qv.encode()}", "  content-type=${req.header("Content-Type") ?? ""} accept=${req.header("Accept") ?? ""}"] + "  body=${req.body.to_str_lossy()}".split("\n")
+    log.with(fn(var l: List[Str]) { l = l + lines })
+    http.text(200, if i == 1 { UDK_1 } else { UDK_2 }).with_header("Content-Type", "application/xml")
+  })
+  let svc = new_service_client_with_no_credential(os.net, os.clock, os.rand, UD_EP)
+  var out: List[Str] = []
+  for info in [
+    KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-07T00:00:00Z"), delegated_user_tenant_id: Some("dtid-1")},
+    KeyInfo{expiry: Some("2026-11-07T00:00:00Z <&>")},
+  ] {
+    let c = svc.get_user_delegation_credential(info)?
+    out = out + log.with(fn(var l: List[Str]) -> List[Str] {
+      let xs = l
+      l = []
+      xs
+    })
+    let k = c.key
+    out.push("  key oid=${k.signed_oid} tid=${k.signed_tid} start=${go_ts(k.signed_start)} expiry=${go_ts(k.signed_expiry)} service=${k.signed_service} version=${k.signed_version} value=${k.value.reveal()} dtid=${if k.signed_delegated_user_tenant_id == "" { "<nil>" } else { k.signed_delegated_user_tenant_id }}")
+    expect(c.account_name) == "acct1"
+  }
+
+  let st = at("2026-11-05T01:02:03Z")
+  let se = at("2026-11-06T01:02:03.5Z")
+  let zst = at("2026-11-05T23:30:00-08:00")
+  let zse = at("2026-11-07T03:00:00.25+05:30")
+  let ip = "198.51.100.10-198.51.100.20"
+  let cred = new_shared_key_credential("acct1", KEY)?
+  out = out + ud_line("ud1 every field, a delegated tenant, letters out of order", sas.QueueSignatureValues{protocol: sas.PROTOCOL_HTTPS, start: Some(st), expiry: Some(se), permissions: "pura", ip_range: ip, identifier: "pol1", queue_name: "q1", authorized_object_id: "aoid-1", unauthorized_object_id: "uoid-1", correlation_id: "cid-1", signed_delegated_user_object_id: "duoid-1"}.sign_with_user_delegation(udc("dtid-1")))
+  out = out + ud_line("ud2 no delegated tenant", sas.QueueSignatureValues{expiry: Some(se), permissions: "r", queue_name: "q1"}.sign_with_user_delegation(udc("")))
+  out = out + ud_line("ud3 a version, a queue name with a capital and a space", sas.QueueSignatureValues{version: "2020-10-02", expiry: Some(se), permissions: "a", queue_name: "Q 1"}.sign_with_user_delegation(udc("")))
+  out = out + ud_line("ud4 a stored policy is not enough", sas.QueueSignatureValues{identifier: "pol1", queue_name: "q1"}.sign_with_user_delegation(udc("")))
+  out = out + ud_line("ud5 no permissions", sas.QueueSignatureValues{expiry: Some(se), queue_name: "q1"}.sign_with_user_delegation(udc("")))
+  out = out + ud_line("ud6 an unknown permission", sas.QueueSignatureValues{expiry: Some(se), permissions: "rx", queue_name: "q1"}.sign_with_user_delegation(udc("")))
+  out = out + ud_line("ud7 start and expiry outside UTC", sas.QueueSignatureValues{start: Some(zst), expiry: Some(zse), permissions: "r", queue_name: "q1"}.sign_with_user_delegation(udc("dtid-1")))
+  out = out + ud_line("sk1 shared key queue SAS, times outside UTC", sas.QueueSignatureValues{start: Some(zst), expiry: Some(zse), permissions: "rp", queue_name: "q1", ip_range: ip}.sign_with_shared_key(cred))
+  out = out + ud_line("sk2 shared key account SAS, times outside UTC", sas.AccountSignatureValues{start: Some(zst), expiry: Some(zse), permissions: "rl", resource_types: "sco"}.sign_with_shared_key(cred))
+  for raw in [
+    "sv=2026-04-06&sp=r&se=2026-11-06T01%3A02%3A03Z&skoid=o1&sktid=t1&skt=2026-11-05T00%3A00%3A00Z&ske=2026-11-07T00%3A00%3A00Z&sks=q&skv=2026-04-06&sduoid=d1&skdutid=dt1&sig=eA%3D%3D",
+    "SDUOID=d2&SKDUTID=dt2&sig=eA%3D%3D",
+    "sduoid=&skdutid=&x=1",
+  ] {
+    let p = sas.new_query_parameters(url.parse_query(raw)?).0
+    out = out + ["== parse ${raw}", "  sduoid=${p.signed_delegated_user_object_id} skdutid=${p.signed_delegated_user_tenant_id} encode=${p.encode()}"]
+  }
+  expect(out.map(hide)) == UD_OUTPUT
+}
+
+fn go_ts(t: Time) -> Str {
+  time.format(t, time.utc(), time.RFC3339)
+}

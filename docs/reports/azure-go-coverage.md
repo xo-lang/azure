@@ -35,10 +35,10 @@ Found: 40 data-plane and support families and 308 ARM families.
 
 | Go module | latest | kind | Go hand-written lines | Go lines | our port | our lines (hand + generated) | popularity |
 |---|---|---|---:|---:|---|---|---|
-| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | missing |  |  |
+| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | missing (needs azcore SSE streaming) |  |  |
 | ai/azopenaiassistants | v0.4.0 | v0, deprecated | 1546 | 13412 | missing |  |  |
 | ai/azopenaiextensions | v0.2.0 | v0, deprecated | 290 | 3840 | missing |  |  |
-| azcore | v1.24.0 | stable | 8168 | 9190 | v1.23.0 (behind v1.24.0) | 2156 |  |
+| azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 except SSE streaming (deferred) | 2156 |  |
 | azidentity | v1.15.0 | stable | 4100 | 4100 | partial | 638 |  |
 | azidentity/cache | v0.4.0 | v0 | 595 | 595 | missing |  |  |
 | batch/azbatch | v0.1.0 | v0 | 66 | 24575 | missing |  |  |
@@ -70,8 +70,8 @@ Found: 40 data-plane and support families and 308 ARM families.
 | security/keyvault/internal | v1.2.0 | stable | 259 | 259 | yes | 185 |  |
 | storage/azblob | v1.8.3 | stable | 14774 | 30535 | v1.8.3 | 3645 |  |
 | storage/azdatalake | v1.7.1 | stable | 10622 | 16543 | v1.7.1 | 2986 |  |
-| storage/azfile | v1.7.2 | stable | 8078 | 18464 | v1.7.1 (behind v1.7.2) | 3132 |  |
-| storage/azqueue | v2.1.2 (`v2`) | stable | 3277 | 6066 | v1.0.1 (behind v2.1.2) | 1305 |  |
+| storage/azfile | v1.7.2 | stable | 8078 | 18464 | v1.7.2 | 3132 |  |
+| storage/azqueue | v2.1.2 (`v2`) | stable | 3277 | 6066 | v2.1.2 | 1305 |  |
 | storage/internal | v0.1.0 | v0 | 989 | 989 | n/a (support module) |  |  |
 | template/aztemplate | v0.6.6 | v0 | 138 | 190 | n/a (sample) |  |  |
 | tracing/azotel | v0.4.0 | v0 | 123 | 123 | missing |  |  |
@@ -402,6 +402,13 @@ shipped a newer major whose spec our generator has not been run on.
 </details>
 
 ## Proposed next three
+
+Status (2026-11-06): (1) is under way. azcore v1.24.0 is ported but
+for its SSE stream reader (`streaming/sse.go`), deferred with the lead:
+our pipeline reads a body whole, so SSE becomes its own slice, a
+streaming body first, when a module we port needs it (azopenai would).
+azfile v1.7.2 and azqueue v2.1.2 are done; azsecrets v1.5.1 is next.
+Our line counts above are from before these catch-ups.
 
 1. **Catch the ported modules up**: azcore v1.24.0 (query-redacted
    URLs in retry logs and tracing spans, SSE streaming, `ResourceID.ValidateResourceTypeChain`;

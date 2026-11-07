@@ -9,6 +9,7 @@ use std/url
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
 use github.com/xo-lang/azure/storage/azqueue/queueerror
 use github.com/xo-lang/azure/storage/azqueue/sas
 
@@ -179,8 +180,20 @@ pub fn (s: ServiceClient) delete_queue(queue_name: Str) -> Response ! azcore.Cal
 pub fn (s: ServiceClient) get_sas_url(resource_types: Str, permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
   let cred = s.core.cred ?? return Err(queueerror.MISSING_SHARED_KEY_CREDENTIAL)
   let qps = sas.AccountSignatureValues{version: sas.VERSION, protocol: sas.PROTOCOL_HTTPS, start: start, expiry: Some(expiry), permissions: permissions, resource_types: resource_types}.sign_with_shared_key(cred)?
-  let base = s.url.trim_end_chars("/")
-  Ok("${base}/?${qps.encode()}")
+  Ok(append_sas_to_account_url(s.url, qps.encode()))
+}
+
+/// A user delegation credential for the account: the service's key for
+/// the client's Entra ID identity (a token credential is needed), for
+/// `sas.QueueSignatureValues.sign_with_user_delegation`. Beyond Go
+/// azqueue v2.1.2, which signs with one but gives callers no way to get
+/// one; the call is Go's generated GetUserDelegationKey, and the account
+/// is the URL's (the first host label, or the path's for an IP host).
+pub fn (s: ServiceClient) get_user_delegation_credential(info: KeyInfo) -> exported.UserDelegationCredential ! azcore.CallErr uses (net.dial, clock, rand) {
+  let parts = parse_url(s.url) ?? e => return Err(azcore.CallErr.Decode(e))
+  let account = if parts.ip_account_name != "" { parts.ip_account_name } else { parts.host.split(".")[0] }
+  let resp = s.core.call("POST", with_query(s.url, [("comp", "userdelegationkey"), ("restype", "service")]), [200], body: Some(key_info_xml(info)))?
+  Ok(exported.new_user_delegation_credential(account, decoded(resp, parse_user_delegation_key)?))
 }
 
 // The queue.
@@ -214,7 +227,7 @@ pub fn (q: QueueClient) get_properties() -> GetQueuePropertiesResponse ! azcore.
   let resp = q.core.call("GET", with_query(q.url, [("comp", "metadata")]), [200])?
   let r = strict_response(resp)?
   let count = match first_header(resp, "x-ms-approximate-messages-count") {
-    Some(v) if v != "" => Some(Int.parse(v) ?? return Err(azcore.CallErr.Decode("strconv.ParseInt: parsing ${go_quote(v)}: invalid syntax")))
+    Some(v) if v != "" => Some(Int.parse(v) ?? return Err(azcore.CallErr.Decode("strconv.ParseInt: parsing ${go_quote(v)}: ${parse_int_err(v)}")))
     _ => None
   }
   Ok(GetQueuePropertiesResponse{response: r, metadata: metadata_of(resp), approximate_messages_count: count})
@@ -339,5 +352,5 @@ pub fn (q: QueueClient) get_sas_url(permissions: Str, expiry: Time, start: Time?
   let cred = q.core.cred ?? return Err(queueerror.MISSING_SHARED_KEY_CREDENTIAL)
   let parts = parse_url(q.url)?
   let qps = sas.QueueSignatureValues{version: sas.VERSION, protocol: sas.PROTOCOL_HTTPS, start: start, expiry: Some(expiry), permissions: permissions, queue_name: parts.queue_name}.sign_with_shared_key(cred)?
-  Ok("${q.url}?${qps.encode()}")
+  Ok(append_sas(q.url, qps.encode()))
 }

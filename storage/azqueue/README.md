@@ -1,7 +1,8 @@
 # azqueue
 
-Azure Queue Storage for Xo, a port of Go's `sdk/storage/azqueue` v1.0.1
-(REST API version 2024-08-04).
+Azure Queue Storage for Xo, a port of Go's `sdk/storage/azqueue/v2`
+v2.1.2 (REST API version 2026-04-06). The module path has no `/v2`:
+Xo versions it on its own.
 
 What it does:
 
@@ -28,6 +29,14 @@ What it does:
   and other parameters; `to_url` is Go's String. An IP host's first
   segment is the account, as Azurite's. Go's `SnapshotTime` getter is
   left out: Go never sets it.
+- User delegation SAS (`sas.QueueSignatureValues.sign_with_user_delegation`,
+  with the `saoid`, `suoid`, `scid`, `sduoid` and `skdutid` fields) and
+  `ServiceClient.get_user_delegation_credential` to get the key. The
+  last is beyond Go v2.1.2: Go signs with a credential but gives
+  callers no way to build one (its constructor is internal; reported
+  upstream), so this one is Go's generated GetUserDelegationKey call
+  plus azblob's credential type. The account is the URL's (the first
+  host label, or the path's first segment for an IP host).
 - `queueerror`: the error codes and `has_code`.
 
 Connection strings, client URLs, the queue URLs a service client or a
@@ -45,12 +54,13 @@ with Go's error text (`unmarshalling type *generated.X: ...`). A list
 page carries the request ID, version and date (`response`), as Go's
 ListQueuesResponse does.
 
-Where it differs from Go v1.0.1:
+Where it differs from Go v2.1.2:
 
-- Times are instants. Go's SAS code writes a start or expiry that is
-  not in UTC in its own zone with a `Z` appended (it signs
-  `01:02:03Z` for `00:02:03Z` given in UTC+1); here every SAS time is
-  UTC. `get_sas_url` converts to UTC in Go too, so its URLs match.
+- Go's zero time (January 1 of year 1) is outside the range of Xo's
+  `Time` (1678 to 2262). Go v2 reads it as no time, and so does this
+  port, by its text (`0001-01-01T00:00:00Z`, `Mon, 01 Jan 0001
+  00:00:00 GMT`). Other years outside the range do not parse here,
+  where Go reads them.
 - A caller's `x-ms-date` is kept. Go's signer looks the header up by its
   lowercase name in a canonicalized header map, so it never sees one and
   always signs its own clock's date.
