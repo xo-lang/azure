@@ -65,6 +65,25 @@ that name (armchaos' executionDetails); TypeSpec's
 file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
 list and map arguments (armbilling, armcdn, armcognitiveservices).
 
+Generator, from the batch-4d differentials against Go: an operation with
+no `produces` takes the document's, and Accept lists every JSON type
+(armfeatures, armscheduler); a `format: byte` query value is standard
+base64 and a numeric or boolean list query is comma joined
+(armdeviceprovisioningservices, armtrafficmanager); a subtype with
+subtypes of its own is a Classification by the discriminator it
+inherits (armservicefabricmesh's NetworkResourcePropertiesClassification,
+armappplatform's UploadedUserSourceInfoClassification); an
+`@@override` whose custom operation takes a model of `@path` properties
+as one parameter is Go's parameter group struct, after the other
+required parameters, and the qualified
+`@@Azure.ClientGenerator.Core.override` counts (armsecurity's
+PrivateLinkParameters); codegen/gorows' `raw_next_link` row sends a next
+link as it is, as autorest.go before mid 2022 does
+(armservicefabricmesh, armworkloadmonitor), and its `struct_order_json`
+row encodes a module with no MarshalJSON in Go's struct order, the
+read-only fields last (armworkloadmonitor). scripts/refresh.sh finds a
+module's zz_generated_response_types.go.
+
 Generator, from the batch-4c differentials against Go: `@@override`'s
 order also places required header and query parameters
 (armdeviceprovisioningservices' ifMatch, armappservice's environmentName
