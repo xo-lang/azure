@@ -1,0 +1,123 @@
+// The credentials against the Go program's fake token endpoint: each
+// token request must be Go's (govectors_test.xo), MSAL Go's form and
+// headers included.
+
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const GV_AUTHORITY: Str = "https://login.example.test/"
+
+struct GvFake {
+  log: Mutex[List[Str]]
+  /// statuses for the next token requests (else 200)
+  next: Mutex[List[Int]]
+}
+
+fn gv_serve(net: testing.FakeNet, section: Str) -> GvFake {
+  let f = GvFake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([])}
+  net.handle("POST ${GV_AUTHORITY}{rest...}", fn(req: http.Request) -> http.Response {
+    var hs: List[Str] = []
+    for (k, v) in req.headers {
+      let lk = k.to_lower()
+      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
+        hs.push("${lk}=${if lk == "client-request-id" { "<uuid>" } else { v }}")
+      }
+    }
+    var body = req.body.to_str_lossy()
+    if let Some((a, rest)) = body.cut("client_assertion=") {
+      let tail = match rest.cut("&") {
+        Some((_, t)) => "&${t}"
+        None => ""
+      }
+      body = "${a}client_assertion=<jwt>${tail}"
+    }
+    f.log.with(fn(var l: List[Str]) { l.push("${section}: REQ POST ${GV_AUTHORITY}${req.escaped_path().trim_start_chars("/")}\n  H ${hs.sort().join(" | ")}\n  B ${body}") })
+    let st = f.next.with(fn(var n: List[Int]) -> Int { if n.is_empty() { 200 } else { n.remove_at(0) } })
+    if st != 200 {
+      return http.text(st, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad secret\",\"error_codes\":[7000215]}")
+    }
+    http.text(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-1\"}")
+  })
+  f
+}
+
+fn gv_opts(allowed: List[Str] = []) -> Options {
+  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}, retry: policy.RetryOptions{max_retries: -1}}, additionally_allowed_tenants: allowed}
+}
+
+/// The Go program's lines of `section`, and the ones logged here.
+fn gv_lines(f: GvFake, section: Str) -> (List[Str], List[Str]) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.join("\n").split("\n") })
+  var want: List[Str] = []
+  var keep = false
+  for l in GO_TOKEN_LINES {
+    if l.starts_with("${section}: ") {
+      keep = true
+      want.push(l)
+    } else if keep && l.starts_with("  ") {
+      want.push(l)
+    } else {
+      keep = false
+    }
+  }
+  (got, want)
+}
+
+fn gv_note(f: GvFake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+/// The Go program's line for a credential's construction.
+fn gv_new[T](f: GvFake, section: Str, label: Str, r: Result[T, azcore.AuthErr]) {
+  match r {
+    Ok(_) => gv_note(f, "${section}: NEW ${label}: <nil>")
+    Err(e) => gv_note(f, "${section}: NEW ${label}: ${e.display()}")
+  }
+}
+
+/// The Go program's line for a token, an AuthenticationFailedError (a
+/// status) or another error, each further line behind `| `.
+fn gv_get(f: GvFake, section: Str, label: Str, r: Result[azcore.AccessToken, azcore.AuthErr]) {
+  match r {
+    Ok(t) => gv_note(f, "${section}: OUT ${label}: token=${t.token.reveal()} expires=<t>")
+    Err(e) => {
+      let kind = if e.status != 0 { "auth failed" } else { "error" }
+      gv_note(f, "${section}: OUT ${label}: ${kind}: ${e.display().replace("\n", "\n${section}: | ")}")
+    }
+  }
+}
+
+const GV_SCOPE: Str = "https://vault.example.test/.default"
+
+test "the client secret credential's requests and errors are Go's" {
+  let f = gv_serve(os.net, "secret")
+  let mk = fn(t: Str, c: Str, sec: Str, allowed: List[Str]) -> ClientSecretCredential ! azcore.AuthErr { new_client_secret_credential(t, c, sec, os.net, os.clock, os.rand, gv_opts(allowed)) }
+  gv_new(f, "secret", "secret", mk("tenant-a", "client-1", "s3cret", ["tenant-b"]))
+  gv_new(f, "secret", "secret no client", mk("tenant-a", "", "s", []))
+  gv_new(f, "secret", "secret no secret", mk("tenant-a", "client-1", "", []))
+  let c = mk("tenant-a", "client-1", "s3cret", ["tenant-b"])?
+  gv_get(f, "secret", "secret first", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, "secret", "secret cached", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, "secret", "secret tenant-b", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"}))
+  gv_get(f, "secret", "secret tenant-c", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-c"}))
+  gv_get(f, "secret", "secret claims", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], claims: "{\"access_token\":{\"nbf\":{\"essential\":true}}}", enable_cae: true}))
+  gv_get(f, "secret", "secret two scopes", c.get_token(azcore.TokenRequestOptions{scopes: ["a", "b"]}))
+  f.next.reset([401])
+  gv_get(f, "secret", "secret 401", c.get_token(azcore.TokenRequestOptions{scopes: ["https://other.example.test/.default"]}))
+  gv_new(f, "secret", "bad tenant", mk("bad tenant!", "client-1", "s", []))
+  let (got, want) = gv_lines(f, "secret")
+  expect(got) == want
+}
+
+test "the workload identity credential's token request is MSAL Go's" {
+  let f = gv_serve(os.net, "workload")
+  os.fs.write("/var/run/idgo-token", b"fed-token-1")?
+  let w = new_workload_identity_credential("tenant-a", "client-1", "/var/run/idgo-token", os.fs, os.net, os.clock, os.rand, gv_opts())
+  gv_new(f, "workload", "workload", w)
+  gv_get(f, "workload", "workload", w?.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  let (got, want) = gv_lines(f, "workload")
+  // the options taking AZURE_CLIENT_ID and the others come with (9)
+  expect(got) == want.filter(fn(l: Str) -> Bool { !l.starts_with("workload: NEW workload empty") })
+}
