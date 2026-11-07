@@ -27,6 +27,10 @@ pub struct Model {
   /// Go's type is unexported (a TypeSpec rename to a lower-case name):
   /// the module's own, without `pub`.
   pub private: Bool = false
+  /// The schema, or an allOf parent, has `additionalProperties: {}`
+  /// beside its properties: Go's `AdditionalProperties map[string]any`,
+  /// the keys no field names, written inline.
+  pub extra: Bool = false
 }
 
 /// An extensible string enum (x-ms-enum): a newtype with constants.
@@ -834,7 +838,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop)})
   }
   let private = b.custom.models.values().any(fn(r: Str) -> Bool { is_unexported(r) && reserve(r) == name })
-  b.models.push(Model{name: name, fields: fields, doc: doc_of(v), private: private})
+  b.models.push(Model{name: name, fields: fields, doc: doc_of(v), private: private, extra: !fields.is_empty() && b.has_extra(file, v, 0)})
   name
 }
 
@@ -1354,4 +1358,26 @@ fn header_kind(hv: json.Value) -> Str {
   } else {
     ""
   }
+}
+
+/// Whether `v` or one of its allOf parents has an untyped
+/// `additionalProperties` (`{}` or `true`), Go's AdditionalProperties.
+fn (b: Builder) has_extra(file: Str, v: json.Value, depth: Int) -> Bool {
+  if depth > 8 {
+    return false
+  }
+  match v.get("additionalProperties") {
+    Some(json.Value.Object(fs)) if fs.is_empty() => return true
+    Some(json.Value.Bool(true)) => return true
+    _ => {}
+  }
+  for parent in list_of(v.get("allOf")) {
+    if str_of(parent.get("$ref")) != "" {
+      let (pf, _, pv) = b.deref(file, parent)
+      if b.has_extra(pf, pv, depth + 1) {
+        return true
+      }
+    }
+  }
+  false
 }

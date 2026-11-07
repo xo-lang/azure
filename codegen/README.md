@@ -156,6 +156,18 @@ response type equal, except armkeyvault's `Secret`, which is
   `stutter: <name>` is the name dropped from the front of type names
   and the group that becomes plain `Client`, in place of the package's
   (armdeployments v3's `stutter: resources` keeps `DeploymentsClient`).
+- `@@override(Iface.op, customOp, "go")`: Go's method takes the custom
+  operation's path parameters in the order it declares them
+  (armcosmos v4's `GetSQLRoleDefinition(ctx, roleDefinitionID,
+  resourceGroupName, accountName)`); the operation is found by its
+  `@operationId`, or by the group an unscoped
+  `@@clientLocation(Iface.op, Group)` moves it to. A custom file's
+  `[param_order]` wins.
+- A model whose schema, or an allOf parent, has `additionalProperties:
+  {}` beside its properties gets Go's AdditionalProperties:
+  `additional_properties: Map[Str, json.Value]?`, the keys no field
+  names, kept on decode and written inline on encode, keys sorted
+  (armcosmos v4's ServiceResourceProperties and its four subtypes).
 - `utc_date_times` in a services.toml row: Go's module writes its
   `date-time` fields in UTC (the TypeSpec Go emitter's `populateTime`
   with `utc`: armstorage v4, armcompute v9, armnetwork v12, armkeyvault

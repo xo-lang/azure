@@ -261,7 +261,11 @@ pub fn emit_models(p: Package, api: Api) -> File {
     for f in m.fields.sort_by(fn(f: Field) -> Str { f.wire }) {
       s = s + doc("  ", f.doc) + (if m.patch { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": json.Patch[${f.typ}] = json.Patch.Absent\n" } else { "  pub ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n" })
     }
-    s = s + "} derive Json\n"
+    if m.extra && !m.patch {
+      s = s + emit_extra(m)
+    } else {
+      s = s + "} derive Json\n"
+    }
     if m.twin_of != "" {
       s = s + "\n/// `m` as a patch: each set field a value, each unset one Absent.\npub fn (m: ${m.twin_of}) patch() -> ${m.name} {\n  ${m.name}{\n"
       for f in m.fields {
@@ -270,6 +274,10 @@ pub fn emit_models(p: Package, api: Api) -> File {
       }
       s = s + "  }\n}\n"
     }
+  }
+  if api.models.any(fn(m: Model) -> Bool { m.extra && !m.patch }) {
+    s = s + "\n/// `v` with `extra`'s keys added (over a field's of the same name), as\n/// Go's MarshalJSON writes AdditionalProperties (its keys sorted).\nfn with_additional(v: json.Value, extra: Map[Str, json.Value]?) -> json.Value {\n  let m = extra ?? return v\n  match v {\n    json.Value.Object(fs) => {\n      var all = fs.filter(fn(f: (Str, json.Value)) -> Bool { !m.contains(f.0) })\n      for (k, x) in m {\n        all.push((k, x))\n      }\n      json.Value.Object(all.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))\n    }\n    other => other\n  }\n}\n"
+    s = s + "\n/// The keys of `v` no field names (Go's AdditionalProperties); None\n/// when there are none.\nfn additional_of(v: json.Value, known: List[Str]) -> Map[Str, json.Value]? {\n  match v {\n    json.Value.Object(fs) => {\n      var m: Map[Str, json.Value] = {}\n      for (k, x) in fs {\n        if !known.contains(k) {\n          m[k] = x\n        }\n      }\n      if m.is_empty() { None } else { Some(m) }\n    }\n    _ => None\n  }\n}\n"
   }
   let imports = (if s.contains("json.") { "use std/json\n" } else { "" }) + (if wire_types { "use github.com/xo-lang/azure/azcore\n" } else { "" })
   File{name: "models.xo", text: head + imports + (if imports == "" { "" } else { "\n" }) + s}
@@ -770,4 +778,32 @@ pub fn tidy(text: Str) -> Str {
     i += 1
   }
   out.join("\n")
+}
+
+/// The end of a model with Go's AdditionalProperties: the field, its
+/// JSON through a private twin of the named fields, and the unknown
+/// keys inline (Go's MarshalJSON and UnmarshalJSON).
+fn emit_extra(m: Model) -> Str {
+  let sn = snake(m.name)
+  let known = "${m.name}Known"
+  let fs = m.fields.sort_by(fn(f: Field) -> Str { f.wire })
+  var s = "  /// The keys no field names, as they came (Go's AdditionalProperties).\n  pub additional_properties: Map[Str, json.Value]? = None\n"
+  s = s + "} derive Json(via: json.Value, to: ${sn}_json, from: parse_${sn})\n"
+  s = s + "\n/// ${m.name}'s named fields, for its JSON.\nstruct ${known} {\n"
+  for f in fs {
+    s = s + "  ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n"
+  }
+  s = s + "} derive Json\n"
+  s = s + "\nfn ${sn}_json(x: ${m.name}) -> json.Value {\n  let known = ${known}{\n"
+  for f in fs {
+    s = s + "    ${f.name}: x.${f.name},\n"
+  }
+  s = s + "  }\n  with_additional(json.to_value(known), x.additional_properties)\n}\n"
+  s = s + "\nfn parse_${sn}(v: json.Value) -> ${m.name} ! json.DecodeErr {\n  let k = json.from_value[${known}](v)?\n  Ok(${m.name}{\n"
+  for f in fs {
+    s = s + "    ${f.name}: k.${f.name},\n"
+  }
+  let wires = fs.map(fn(f: Field) -> Str { "\"${esc(f.wire)}\"" }).join(", ")
+  s = s + "    additional_properties: additional_of(v, [${wires}]),\n  })\n}\n"
+  s
 }

@@ -13,6 +13,11 @@ pub struct Renames {
   /// (armsubscriptions' `Client.Get(ctx, subscriptionID, ...)`), as
   /// `operationid#wire`, lower case operationId.
   pub method_params: List[Str] = []
+  /// `@@override(Iface.op, customOp, "go")`: the custom operation's path
+  /// parameters in the order it declares them, which is Go's method's
+  /// order (armcosmos' `GetSQLRoleDefinition(ctx, roleDefinitionID,
+  /// resourceGroupName, accountName)`), by operationId, lower case.
+  pub param_order: Map[Str, List[Str]] = {}
   /// model to Go's name
   pub models: Map[Str, Str] = {}
   /// `Model.property` to Go's field name
@@ -243,6 +248,8 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let unscoped_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,?\\s*\\)") ?? e => return Err(e.display())
+  let override_re = regexp.compile("@@override\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let param_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)::parameters\\.([A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
@@ -258,6 +265,18 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // each operation's operationId by `iface.op` (lower case), from every
   // file: a `@@clientLocation` in one file names an operation of another
   var ids: Map[Str, Str] = {}
+  // `@@clientLocation(Iface.op, Group)` with no scope: `iface.op` (lower
+  // case) to Group
+  var moved: Map[Str, Str] = {}
+  for text in texts {
+    for whole in unscoped_loc.find_all(text) {
+      let m = unscoped_loc.captures(whole) ?? continue
+      let segs = (m[1] ?? "").split(".")
+      if segs.len() >= 2 {
+        moved["${segs[segs.len() - 2]}.${segs[segs.len() - 1]}".to_lower()] = m[2] ?? ""
+      }
+    }
+  }
   for text in texts {
     for (id, iface, op, _) in operation_ids(text) {
       ids["${iface}.${op}".to_lower()] = id
@@ -491,8 +510,72 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
       r.method_params.push("${id.to_lower()}#${m[2] ?? ""}")
     }
+    for whole in override_re.find_all(text) {
+      let m = override_re.captures(whole) ?? continue
+      if !for_go(m[3] ?? "") {
+        continue
+      }
+      let segs = (m[1] ?? "").split(".")
+      if segs.len() < 2 {
+        continue
+      }
+      let iface = segs[segs.len() - 2]
+      let op = segs[segs.len() - 1]
+      // an unscoped `@@clientLocation(Iface.op, Group)` moves it to Group
+      // for every emitter, the OpenAPI one's operationId too
+      let id = ids.get("${iface}.${op}".to_lower()) ?? "${moved.get("${iface}.${op}".to_lower()) ?? iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      for t in texts {
+        let order = override_path_order(t, m[2] ?? "")
+        if !order.is_empty() {
+          r.param_order[id.to_lower()] = order
+          break
+        }
+      }
+    }
   }
   Ok(r)
+}
+
+/// The path parameters of `op name(...)` in `text`, in the order it
+/// declares them: the spread resource group by its wire name, a `@path`
+/// property by its name ([] when `text` has no such operation).
+fn override_path_order(text: Str, name: Str) -> List[Str] {
+  if name == "" {
+    return []
+  }
+  let start = match text.find("op ${name}(") {
+    Some(i) => i + name.len() + 4
+    None => return []
+  }
+  let rest = text[start..text.len()]
+  let body = match rest.find("\n):") {
+    Some(j) => rest[0..j]
+    None => match rest.find("):") {
+      Some(j) => rest[0..j]
+      None => return []
+    }
+  }
+  var out: List[Str] = []
+  var path = false
+  for raw in body.split("\n") {
+    let l = raw.trim()
+    if l.starts_with("...") {
+      let spread = l.trim_suffix(",")
+      // the subscription is the client's, not the method's
+      if spread.ends_with(".ResourceGroupParameter") {
+        out.push("resourceGroupName")
+      }
+      path = false
+    } else if l.starts_with("@path") {
+      path = true
+    } else if l.contains(":") && !l.starts_with("@") && !l.starts_with("#") && !l.starts_with("//") {
+      if path {
+        out.push(l[0..(l.find(":") ?? 0)].trim().trim_suffix("?"))
+      }
+      path = false
+    }
+  }
+  out
 }
 
 /// `fields` (`Model.prop` to a name) with each key repeated for every

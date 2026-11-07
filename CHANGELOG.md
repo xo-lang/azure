@@ -8,6 +8,18 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/cosmos/armcosmos v4.0.0, Go's armcosmos/v4 v4.0.0
+(Cosmos DB accounts, databases and containers of every API, role
+definitions and assignments, restores, services, fleets; TypeSpec, API
+version 2026-03-15). Two generator rules came with it: Go's parameter
+order from a TypeSpec `@@override` (12 methods here, and armnetwork's
+`new_list_auto_approved_private_link_services_by_resource_group_pager`,
+which now takes `location` before `resource_group_name` as Go's does),
+and Go's AdditionalProperties for schemas with `additionalProperties:
+{}`. All 237 calls of its 41 clients checked against a local Go
+program's requests and results (azcore v1.23.3), the long-running ones
+through poll_until_done.
+
 resourcemanager/dns/armdns v1.2.0, Go's armdns v1.2.0 (DNS zones and
 record sets; autorest, API version 2018-05-01): generated with no
 generator change. All 14 calls of its three clients checked against a
