@@ -8,6 +8,22 @@ version has been tagged since.
 
 ## Unreleased
 
+Generator and specs, before the bulk generation of every ARM module:
+Go's float32 fields are `Float32` (decision 0010; 619 fields in 63 Go
+modules), and a float32 path, query or header value is written as Go
+writes it (azcore `float32_text`, checked against Go for 2000 values).
+A Float32 in a JSON body is not yet Go's text (std/json; pinned in
+`azcore/float32_json_test.xo`). Of the ported modules, armcompute,
+armcontainerservice, armcosmos, armnetwork, armstorage, azbatch,
+azopenai and azsystemevents change their float32 fields' types only.
+armdeployments writes its date-times in UTC, as Go v3 does
+(`utc_date_times`, which its row lacked; its Go vectors use UTC times,
+so they did not catch it). A spec file may start with a UTF-8 byte order
+mark, and a `$ref`'s fragment is percent-decoded (before, one that did
+not resolve recursed without end). codegen/fetch-specs.sh checks every
+spec commit out of one shared partial clone, without examples, as plain
+files.
+
 resourcemanager/eventhub/armeventhub v1.3.0, Go's armeventhub v1.3.0
 (namespaces, event hubs, consumer groups, clusters, application groups,
 schema groups, disaster recovery configs, network security perimeter

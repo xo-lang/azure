@@ -141,6 +141,24 @@ fn ident_prefix(s: Str) -> Str {
 /// Each interface's operations that carry `@operationId`, from `text`:
 /// (operationId, interface, operation, whether its decorators include
 /// `@added`).
+/// Every interface operation (`iface.op`, lower case) declared in
+/// `text`, with an @operationId or not.
+fn interface_ops(text: Str) -> List[Str] {
+  var out: List[Str] = []
+  let chunks = interface_chunks(text)
+  for ci in 1..chunks.len() {
+    let iface = ident_prefix(chunks[ci])
+    for line in chunks[ci].split("\n") {
+      let l = line.trim()
+      let op = ident_prefix(l)
+      if op != "" && op[0..1] >= "a" && op[0..1] <= "z" && l[op.len()..l.len()].trim().starts_with("is ") {
+        out.push("${iface}.${op}".to_lower())
+      }
+    }
+  }
+  out
+}
+
 fn operation_ids(text: Str) -> List[(Str, Str, Str, Bool)] {
   var out: List[(Str, Str, Str, Bool)] = []
   let chunks = interface_chunks(text)
@@ -189,6 +207,7 @@ fn xo_type(t: Str) -> Str {
     "boolean" => "Bool"
     "int32" => "Int"
     "int64" => "Int"
+    "float32" => "Float32"
     "float64" => "Float"
     _ => t
   }
@@ -265,6 +284,8 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   // each operation's operationId by `iface.op` (lower case), from every
   // file: a `@@clientLocation` in one file names an operation of another
   var ids: Map[Str, Str] = {}
+  // every interface operation, `iface.op` (lower case)
+  var iface_ops: List[Str] = []
   // `@@clientLocation(Iface.op, Group)` with no scope: `iface.op` (lower
   // case) to Group
   var moved: Map[Str, Str] = {}
@@ -281,6 +302,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     for (id, iface, op, _) in operation_ids(text) {
       ids["${iface}.${op}".to_lower()] = id
     }
+    iface_ops = iface_ops + interface_ops(text)
     for whole in ns_decl.find_all(text) {
       let n = (ns_decl.captures(whole) ?? continue)[1] ?? ""
       if n != "" && !namespaces.contains(n) {
@@ -387,7 +409,13 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let full = m[1] ?? ""
       let target = strip_namespace(full, namespaces)
       let name = m[2] ?? ""
-      if target.contains(".") && !names_type(target) {
+      if iface_ops.contains(target.to_lower()) {
+        // an interface's operation (`WebApps.swapSlotSlot`, armappservice):
+        // Go's method by the new name, keyed by its operationId
+        let (iface, op) = target.cut(".") ?? continue
+        let id = ids.get(target.to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+        r.ops[id.to_lower()] = name[0..1].to_upper() + name[1..name.len()]
+      } else if target.contains(".") && !names_type(target) {
         r.fields[target] = name
       } else if types.contains(target) && target[0..1] >= "a" && target[0..1] <= "z" {
         // a type declared in lower case (azsystemevents' union
@@ -476,14 +504,19 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
         continue
       }
       let segs = (m[1] ?? "").split(".")
-      if segs.len() < 2 {
+      let op = segs.last() ?? ""
+      if op == "" {
         continue
       }
-      let iface = segs[segs.len() - 2]
-      let op = segs[segs.len() - 1]
       let dest = m[2] ?? ""
       let group = if dest != "" { dest.trim_suffix("Client") } else { (m[3] ?? "").split(".").last() ?? "" }
-      let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      // a namespace's own operation (`checkNameAvailability`, outside any
+      // interface: armappservice) has the operationId its name gives
+      let upper = "${op[0..1].to_upper()}${op[1..op.len()]}"
+      let id = if segs.len() < 2 { upper } else {
+        let iface = segs[segs.len() - 2]
+        ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${upper}"
+      }
       let name = match r.tsp_ops.get(id.to_lower()) {
         Some((_, n)) => n
         None => match id.find("_") {

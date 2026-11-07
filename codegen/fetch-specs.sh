@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fetch the azure-rest-api-specs files the generator reads (decision
-# 0002) into codegen/.specs/<commit>/ (ignored by git): one partial,
-# sparse clone per commit, of the spec folders services.toml names. A
+# 0002) into codegen/.specs/<commit>/ (ignored by git): one sparse
+# checkout per commit from a shared partial clone (codegen/.specs/.store),
+# of the spec folders services.toml names, without examples. A
 # row's `commit` pins it (a TypeSpec module at Go's tsp-location
 # commit); other rows use specs.lock's.
 # Usage: codegen/fetch-specs.sh
@@ -16,19 +17,41 @@ rows=$(awk -F'"' -v def="$default" '
   /^spec *=/ { spec = $2 } /^commit *=/ { commit = $2 }
   /^openapi *=/ { n = split($2, p, "/"); api = p[1]; for (i = 2; i < n; i++) api = api "/" p[i] }
   END { flush() }' "$here/services.toml")
+# One shared partial clone holds every commit's objects (most files are
+# the same across commits); each commit is checked out of it sparsely,
+# without the examples folders the generator never reads, as plain
+# files (.fetched lists the folders).
+store="$here/.specs/.store"
+if [ ! -d "$store" ]; then
+  mkdir -p "$store"
+  git init -q "$store"
+  git -C "$store" remote add origin "$repo"
+  git -C "$store" config extensions.partialClone origin
+  git -C "$store" config remote.origin.promisor true
+  git -C "$store" config remote.origin.partialclonefilter blob:none
+  git -C "$store" config extensions.worktreeConfig true
+fi
 for commit in $(echo "$rows" | awk '{ print $1 }' | sort -u); do
   dst="$here/.specs/$commit"
   dirs=$( (echo specification/common-types; echo "$rows" | awk -v c="$commit" '$1 == c { print $2; if ($3 != "") print $3 }') | sort -u)
-  if [ ! -d "$dst/.git" ]; then
-    mkdir -p "$dst"
-    git init -q "$dst"
-    git -C "$dst" remote add origin "$repo"
-    git -C "$dst" config extensions.partialClone origin
-  fi
-  git -C "$dst" sparse-checkout set --no-cone $(for d in $dirs; do printf '/%s/ ' "$d"; done)
-  if [ "$(git -C "$dst" rev-parse HEAD 2>/dev/null || true)" != "$commit" ]; then
-    git -C "$dst" fetch -q --depth 1 --filter=blob:none origin "$commit"
-    git -C "$dst" checkout -q --detach FETCH_HEAD
+  pats=$(for d in $dirs; do printf '/%s/ !/%s/**/examples/ ' "$d" "$d"; done)
+  if [ -d "$dst/.git" ]; then
+    # a clone of its own, from before the shared store
+    git -C "$dst" sparse-checkout set --no-cone $pats
+  elif [ ! -f "$dst/.fetched" ] || [ "$(cat "$dst/.fetched")" != "$dirs" ]; then
+    rm -rf "${dst:?}"
+    git -C "$store" worktree prune
+    if ! git -C "$store" cat-file -e "$commit^{commit}" 2>/dev/null; then
+      git -C "$store" fetch -q --depth 1 --filter=blob:none origin "$commit"
+    fi
+    git -C "$store" worktree add -q --no-checkout --detach "$dst" "$commit"
+    git -C "$dst" sparse-checkout set --no-cone $pats
+    git -C "$dst" read-tree -mu HEAD
+    # plain files from here: a worktree's index lists the whole spec
+    # repository (tens of MB a commit)
+    rm "$dst/.git"
+    git -C "$store" worktree prune
+    echo "$dirs" > "$dst/.fetched"
   fi
   echo "ok: $(echo "$dirs" | wc -l | tr -d ' ') spec folders at $commit"
 done

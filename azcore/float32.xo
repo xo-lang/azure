@@ -1,0 +1,209 @@
+// Go's float32 values as Go writes them as text: the shortest decimal
+// that reads back as the same float32 (Go's strconv.FormatFloat(float64(f),
+// 'f', -1, 32)). Xo's own Display of a Float32 prints the float64 shortest
+// form (`1.100000023841858` for Float32(1.1)), so these find the float32
+// shortest digits themselves. Taken from the AWS SDK port's
+// protocol/rest/float32.xo, where they are checked against Go. Generated
+// clients use float32_text for a float32 path, query or header value.
+
+use std/big
+
+/// Go's strconv.FormatFloat(float64(f), 'f', -1, 32): a float32 path,
+/// query or header value.
+pub fn float32_text(f: Float32) -> Str {
+  let x = Float(f)
+  if x.is_nan() {
+    return "NaN"
+  }
+  if x.is_inf() {
+    return if x > 0.0 { "+Inf" } else { "-Inf" }
+  }
+  shortest32(f).to_fixed(-1)
+}
+
+/// The value of finite decimal text `s` rounded once to the nearest
+/// Float32 (Go's ParseFloat(s, 32)), as a Float; None past its range.
+fn parse32(s: Str) -> Float? {
+  let x = Float.parse(s) ?? return None
+  if x.is_inf() || x.is_nan() {
+    return None
+  }
+  round_f32(s, x)
+}
+
+/// The float64 nearest the shortest decimal that reads back as `f`:
+/// Go's strconv.FormatFloat(float64(f), 'g', -1, 32) digits. That
+/// decimal has at most 9 digits, so the float64's own shortest text
+/// has the same digits, and `to_fixed(-1)` or `to_exp(-1)` writes them.
+pub fn shortest32(f: Float32) -> Float {
+  let x = Float(f)
+  if x == 0.0 || x.is_nan() || x.is_inf() {
+    return x
+  }
+  // x's exact digits (a float32 has at most 105 significant digits)
+  let (mant, exp) = x.to_exp(120).cut("e") ?? return x
+  let sign = if mant.starts_with("-") { "-" } else { "" }
+  let all = mant.replace("-", "").replace(".", "")
+  let e0 = Int.parse(exp.replace("+", "")) ?? return x
+  let b = Int(f.to_bits())
+  let half_up = b & 0x7fffff == 0 && (b >> 23) & 0xff != 0
+  for p in 1..10 {
+    // x rounded to p significant digits as Go's Dragonbox rounds an
+    // exact tie: half even, but half up at a power of two (2^-12 is
+    // 0.00024414063). Also its two neighbors: the interval
+    // around a power of two is uneven, so the nearest p digit decimal
+    // can miss while a neighbor reads back.
+    let head = Int.parse(all[0..p]) ?? return x
+    let next = all[p..p + 1]
+    let tie = next == "5" && all[p + 1..all.len()].replace("0", "") == ""
+    let up = if tie { half_up || head % 2 == 1 } else { next >= "5" }
+    let d = head + (if up { 1 } else { 0 })
+    let e = e0 - (p - 1)
+    var best: Str? = None
+    var best_dist = 0.0
+    for c in [d, d - 1, d + 1] {
+      if c <= 0 {
+        continue
+      }
+      let text = "${sign}${c}e${e}"
+      match parse32(text) {
+        Some(y) => if y == x {
+          let dist = ((Float.parse(text) ?? x) - x).abs()
+          if best.is_none() || dist < best_dist {
+            best = Some(text)
+            best_dist = dist
+          }
+        }
+        None => {}
+      }
+      if best.is_some() && c == d {
+        // the nearest p digit decimal reads back: it is Go's choice
+        break
+      }
+    }
+    match best {
+      Some(t) => return Float.parse(t) ?? x
+      None => {}
+    }
+  }
+  x
+}
+
+fn lower(c: Int) -> Int {
+  c | 0x20
+}
+
+fn is_digit(c: Int) -> Bool {
+  c >= 0x30 && c <= 0x39
+}
+
+/// 2^k for k in Float's normal range.
+fn pow2(k: Int) -> Float {
+  Float.from_bits((k + 1023) << 52)
+}
+
+/// The sign of |value of s| - |x|: `s` well-formed finite number text,
+/// `x` a finite nonzero Float. Exact (big integers).
+fn exact_cmp(s: Str, x: Float) -> Int {
+  let b = s.bytes()
+  var i = 0
+  if b[0] == 0x2b || b[0] == 0x2d {
+    i = 1
+  }
+  let hex = i + 2 < b.len() && b[i] == 0x30 && lower(Int(b[i + 1])) == 0x78
+  if hex {
+    i = i + 2
+  }
+  var digits = ""
+  var frac = 0
+  var sawdot = false
+  while i < b.len() {
+    let c = Int(b[i])
+    if c == 0x2e {
+      sawdot = true
+    } else if is_digit(c) || hex && lower(c) >= 0x61 && lower(c) <= 0x66 {
+      digits = digits + b[i..i + 1].to_str_lossy()
+      if sawdot {
+        frac = frac + 1
+      }
+    } else if c != 0x5f {
+      break
+    }
+    i = i + 1
+  }
+  var e = 0
+  if i < b.len() {
+    // the exponent: e or p, a sign, digits and underscores
+    i = i + 1
+    var esign = 1
+    if b[i] == 0x2b {
+      i = i + 1
+    } else if b[i] == 0x2d {
+      esign = -1
+      i = i + 1
+    }
+    while i < b.len() {
+      if b[i] != 0x5f && e < 100000 {
+        e = e * 10 + Int(b[i]) - 0x30
+      }
+      i = i + 1
+    }
+    e = e * esign
+  }
+  var a = big.parse(digits, base: if hex { 16 } else { 10 }).ok() ?? big.from_int(0)
+  // x's significand and binary exponent
+  let bits = x.to_bits()
+  let ex = (bits >> 52) & 0x7ff
+  let m = (bits & ((1 << 52) - 1)) | (1 << 52)
+  let p = ex - 1023 - 52
+  var bx = big.from_int(m)
+  if hex {
+    let k = e - 4 * frac
+    if k >= 0 { a = a.lsh(k) } else { bx = bx.lsh(-k) }
+  } else {
+    let k = e - frac
+    let ten = big.from_int(10)
+    if k >= 0 { a = a.mul(ten.exp(big.from_int(k))) } else { bx = bx.mul(ten.exp(big.from_int(-k))) }
+  }
+  if p >= 0 { bx = bx.lsh(p) } else { a = a.lsh(-p) }
+  a.cmp(bx)
+}
+
+/// `x` (finite, the nearest Float to the value of `s`) rounded to the
+/// nearest Float32, ties to even, as Go's atof32 rounds the exact value:
+/// where x is a Float32 midpoint the value of s decides. None past
+/// Float32's range.
+fn round_f32(s: Str, x: Float) -> Float? {
+  if x == 0.0 {
+    return Some(x)
+  }
+  let bits = x.to_bits()
+  let neg = bits < 0
+  let ex = (bits >> 52) & 0x7ff
+  if ex == 0 {
+    // a Float subnormal is far below Float32's least
+    return Some(if neg { -0.0 } else { 0.0 })
+  }
+  let sig = (bits & ((1 << 52) - 1)) | (1 << 52)
+  var e = ex - 1023
+  let drop = if e >= -126 { 29 } else { 29 + (-126 - e) }
+  if drop >= 54 {
+    return Some(if neg { -0.0 } else { 0.0 })
+  }
+  var kept = sig >> drop
+  let rem = sig & ((1 << drop) - 1)
+  let half = 1 << (drop - 1)
+  let up = if rem > half { true } else if rem < half { false } else {
+    let c = exact_cmp(s, x)
+    c > 0 || c == 0 && kept % 2 == 1
+  }
+  if up {
+    kept = kept + 1
+  }
+  // kept * 2^(e - 52 + drop)
+  let v = Float(kept) * pow2(e - 52 + drop)
+  if v > 3.4028234663852886e38 {
+    return None
+  }
+  Some(if neg { -v } else { v })
+}
