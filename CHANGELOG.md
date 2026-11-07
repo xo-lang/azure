@@ -8,6 +8,15 @@ version has been tagged since.
 
 ## Unreleased
 
+Polymorphic models encode as Go's: a subtype encoded on its own (not
+through its `<Base>Classification` enum) now writes its discriminator
+value, as Go's MarshalJSON always does, and a base type in armcosmos,
+armnetwork and armstorage leaves out an unset discriminator in place of
+writing null (Go's `populate`); azopenai and armauthorization, whose Go
+modules write null, keep it. Checked against a local Go program over
+each Go module: a subtype alone, the base alone, and both through the
+base (`discriminator_test.xo` in the five modules).
+
 resourcemanager/cosmos/armcosmos v4.0.0, Go's armcosmos/v4 v4.0.0
 (Cosmos DB accounts, databases and containers of every API, role
 definitions and assignments, restores, services, fleets; TypeSpec, API

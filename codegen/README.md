@@ -32,9 +32,14 @@ response type equal, except armkeyvault's `Secret`, which is
   interface wherever it is referenced: an enum with a variant per
   subtype (every definition that descends from it, by its
   `x-ms-discriminator-value`) and the base for any other value, with
-  `derive Json(via: json.Value)`; encoding writes the subtype's value,
-  and the base's own (null when unset), as Go's base MarshalJSON
-  always writes it.
+  `derive Json(via: json.Value)`. Each subtype's own JSON (through a
+  private twin of its fields) writes its discriminator value always,
+  whatever the field holds, alone or through the enum, as Go's subtype
+  MarshalJSON does. The base writes its field only when set (Go's
+  `populate`), or always, null when unset, in a module whose custom
+  TOML has `null_base_discriminator = true` (the older generators'
+  `objectMap["kind"] = b.Kind`: azopenai v0.9.0, armauthorization
+  v2.2.0).
 - An enum's constants, and its `possible_<type>_values()`, are sorted
   by Go constant name, case and all, as Go's `Possible<Type>Values`.
 - Two x-ms-enums of one name are one type with every value of both, as
