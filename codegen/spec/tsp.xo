@@ -42,6 +42,11 @@ pub struct Renames {
   /// case) to x. Go's emitter sets a poller's final state from it alone,
   /// not from the OpenAPI file's final-state-via.
   pub final_states: Map[Str, Str] = {}
+  /// An ARM action whose request is an inline `{ @bodyRoot x: T; }`
+  /// (armnetwork's stopCircuitLinkFailoverTest): Go's emitter also
+  /// writes that model, unused, as `<Op>ParameterBody`. Each is (model
+  /// name, field, field type, field documentation).
+  pub body_roots: List[(Str, Str, Str, Str)] = []
 }
 
 /// Each operation in an interface of `text` that carries decorator `dec`
@@ -228,12 +233,20 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
+  let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
   let alt_model = regexp.compile("@@alternateType\\(\\s*(Azure\\.[A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   // `Namespace.op` names the operation: the project's namespaces, from
   // every file, are stripped from a target before it is read.
   var namespaces: List[Str] = []
+  // each operation's operationId by `iface.op` (lower case), from every
+  // file: a `@@clientLocation` in one file names an operation of another
+  var ids: Map[Str, Str] = {}
   for text in texts {
+    for (id, iface, op, _) in operation_ids(text) {
+      ids["${iface}.${op}".to_lower()] = id
+    }
     for whole in ns_decl.find_all(text) {
       let n = (ns_decl.captures(whole) ?? continue)[1] ?? ""
       if n != "" && !namespaces.contains(n) {
@@ -274,6 +287,12 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       if added && id.to_lower() != default.to_lower() {
         r.tsp_ops[id.to_lower()] = (iface, op)
       }
+    }
+    for whole in body_root.find_all(text) {
+      let m = body_root.captures(whole) ?? continue
+      let op = m[1] ?? ""
+      let ty = m[4] ?? ""
+      r.body_roots.push(("${op[0..1].to_upper()}${op[1..op.len()]}ParameterBody", m[3] ?? "", ty.split(".").last() ?? ty, (m[2] ?? "").trim()))
     }
     for (id, via) in decorated(text.replace("@Azure.Core.useFinalStateVia(", "@useFinalStateVia("), "@useFinalStateVia(") {
       r.final_states[id.to_lower()] = via
@@ -320,6 +339,36 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       }
       let w = loc.captures(seg) ?? continue
       r.params[w[1] ?? ""] = m[1] ?? ""
+    }
+  }
+  for text in texts {
+    // `@@clientLocation(Iface.op, "ManagementClient", "go")` moves an
+    // operation to another client (Go names armnetwork's
+    // CheckDNSNameAvailability on ManagementClient); an interface target
+    // (`Microsoft.Network.NetworkInterfaces`) is that interface's client.
+    // The operation keeps the name its operationId gives.
+    for whole in client_loc.find_all(text) {
+      let m = client_loc.captures(whole) ?? continue
+      if !for_go(m[4] ?? "") {
+        continue
+      }
+      let segs = (m[1] ?? "").split(".")
+      if segs.len() < 2 {
+        continue
+      }
+      let iface = segs[segs.len() - 2]
+      let op = segs[segs.len() - 1]
+      let dest = m[2] ?? ""
+      let group = if dest != "" { dest.trim_suffix("Client") } else { (m[3] ?? "").split(".").last() ?? "" }
+      let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      let name = match r.tsp_ops.get(id.to_lower()) {
+        Some((_, n)) => n
+        None => match id.find("_") {
+          Some(i) => id[i + 1..id.len()]
+          None => id
+        }
+      }
+      r.tsp_ops[id.to_lower()] = (group, name)
     }
   }
   Ok(r)

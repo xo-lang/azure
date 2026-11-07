@@ -168,6 +168,9 @@ pub struct Custom {
   /// An ARM module from TypeSpec: operationId (lower case) to its
   /// `@useFinalStateVia`; the OpenAPI file's final-state-via is not used.
   pub final_states: Map[Str, Str] = {}
+  /// Go's unused `<Op>ParameterBody` models (spec.Renames.body_roots):
+  /// (model, field, field type, field documentation).
+  pub body_roots: List[(Str, Str, Str, Str)] = []
   /// Enum values Go's transforms delete, by enum: wire values.
   pub drop_values: Map[Str, List[Str]] = {}
   /// A data-plane module: operations without a group stay on its Client.
@@ -495,7 +498,7 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   if b.sealed(v) {
     return "Str"
   }
-  if v.get("x-ms-enum").is_some() && str_of(v.get("type")) == "integer" {
+  if v.get("x-ms-enum").is_some() && int_enum(v) {
     let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
     if name != "" {
       return b.str_enum(b.enum_name(name), v, base: "Int")
@@ -537,6 +540,23 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   }
 }
 
+/// An enum of whole numbers: `integer`, or TypeSpec's `number` whose
+/// values are all integers (armnetwork v12's
+/// FirewallPolicyIDPSSignatureDirection, Go's int32).
+fn int_enum(v: json.Value) -> Bool {
+  match str_of(v.get("type")) {
+    "integer" => true
+    "number" => {
+      let vals = list_of(v.get("enum"))
+      !vals.is_empty() && vals.all(fn(x: json.Value) -> Bool {
+        let s = x.encode()
+        s != "" && !s.contains(".") && !s.contains("e") && !s.contains("E") && !s.contains("\"")
+      })
+    }
+    _ => false
+  }
+}
+
 fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str {
   let merging = b.enum_keys.contains(name)
   if b.known.contains(name) && !merging {
@@ -555,7 +575,9 @@ fn (var b: Builder) str_enum(name: Str, v: json.Value, base: Str = "Str") -> Str
         None => ""
       }
       let n = str_of(x.get("name"))
-      let raw = if n != "" { n } else { value }
+      // an integer value named by itself (TypeSpec's `0 | 1`) is named
+      // as a number word, as Go names it (`...DirectionFive`)
+      let raw = if base == "Int" && (n == "" || n == value) { number_name(value) } else if n != "" { n } else { value }
       keyed.push((value_part(raw), (screaming(raw), value, str_of(x.get("description")))))
     }
   } else {
@@ -625,7 +647,15 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value, inline: Bool = fal
   // An enum is known by its x-ms-enum name, which may repeat.
   if !list_of(v.get("enum")).is_empty() {
     let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
-    let t = b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.enum_name(en) } else { name }, v)
+    let t = b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.enum_name(en) } else { name }, v, base: if int_enum(v) { "Int" } else { "Str" })
+    b.ids[id] = t
+    return t
+  }
+  // From TypeSpec one name is one model: an older API version's copy of
+  // it in another file (armnetwork v12's 2018-10-01 vmssNetwork.json
+  // `NetworkInterface`) is the model Go emits once, not a second type.
+  if b.custom.tsp && b.firsts.contains(name) {
+    let t = b.known.get(name) ?? name
     b.ids[id] = t
     return t
   }
@@ -660,7 +690,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
   }
   if !list_of(v.get("enum")).is_empty() {
     let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
-    return b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.type_name(en) } else { name }, v)
+    return b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.type_name(en) } else { name }, v, base: if int_enum(v) { "Int" } else { "Str" })
   }
   let props = fields_of(v.get("properties"))
   let t = str_of(v.get("type"))
@@ -884,6 +914,19 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
         continue
       }
       b.named(file, def, v)
+    }
+  }
+  // TypeSpec's Go emitter writes an action's inline `@bodyRoot` request
+  // model too, though no operation uses it: a model of one required
+  // field, the definition it names.
+  for (name, field, ty, doc) in b.custom.body_roots {
+    for (file, d) in b.files {
+      if fields_of(d.get("definitions")).any(fn(p: (Str, json.Value)) -> Bool { p.0 == ty }) {
+        let prop = json.Value.Object([("$ref", json.Value.Str("#/definitions/${ty}")), ("description", json.Value.Str(doc))])
+        let schema = json.Value.Object([("type", json.Value.Str("object")), ("required", json.Value.List([json.Value.Str(field)])), ("properties", json.Value.Object([(field, prop)]))])
+        b.named(file, name, schema)
+        break
+      }
     }
   }
   let patched = patch_only(ops, b.models, b.polys)
