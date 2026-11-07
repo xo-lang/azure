@@ -7,6 +7,21 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- ChainedTokenCredential's `retry_sources` (Go's RetrySources, gap item
+  8): every call starts from the first source again instead of keeping
+  the one that worked. **Breaking**: `new_chained_token_credential`
+  returns `! azcore.AuthErr`, Go's `sources must contain at least one
+  TokenCredential` for an empty list (Go's other error, a nil source,
+  cannot happen in Xo).
+- `new_workload_identity_credential_from_env` and
+  `WorkloadIdentityOptions` (gap item 9): an empty `client_id`,
+  `token_file_path` or `tenant_id` comes from AZURE_CLIENT_ID,
+  AZURE_FEDERATED_TOKEN_FILE or AZURE_TENANT_ID, checked in that order
+  with Go's errors (`no client ID specified. Check pod configuration or
+  set ClientID in the options`, then the token file, then the tenant
+  ID). A variable set but empty counts as set, as Go's os.LookupEnv.
+  DefaultAzureCredential builds its workload identity with it. The
+  three-argument `new_workload_identity_credential` stays.
 - DefaultAzureCredential's selection, options and errors are Go's (gap
   item 7; 23 Go cases in `dacvectors_test.xo`):
   - `AZURE_TOKEN_CREDENTIALS`: `prod`, or one source's name in any case;

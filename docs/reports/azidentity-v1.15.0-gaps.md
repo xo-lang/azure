@@ -1,6 +1,6 @@
 # azidentity: the port against Go v1.15.0
 
-Status (2026-11-06): (1), (2), (3), (4), (6), (7), (11) and (12) are ported (azidentity/CHANGELOG.md).
+Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11) and (12) are ported (azidentity/CHANGELOG.md).
 Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
@@ -78,12 +78,14 @@ Ranked by how many callers meet the gap first.
    or the name of any credential type in the default chain. See ...`).
 8. **ChainedTokenCredential `RetrySources`.** Go's chain keeps using the
    credential that worked unless `RetrySources` is set. Ours always
-   keeps it.
+   keeps it. Ported 2026-11-06 (`retry_sources`), checked against a Go
+   chain whose first source fails once and then works.
 9. **WorkloadIdentityCredential options.** In Go, `ClientID`, `TenantID`
    and `TokenFilePath` default to `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
    `AZURE_FEDERATED_TOKEN_FILE`, with Go's errors (`no client ID
    specified. Check pod configuration or set ClientID in the options`).
-   Ours takes all three as arguments.
+   Ours takes all three as arguments. Ported 2026-11-06
+   (`new_workload_identity_credential_from_env`), with 8 Go cases.
 10. **v1.15.0: workload identity's Azure proxy mode**
     (`EnableAzureProxy`): the token request goes to
     `AZURE_KUBERNETES_TOKEN_PROXY`, with `AZURE_KUBERNETES_SNI_NAME` and

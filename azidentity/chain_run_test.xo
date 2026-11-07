@@ -1,0 +1,78 @@
+// ChainedTokenCredential against the lines a Go program prints with
+// azidentity v1.15.0: a chain of a ManagedIdentityCredential, whose IMDS
+// (a FakeNet handler) answers 400 and then a token, and a source that
+// always gives "b", asked three times with and without RetrySources.
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const GO_CHAIN_LINES: List[Str] = [
+  "NEW chain retry=false: <nil>",
+  "REQ GET http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.example.test",
+  "CALL b 1",
+  "OUT retry=false call 1: token=\"b\" err=<nil>",
+  "CALL b 2",
+  "OUT retry=false call 2: token=\"b\" err=<nil>",
+  "CALL b 3",
+  "OUT retry=false call 3: token=\"b\" err=<nil>",
+  "NEW chain retry=true: <nil>",
+  "REQ GET http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.example.test",
+  "CALL b 1",
+  "OUT retry=true call 1: token=\"b\" err=<nil>",
+  "REQ GET http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.example.test",
+  "OUT retry=true call 2: token=\"mi-1\" err=<nil>",
+  "OUT retry=true call 3: token=\"mi-1\" err=<nil>",
+  "NEW empty: sources must contain at least one TokenCredential",
+]
+
+/// A source that always gives the token `b`, logging each call.
+struct Scripted {
+  log: Mutex[List[Str]]
+  calls: Atomic[Int]
+}
+
+fn (s: Scripted) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let n = s.calls.get() + 1
+  s.calls.set(n)
+  s.log.with(fn(var l: List[Str]) { l.push("CALL b ${n}") })
+  Ok(azcore.AccessToken{token: Secret.new("b"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+test "ChainedTokenCredential keeps the source that worked unless RetrySources is set, as Go's" {
+  let log = Mutex[List[Str]].new([])
+  let imds = Atomic[Int].new(0)
+  os.net.handle("GET http://169.254.169.254/{rest...}", fn(req: http.Request) -> http.Response {
+    log.with(fn(var l: List[Str]) { l.push("REQ GET http://169.254.169.254${req.escaped_path()}?${req.raw_query()}") })
+    if imds.get() == 0 { mi_reply("400|${NOT_FOUND}") } else { mi_reply("200|${MI_TOKEN}") }
+  })
+  let opts = azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]}
+  for retry in [false, true] {
+    imds.set(0)
+    let mi = new_managed_identity_credential(os.env.only([]), os.fs, os.net, os.clock, os.rand, ManagedIdentityOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}, chained: true})?
+    let b = Scripted{log: log, calls: Atomic[Int].new(0)}
+    let srcs: List[azcore.TokenCredential[fs.read]] = [mi, b]
+    let c = new_chained_token_credential(srcs, retry_sources: retry)?
+    log.with(fn(var l: List[Str]) { l.push("NEW chain retry=${retry}: <nil>") })
+    for i in 0..3 {
+      if i == 1 {
+        imds.set(1)
+      }
+      let line = match c.get_token(opts) {
+        Ok(t) => "OUT retry=${retry} call ${i + 1}: token=\"${t.token.reveal()}\" err=<nil>"
+        Err(e) => "OUT retry=${retry} call ${i + 1}: token=\"\" err=${e.display()}"
+      }
+      log.with(fn(var l: List[Str]) { l.push(line) })
+    }
+  }
+  let empty: List[azcore.TokenCredential[()]] = []
+  let made = match new_chained_token_credential(empty) {
+    Ok(_) => "<nil>"
+    Err(e) => e.display()
+  }
+  log.with(fn(var l: List[Str]) { l.push("NEW empty: ${made}") })
+  let got = log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for i in 0..got.len().min(GO_CHAIN_LINES.len()) {
+    expect((i, got[i])) == (i, GO_CHAIN_LINES[i])
+  }
+  expect(got.len()) == GO_CHAIN_LINES.len()
+}

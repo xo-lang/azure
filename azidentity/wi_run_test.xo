@@ -1,0 +1,76 @@
+// WorkloadIdentityCredential built from its options and the environment,
+// against the lines a Go program prints with azidentity v1.15.0. A
+// credential that builds asks for a token with no token file, so the
+// requests before the read show the tenant it uses (Go's printer adds an
+// empty `?` to a URL without a query; it is dropped here).
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const GO_WI_LINES: List[Str] = [
+  "NEW wi none: no client ID specified. Check pod configuration or set ClientID in the options",
+  "NEW wi client: no token file specified. Check pod configuration or set TokenFilePath in the options",
+  "NEW wi client-file: no tenant ID specified. Check pod configuration or set TenantID in the options",
+  "NEW wi all-env: <nil>",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-a%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-a%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.example.test/tenant-a/v2.0/.well-known/openid-configuration",
+  "OUT wi all-env: WorkloadIdentityCredential: open /fed/token: no such file or directory. To troubleshoot, visit https://aka.ms/azsdk/go/identity/troubleshoot#workload",
+  "NEW wi empty-env: invalid tenantID. You can locate your tenantID by following the instructions listed here: https://learn.microsoft.com/partner-center/find-ids-and-domain-names",
+  "NEW wi options: <nil>",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-a%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-a%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.example.test/tenant-a/v2.0/.well-known/openid-configuration",
+  "OUT wi options: WorkloadIdentityCredential: open /fed/token: no such file or directory. To troubleshoot, visit https://aka.ms/azsdk/go/identity/troubleshoot#workload",
+  "NEW wi option-tenant: <nil>",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-b%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flogin.example.test%2Ftenant-b%2Foauth2%2Fv2.0%2Fauthorize",
+  "REQ GET https://login.example.test/tenant-b/v2.0/.well-known/openid-configuration",
+  "OUT wi option-tenant: WorkloadIdentityCredential: open /fed/token: no such file or directory. To troubleshoot, visit https://aka.ms/azsdk/go/identity/troubleshoot#workload",
+  "NEW wi bad-tenant: invalid tenantID. You can locate your tenantID by following the instructions listed here: https://learn.microsoft.com/partner-center/find-ids-and-domain-names",
+]
+
+test "WorkloadIdentityCredential's options default from the environment as Go's" {
+  // (name, environment, client_id, tenant_id, token_file_path)
+  let cases: List[(Str, List[(Str, Str)], Str, Str, Str)] = [
+    ("none", [], "", "", ""),
+    ("client", [("AZURE_CLIENT_ID", "client-1")], "", "", ""),
+    ("client-file", [("AZURE_CLIENT_ID", "client-1"), ("AZURE_FEDERATED_TOKEN_FILE", "/fed/token")], "", "", ""),
+    ("all-env", [("AZURE_CLIENT_ID", "client-1"), ("AZURE_FEDERATED_TOKEN_FILE", "/fed/token"), ("AZURE_TENANT_ID", "tenant-a")], "", "", ""),
+    ("empty-env", [("AZURE_CLIENT_ID", ""), ("AZURE_FEDERATED_TOKEN_FILE", ""), ("AZURE_TENANT_ID", "")], "", "", ""),
+    ("options", [], "client-1", "tenant-a", "/fed/token"),
+    ("option-tenant", [("AZURE_CLIENT_ID", "client-1"), ("AZURE_FEDERATED_TOKEN_FILE", "/fed/token")], "", "tenant-b", ""),
+    ("bad-tenant", [("AZURE_CLIENT_ID", "client-1"), ("AZURE_FEDERATED_TOKEN_FILE", "/fed/token"), ("AZURE_TENANT_ID", "bad tenant!")], "", "", ""),
+  ]
+  let client = policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}, retry: policy.RetryOptions{max_retries: -1}}
+  os.fs.remove_all("/fed") ?? _ => ()
+  var got: List[Str] = []
+  for (name, vars, client_id, tenant_id, file) in cases {
+    let f = gv_serve(os.net, "wi-${name}")
+    let env = os.env
+    var names: List[Str] = []
+    for (k, v) in vars {
+      env.set(k, v)
+      names.push(k)
+    }
+    let w = new_workload_identity_credential_from_env(env.only(names), os.fs, os.net, os.clock, os.rand, WorkloadIdentityOptions{client_id: client_id, tenant_id: tenant_id, token_file_path: file, opts: Options{client: client}})
+    let made = match w {
+      Ok(_) => "<nil>"
+      Err(e) => e.display()
+    }
+    got.push("NEW wi ${name}: ${made}")
+    if let Ok(c) = w {
+      let r = c.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"]})
+      got = got + f.log.with_read(fn(l: List[Str]) -> List[Str] { l.map(fn(x: Str) -> Str { x.split("\n")[0].trim_prefix("wi-${name}: ") }) })
+      let out = match r {
+        Ok(_) => "<nil>"
+        Err(e) => e.display()
+      }
+      got.push("OUT wi ${name}: ${out}")
+    }
+  }
+  for i in 0..got.len().min(GO_WI_LINES.len()) {
+    expect((i, got[i])) == (i, GO_WI_LINES[i])
+  }
+  expect(got.len()) == GO_WI_LINES.len()
+}
