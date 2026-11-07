@@ -1,0 +1,217 @@
+// Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+// Ported from azure-sdk-for-go sdk/ai/azopenai v0.9.0 custom_errors.go
+// (NOTICE.md).
+
+use std/json
+
+/// Go's ContentFilterError: a request Azure OpenAI rejected outright
+/// because its prompt broke a content filtering rule (a 400 whose error
+/// code is `content_filter`), with the filter's results. Go's wraps
+/// openai-go's error; this one carries the parts of the body Go reads.
+pub struct ContentFilterError {
+  /// The response's status (400).
+  pub status: Int
+  /// The error's message.
+  pub message: Str
+  /// The error's `prompt` member (Go's Param).
+  pub param: Str
+  /// The error's `status` member.
+  pub error_status: Int
+  /// The inner error's code (`ResponsibleAIPolicyViolation`).
+  pub inner_code: Str
+  /// The content filter results for the prompt.
+  pub details: ContentFilterResultDetailsForPrompt
+}
+
+/// The error's message, as the service wrote it.
+pub fn (e: ContentFilterError) display() -> Str {
+  "content_filter (${e.status}): ${e.message}"
+}
+
+/// Go's ContentFilterError.NonRetriable: retrying the same prompt is
+/// rejected the same way.
+pub fn (e: ContentFilterError) non_retriable() -> Bool {
+  true
+}
+
+/// Go's ExtractContentFilterError for a response's status and body: the
+/// ContentFilterError when the status is 400 and the body is Azure's
+/// content filter envelope, None otherwise. The envelope is read as Go's
+/// encoding/json reads it (member names in any case, a later duplicate
+/// merged into an earlier one, null leaving a member as it was, a
+/// member of the wrong type failing the whole), the filter results as
+/// their autorest decoder (names exact).
+pub fn extract_content_filter_error(status: Int, body: Bytes) -> ContentFilterError? {
+  if status != 400 {
+    return None
+  }
+  var r = json.tokens(body)
+  var env = Envelope{}
+  match r.next() {
+    Ok(Some(json.Token.ObjectStart)) => {}
+    _ => return None
+  }
+  if !read_object(r, env, "") {
+    return None
+  }
+  match r.next() {
+    Ok(None) => {}
+    _ => return None
+  }
+  if env.code != "content_filter" {
+    return None
+  }
+  var merged = json.Value.Object([])
+  for p in env.pieces {
+    merged = merge(merged, p)
+  }
+  let details = json.from_value[ContentFilterResultDetailsForPrompt](merged) ?? _ => return None
+  Some(ContentFilterError{status: status, message: env.message, param: env.param, error_status: env.status, inner_code: env.inner_code, details: details})
+}
+
+struct Envelope {
+  code: Str = ""
+  message: Str = ""
+  param: Str = ""
+  status: Int = 0
+  inner_code: Str = ""
+  /// each content_filter_result object, in order
+  pieces: List[json.Value] = []
+}
+
+/// Go's foldName: a member name as encoding/json matches it to a field
+/// (bytes.EqualFold: ASCII case, and the Kelvin sign and long s).
+fn fold(name: Str) -> Str {
+  name.replace("\u{17F}", "s").replace("\u{212A}", "k").to_lower()
+}
+
+/// The members of an object whose `{` was read, into env; `at` is the
+/// path ("" the envelope, "error", "innererror"). False when one has the
+/// wrong type or the text is not JSON.
+fn read_object(var r: json.TokenReader, var env: Envelope, at: Str) -> Bool {
+  while {
+    let t = r.next() ?? _ => return false
+    let name = match t {
+      Some(json.Token.ObjectEnd) => return true
+      Some(json.Token.Key(k)) => fold(k)
+      _ => return false
+    }
+    let field = "${at}/${name}"
+    let ok = match field {
+      "/error" | "error/innererror" => read_struct(r, env, if at == "" { "error" } else { "innererror" })
+      "error/code" => {
+        env.code = read_str(r, env.code) ?? _ => return false
+        true
+      }
+      "error/message" => {
+        env.message = read_str(r, env.message) ?? _ => return false
+        true
+      }
+      "error/prompt" => {
+        env.param = read_str(r, env.param) ?? _ => return false
+        true
+      }
+      "innererror/code" => {
+        env.inner_code = read_str(r, env.inner_code) ?? _ => return false
+        true
+      }
+      "error/status" => match r.next() {
+        Ok(Some(json.Token.Number(text))) => match Int.parse(text) {
+          Some(n) => {
+            env.status = n
+            true
+          }
+          None => false
+        }
+        Ok(Some(json.Token.Null)) => true
+        _ => false
+      }
+      "innererror/content_filter_result" => match r.value() {
+        Ok(json.Value.Null) => true
+        Ok(raw) => {
+          // the autorest decoder's own rules: each object must decode
+          let v = nulls_zero(raw)
+          if json.from_value[ContentFilterResultDetailsForPrompt](v).is_ok() {
+            env.pieces.push(v)
+            true
+          } else {
+            false
+          }
+        }
+        Err(_) => false
+      }
+      _ => r.skip().is_ok()
+    }
+    if !ok {
+      return false
+    }
+  }
+}
+
+/// A struct member: an object read into env, or null.
+fn read_struct(var r: json.TokenReader, var env: Envelope, at: Str) -> Bool {
+  match r.next() {
+    Ok(Some(json.Token.ObjectStart)) => read_object(r, env, at)
+    Ok(Some(json.Token.Null)) => true
+    _ => false
+  }
+}
+
+/// A string member: its value, or cur for null; Err for another type.
+fn read_str(var r: json.TokenReader, cur: Str) -> Str ! Str {
+  match r.next() {
+    Ok(Some(json.Token.Str(s))) => Ok(s)
+    Ok(Some(json.Token.Null)) => Ok(cur)
+    _ => Err("not a string")
+  }
+}
+
+/// b decoded over a, as Go decodes a second autorest object into the
+/// same struct: an object's members merged (null leaves a member as it
+/// was), an array's elements decoded over the elements already there
+/// and the rest dropped, anything else replaced.
+fn merge(a: json.Value, b: json.Value) -> json.Value {
+  match (a, b) {
+    (_, json.Value.Null) => a
+    (json.Value.Object(af), json.Value.Object(bf)) => {
+      var out = af
+      for (k, bv) in bf {
+        match key_index(out, k) {
+          Some(i) => out[i] = (k, merge(out[i].1, bv))
+          None => if bv != json.Value.Null {
+            out.push((k, merge(json.Value.Object([]), bv)))
+          }
+        }
+      }
+      json.Value.Object(out)
+    }
+    (json.Value.List(ai), json.Value.List(bi)) => {
+      var out: List[json.Value] = []
+      for (i, bv) in bi.indexed() {
+        out.push(merge(ai.get(i) ?? json.Value.Object([]), bv))
+      }
+      json.Value.List(out)
+    }
+    _ => b
+  }
+}
+
+fn key_index(fs: List[(Str, json.Value)], k: Str) -> Int? {
+  for (i, f) in fs.indexed() {
+    if f.0 == k {
+      return Some(i)
+    }
+  }
+  None
+}
+
+/// v with each null array element an empty object: Go decodes a null
+/// element of an array of autorest structs as the zero struct (every
+/// array the filter results hold is one).
+fn nulls_zero(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, nulls_zero(f.1)) }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { if x == json.Value.Null { json.Value.Object([]) } else { nulls_zero(x) } }))
+    other => other
+  }
+}

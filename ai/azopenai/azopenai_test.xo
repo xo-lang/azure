@@ -1,0 +1,130 @@
+// Every case of vectors_test.xo made again here; each output must be
+// Go's.
+
+use std/json
+
+/// Where this port differs from Go, on purpose or for now: each case's
+/// reason and this port's output (which must not be Go's).
+const KNOWN: Map[Str, (Str, Str)] = {
+  "int32 overflow": ("Go's int32 fields are Int", "{\"top_n_documents\":2147483648}"),
+  "float32": ("Go's float32 fields are Float; json_writer also writes -0 as 0 (Go and json.encode write -0)", "{\"grounding\":{\"lines\":[{\"spans\":[{\"length\":2,\"offset\":1,\"polygon\":[{\"x\":0.123456789,\"y\":1e-50},{\"x\":3.4e+38,\"y\":0},{\"x\":16777217,\"y\":0.1}],\"text\":\"s\"}],\"text\":\"t\"}]}}"),
+  "float32 overflow": ("Go's float32 fields are Float", "{\"grounding\":{\"lines\":[{\"spans\":[{\"polygon\":[{\"x\":1e+39}]}]}]}}"),
+  "null": ("Go's Unmarshal of null into a struct leaves it; Xo's decode of null as a struct is an error (as an Option, None)", "decode error"),
+  "two prompts": ("Go reads a null array element as the zero struct; Xo's decode is an error", "decode error"),
+  "config writes its type": ("Go's subtype writes its own discriminator; here the Classification enum writes it, a subtype alone writes its field", "{\"parameters\":{\"index_name\":\"i\"},\"type\":\"pinecone\"}"),
+  "source writes its type": ("Go's subtype writes its own discriminator; here the Classification enum writes it, a subtype alone writes its field", "{\"deployment_name\":\"d\"}"),
+}
+
+/// Go's json.Marshal text of v (`<`, `>` and `&` escaped).
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer(escape_html: true)
+  w.value(v) ?? _ => return "marshal error"
+  w.finish().to_str() ?? "marshal error"
+}
+
+fn rt[T: Json](input: Str) -> Str {
+  match json.decode_str[T](input) {
+    Ok(v) => go_json(json.to_value(v))
+    Err(_) => "decode error"
+  }
+}
+
+fn res[T: Json](r: Result[T?, json.DecodeErr]) -> Str {
+  match r {
+    Ok(Some(v)) => go_json(json.to_value(v))
+    Ok(None) => "null"
+    Err(_) => "error"
+  }
+}
+
+fn items(v: json.Value, key: Str) -> List[json.Value] {
+  match v.get(key) {
+    Some(json.Value.List(xs)) => xs
+    _ => []
+  }
+}
+
+fn round_trip(t: Str, input: Str) -> Str {
+  match t {
+    "AzureSearchChatExtensionParameters" => rt[AzureSearchChatExtensionParameters](input)
+    "AzureCosmosDBChatExtensionParameters" => rt[AzureCosmosDBChatExtensionParameters](input)
+    "ElasticsearchChatExtensionParameters" => rt[ElasticsearchChatExtensionParameters](input)
+    "MongoDBChatExtensionParameters" => rt[MongoDBChatExtensionParameters](input)
+    "PineconeChatExtensionParameters" => rt[PineconeChatExtensionParameters](input)
+    "AzureChatEnhancements" => rt[AzureChatEnhancements](input)
+    "AzureChatEnhancementConfiguration" => rt[AzureChatEnhancementConfiguration](input)
+    "AzureChatExtensionsMessageContext" => rt[AzureChatExtensionsMessageContext](input)
+    "ContentFilterResultsForChoice" => rt[ContentFilterResultsForChoice](input)
+    "[]ContentFilterResultsForPrompt" => rt[List[ContentFilterResultsForPrompt]](input)
+    "Error" => rt[ErrorModel](input)
+    "AzureSearchChatExtensionConfiguration" => rt[AzureSearchChatExtensionConfiguration](input)
+    "OnYourDataDeploymentNameVectorizationSource" => rt[OnYourDataDeploymentNameVectorizationSource](input)
+    _ => "unknown type ${t}"
+  }
+}
+
+fn run(kind: Str, input: Str, status: Int) -> Str {
+  if kind.starts_with("T:") {
+    return round_trip(kind[2..kind.len()], input)
+  }
+  match kind {
+    "cfe" => match extract_content_filter_error(status, input.bytes()) {
+      Some(e) => "true ${go_json(json.to_value(e.details))}"
+      None => "false"
+    }
+    "chat" | "chunk" | "completion" => {
+      let v = json.parse_value(input) ?? _ => return "openai decode error"
+      var parts = ["prompt=${res(prompt_filter_results(v))}"]
+      for (i, ch) in items(v, "choices").indexed() {
+        if kind != "chunk" {
+          parts.push("choice${i}=${res(content_filter_results(ch))}")
+        }
+        if kind != "completion" {
+          let m = ch.get(if kind == "chat" { "message" } else { "delta" }) ?? json.Value.Null
+          parts.push("context${i}=${res(message_context(m))}")
+        }
+      }
+      parts.join(" ")
+    }
+    "ds" => match json.decode_str[List[AzureChatExtensionConfigurationClassification]](input) {
+      Ok(ds) => go_json(with_data_sources(json.parse_value(BASE_BODY) ?? _ => json.Value.Null, ds))
+      Err(_) => "decode error"
+    }
+    "enh" => match json.decode_str[AzureChatEnhancementConfiguration](input) {
+      Ok(e) => go_json(with_enhancements(json.parse_value(BASE_BODY) ?? _ => json.Value.Null, e))
+      Err(_) => "decode error"
+    }
+    "mongo" => {
+      let dep = if input.contains("deployment_name") {
+        match json.decode_str[OnYourDataDeploymentNameVectorizationSource](input) {
+          Ok(s) => MongoDBChatExtensionParametersEmbeddingDependency.DeploymentName(s)
+          Err(_) => return "decode error"
+        }
+      } else {
+        match json.decode_str[OnYourDataEndpointVectorizationSource](input) {
+          Ok(s) => MongoDBChatExtensionParametersEmbeddingDependency.Endpoint(s)
+          Err(_) => return "decode error"
+        }
+      }
+      go_json(json.to_value(MongoDBChatExtensionParameters{embedding_dependency: Some(dep)}))
+    }
+    _ => "unknown kind"
+  }
+}
+
+test "azopenai's models, helpers and ExtractContentFilterError do what Go's do" {
+  var bad: List[Str] = []
+  for (kind, name, input, status, want) in OAI_GO {
+    let got = run(kind, input, status)
+    if let Some((why, ours)) = KNOWN.get(name) {
+      if got != ours || ours == want {
+        bad.push("KNOWN ${kind} ${name} (${why})\n  go: ${want}\n  xo: ${got}")
+      }
+      continue
+    }
+    if got != want {
+      bad.push("MISMATCH ${kind} ${name}\n  go: ${want}\n  xo: ${got}")
+    }
+  }
+  expect(bad.join("\n")) == ""
+}

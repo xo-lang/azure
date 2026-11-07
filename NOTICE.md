@@ -88,6 +88,10 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   v0.2.3 (its clients' constructors, challenge authentication policy,
   chunk upload and digest helpers, hand written; the rest generated
   with its autorest.md directives; requests checked against its own),
+  `sdk/ai/azopenai` v0.9.0 (its Azure models generated, its MongoDB
+  embedding dependency, request options, response accessors and
+  content filter error hand written over JSON; checked against its
+  own),
   and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's

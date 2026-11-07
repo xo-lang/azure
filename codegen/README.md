@@ -32,7 +32,9 @@ response type equal, except armkeyvault's `Secret`, which is
   interface wherever it is referenced: an enum with a variant per
   subtype (every definition that descends from it, by its
   `x-ms-discriminator-value`) and the base for any other value, with
-  `derive Json(via: json.Value)`; encoding writes the subtype's value.
+  `derive Json(via: json.Value)`; encoding writes the subtype's value,
+  and the base's own (null when unset), as Go's base MarshalJSON
+  always writes it.
 - An enum's constants, and its `possible_<type>_values()`, are sorted
   by Go constant name, case and all, as Go's `Possible<Type>Values`.
 - Two x-ms-enums of one name are one type with every value of both, as
@@ -212,7 +214,15 @@ response type equal, except armkeyvault's `Secret`, which is
   the `Link` header, joined to the endpoint after the named hand
   written function extracts it), and `private_ops` and `private_types`
   (Go's lower case ones, emitted as `raw_<name>` and `Raw<Name>` so a
-  hand written public wrapper keeps Go's name).
+  hand written public wrapper keeps Go's name). `keep_definitions`
+  keeps only the definitions whose name is one of its prefixes and
+  more, before the patches (azopenai's autorest.md keeps
+  `^(OnYour|Azure|...).+$`); with no paths the module is models only.
+- `custom/<module>.toml: field_types` names a field's type by
+  `model.field` (or `field` alone, for a string field in every model);
+  a field of an `x-ms-external` type (otherwise `json.Value`) takes a
+  hand written type only by `model.field` (azopenai's
+  `MongoDBChatExtensionParametersEmbeddingDependency`).
 - A `formData` body is sent `application/x-www-form-urlencoded`; a
   `format: binary` or `file` body is `Bytes`, with a `content_type`
   parameter when the operation consumes several types; a binary

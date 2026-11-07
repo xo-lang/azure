@@ -8,6 +8,13 @@ version has been tagged since.
 
 ## Unreleased
 
+The generator (`codegen`), for ai/azopenai: `keep_definitions` (Go's
+autorest.md filter of definitions by name), a hand written type for a
+field of an `x-ms-external` type (`field_types` by `model.field`), and
+a polymorphic type's base variant written with its discriminator null
+when unset, as Go's base MarshalJSON writes it (armauthorization,
+armnetwork and armstorage regenerated).
+
 Server-sent events, as azcore v1.24.0:
 
 - `streaming`: `SSEReader[T, fx]` (`new_sse_reader`, `next`,
