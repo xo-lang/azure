@@ -89,11 +89,12 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
+| resourcemanager/resources/armdeployments | v3.0.0 (`v3`) | stable | 0 | 10993 | v3.0.0 | 0 + 3303 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (299)
+## ARM modules not ported (298)
 
 <details><summary>The list</summary>
 
@@ -339,7 +340,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/resourcemover/armresourcemover | v1.3.0 | stable | 7424 |
 | resourcemanager/resources/armbicep | v0.1.0 | v0 | 543 |
 | resourcemanager/resources/armchanges | v1.2.0 | stable | 1238 |
-| resourcemanager/resources/armdeployments | v3.0.0 | stable | 10993 |
 | resourcemanager/resources/armdeploymentscripts | v2.1.0 | stable | 3108 |
 | resourcemanager/resources/armdeploymentstacks | v2.0.0 | stable | 8054 |
 | resourcemanager/resources/armfeatures | v1.2.0 | stable | 2724 |

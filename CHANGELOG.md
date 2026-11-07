@@ -8,6 +8,15 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/resources/armdeployments v3.0.0, Go's armdeployments/v3
+v3.0.0 (ARM template deployments at resource group, subscription,
+management group, tenant and any scope; TypeSpec, API version
+2026-06-01). The generator reads tspconfig.yaml's typespec-go `stutter`
+option, so `DeploymentsClient` keeps its name as in Go. All 55 calls of
+its two clients checked against a local Go program's requests and
+results (azcore v1.23.3), the long-running ones through
+poll_until_done.
+
 resourcemanager/msi/armmsi v1.3.0, Go's armmsi v1.3.0 (managed
 identities; autorest, API version 2024-11-30): generated with no
 generator change, its custom file only naming Go's

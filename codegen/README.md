@@ -152,7 +152,10 @@ response type equal, except armkeyvault's `Secret`, which is
 - The project's tspconfig.yaml options for `@azure-tools/typespec-go`
   apply as readme.go.md's did: `head-as-boolean: true` makes a HEAD
   operation's response `success`, true on 2xx and false on 404
-  (armresources v4's `ResourceGroupsClient.CheckExistence`).
+  (armresources v4's `ResourceGroupsClient.CheckExistence`), and
+  `stutter: <name>` is the name dropped from the front of type names
+  and the group that becomes plain `Client`, in place of the package's
+  (armdeployments v3's `stutter: resources` keeps `DeploymentsClient`).
 - `utc_date_times` in a services.toml row: Go's module writes its
   `date-time` fields in UTC (the TypeSpec Go emitter's `populateTime`
   with `utc`: armstorage v4, armcompute v9, armnetwork v12, armkeyvault
