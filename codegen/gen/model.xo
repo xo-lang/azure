@@ -24,6 +24,9 @@ pub struct Model {
   /// The model this is the patch twin of (`VirtualMachineProperties` for
   /// `VirtualMachinePropertiesPatch`), "" for a spec model.
   pub twin_of: Str = ""
+  /// Go's type is unexported (a TypeSpec rename to a lower-case name):
+  /// the module's own, without `pub`.
+  pub private: Bool = false
 }
 
 /// An extensible string enum (x-ms-enum): a newtype with constants.
@@ -148,6 +151,9 @@ pub struct Custom {
   pub models: Map[Str, Str] = {}
   /// `Definition.property` to Go's field name.
   pub fields: Map[Str, Str] = {}
+  /// TypeSpec renames for other emitters, not Go (spec.Renames
+  /// not_go_fields): `Model.client name` to Go's name.
+  pub not_go_fields: Map[Str, Str] = {}
   /// parameter wire name to Go's parameter name.
   pub params: Map[Str, Str] = {}
   /// Go field name (lower case) of a `Str` field to its type (`ID`).
@@ -197,6 +203,10 @@ pub struct Custom {
   /// Emit only the types operations reach (TypeSpec's Go emitter), not
   /// every definition (autorest.go).
   pub reachable_only: Bool = false
+  /// Every definition is emitted though the shapes are TypeSpec's (a
+  /// models-only TypeSpec module, azsystemevents: its tspconfig keeps
+  /// unreachable types).
+  pub all_definitions: Bool = false
 }
 
 pub struct Builder {
@@ -754,7 +764,11 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
     }
     seen.push(wire)
     let raw_client = str_of(prop.get("x-ms-client-name"))
-    let client = b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
+    // a Go rename by the property's own (wire) name first, then one by
+    // the OpenAPI file's x-ms-client-name (or a rename for other
+    // emitters undone), else that name
+    let undone = if raw_client != "" { b.custom.not_go_fields.get("${def}.${raw_client}") } else { None }
+    let client = b.custom.fields.get("${def}.${wire}") ?? undone ?? b.custom.fields.get("${def}.${if raw_client != "" { raw_client } else { wire }}") ?? raw_client
     // an inline schema is named after the definition's key, not its
     // x-ms-client-name (modelerfour names it before the rename: Compute's
     // Operation, renamed OperationValue, has an OperationDisplay)
@@ -765,15 +779,15 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
       if let Some(t) = b.custom.field_types.get("${name}.${go_name}".to_lower()) ?? b.custom.field_types.get(go_name.to_lower()) {
         typ = t
       }
-    } else if typ == "json.Value" {
-      // an x-ms-external type: a hand-written one, by `Model.field` only
-      if let Some(t) = b.custom.field_types.get("${name}.${go_name}".to_lower()) {
-        typ = t
-      }
+    } else if let Some(t) = b.custom.field_types.get("${name}.${go_name}".to_lower()) {
+      // any other type (an x-ms-external one, a model Go's own generate
+      // step swaps): a hand-written one, by `Model.field` only
+      typ = t
     }
     fields.push(Field{name: snake(go_name), wire: wire, typ: typ, doc: doc_of(prop)})
   }
-  b.models.push(Model{name: name, fields: fields, doc: doc_of(v)})
+  let private = b.custom.models.values().any(fn(r: Str) -> Bool { is_unexported(r) && reserve(r) == name })
+  b.models.push(Model{name: name, fields: fields, doc: doc_of(v), private: private})
   name
 }
 
@@ -1026,7 +1040,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
     }
   }
   // autorest.go emits every definition of the input files, used or not.
-  for file in if b.custom.reachable_only { [] } else { inputs } {
+  for file in if b.custom.reachable_only && !b.custom.all_definitions { [] } else { inputs } {
     let doc = b.files.get(file) ?? json.Value.Null
     for (def, v) in fields_of(doc.get("definitions")) {
       // x-ms-external types come from elsewhere: Go does not emit them.

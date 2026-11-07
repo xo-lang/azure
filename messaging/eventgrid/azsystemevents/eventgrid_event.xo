@@ -1,0 +1,170 @@
+// Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+// Ported from azure-sdk-for-go sdk/messaging/eventgrid/azsystemevents
+// v1.1.0 eventgrid_event.go (NOTICE.md).
+
+use std/json
+use github.com/xo-lang/azure/azcore
+
+/// Go's EventGridEvent: an event in the Event Grid schema. A received
+/// `data` is kept as its JSON text (Go's `[]byte` in `Data any`): decode
+/// it as the type `event_type` names (`TYPE_...` in system_events.xo).
+/// Writing an event writes `data` as Go writes a `[]byte`, base64.
+pub struct EventGridEvent {
+  /// Event data specific to the event type, as JSON text.
+  pub data: Bytes? = None
+  /// The schema version of the data object.
+  pub data_version: Str? = None
+  /// The time (in UTC) the event was generated.
+  pub event_time: azcore.DateTimeUTC? = None
+  /// The type of the event that occurred.
+  pub event_type: Str? = None
+  /// An unique identifier for the event.
+  pub id: Str? = None
+  /// The schema version of the event metadata.
+  pub metadata_version: Str? = None
+  /// A resource path relative to the topic path.
+  pub subject: Str? = None
+  /// The resource path of the event source.
+  pub topic: Str? = None
+} derive Json(via: json.Value, to: event_json, from: event_from_value)
+
+/// Go's MarshalJSON: the fields set, keys sorted.
+fn event_json(e: EventGridEvent) -> json.Value {
+  var fs: List[(Str, json.Value)] = []
+  if let Some(b) = e.data {
+    fs.push(("data", json.Value.Str(b.to_base64())))
+  }
+  let strs = [("dataVersion", e.data_version), ("eventType", e.event_type), ("id", e.id), ("metadataVersion", e.metadata_version), ("subject", e.subject), ("topic", e.topic)]
+  for (k, v) in strs {
+    if let Some(s) = v {
+      fs.push((k, json.Value.Str(s)))
+    }
+  }
+  if let Some(t) = e.event_time {
+    fs.push(("eventTime", json.to_value(t)))
+  }
+  json.Value.Object(fs.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+}
+
+fn opt[T: Json](v: json.Value) -> T? ! json.DecodeErr {
+  match v {
+    json.Value.Null => Ok(None)
+    _ => Ok(Some(json.from_value[T](v)?))
+  }
+}
+
+/// Go's UnmarshalJSON of a decoded value: `data` kept as its JSON text,
+/// written compacted (decode_event keeps the text as received, as Go),
+/// the other fields decoded, any other key ignored.
+fn event_from_value(v: json.Value) -> EventGridEvent ! json.DecodeErr {
+  let fs = match v {
+    json.Value.Object(fs) => fs
+    _ => return Err(json.DecodeErr{msg: "unmarshalling type *azsystemevents.EventGridEvent: json: cannot unmarshal into Go value of type map[string]json.RawMessage", path: ""})
+  }
+  var e = EventGridEvent{}
+  for (k, x) in fs {
+    match k {
+      "data" => e.data = Some(x.encode().bytes())
+      "dataVersion" => e.data_version = opt[Str](x)?
+      "eventTime" => e.event_time = opt[azcore.DateTimeUTC](x)?
+      "eventType" => e.event_type = opt[Str](x)?
+      "id" => e.id = opt[Str](x)?
+      "metadataVersion" => e.metadata_version = opt[Str](x)?
+      "subject" => e.subject = opt[Str](x)?
+      "topic" => e.topic = opt[Str](x)?
+      _ => {}
+    }
+  }
+  Ok(e)
+}
+
+/// Go's json.Unmarshal of one event: as `derive Json`, but `data` is the
+/// text as received, byte for byte (Go's json.RawMessage).
+pub fn decode_event(data: Bytes) -> EventGridEvent ! json.DecodeErr {
+  var r = json.tokens(data)
+  let e = read_event(data, r)?
+  end_of_text(r)?
+  Ok(e)
+}
+
+/// Go's json.Unmarshal of a list of events (an Event Grid delivery), each
+/// as decode_event.
+pub fn decode_events(data: Bytes) -> List[EventGridEvent] ! json.DecodeErr {
+  var r = json.tokens(data)
+  var out: List[EventGridEvent] = []
+  match r.next()? {
+    Some(json.Token.ArrayStart) => {}
+    Some(json.Token.Null) => {
+      end_of_text(r)?
+      return Ok([])
+    }
+    Some(_) => {
+      // not a list: decode's own error for it
+      return Err(json.decode[List[json.Value]](data).err() ?? not_json())
+    }
+    None => return Err(not_json())
+  }
+  while r.more() {
+    out.push(read_event(data, r)?)
+  }
+  let _ = r.next()?
+  end_of_text(r)?
+  Ok(out)
+}
+
+fn not_json() -> json.DecodeErr {
+  json.DecodeErr{msg: "unexpected end of JSON input", path: ""}
+}
+
+fn end_of_text(var r: json.TokenReader) -> () ! json.DecodeErr {
+  match r.next()? {
+    None => Ok(())
+    Some(_) => Err(json.DecodeErr{msg: "invalid character after top-level value", path: ""})
+  }
+}
+
+/// The event at r's next token; a `data` member's text is cut from
+/// `data` between the offsets around it.
+fn read_event(data: Bytes, var r: json.TokenReader) -> EventGridEvent ! json.DecodeErr {
+  match r.next()? {
+    Some(json.Token.ObjectStart) => {}
+    Some(json.Token.Null) => return Ok(EventGridEvent{})
+    _ => {
+      // not an object: event_from_value's error for it
+      return Err(event_from_value(json.Value.Bool(false)).err() ?? not_json())
+    }
+  }
+  var fs: List[(Str, json.Value)] = []
+  var raw: Bytes? = None
+  while r.more() {
+    let k = match r.next()? {
+      Some(json.Token.Key(k)) => k
+      _ => return Err(not_json())
+    }
+    if k == "data" {
+      let from = r.offset()
+      r.skip()?
+      raw = Some(trim_member(data[from..r.offset()]))
+    } else {
+      fs.push((k, r.value()?))
+    }
+  }
+  let _ = r.next()?
+  var e = event_from_value(json.Value.Object(fs))?
+  e.data = raw
+  Ok(e)
+}
+
+/// A member's value text from just after its key: without the `:` and
+/// the white space around it.
+fn trim_member(b: Bytes) -> Bytes {
+  var i = 0
+  while i < b.len() && (b[i] == 32 || b[i] == 9 || b[i] == 10 || b[i] == 13 || b[i] == 58) {
+    i = i + 1
+  }
+  var j = b.len()
+  while j > i && (b[j - 1] == 32 || b[j - 1] == 9 || b[j - 1] == 10 || b[j - 1] == 13) {
+    j = j - 1
+  }
+  b[i..j]
+}

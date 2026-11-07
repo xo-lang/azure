@@ -57,7 +57,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | messaging/azwebpubsub | v0.1.1 | v0 | 332 | 2071 | missing |  |  |
 | messaging/eventgrid/azeventgrid | v1.0.0 | stable | 127 | 574 | v1.0.0 | 132 |  |
 | messaging/eventgrid/aznamespaces | v1.0.0 | stable | 537 | 1939 | v1.0.0 | 345 |  |
-| messaging/eventgrid/azsystemevents | v1.1.0 | stable | 878 | 19101 | missing |  |  |
+| messaging/eventgrid/azsystemevents | v1.1.0 | stable | 878 | 19101 | v1.1.0 | 243 + 5263 gen |  |
 | monitor/azingest | v0.1.2 | v0, deprecated | 95 | 208 | missing |  |  |
 | monitor/azquery | v1.2.0 | stable | 255 | 2257 | missing |  |  |
 | monitor/ingestion/azlogs | v1.1.0 | stable | 81 | 372 | v1.1.0 | 138 |  |
@@ -443,4 +443,7 @@ body in the pipeline). ai/azopenai v0.9.0 has no client (it extends
 openai-go v3, which is not an Azure module): its Azure models are
 generated and its MongoDB embedding dependency, request options,
 response accessors and ExtractContentFilterError written by hand over
-JSON, every case checked against Go's own.
+JSON, every case checked against Go's own. messaging/eventgrid/
+azsystemevents v1.1.0 is done: its models and event type constants
+generated from the TypeSpec's OpenAPI file, its Event Grid event and
+error written by hand, every spec example checked against Go's own.

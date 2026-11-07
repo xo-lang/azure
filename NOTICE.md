@@ -92,6 +92,9 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   embedding dependency, request options, response accessors and
   content filter error hand written over JSON; checked against its
   own),
+  `sdk/messaging/eventgrid/azsystemevents` v1.1.0 (its models and
+  event types generated, its Event Grid event and error hand written;
+  checked against its own),
   and
   later the other data plane packages. Each ported file names its source in a header comment.
   The generator (`codegen/`) follows the names and shapes of Go's

@@ -8,6 +8,16 @@ version has been tagged since.
 
 ## Unreleased
 
+The generator (`codegen`), for messaging/eventgrid/azsystemevents:
+`all_definitions` (a models only TypeSpec module keeps every
+definition), `drop_models` (Go's hand written replacements),
+`event_types` (Go's `system_events.go` constants, from each event's
+data type doc), TypeSpec renames that are unscoped, spread into a
+model, or for other emitters only (`not_go_fields`: undone for Go),
+`field_types` for a field of any type, and Go's unexported types
+(`internalACSRouterCommunicationError`) emitted UpperCamel without
+`pub`. No other module changed.
+
 The SSE test reads a streamed response as the FakeNet server flushes
 it (the server's second event waits until the reader has returned the
 first); needs xo 3b2e4b78d or later, whose FakeNet sends an

@@ -1,0 +1,173 @@
+// Every case of vectors_test.xo made again here; each output must be
+// Go's, or be in KNOWN.
+
+use std/json
+
+/// Where this port differs from Go, on purpose or for now: each case's
+/// reason and this port's output (which must not be Go's).
+const KNOWN: Map[Str, (Str, Str)] = {
+  "data geofence_entered": ("Go's float32 fields are Float (the Int32/Float32 note)", "{\"expiredGeofenceGeometryId\":[],\"geometries\":[{\"deviceId\":\"device_1\",\"distance\":-999,\"geometryId\":\"2\",\"nearestLat\":47.618786,\"nearestLon\":-122.132151,\"udId\":\"00000000-0000-0000-0000-000000000000\"}],\"invalidPeriodGeofenceGeometryId\":[]}"),
+  "data geofence_result": ("Go's float32 fields are Float (the Int32/Float32 note)", "{\"expiredGeofenceGeometryId\":[],\"geometries\":[{\"deviceId\":\"device_1\",\"distance\":999,\"geometryId\":\"1\",\"nearestLat\":47.609833,\"nearestLon\":-122.148274,\"udId\":\"00000000-0000-0000-0000-000000000000\"},{\"deviceId\":\"device_1\",\"distance\":999,\"geometryId\":\"2\",\"nearestLat\":47.621954,\"nearestLon\":-122.131841,\"udId\":\"00000000-0000-0000-0000-000000000000\"}],\"invalidPeriodGeofenceGeometryId\":[]}"),
+  "data channel error null": ("Go's channel error decode dereferences a nil pointer (a panic); here a null error is None", "{}|nil"),
+  "data router errors empty": ("Go's router errors decode leaves an empty list nil, so it is not written; here it stays an empty list", "{\"errors\":[]}"),
+}
+
+/// Cases with a map (Go's map, Xo's Map or json.Value) of keys not in
+/// order: Go's encoding/json writes a map's keys sorted; Xo's json
+/// writes a Map's in insertion order. Each must differ from Go's and be
+/// Go's once every object's keys are sorted.
+const MAP_ORDER: List[Str] = ["ContainerServiceEventResources_ScheduledEventEmitted", "HealthResources_AvailabilityStatusChanged", "HealthResources_ResourceAnnotated", "Resources_CreatedOrUpdated", "chat_message_edited", "chat_message_received", "chat_thread_created", "device_telemetry", "incoming_call", "resource_action_cancel", "resource_action_failure", "resource_action_success", "resource_delete_cancel", "resource_delete_failure", "resource_delete_success", "resource_write_cancel", "resource_write_failure", "resource_write_success", "router_worker_registered", "run_completed", "run_status_changed"]
+
+/// Event cases whose `data` text is not compact (`-999.0`, spaces):
+/// `derive Json` keeps it compacted; decode_event keeps it as Go does.
+const COMPACTED: List[Str] = ["geofence_entered", "geofence_result", "event data spaced"]
+
+/// Go's json.Marshal text of v (`<`, `>` and `&` escaped).
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer(escape_html: true)
+  w.value(v) ?? _ => return "marshal error"
+  w.finish().to_str() ?? "marshal error"
+}
+
+/// v with every object's keys sorted.
+fn sorted(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sorted(f.1)) }).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { sorted(x) }))
+    other => other
+  }
+}
+
+/// A data case's output with its JSON's keys sorted (its error text
+/// after the JSON kept).
+fn sorted_out(out: Str) -> Str {
+  let i = out.find("|") ?? out.len()
+  match json.parse_value(out[0..i]) {
+    Ok(v) => go_json(sorted(v)) + out[i..out.len()]
+    Err(_) => out
+  }
+}
+
+fn rt[T: Json](input: Str) -> Str {
+  match json.decode_str[T](input) {
+    Ok(v) => go_json(json.to_value(v))
+    Err(_) => "decode error"
+  }
+}
+
+/// The errors a data type carries, as the Go program writes them
+/// (`|code=message` each).
+fn errs(t: Str, input: Str) -> Str {
+  let es: List[ErrorModel?] = match t {
+    "Microsoft.Communication.AdvancedMessageReceived" => {
+      let d = json.decode_str[ACSMessageReceivedEventData](input) ?? _ => return ""
+      [d.error]
+    }
+    "Microsoft.Communication.AdvancedMessageDeliveryStatusUpdated" => {
+      let d = json.decode_str[ACSMessageDeliveryStatusUpdatedEventData](input) ?? _ => return ""
+      [d.error]
+    }
+    "Microsoft.Communication.RouterJobClassificationFailed" => {
+      let d = json.decode_str[ACSRouterJobClassificationFailedEventData](input) ?? _ => return ""
+      (d.errors ?? []).map(fn(e: ErrorModel) -> ErrorModel? { Some(e) })
+    }
+    _ => []
+  }
+  es.map(fn(e: ErrorModel?) -> Str {
+    match e {
+      Some(x) => "|${x.code}=${x.display()}"
+      None => "|nil"
+    }
+  }).join("")
+}
+
+fn ours(kind: Str, t: Str, input: Str) -> Str {
+  match kind {
+    "data" => {
+      let out = data_round_trip(t, input) ?? return "no type"
+      if out == "decode error" { out } else { out + errs(t, input) }
+    }
+    "event" => match decode_event(input.bytes()) {
+      Ok(e) => go_json(json.to_value(e))
+      Err(_) => "decode error"
+    }
+    _ => "bad kind"
+  }
+}
+
+test "every case as Go" {
+  var bad: List[Str] = []
+  for (kind, name, t, input, want) in SYSEV_GO {
+    let got = ours(kind, t, input)
+    let key = "${kind} ${name}"
+    match KNOWN.get(key) {
+      Some((_, pinned)) => {
+        if got != pinned || got == want {
+          bad.push("${key}: known ${pinned}, got ${got}, Go ${want}")
+        }
+      }
+      None if kind == "data" && MAP_ORDER.contains(name) => {
+        if got == want || sorted_out(got) != sorted_out(want) {
+          bad.push("${key}: map order: got ${got}, Go ${want}")
+        }
+      }
+      None => {
+        if got != want {
+          bad.push("${key}:\n  got ${got}\n  Go  ${want}")
+        }
+      }
+    }
+  }
+  expect(bad.join("\n")) == ""
+}
+
+test "every Go event type, as Go's" {
+  var bad: List[Str] = []
+  for (ours, go) in GO_TYPES {
+    if ours != go {
+      bad.push("${ours} != ${go}")
+    }
+    if data_round_trip(go, "{}") == None {
+      bad.push("no data type: ${go}")
+    }
+  }
+  expect(bad.join("\n")) == ""
+  expect(GO_TYPES.len()) == 206
+}
+
+test "derive Json of an event, as Go's but data compacted" {
+  var bad: List[Str] = []
+  for (kind, name, _, input, want) in SYSEV_GO {
+    if kind != "event" {
+      continue
+    }
+    let got = rt[EventGridEvent](input)
+    if (got == want) == COMPACTED.contains(name) {
+      bad.push("${name}: got ${got}, Go ${want}")
+    }
+  }
+  expect(bad.join("\n")) == ""
+}
+
+test "decode_events keeps each data text" {
+  let body = "[ {\"data\": [1.0, 2] ,\"eventType\":\"a\"},\n {\"data\":\"s\"}, {\"id\":\"x\"} ]".bytes()
+  let es = decode_events(body)?
+  expect(es.len()) == 3
+  expect(es[0].data?.to_str()?) == "[1.0, 2]"
+  expect(es[0].event_type) == Some("a")
+  expect(es[1].data?.to_str()?) == "\"s\""
+  expect(es[2].data) == None
+  expect(decode_events("null".bytes())?.len()) == 0
+  expect(decode_events("{}".bytes()).is_err()) == true
+  expect(decode_events("[1]".bytes()).is_err()) == true
+  expect(decode_events("[] x".bytes()).is_err()) == true
+  expect(decode_event("{\"data\":{}} 1".bytes()).is_err()) == true
+}
+
+test "an error's text is its message" {
+  let d = json.decode_str[ACSRouterJobClassificationFailedEventData]("{\"errors\":[{\"code\":\"c\",\"message\":\"m\"}]}")?
+  let e = (d.errors ?? [])[0]
+  expect(e.code) == "c"
+  expect(e.display()) == "Code: c\nMessage: m\n"
+  expect(go_json(json.to_value(e))) == "{\"Code\":\"c\"}"
+}

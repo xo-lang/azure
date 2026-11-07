@@ -47,6 +47,10 @@ pub struct Renames {
   /// writes that model, unused, as `<Op>ParameterBody`. Each is (model
   /// name, field, field type, field documentation).
   pub body_roots: List[(Str, Str, Str, Str)] = []
+  /// A property renamed for other emitters but not Go (`"!go, !csharp"`),
+  /// which the OpenAPI file carries as x-ms-client-name: `Model.name`
+  /// (that client name) to the property's own name, Go's.
+  pub not_go_fields: Map[Str, Str] = {}
 }
 
 /// Each operation in an interface of `text` that carries decorator `dec`
@@ -236,6 +240,10 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
   let alt_model = regexp.compile("@@alternateType\\(\\s*(Azure\\.[A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
+  // `@@clientName(T, "Name")` with no scope: the name every emitter,
+  // the OpenAPI one too, gives T
+  let unscoped = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*\\)") ?? e => return Err(e.display())
+  let type_decl = regexp.compile("(?:^|\\n)\\s*(?:enum|union|model|scalar)\\s+([A-Za-z0-9_]+)") ?? e => return Err(e.display())
   let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   // `Namespace.op` names the operation: the project's namespaces, from
   // every file, are stripped from a target before it is read.
@@ -254,7 +262,25 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       }
     }
   }
+  // each declared type's name, and the name the OpenAPI file gives it
+  var types: List[Str] = []
+  var emitted: Map[Str, Str] = {}
+  for text in texts {
+    for whole in type_decl.find_all(text) {
+      let n = (type_decl.captures(whole) ?? continue)[1] ?? ""
+      if n != "" && !types.contains(n) {
+        types.push(n)
+      }
+    }
+    for whole in unscoped.find_all(text) {
+      let m = unscoped.captures(whole) ?? continue
+      emitted[strip_namespace(m[1] ?? "", namespaces)] = m[2] ?? ""
+    }
+  }
   var r = Renames{}
+  // a property's rename for other emitters, not Go's: the OpenAPI file
+  // carries it as x-ms-client-name, and Go keeps the property's name
+  var not_go: Map[Str, Str] = {}
   for text in texts {
     for whole in client.find_all(text) {
       let cc = client.captures(whole) ?? continue
@@ -315,6 +341,11 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     for whole in aug.find_all(text) {
       let m = aug.captures(whole) ?? continue
       if !for_go(m[3] ?? "") {
+        let target = strip_namespace(m[1] ?? "", namespaces)
+        if target.contains(".") && !names_type(target) {
+          let (model, prop) = target.cut(".") ?? continue
+          not_go["${model}.${m[2] ?? ""}"] = prop
+        }
         continue
       }
       let full = m[1] ?? ""
@@ -322,6 +353,10 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let name = m[2] ?? ""
       if target.contains(".") && !names_type(target) {
         r.fields[target] = name
+      } else if types.contains(target) && target[0..1] >= "a" && target[0..1] <= "z" {
+        // a type declared in lower case (azsystemevents' union
+        // recordingChannelType), by the name the OpenAPI file gives it
+        r.models[emitted.get(target) ?? target] = name
       } else if target != "" && target[0..1] >= "a" && target[0..1] <= "z" {
         r.ops[target.to_lower()] = name
       } else if full != target {
@@ -341,6 +376,44 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       r.params[w[1] ?? ""] = m[1] ?? ""
     }
   }
+  // an unscoped property rename is Go's too, unless Go has its own
+  for text in texts {
+    for whole in unscoped.find_all(text) {
+      let m = unscoped.captures(whole) ?? continue
+      let target = strip_namespace(m[1] ?? "", namespaces)
+      if target.contains(".") && !names_type(target) && !r.fields.contains(target) {
+        r.fields[target] = m[2] ?? ""
+      }
+    }
+  }
+  // a model that spreads another (`...ResourceBaseEventData;`) has its
+  // properties, and their renames
+  var spreads: Map[Str, List[Str]] = {}
+  for text in texts {
+    for (i, chunk) in text.split("model ").indexed() {
+      if i == 0 {
+        continue
+      }
+      let name = ident_prefix(chunk)
+      let (head, body) = chunk.cut("{") ?? continue
+      if name == "" || head.contains(";") || head.contains("}") {
+        continue
+      }
+      let (inner, _) = body.cut("}") ?? continue
+      for (j, part) in inner.split("...").indexed() {
+        if j == 0 {
+          continue
+        }
+        let base = ident_prefix(part.trim())
+        if base != "" {
+          spreads[name] = (spreads.get(name) ?? []) + [base]
+        }
+      }
+    }
+  }
+  r.fields = spread_keys(r.fields, spreads)
+  r.not_go_fields = spread_keys(not_go, spreads)
+
   for text in texts {
     // `@@clientLocation(Iface.op, "ManagementClient", "go")` moves an
     // operation to another client (Go names armnetwork's
@@ -372,4 +445,30 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
   }
   Ok(r)
+}
+
+/// `fields` (`Model.prop` to a name) with each key repeated for every
+/// model that spreads Model, directly or through others; a model's own
+/// key wins.
+fn spread_keys(fields: Map[Str, Str], spreads: Map[Str, List[Str]]) -> Map[Str, Str] {
+  var out = fields
+  for (model, bases) in spreads {
+    var todo = bases
+    var seen: List[Str] = []
+    while let Some(base) = todo.pop() {
+      if seen.contains(base) {
+        continue
+      }
+      seen.push(base)
+      todo = todo + (spreads.get(base) ?? [])
+      for (k, v) in fields {
+        if let Some((m, prop)) = k.cut(".") {
+          if m == base && !out.contains("${model}.${prop}") {
+            out["${model}.${prop}"] = v
+          }
+        }
+      }
+    }
+  }
+  out
 }

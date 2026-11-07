@@ -95,6 +95,12 @@ struct CustomFile {
   /// Keep only the input files' definitions named one of these
   /// prefixes and more (spec.keep_definitions), before the patches.
   pub keep_definitions: List[Str] = []
+  /// Emit every definition of a TypeSpec module (gen.Custom).
+  pub all_definitions: Bool = false
+  /// Models Go's own generate step deletes after generation, by name.
+  pub drop_models: List[Str] = []
+  /// Go's azsystemevents event type constants (gen.emit_event_types).
+  pub event_types: Bool = false
 } derive Json
 
 fn main(os: Os) -> () ! Error {
@@ -118,7 +124,7 @@ fn main(os: Os) -> () ! Error {
   let name = dir.split("/").last() ?? dir
   let custom_path = "codegen/custom/${name}.toml"
   let cf = if os.fs.exists(custom_path)? { toml.decode[CustomFile](os.fs.read_text(custom_path)?)? } else { CustomFile{} }
-  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || cf.remove_unreferenced || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() }), ops: lower_keys(cf.ops), body_fields: lower_keys(cf.body_fields)}
+  var custom = gen.Custom{models: cf.models, drop_values: cf.drop_values, field_types: cf.field_types, replace_types: cf.replace_types, drop_params: cf.drop_params, param_order: cf.param_order, allow_empty: cf.allow_empty, reachable_only: cf.reachable_only || cf.remove_unreferenced || svc.openapi != "", seal_single_value_enums: svc.seal_single_value_enums, utc_date_times: svc.utc_date_times, tsp: svc.openapi != "", all_definitions: cf.all_definitions, data_plane: cf.data_plane, status_pollers: cf.status_pollers.map(fn(s: Str) -> Str { s.to_lower() }), ops: lower_keys(cf.ops), body_fields: lower_keys(cf.body_fields)}
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
@@ -159,7 +165,7 @@ fn main(os: Os) -> () ! Error {
         _ => models[m] = v
       }
     }
-    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots}
+    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots}
     source = "${svc.openapi} (from ${svc.spec})"
   } else if svc.swagger != "" {
     inputs = ["${base}/${svc.swagger}"]
@@ -219,7 +225,8 @@ fn main(os: Os) -> () ! Error {
     }
   }
   var b = gen.builder(files, name, custom)
-  let api = b.build(inputs)
+  let built = b.build(inputs)
+  let api = built with {models: built.models.filter(fn(m: gen.Model) -> Bool { !cf.drop_models.contains(m.name) })}
   let tspconfig = "${base}/${svc.spec}/tspconfig.yaml"
   let head_as_boolean = svc.openapi != "" && os.fs.exists(tspconfig)? && go_option(os.fs.read_text(tspconfig)?, "head-as-boolean") == Some("true")
   let p = gen.Package{name: name, module: "github.com/xo-lang/azure/${dir}", version: svc.version, source: "${source} at ${commit[0..12]}", data_plane: cf.data_plane, allow_empty: cf.allow_empty, accept_always: cf.accept_always, query_pct20: cf.query_pct20, typespec: cf.reachable_only || svc.openapi != "", tsp_arm: svc.openapi != "" && !cf.data_plane, head_as_boolean: head_as_boolean, go_package: go_package(svc.go_module, name), next_link_transform: cf.next_link_transform, private_ops: cf.private_ops, private_types: cf.private_types}
@@ -227,6 +234,10 @@ fn main(os: Os) -> () ! Error {
   os.fs.write("${dir}/xo.mod", ("module ${p.module}\nedition preview\n\nrequire github.com/xo-lang/azure v0.1.0\n" + cf.needs.map(fn(r: Str) -> Str { "require ${r} v0.1.0\n" }).join("")).bytes())?
   let m = gen.emit_models(p, api)
   os.fs.write("${dir}/${m.name}", (m.text).bytes())?
+  if cf.event_types {
+    let f = gen.emit_event_types(p, api)?
+    os.fs.write("${dir}/${f.name}", (f.text).bytes())?
+  }
   for f in gen.emit_clients(p, api) {
     os.fs.write("${dir}/${f.name}", (f.text).bytes())?
   }

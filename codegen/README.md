@@ -234,6 +234,18 @@ response type equal, except armkeyvault's `Secret`, which is
   joined URL already has is kept, as Go's `URL.Query()` keeps it.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
+- A Go type with a lower case name (a TypeSpec `@@clientName` to
+  `internal...`) is the module's own: UpperCamel, without `pub`.
+- `custom/<module>.toml: all_definitions` keeps every definition of a
+  TypeSpec module (azsystemevents is models only), `drop_models` drops
+  the ones Go writes by hand, and `event_types` writes
+  `system_events.xo`: a `TYPE_...` constant per event, from each data
+  type's doc as Go's generate step reads it (`Name - doc ... Type.Event`).
+- TypeSpec renames: a scoped `@@clientName` for Go applies; an
+  unscoped one applies unless Go has its own; one scoped to other
+  languages only is undone when the OpenAPI file carries it as
+  `x-ms-client-name`; a rename of a spread model applies to each model
+  it is spread into.
 - A Go name whose snake_case form is an Xo keyword or predeclared value
   (`gen/names.xo` KEYWORDS) gets a trailing `_`: in the generated modules
   `type_`, `select_`, `target_`, `interface_`, `match_` and `as_`

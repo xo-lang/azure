@@ -1,0 +1,73 @@
+// Copyright (c) Microsoft Corporation. Licensed under the MIT License.
+// Ported from azure-sdk-for-go sdk/messaging/eventgrid/azsystemevents
+// v1.1.0 error.go and custom_events.go (NOTICE.md).
+
+use std/json
+
+/// Go's Error (`ErrorModel`: Xo predeclares `Error`): an error a system event reports (an ACS message's channel
+/// error, a router job's classification errors). Its text is the
+/// service's message; a router error's details and inner errors are
+/// folded into it, indented, as Go's.
+pub struct ErrorModel {
+  /// The error code from the service that produced the event.
+  pub code: Str
+  message: Str
+} derive Json(via: json.Value, to: error_json, from: parse_error)
+
+/// Go's Error.Error(): the message.
+pub fn (e: ErrorModel) display() -> Str {
+  e.message
+}
+
+/// Go writes only the exported field (`{"Code": ...}`).
+fn error_json(e: ErrorModel) -> json.Value {
+  json.Value.Object([("Code", json.Value.Str(e.code))])
+}
+
+/// Go reads an ACS message's `error` as a channel error (`channelCode`,
+/// `channelMessage`) and a router job's `errors` as communication errors
+/// (`code`, `message`, `details`, `innererror`); each field's own shape
+/// tells them apart here. A null router error is the zero one, as Go's
+/// decoding of a null element.
+fn parse_error(v: json.Value) -> ErrorModel ! json.DecodeErr {
+  match v {
+    json.Value.Object(fs) if fs.any(fn(f: (Str, json.Value)) -> Bool { f.0 == "channelCode" || f.0 == "channelMessage" }) => {
+      let c = json.from_value[InternalACSMessageChannelEventError](v)?
+      Ok(ErrorModel{code: c.channel_code ?? "", message: c.channel_message ?? ""})
+    }
+    _ => {
+      let r = json.from_value[InternalACSRouterCommunicationError](nulls_zero(v))?
+      Ok(ErrorModel{code: r.code ?? "", message: unpack_msg(r, "")})
+    }
+  }
+}
+
+/// Go's unpackMsg: the code, the message, then each detail and the
+/// inner error, two spaces further in.
+fn unpack_msg(e: InternalACSRouterCommunicationError, indent: Str) -> Str {
+  var s = "${indent}Code: ${e.code ?? ""}\n${indent}Message: ${e.message ?? ""}\n"
+  for (i, d) in (e.details ?? []).indexed() {
+    s = s + "${indent}Details[${i}]:\n${unpack_msg(d, indent + "  ")}"
+  }
+  if let Some(inner) = e.innererror {
+    s = s + "${indent}InnerError:\n${unpack_msg(inner, indent + "  ")}"
+  }
+  s
+}
+
+/// v with null as an empty object where Go reads a null struct as its
+/// zero value (the value itself and each array element).
+fn nulls_zero(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Null => json.Value.Object([])
+    json.Value.Object(fs) => json.Value.Object(fs.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, if f.0 == "details" { nulls_zero_list(f.1) } else if f.0 == "innererror" && f.1 != json.Value.Null { nulls_zero(f.1) } else { f.1 }) }))
+    other => other
+  }
+}
+
+fn nulls_zero_list(v: json.Value) -> json.Value {
+  match v {
+    json.Value.List(xs) => json.Value.List(xs.map(fn(x: json.Value) -> json.Value { nulls_zero(x) }))
+    other => other
+  }
+}

@@ -4,6 +4,8 @@
 // Go's operations: plain, HEAD (a Bool), pageable (runtime.Pager) and
 // long-running (runtime.Poller, resumable).
 
+use std/regexp
+
 pub struct File {
   pub name: Str
   pub text: Str
@@ -181,7 +183,10 @@ pub fn emit_models(p: Package, api: Api) -> File {
     s = s + "\n/// `v` with its discriminator `key` null when it has none, as Go's\n/// base type's MarshalJSON writes it (its keys sorted).\nfn with_discriminator_value(v: json.Value, key: Str) -> json.Value {\n  match v {\n    json.Value.Object(fs) if !fs.any(fn(f: (Str, json.Value)) -> Bool { f.0 == key }) => json.Value.Object((fs + [(key, json.Value.Null)]).sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))\n    other => other\n  }\n}\n"
   }
   for m in api.models {
-    s = s + "\n" + doc("", m.doc) + "pub struct ${m.name} {\n"
+    // Go's unexported types (`internalACSRouterCommunicationError`) are
+    // the module's own: UpperCamel, without `pub`
+    let head = if m.private { "struct ${m.name}" } else { "pub struct ${m.name}" }
+    s = s + "\n" + doc("", m.doc) + "${head} {\n"
     // Go's MarshalJSON fills a map[string]any, so json.Marshal writes the
     // keys sorted: the fields are declared in that order
     for f in m.fields.sort_by(fn(f: Field) -> Str { f.wire }) {
@@ -617,4 +622,31 @@ fn uncap_go(n: Str) -> Str {
     return n
   }
   ws[0][0..1].to_lower() + ws[0][1..] + ws[1..].map(fn(w: Str) -> Str { cap(w) }).join("")
+}
+
+/// Go's azsystemevents internal/generate constants (system_events.go):
+/// for each model whose documentation names an event type (`<Model> -
+/// ... for a Microsoft.X.Y event`, the first dotted name of three or four
+/// parts), `TYPE_<model without EventData>`, sorted by the type.
+pub fn emit_event_types(p: Package, api: Api) -> File ! Str {
+  let re = regexp.compile("([^ ]+) -.+?([A-Za-z0-9]+(?:\\.[A-Za-z0-9]+){2,3})") ?? e => return Err(e.display())
+  var found: Map[Str, (Str, Str)] = {}
+  for m in api.models {
+    // Go's comment lines for the type, joined with spaces
+    let text = "${m.name} - ${m.doc.split("\n").map(fn(l: Str) -> Str { l.trim() }).filter(fn(l: Str) -> Bool { l != "" }).join(" ")}"
+    let c = re.captures(text) ?? continue
+    let ty = c[1] ?? ""
+    let value = c[2] ?? ""
+    let name = match ty.find("EventData") {
+      Some(i) => ty[0..i] + ty[i + 9..ty.len()]
+      None => ty
+    }
+    found[value] = ("Type${name}", ty)
+  }
+  var s = header(p)
+  for value in found.keys().sort_by(fn(k: Str) -> Str { k }) {
+    let (name, ty) = found.get(value) ?? continue
+    s = s + "\n/// ${value}: data of ${ty}.\npub const ${screaming(name)}: Str = \"${esc(value)}\"\n"
+  }
+  Ok(File{name: "system_events.xo", text: s})
 }
