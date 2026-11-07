@@ -2,7 +2,10 @@
 // token request must be Go's (govectors_test.xo), MSAL Go's form and
 // headers included.
 
+use std/crypto
 use std/http
+use std/json
+use std/x509
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/cloud
 use github.com/xo-lang/azure/policy
@@ -30,6 +33,42 @@ fn gv_serve(net: testing.FakeNet, section: Str) -> GvFake {
   f
 }
 
+/// A signed client assertion's JOSE header as the Go program prints it:
+/// `k=v` sorted, x5c as its certificates' common names; "" when the
+/// form's assertion is not a JWT.
+fn gv_jose(form: Str) -> Str {
+  let (_, rest) = form.cut("client_assertion=") ?? return ""
+  let a = (rest.cut("&").map(fn(p: (Str, Str)) -> Str { p.0 })) ?? rest
+  let parts = a.split(".")
+  if parts.len() != 3 {
+    return ""
+  }
+  var b64 = parts[0].replace("-", "+").replace("_", "/")
+  while b64.len() % 4 != 0 {
+    b64 = b64 + "="
+  }
+  let raw = Bytes.from_base64(b64) ?? return "bad header"
+  let doc = json.parse_value(raw.to_str_lossy()) ?? _ => return "bad header json"
+  var kv: List[Str] = []
+  if let json.Value.Object(fields) = doc {
+    for (k, v) in fields {
+      if k == "x5c" {
+        let names = match v {
+          json.Value.List(xs) => xs.map(fn(x: json.Value) -> Str {
+            let der = Bytes.from_base64(str_of_value(x)) ?? return "?"
+            (x509.parse(der) ?? _ => return "?").subject.common_name
+          })
+          _ => []
+        }
+        kv.push("x5c=[${names.join(",")}]")
+      } else {
+        kv.push("${k}=${str_of_value(v)}")
+      }
+    }
+  }
+  kv.sort().join(" | ")
+}
+
 fn gv_answer(f: GvFake, section: Str, req: http.Request) -> http.Response {
   var hs: List[Str] = []
   for (k, v) in req.headers {
@@ -49,7 +88,8 @@ fn gv_answer(f: GvFake, section: Str, req: http.Request) -> http.Response {
   let host = req.header("Host") ?? req.url.host
   let path = req.escaped_path()
   let qs = req.raw_query()
-  f.log.with(fn(var l: List[Str]) { l.push("${section}: REQ ${req.method} https://${host}${path}${if qs == "" { "" } else { "?${qs}" }}\n  H ${hs.sort().join(" | ")}\n  B ${body}") })
+  let jose = gv_jose(req.body.to_str_lossy())
+  f.log.with(fn(var l: List[Str]) { l.push("${section}: REQ ${req.method} https://${host}${path}${if qs == "" { "" } else { "?${qs}" }}\n  H ${hs.sort().join(" | ")}\n  B ${body}${if jose == "" { "" } else { "\n  J ${jose}" }}") })
   let o = f.overrides.with(fn(var os: List[(Str, Int, Str)]) -> (Int, Str)? {
     for i in 0..os.len() {
       if path.contains(os[i].0) {
@@ -243,4 +283,151 @@ test "the client assertion credential's first request is MSAL Go's" {
   gv_get(f, "assertion", "assertion", c?.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
   let (got, want) = gv_lines(f, "assertion")
   expect(got) == want
+}
+
+const PFX_LEGACY: Bytes = embed("testdata/test-legacy.pfx")
+const PFX_NOPASS: Bytes = embed("testdata/test-nopass.pfx")
+const PFX_AES: Bytes = embed("testdata/test-aes.pfx")
+const PFX_CHAIN: Bytes = embed("testdata/test-chain.pfx")
+const PFX_EC: Bytes = embed("testdata/test-ec.pfx")
+const PFX_PASSWORD: Str = "xo-test-only"
+
+/// The key a PKCS #8 DER wraps (PKCS #1 for RSA, SEC 1 for EC): the
+/// contents of its OCTET STRING after the version and the algorithm.
+fn inner_key(p8: Bytes) -> Bytes {
+  // a DER element's header length and contents length at `at`
+  let element = fn(at: Int) -> (Int, Int) {
+    let first = Int(p8[at + 1])
+    if first < 0x80 {
+      return (2, first)
+    }
+    let n = first & 0x7f
+    var len = 0
+    for i in 0..n {
+      len = len * 256 + Int(p8[at + 2 + i])
+    }
+    (2 + n, len)
+  }
+  let (outer, _) = element(0)
+  var at = outer
+  for _ in 0..2 {
+    // the version INTEGER, then the AlgorithmIdentifier SEQUENCE
+    let (h, l) = element(at)
+    at += h + l
+  }
+  let (h, l) = element(at)
+  p8[at + h..at + h + l]
+}
+
+/// The Go program's describe: the certificates' common names and the
+/// key's Go type.
+fn gv_describe(r: Result[(List[x509.Certificate], crypto.PrivateKey), azcore.AuthErr]) -> Str {
+  match r {
+    Ok((certs, key)) => {
+      let kind = if key.alg() == crypto.KeyAlg.Rsa { "*rsa.PrivateKey" } else if key.alg() == crypto.KeyAlg.Ed25519 { "ed25519.PrivateKey" } else { "*ecdsa.PrivateKey" }
+      "certs=[${certs.map(fn(c: x509.Certificate) -> Str { c.subject.common_name }).join(",")}] key=${kind}"
+    }
+    Err(e) => "error: ${e.display()}"
+  }
+}
+
+test "certificates and PKCS #12 files are read as Go's ParseCertificates reads them" {
+  let f = gv_serve(os.net, "pfx")
+  let pem = TEST_PEM
+  let blocks = crypto.pem_decode(pem)
+  let cert_pem = crypto.pem_encode(blocks[0])?
+  let key_pem = crypto.pem_encode(blocks[1])?
+  let ec_key = crypto.generate_key(os.rand, crypto.KeyAlg.EcdsaP256)?
+  let ec_cert = x509.create_certificate(os.rand, x509.Template{subject: x509.Name{common_name: "xo-azure-test-only-ec"}, not_before: Time.from_unix_millis(0), not_after: Time.from_unix_millis(4000000000000)}, ec_key.public_key(), None, ec_key)?
+  let ec_cert_pem = crypto.pem_encode(crypto.PemBlock{kind: "CERTIFICATE", headers: {}, bytes: ec_cert.raw})?
+  let ec_p8 = crypto.marshal_private_key(ec_key)
+  // Go's program writes SEC 1 DER here; ParseCertificates skips the
+  // block by its type whatever it holds
+  let ec_sec1_pem = crypto.pem_encode(crypto.PemBlock{kind: "EC PRIVATE KEY", headers: {}, bytes: ec_p8})?
+  let ec_p8_pem = crypto.pem_encode(crypto.PemBlock{kind: "PRIVATE KEY", headers: {}, bytes: ec_p8})?
+  let parse = fn(name: Str, data: Bytes, pw: Str) {
+    gv_note(f, "pfx: PARSE ${name}: ${gv_describe(parse_certificates(data, pw))}")
+  }
+  parse("pem", pem.bytes(), "")
+  parse("pem with password", pem.bytes(), PFX_PASSWORD)
+  parse("pem cert only", cert_pem.bytes(), "")
+  parse("pem key only", key_pem.bytes(), "")
+  parse("pem key first", (key_pem + cert_pem).bytes(), "")
+  parse("pem two keys", (cert_pem + key_pem + key_pem).bytes(), "")
+  parse("pem rsa private key", (cert_pem + key_pem.replace("PRIVATE KEY", "RSA PRIVATE KEY")).bytes(), "")
+  parse("pem bad certificate", ("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" + key_pem).bytes(), "")
+  parse("pem ec sec1", (ec_cert_pem + ec_sec1_pem).bytes(), "")
+  parse("pem ec pkcs8", (ec_cert_pem + ec_p8_pem).bytes(), "")
+  // PKCS #8's inner key bytes under a PRIVATE KEY label, and two RSA
+  // PRIVATE KEY blocks
+  let rsa_p1 = inner_key(blocks[1].bytes)
+  parse("pem private key pkcs1", (cert_pem + crypto.pem_encode(crypto.PemBlock{kind: "PRIVATE KEY", headers: {}, bytes: rsa_p1})?).bytes(), "")
+  // PKCS #8 leaves the curve out of the SEC 1 key it wraps; Go's
+  // MarshalECPrivateKey, which the Go program uses, puts it back as [0]
+  // (prime256v1's OID) after the private key OCTET STRING
+  let bare = inner_key(ec_p8)
+  let curve = Bytes.from_hex("a00a06082a8648ce3d030107")?
+  // the 1 byte length (under 128) grows by the 12 bytes added
+  let n = Int(bare[1]) + curve.len()
+  let digits = "0123456789abcdef"
+  let header = Bytes.from_hex("30${digits[n / 16..n / 16 + 1]}${digits[n % 16..n % 16 + 1]}")?
+  let sec1 = header + bare[2..39] + curve + bare[39..bare.len()]
+  parse("pem private key sec1", (ec_cert_pem + crypto.pem_encode(crypto.PemBlock{kind: "PRIVATE KEY", headers: {}, bytes: sec1})?).bytes(), "")
+  parse("pem rsa private key sec1", (ec_cert_pem + crypto.pem_encode(crypto.PemBlock{kind: "RSA PRIVATE KEY", headers: {}, bytes: sec1})?).bytes(), "")
+  let rsa_block = crypto.pem_encode(crypto.PemBlock{kind: "RSA PRIVATE KEY", headers: {}, bytes: rsa_p1})?
+  parse("pem two rsa keys", (cert_pem + rsa_block + rsa_block).bytes(), "")
+  parse("not pem", b"hello", "")
+  parse("empty", b"", "")
+  parse("legacy", PFX_LEGACY, PFX_PASSWORD)
+  parse("legacy wrong password", PFX_LEGACY, "nope")
+  parse("legacy no password", PFX_LEGACY, "")
+  parse("nopass", PFX_NOPASS, "")
+  parse("nopass with password", PFX_NOPASS, PFX_PASSWORD)
+  parse("aes", PFX_AES, PFX_PASSWORD)
+  parse("chain", PFX_CHAIN, PFX_PASSWORD)
+  parse("ec pfx", PFX_EC, PFX_PASSWORD)
+  os.fs.write("test-legacy.pfx", PFX_LEGACY)?
+  for (name, path, pw) in [("env pfx", "test-legacy.pfx", PFX_PASSWORD), ("env pfx wrong password", "test-legacy.pfx", "nope"), ("env missing file", "missing.pfx", "")] {
+    let env = os.env
+    env.set("AZURE_TENANT_ID", "tenant-a")
+    env.set("AZURE_CLIENT_ID", "client-1")
+    env.set("AZURE_CLIENT_CERTIFICATE_PATH", path)
+    env.set("AZURE_CLIENT_CERTIFICATE_PASSWORD", pw)
+    let r = new_environment_credential(env, os.fs, os.net, os.clock, os.rand, gv_opts(nodisc: true))
+    gv_new(f, "pfx", name, r)
+    if let Ok(c) = r {
+      gv_get(f, "pfx", name, c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+    }
+  }
+  let (chain, key) = parse_certificates(PFX_CHAIN, PFX_PASSWORD)?
+  let leaf = chain[0]
+  let ca = chain[1]
+  let mk = fn(name: Str, certs: List[x509.Certificate], k: crypto.PrivateKey, send: Bool) {
+    let o = gv_opts(nodisc: true)
+    let r = new_client_certificate_credential("tenant-a", "client-1", certs, k, os.net, os.clock, os.rand, send_chain: send, opts: o)
+    gv_new(f, "pfx", name, r)
+    if let Ok(c) = r {
+      gv_get(f, "pfx", name, c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+    }
+  }
+  mk("cert leaf", [leaf], key, false)
+  mk("cert ca first, chain", [ca, leaf], key, true)
+  mk("cert ca first, no chain", [ca, leaf], key, false)
+  mk("cert ca only", [ca], key, false)
+  mk("cert none", [], key, false)
+  let (ec_certs, ec_k) = parse_certificates((ec_cert_pem + ec_p8_pem).bytes(), "")?
+  mk("cert ec", ec_certs, ec_k, false)
+  let (got, want) = gv_lines(f, "pfx")
+  // std's PKCS #12 reader says `malformed PFX` where Go prints
+  // encoding/asn1's detail (`asn1: structure error: tags don't match
+  // ...`); those lines are compared up to Go's common prefix
+  let prefix = "error: pkcs12: error reading P12 data: "
+  let cut = fn(l: Str) -> Str {
+    match l.find(prefix) {
+      Some(i) => l[0..i + prefix.len()]
+      None => l
+    }
+  }
+  expect(got.map(cut)) == want.map(cut)
+  expect(got.filter(fn(l: Str) -> Bool { l.contains(prefix) }).len()) == 3
 }

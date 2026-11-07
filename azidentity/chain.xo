@@ -4,6 +4,7 @@
 // identity, then Managed identity; the Azure CLI, Azure Developer CLI
 // and PowerShell credentials are not in it (decision 0003, owner notes).
 
+use std/json
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/cloud
 
@@ -39,11 +40,15 @@ pub fn new_environment_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand
   }
   let path = get("AZURE_CLIENT_CERTIFICATE_PATH")
   if path != "" {
-    if get("AZURE_CLIENT_CERTIFICATE_PASSWORD") != "" {
-      return Err(azcore.AuthErr{credential: name, msg: "a password protected certificate (.pfx) is not read yet: use an unencrypted PEM file"})
+    let data = fs.read(path) ?? e => {
+      // Go's os.ReadFile error names its operation: `open <path>: ...`
+      let m = "failed to read certificate file \"${path}\": open ${e.display()}"
+      return Err(azcore.AuthErr{credential: name, msg: m, text: m})
     }
-    let pem = fs.read(path) ?? e => return Err(azcore.AuthErr{credential: name, msg: "reading ${path}: ${e.display()}"})
-    let (certs, key) = parse_certificates(pem)?
+    let (certs, key) = parse_certificates(data, get("AZURE_CLIENT_CERTIFICATE_PASSWORD")) ?? e => {
+      let m = "failed to parse ${json.encode_str(path)} due to error ${json.encode_str(e.display())}. This may be due to a limitation of this module's certificate loader. Consider calling NewClientCertificateCredential instead"
+      return Err(azcore.AuthErr{credential: name, msg: m, text: m})
+    }
     let chain = get("AZURE_CLIENT_SEND_CERTIFICATE_CHAIN").to_lower()
     return Ok(new_client_certificate_credential(tenant, client, certs, key, net, clock, rand, send_chain: chain == "1" || chain == "true", opts: o)?)
   }

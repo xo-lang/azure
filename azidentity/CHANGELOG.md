@@ -7,6 +7,29 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- `parse_certificates(data, password = "")` is Go's ParseCertificates:
+  a PEM file, or a PKCS #12 file (`.pfx`) opened with `password`
+  through std's `x509.parse_pkcs12` (3DES and 40 bit RC2, as Go's
+  golang.org/x/crypto/pkcs12; an AES file is refused by both). PEM keys
+  follow Go: `PRIVATE KEY` (PKCS #8, else PKCS #1) and `RSA PRIVATE KEY`
+  blocks, `EC PRIVATE KEY` blocks skipped, two keys an error. Its
+  errors are Go's texts (`found no certificate`, `certData contains
+  multiple private keys`, `pkcs12: decryption password incorrect`, ...).
+  EnvironmentCredential reads `AZURE_CLIENT_CERTIFICATE_PASSWORD` and
+  reports Go's `failed to parse "<path>" due to error ...`.
+- **Behavior change**: `new_client_certificate_credential` signs with
+  the certificate whose public key is the private key's, wherever it is
+  in the list, and `x5c` lists it first, then the others in order (MSAL
+  Go's NewCredFromCert). Before, the first certificate signed. A
+  non-RSA key, no certificate, or no certificate for the key is Go's
+  error.
+- **Behavior change**: `x5t#S256` is standard base64 with padding, as
+  MSAL Go v1.10.1 writes it (base64url without padding before).
+- Differences: a PKCS #12 file's certificates come back with the key's
+  certificate first, then the rest in file order (Go: file order; the
+  credential picks the same certificate either way). A malformed file's
+  error is `pkcs12: error reading P12 data: malformed PFX` where Go
+  prints encoding/asn1's detail.
 - `ClientAssertionCredential` (`new_client_assertion_credential`), Go's:
   the assertion comes from a callback, which runs only when no cached
   token fits and after the tenant's endpoint is resolved. Its error is

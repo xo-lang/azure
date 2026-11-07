@@ -18,3 +18,13 @@
 
   gitleaks ignores this one path only: `scripts/gitleaks-extra.toml`,
   which `scripts/check-public.sh` adds to the shared configuration.
+
+- `test-legacy.pfx`, `test-nopass.pfx`, `test-aes.pfx`, `test-chain.pfx`,
+  `test-ec.pfx` and `test-ca.pem`: invented test material, made only for
+  these tests from `test-certificate.pem` (and, for `test-ca.pem` and
+  `test-ec.pfx`, keys invented on the spot and thrown away) by
+  `make-pfx.sh`, run on 2026-11-06 with LibreSSL 3.3.6. The password of
+  every protected file is `xo-test-only`. They are valid nowhere and
+  trusted by nothing. `govectors_run_test.xo` reads them as Go's
+  azidentity ParseCertificates does; the Go program that wrote the
+  expected lines read the same files.
