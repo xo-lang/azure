@@ -8,6 +8,33 @@ version has been tagged since.
 
 ## Unreleased
 
+`scripts/refresh.sh` (decision 0011): every ARM module is refreshed to
+Go's newest release and checked against it in one command; `--verify`
+regenerates and checks the modules given whether or not their row
+changed (the batched differentials). armauthorization, armcompute,
+armkeyvault, armnetwork, armresources and armstorage now carry the full
+set of Go vectors (every public method of every client), not the
+hand-picked calls of before, which stay beside them as
+`goscenario_*_test.xo` (resume tokens, multi-step polls). The fake the
+vectors run against (client_test.xo) is generated, and its helpers carry
+a `gv_` prefix so a module's own tests keep their names.
+
+runtime: a poller whose operation ends with no body gives a string,
+list or map result its empty value, as Go's zero value, instead of a
+decode error (armnetwork's packet capture and failover test calls).
+
+Generator, from the batch-1 differentials against Go: an optional
+single-value sealed enum parameter sends its constant whenever the
+option is set (armstorage's failoverType is always "Planned", armlinks'
+`$filter` always `atScope()`); an api-version with one enum value is
+that value (armkeyvault's vault list is 2015-11-01); TypeSpec's
+`@apiVersion(false)` api-version is a method argument (armresources'
+generic resource calls); a `@@clientLocation` group may be quoted and an
+unscoped `@@clientName` renames the operation, so `@@override`'s
+parameter order reaches the right operation (armnetwork,
+armpolicyinsights). codegen/custom/armnetwork.toml is gone: its one
+order is derived.
+
 azidentity: Service Fabric's cases run against a FakeNet TLS endpoint
 (`FakeNet.handle_tls`, xo decision 0544) presenting a certificate made by
 the test, so the client's pin is checked on every case, as Go's are

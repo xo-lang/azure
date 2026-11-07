@@ -85,22 +85,22 @@ and results).
 
 | Go module | latest | kind | Go lines | our port | our lines | status |
 |---|---|---|---:|---|---:|---|
-| resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 14114 | v2.2.0 | 3819 gen | Go-verified (old vector format) |
-| resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 85961 | v9.0.0 | 30813 gen | Go-verified (old vector format) |
+| resourcemanager/authorization/armauthorization | v2.2.0 (`v2`) | stable; newer v3.0.0-beta.3 | 14114 | v2.2.0 | 3819 gen | Go-verified |
+| resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 85961 | v9.0.0 | 30813 gen | Go-verified |
 | resourcemanager/containerregistry/armcontainerregistry | v3.0.0 (`v3`) | stable | 15726 | v3.0.0 | 4866 gen | Go-verified |
 | resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 24355 | v9.7.0 | 6919 gen | Go-verified |
 | resourcemanager/cosmos/armcosmos | v4.0.0 (`v4`) | stable | 59620 | v4.0.0 | 18216 gen | Go-verified |
 | resourcemanager/dns/armdns | v1.2.0 | stable | 3889 | v1.2.0 | 1033 gen | Go-verified |
 | resourcemanager/eventhub/armeventhub | v1.3.0 | stable; newer v2.0.0-beta.1 | 15366 | v1.3.0 | 4593 gen | Go-verified |
-| resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 13812 | v2.1.0 | 3964 gen | Go-verified (old vector format) |
+| resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 13812 | v2.1.0 | 3964 gen | Go-verified |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 3108 | v1.3.0 | 846 gen | Go-verified |
-| resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 208724 | v12.1.0 | 61668 gen | Go-verified (old vector format) |
+| resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 208724 | v12.1.0 | 61668 gen | Go-verified |
 | resourcemanager/privatedns/armprivatedns | v2.0.0 (`v2`) | stable | 4414 | v2.0.0 | 1245 gen | Go-verified |
 | resourcemanager/resources/armdeployments | v3.0.0 (`v3`) | stable | 10993 | v3.0.0 | 3267 gen | Go-verified |
-| resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 8683 | v4.0.0 | 2499 gen | Go-verified (old vector format) |
+| resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 8683 | v4.0.0 | 2499 gen | Go-verified |
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 2718 | v2.0.0 | 668 gen | Go-verified |
 | resourcemanager/servicebus/armservicebus | v1.2.0 | stable; newer v2.0.0-beta.4 | 14615 | v1.2.0 | 4504 gen | Go-verified |
-| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 42130 | v4.3.0 | 13897 gen | Go-verified (old vector format) |
+| resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 42130 | v4.3.0 | 13897 gen | Go-verified |
 
 ## ARM modules: compiled, not yet Go-verified (291)
 
@@ -251,7 +251,7 @@ counted as ported until their Go vectors pass.
 | resourcemanager/iotcentral/armiotcentral | v1.2.0 | stable; newer v2.0.0-beta.2 | 2567 | v1.2.0 | 733 gen | compiled |
 | resourcemanager/iotfirmwaredefense/armiotfirmwaredefense | v2.0.0 | stable | 8190 | v2.0.0 | 2412 gen | compiled |
 | resourcemanager/iothub/armiothub | v1.3.0 | stable; newer v2.0.0-beta.3 | 11167 | v1.3.0 | 3077 gen | compiled |
-| resourcemanager/iotoperations/armiotoperations | v1.2.0 | stable | 21882 | v1.2.0 | 7035 gen | compiled |
+| resourcemanager/iotoperations/armiotoperations | v1.2.0 | stable | 21882 | v1.2.0 | 7033 gen | compiled |
 | resourcemanager/kubernetesconfiguration/armextensions | v1.0.0 | stable | 2755 | v1.0.0 | 748 gen | compiled |
 | resourcemanager/kubernetesconfiguration/armextensiontypes | v0.2.0 | v0 | 2392 | v0.2.0 | 644 gen | compiled |
 | resourcemanager/kubernetesconfiguration/armfluxconfigurations | v0.1.0 | v0 | 4414 | v0.1.0 | 1163 gen | compiled |
