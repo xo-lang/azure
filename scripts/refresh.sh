@@ -1,5 +1,3 @@
-    if [ $had_fake -eq 1 ]; then cp "$work/$n.old_fake" "$d/client_test.xo"; else rm -f "$d/client_test.xo"; fi
-  cp codegen/govec/client_test.xo.txt "$d/client_test.xo"
 #!/bin/sh
 # Refresh every generated ARM module to Go's latest release (decision
 # 0011): one command, then generator fixes, never edits to a module.
@@ -52,12 +50,32 @@ if [ $# -gt 0 ]; then
 else
   dirs=$(awk -F'|' '/^\| resourcemanager\// { gsub(/ /, "", $2); print $2 }' docs/reports/azure-go-coverage.md | sort -u)
 fi
+# The candidate module paths: from the major services.toml has for the
+# module (its go_module) to two above it, or every major to /v15 for a
+# module with no row; all asked of the proxy in one `go list -e` (one
+# call per path took about 12 minutes a module).
+: > "$work/candidates"
+for d in $dirs; do
+  have=$(awk -v d="$d" -F'"' '/^dir *=/ { cur = $2 } /^go_module *=/ && cur == d { print $2 }' codegen/services.toml)
+  case "$have" in
+    */v[0-9]*) m=${have##*/v} ;;
+    "") m=0 ;;
+    *) m=1 ;;
+  esac
+  if [ "$m" -eq 0 ]; then lo=1; hi=15; else lo=$m; hi=$((m + 2)); fi
+  i=$lo
+  while [ "$i" -le "$hi" ]; do
+    if [ "$i" -eq 1 ]; then echo "$d $prefix/$d"; else echo "$d $prefix/$d/v$i"; fi
+    i=$((i + 1))
+  done >> "$work/candidates"
+done
+$genv $go list -m -e -versions -f '{{.Path}}{{range .Versions}} {{.}}{{end}}' $(awk '{ print $2 }' "$work/candidates") > "$work/versions" 2> "$work/versions.err" || true
 : > "$work/modules"
 for d in $dirs; do
   best=""
-  for major in "" /v2 /v3 /v4 /v5 /v6 /v7 /v8 /v9 /v10 /v11 /v12 /v13 /v14 /v15; do
-    v=$($genv $go list -m -versions "$prefix/$d$major" 2>/dev/null | tr ' ' '\n' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1 || true)
-    [ -n "$v" ] && best="$prefix/$d$major@$v"
+  for p in $(awk -v d="$d" '$1 == d { print $2 }' "$work/candidates"); do
+    v=$(awk -v p="$p" '$1 == p { for (i = 2; i <= NF; i++) print $i }' "$work/versions" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1 || true)
+    if [ -n "$v" ]; then best="$p@$v"; fi
   done
   if [ -z "$best" ]; then echo "refresh: $d: no Go release" >&2; continue; fi
   echo "$best" >> "$work/modules"
