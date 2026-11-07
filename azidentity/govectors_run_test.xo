@@ -203,3 +203,44 @@ test "instance discovery and the OpenID configuration are MSAL Go's" {
   gv_disc(os, "disc-neterr-twice", "", GV_AUTHORITY, false, [], scopes: [[GV_SCOPE], other], labels: ["first", "second scope"], unlogged: 1)
   gv_disc(os, "disc-trusted-us", "trusted us", "https://login.microsoftonline.us/", false, [])
 }
+
+test "the client assertion credential calls back only on a cache miss, as Go's" {
+  let f = gv_serve(os.net, "assertion2")
+  let calls = Atomic[Int].new(0)
+  let cb = fn() -> Str ! Str { Ok("assert-${calls.add(1)}") }
+  let c = new_client_assertion_credential("tenant-a", "client-1", cb, os.net, os.clock, os.rand, gv_opts(["tenant-b"]))?
+  gv_get(f, "assertion2", "assertion first", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, "assertion2", "assertion cached", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, "assertion2", "assertion tenant-b", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"}))
+  gv_get(f, "assertion2", "assertion tenant-c", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-c"}))
+  // Go's program prints CALLS 2 here
+  expect(calls.get()) == 2
+  f.next.reset([401])
+  gv_get(f, "assertion2", "assertion 401", c.get_token(azcore.TokenRequestOptions{scopes: ["https://other.example.test/.default"]}))
+  gv_new(f, "assertion2", "assertion bad tenant", new_client_assertion_credential("bad tenant!", "client-1", cb, os.net, os.clock, os.rand, gv_opts()))
+  let (got, want) = gv_lines(f, "assertion2")
+  // a callback cannot be nil in Xo, so Go's nil check has no counterpart
+  expect(got) == want.filter(fn(l: Str) -> Bool { !l.starts_with("assertion2: NEW assertion nil") })
+  // the harness masks the assertion; it is the callback's text, sent as is
+  let bodies = os.net.requests().filter(fn(r: http.Request) -> Bool { r.method == "POST" }).map(fn(r: http.Request) -> Str { r.body.to_str_lossy() })
+  expect(bodies[0].contains("client_assertion=assert-1&")) == true
+  expect(bodies[1].contains("client_assertion=assert-2&")) == true
+}
+
+test "a client assertion callback's error is the credential's, as Go's" {
+  let f = gv_serve(os.net, "assertion-err")
+  let c = new_client_assertion_credential("tenant-a", "client-1", fn() -> Str ! Str { Err("no assertion here") }, os.net, os.clock, os.rand, gv_opts())?
+  gv_get(f, "assertion-err", "assertion error", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, "assertion-err", "assertion error again", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  let (got, want) = gv_lines(f, "assertion-err")
+  expect(got) == want
+}
+
+test "the client assertion credential's first request is MSAL Go's" {
+  let f = gv_serve(os.net, "assertion")
+  let c = new_client_assertion_credential("tenant-a", "client-1", fn() -> Str ! Str { Ok("assert-1") }, os.net, os.clock, os.rand, gv_opts())
+  gv_new(f, "assertion", "assertion", c)
+  gv_get(f, "assertion", "assertion", c?.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  let (got, want) = gv_lines(f, "assertion")
+  expect(got) == want
+}

@@ -7,6 +7,15 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- `ClientAssertionCredential` (`new_client_assertion_credential`), Go's:
+  the assertion comes from a callback, which runs only when no cached
+  token fits and after the tenant's endpoint is resolved. Its error is
+  the credential's AuthenticationFailedError
+  (`ClientAssertionCredential: <msg>`, no troubleshooting link). The
+  callback may use the network (`uses (net.dial, clock, rand)`, as
+  `get_token`); a callback that reads a file reads it outside, since a
+  credential's `get_token` has no file effect. Go's error for a nil
+  callback has no counterpart (an Xo function value is never nil).
 - **Behavior change**: the token endpoint is found as MSAL Go finds it.
   Before a credential's first token request for a host, it asks for the
   host's instance metadata (`GET

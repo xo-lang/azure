@@ -1,8 +1,7 @@
 # azidentity: the port against Go v1.15.0
 
-Status (2026-11-06): (1), (2) and (3) are ported (azidentity/CHANGELOG.md).
-Lead calls: (11) waits
-for the owner; (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
+Status (2026-11-06): (1), (2), (3) and (12) are ported (azidentity/CHANGELOG.md).
+Lead calls: (11) approved by the owner, after (6); (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
 credentials grant by hand, no MSAL).
