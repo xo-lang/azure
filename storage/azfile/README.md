@@ -1,6 +1,6 @@
 # azfile
 
-Azure Files for Xo, a port of Go's `sdk/storage/azfile` v1.7.1 (REST API
+Azure Files for Xo, a port of Go's `sdk/storage/azfile` v1.7.2 (REST API
 version 2026-06-06).
 
 What it does:
@@ -80,7 +80,7 @@ calls against the same fake service and compares every request
 (method, URL, headers with the Shared Key signature, body) and a dump
 of every field Go read back.
 
-Where it differs from Go v1.7.1:
+Where it differs from Go v1.7.2:
 
 - A caller's `x-ms-date` is kept. Go's signer looks the header up by its
   lowercase name in a canonicalized header map, so it never sees one and

@@ -1,5 +1,16 @@
 # azfile changes
 
+## Unreleased
+
+Follows Go's azfile v1.7.2 (was v1.7.1). Go v1.7.2's one fix, SAS
+start and expiry times converted to UTC before they are written and
+signed, was never needed here: a `Time` is an instant and every SAS
+time is written in UTC. It is now checked against Go v1.7.2's output
+for times given in other zones, across a date line, in account,
+share, file and user delegation SAS and each client's `get_sas_url`
+(`saszonevectors_test.xo`). Go v1.7.1 wrote those times' wall clocks
+with a `Z`, signing another instant.
+
 ## v0.3.0
 
 Behavior fix: a response header that repeats is read as Go's

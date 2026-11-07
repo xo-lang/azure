@@ -181,3 +181,38 @@ test "a SAS time is read in the first layout that takes it and written back in i
   expect(sas.parse_time("2026-11-05T01:02:03").0.is_none()) == true
   expect(sas.format_time(None, sas.TIME_FORMAT_DATE)) == "0001-01-01"
 }
+
+test "SAS times given outside UTC are signed and written in UTC, as Go v1.7.2's" {
+  let log = Mutex[List[Str]].new([])
+  os.net.handle("POST https://acct1.file.example.test/", fn(req: http.Request) -> http.Response {
+    let body = req.body
+    log.with(fn(var l: List[Str]) {
+      l.push("REQ POST /?comp=userdelegationkey&restype=service")
+      l.push("  body=${body.quote()}")
+    })
+    xml_resp(200, UDK)
+  })
+  let cred = new_shared_key_credential("acct1", KEY)?
+  // 2026-11-06T07:30:00Z and 2026-11-06T21:30:00.25Z, each on another day in its zone
+  let st = Time.parse_rfc3339("2026-11-05T23:30:00-08:00")?
+  let se = Time.parse_rfc3339("2026-11-07T03:00:00.25+05:30")?
+  let snap = Time.parse_rfc3339("2026-11-05T20:00:00.0012345-08:00")?
+  let ip = "198.51.100.10-198.51.100.20"
+  var out: List[Str] = []
+  out = out + qline("z1 account SAS, start and expiry outside UTC", sas.AccountSignatureValues{protocol: sas.PROTOCOL_HTTPS, start: Some(st), expiry: Some(se), permissions: "lcdwr", ip_range: ip, resource_types: "osc"}.sign_with_shared_key(cred))
+  out = out + qline("z2 share SAS, start and expiry outside UTC", sas.SignatureValues{cache_control: "max-age=60", content_type: "text/plain", protocol: sas.PROTOCOL_HTTPS_AND_HTTP, start: Some(st), expiry: Some(se), permissions: "ldwcr", share_name: "s1", identifier: "pol1"}.sign_with_shared_key(cred))
+  out = out + qline("z3 file SAS, a snapshot outside UTC", sas.SignatureValues{start: Some(st), expiry: Some(se), permissions: "r", share_name: "s1", file_path: "d1/f.txt", snapshot: Some(snap)}.sign_with_shared_key(cred))
+  let opts = ClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+  let svc_tok = new_service_client_with_no_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/", opts)
+  let udc = svc_tok.get_user_delegation_credential(KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-07T00:00:00Z"), delegated_user_tenant_id: Some("dtid-1")})?
+  out = out + log.with(fn(var l: List[Str]) -> List[Str] { l })
+  out = out + qline("z4 user delegation file SAS, times outside UTC", sas.SignatureValues{protocol: sas.PROTOCOL_HTTPS, start: Some(st), expiry: Some(se), permissions: "wr", share_name: "s1", file_path: "d1/f.txt", snapshot: Some(snap), authorized_object_id: "aoid-1", correlation_id: "cid-1"}.sign_with_user_delegation(udc))
+  let svc = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test", cred, opts)
+  out = out + sas_line("z5 service SAS URL, times outside UTC", svc.get_sas_url("so", "rl", se, Some(st)))
+  let sh = new_share_client_with_shared_key_credential(os.net, os.clock, os.rand, "https://acct1.file.example.test/s1", cred, opts)
+  out = out + sas_line("z6 share SAS URL, times outside UTC", sh.get_sas_url("rl", se, Some(st)))
+  let fc = sh.new_directory_client("d1").new_file_client("f.txt")
+  out = out + sas_line("z7 file SAS URL, times outside UTC", fc.get_sas_url("r", se, Some(st)))
+  out = out + sas_line("z8 file SAS URL, expiry only, outside UTC", fc.get_sas_url("r", se))
+  expect(out.map(hide_sig)) == SAS_ZONE_OUTPUT
+}
