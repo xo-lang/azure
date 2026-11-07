@@ -23,6 +23,11 @@ pub struct Options {
   /// Tenants besides the credential's that a token may be asked for;
   /// `*` allows any.
   pub additionally_allowed_tenants: List[Str] = []
+  /// Skip instance discovery: no `common/discovery/instance` lookups, the
+  /// tenant's OpenID configuration read straight from the authority
+  /// (Go's DisableInstanceDiscovery; for disconnected clouds and Azure
+  /// Stack).
+  pub disable_instance_discovery: Bool = false
 }
 
 /// A credential that asks the token endpoint for an app's tokens.
@@ -36,6 +41,12 @@ pub struct Confidential {
   pub clock: Clock
   rand: Rand
   cache: Mutex[List[(Str, azcore.AccessToken)]]
+  disable_discovery: Bool
+  /// Hosts whose instance metadata a cache read has fetched, per MSAL
+  /// client (`cae|host`).
+  hosts: Mutex[Map[Str, Bool]]
+  /// Token endpoints resolved per MSAL client and tenant (`cae|tenant`).
+  endpoints: Mutex[Map[Str, Str]]
 }
 
 /// Go's error for a tenant that is not a tenant ID or domain.
@@ -75,7 +86,7 @@ pub fn auth_failed(name: Str, method: Str, u: Str, resp: http.Response) -> azcor
     Ok(doc) => str_field(doc, "error")
     Err(_) => ""
   }
-  azcore.AuthErr{credential: name, msg: "HTTP ${resp.status} ${code}".trim(), text: text, status: resp.status}
+  azcore.AuthErr{credential: name, msg: "HTTP ${resp.status} ${code}".trim(), text: text, status: resp.status, failed: true}
 }
 
 /// Whether `t` can be a tenant id or domain (azidentity's check).
@@ -98,6 +109,9 @@ pub fn confidential(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: 
     clock: clock,
     rand: rand,
     cache: Mutex.new([]),
+    disable_discovery: opts.disable_instance_discovery,
+    hosts: Mutex.new({}),
+    endpoints: Mutex.new({}),
   })
 }
 
@@ -112,17 +126,144 @@ pub fn (c: Confidential) tenant_for(opts: azcore.TokenRequestOptions) -> Str ! a
   Err(azcore.AuthErr{credential: c.name, msg: "tenant ${opts.tenant_id} is not allowed", text: "${c.name} isn't configured to acquire tokens for tenant ${json.encode_str(opts.tenant_id)}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant"})
 }
 
-/// The token endpoint of `tenant`.
-pub fn (c: Confidential) endpoint(tenant: Str) -> Str {
-  "${c.authority_host}${tenant}/oauth2/v2.0/token"
+/// The hosts MSAL Go trusts without instance discovery (its
+/// aadTrustedHostList).
+pub const TRUSTED_HOSTS: List[Str] = [
+  "login.windows.net", "login.partner.microsoftonline.cn", "login.chinacloudapi.cn", "login.microsoftonline.de",
+  "login-us.microsoftonline.com", "login.microsoftonline.us", "login.microsoftonline.com", "login.microsoft.com",
+  "sts.windows.net", "login.usgovcloudapi.net", "login.sovcloud-identity.fr", "login.sovcloud-identity.de",
+  "login.sovcloud-identity.sg",
+]
+
+/// The authority's host (with its port), lower case.
+fn (c: Confidential) host() -> Str {
+  let rest = c.authority_host.cut("://").map(fn(p: (Str, Str)) -> Str { p.1 }) ?? c.authority_host
+  (rest.cut("/").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? rest).to_lower()
+}
+
+/// MSAL's instance discovery request for `tenant`: at the authority's
+/// host when MSAL trusts it, else at login.microsoftonline.com.
+fn (c: Confidential) discovery_url(tenant: Str) -> Str {
+  let h = c.host()
+  let at = if TRUSTED_HOSTS.contains(h) { h } else { "login.microsoftonline.com" }
+  "https://${at}/common/discovery/instance?api-version=1.1&authorization_endpoint=${url.query_escape("https://${h}/${tenant}/oauth2/v2.0/authorize")}"
+}
+
+/// A GET as MSAL sends one (its client-request-id headers). Go's URL
+/// for the OpenID configuration ends in an empty query (`?`); Xo's URL
+/// has no empty query, so that `?` is not sent.
+fn (c: Confidential) msal_get(u: Str) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  c.pipeline.send(policy.Request{method: "GET", url: u, headers: [("client-request-id", uuid.v4(c.rand).display()), ("return-client-request-id", "false")]})
+}
+
+/// azidentity's error without a response: `<credential>: <msg>` and the
+/// troubleshooting link.
+fn failed_text(name: Str, msg: Str) -> azcore.AuthErr {
+  let link = tsg_link(name)
+  let tail = if link == "" { "" } else if msg.ends_with(".") { " ${link}" } else { ". ${link}" }
+  azcore.AuthErr{credential: name, msg: msg, text: "${name}: ${msg}${tail}", failed: true}
+}
+
+/// MSAL's cache read: the first for a host (per MSAL client) asks for
+/// the host's instance metadata, unless discovery is off. Its failure
+/// is not the caller's: MSAL goes on to ask for a token, and keeps a
+/// fallback entry unless the host was invalid.
+fn (c: Confidential) read_metadata(tenant: Str, cae: Bool) uses (net.dial, clock, rand) {
+  if c.disable_discovery {
+    return
+  }
+  let k = "${cae}|${c.host()}"
+  if c.hosts.with_read(fn(m: Map[Str, Bool]) -> Bool { m.contains(k) }) {
+    return
+  }
+  let keep = match c.msal_get(c.discovery_url(tenant)) {
+    Ok(r) => !(r.status == 400 && r.body.to_str_lossy().contains("invalid_instance"))
+    Err(_) => true
+  }
+  if keep {
+    c.hosts.with(fn(var m: Map[Str, Bool]) { m[k] = true })
+  }
+}
+
+/// The token endpoint of `tenant`, resolved as MSAL Go does once per
+/// tenant (per MSAL client): instance discovery for a host MSAL does not
+/// trust (unless off), then the tenant's OpenID configuration, whose
+/// fields and issuer are checked.
+pub fn (c: Confidential) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let k = "${cae}|${tenant}"
+  if let Some(e) = c.endpoints.with_read(fn(m: Map[Str, Str]) -> Str? { m.get(k) }) {
+    return Ok(e)
+  }
+  let h = c.host()
+  let authority = "${c.authority_host}${tenant}/"
+  var oidc = "${authority}v2.0/.well-known/openid-configuration"
+  var aliases: List[Str] = []
+  let unresolved = fn(m: Str) -> azcore.AuthErr { failed_text(c.name, "unable to resolve an endpoint: ${m}") }
+  if !c.disable_discovery && !TRUSTED_HOSTS.contains(h) {
+    let du = c.discovery_url(tenant)
+    let r = c.msal_get(du) ?? e => return Err(unresolved(e.display()))
+    if r.status != 200 {
+      return Err(auth_failed(c.name, "GET", du, r))
+    }
+    let doc = json.parse_value(r.body.to_str_lossy()) ?? e => return Err(unresolved(e.display()))
+    oidc = str_field(doc, "tenant_discovery_endpoint")
+    if let Some(json.Value.List(ms)) = doc.get("metadata") {
+      for m in ms {
+        let names = match m.get("aliases") {
+          Some(json.Value.List(xs)) => xs.map(fn(x: json.Value) -> Str { str_of_value(x) })
+          _ => []
+        }
+        if names.any(fn(a: Str) -> Bool { a.to_lower() == h }) {
+          aliases = names
+          break
+        }
+      }
+    }
+  }
+  let r = c.msal_get(oidc) ?? e => return Err(unresolved(e.display()))
+  if r.status != 200 {
+    return Err(auth_failed(c.name, "GET", oidc, r))
+  }
+  let doc = json.parse_value(r.body.to_str_lossy()) ?? e => return Err(unresolved(e.display()))
+  let auth_ep = str_field(doc, "authorization_endpoint")
+  let token_ep = str_field(doc, "token_endpoint")
+  let issuer = str_field(doc, "issuer")
+  let missing = if auth_ep == "" { "authorize endpoint was not found" } else if token_ep == "" { "token endpoint was not found" } else if issuer == "" { "issuer was not found" } else { "" }
+  if missing != "" {
+    return Err(unresolved("ResolveEndpoints(): TenantDiscoveryResponse: ${missing} in the openid configuration"))
+  }
+  if !issuer_matches(issuer, authority, aliases) {
+    return Err(unresolved("ResolveEndpoints(): TenantDiscoveryResponse: issuer '${issuer}' does not match authority '${authority}' or any trusted/alias rule"))
+  }
+  let e = token_ep.replace("{tenant}", tenant)
+  c.endpoints.with(fn(var m: Map[Str, Str]) { m[k] = e })
+  Ok(e)
+}
+
+/// MSAL's ValidateIssuerMatchesAuthority: the same scheme and host, an
+/// alias of the authority, a host MSAL trusts, or a regional authority
+/// under the issuer's host.
+fn issuer_matches(issuer: Str, authority: Str, aliases: List[Str]) -> Bool {
+  let parts = fn(u: Str) -> (Str, Str) {
+    let (scheme, rest) = u.cut("://") ?? return ("", "")
+    (scheme.to_lower(), (rest.cut("/").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? rest).to_lower())
+  }
+  let (is, ih) = parts(issuer)
+  let (as_, ah) = parts(authority)
+  if is == as_ && ih == ah {
+    return true
+  }
+  aliases.any(fn(a: Str) -> Bool { a.to_lower() == ih }) || TRUSTED_HOSTS.contains(ih) || (ih != "" && ah.ends_with(".${ih}"))
 }
 
 /// A cached token for `opts`, if still fresh; never for a request with
-/// claims (MSAL's WithClaims skips the cache).
-pub fn (c: Confidential) cached(key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses clock {
+/// claims (MSAL's WithClaims skips the cache). The read is MSAL's: the
+/// first for the host fetches its instance metadata.
+pub fn (c: Confidential) cached(tenant: Str, key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses (net.dial, clock, rand) {
   if opts.claims != "" {
     return None
   }
+  c.read_metadata(tenant, opts.enable_cae)
   let now = c.clock.now()
   c.cache.with_read(fn(xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken? {
     for (k, t) in xs {
@@ -158,8 +299,8 @@ pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenReques
     ("client-request-id", uuid.v4(c.rand).display()),
     ("return-client-request-id", "false"),
   ]
-  let req = policy.Request{method: "POST", url: c.endpoint(tenant), headers: headers, body: body.bytes()}
-  let resp = c.pipeline.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display()})
+  let req = policy.Request{method: "POST", url: c.endpoint(tenant, opts.enable_cae)?, headers: headers, body: body.bytes()}
+  let resp = c.pipeline.send(req) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e.display(), failed: true})
   if resp.status != 200 {
     return Err(auth_failed(c.name, req.method, req.url, resp))
   }
@@ -190,15 +331,15 @@ fn str_field(doc: json.Value, k: Str) -> Str {
 /// An OAuth token response (`access_token`, `expires_in`, `refresh_in`),
 /// or the error it carries (`error`, `error_description`).
 pub fn parse_token_response(name: Str, resp: http.Response, now: Time) -> azcore.AccessToken ! azcore.AuthErr {
-  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status}: the token response is not JSON"})
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status}: the token response is not JSON", failed: true})
   if resp.status != 200 {
     let code = str_field(doc, "error")
     let desc = str_field(doc, "error_description")
-    return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status} ${code}: ${desc}".trim()})
+    return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status} ${code}: ${desc}".trim(), failed: true})
   }
   let token = str_field(doc, "access_token")
   if token == "" {
-    return Err(azcore.AuthErr{credential: name, msg: "the token response has no access_token"})
+    return Err(azcore.AuthErr{credential: name, msg: "the token response has no access_token", failed: true})
   }
   let at = now.unix_millis()
   // managed identity endpoints send expires_on (epoch seconds) instead
@@ -206,7 +347,7 @@ pub fn parse_token_response(name: Str, resp: http.Response, now: Time) -> azcore
     Some(s) => Time.from_unix_millis(at + s * 1000)
     None => match num_field(doc, "expires_on") {
       Some(e) => Time.from_unix_millis(e * 1000)
-      None => return Err(azcore.AuthErr{credential: name, msg: "the token response has no expires_in"})
+      None => return Err(azcore.AuthErr{credential: name, msg: "the token response has no expires_in", failed: true})
     }
   }
   let refresh = num_field(doc, "refresh_in").map(fn(s: Int) -> Time { Time.from_unix_millis(at + s * 1000) })
@@ -253,4 +394,11 @@ pub fn merge_claims(claims: Str, cae: Bool) -> Str ! Str {
     out.push(("access_token", json.Value.Object([cc])))
   }
   Ok(json.Value.Object(out).encode())
+}
+
+fn str_of_value(v: json.Value) -> Str {
+  match v {
+    json.Value.Str(s) => s
+    _ => ""
+  }
 }

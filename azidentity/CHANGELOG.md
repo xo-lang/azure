@@ -7,6 +7,30 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- **Behavior change**: the token endpoint is found as MSAL Go finds it.
+  Before a credential's first token request for a host, it asks for the
+  host's instance metadata (`GET
+  https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=...`,
+  at the authority itself for a host MSAL trusts); a failure there is
+  ignored. Once per tenant it reads the tenant's OpenID configuration
+  (from the discovery reply's `tenant_discovery_endpoint` for a host
+  MSAL does not trust, else
+  `<authority><tenant>/v2.0/.well-known/openid-configuration`), checks
+  that it names the authorize and token endpoints and an issuer that
+  matches the authority (the same host, an alias from discovery, a host
+  MSAL trusts, or a regional host under the issuer's), and posts to its
+  `token_endpoint`. CAE and plain requests keep separate lookups, as
+  Go's two MSAL clients do. A failed lookup is Go's error (`unable to
+  resolve an endpoint: ...`, or the response block).
+- `Options.disable_instance_discovery` skips the instance metadata (Go's
+  `DisableInstanceDiscovery`), for a private or disconnected cloud.
+- `azcore.AuthErr` gains `failed`: true for what Go returns as an
+  AuthenticationFailedError (the token request or the endpoint lookup
+  failed, with or without a response).
+- Not sent, unlike Go: the empty `?` Go puts after the OpenID
+  configuration's URL (Xo's URL has no empty query) and MSAL's
+  `x-client-*` library headers.
+
 - **Behavior change**: the token request is MSAL Go's. The scopes are
   followed by `openid offline_access profile`, an assertion grant adds
   `client_info=1`, the form's keys are sorted, the content type is
@@ -24,6 +48,4 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 - An empty client ID is accepted when the credential is built, as Go's
   credentials accept it (the token endpoint rejects it).
 
-Not yet: instance discovery and the tenant's OpenID metadata (the lead
-asked for both, next), managed identity's error texts, and the rest of
-the gap list.
+Not yet: managed identity's error texts and the rest of the gap list.

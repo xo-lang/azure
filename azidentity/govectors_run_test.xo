@@ -13,38 +13,74 @@ struct GvFake {
   log: Mutex[List[Str]]
   /// statuses for the next token requests (else 200)
   next: Mutex[List[Int]]
+  /// one-shot replies by path substring: (status, body)
+  overrides: Mutex[List[(Str, Int, Str)]]
 }
 
+/// The Go program's fake: instance discovery names the tenant of its
+/// authorization_endpoint, the OpenID configuration names the endpoints
+/// of the host it was asked on, the token endpoint gives `at-1`.
 fn gv_serve(net: testing.FakeNet, section: Str) -> GvFake {
-  let f = GvFake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([])}
-  net.handle("POST ${GV_AUTHORITY}{rest...}", fn(req: http.Request) -> http.Response {
-    var hs: List[Str] = []
-    for (k, v) in req.headers {
-      let lk = k.to_lower()
-      if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
-        hs.push("${lk}=${if lk == "client-request-id" { "<uuid>" } else { v }}")
-      }
-    }
-    var body = req.body.to_str_lossy()
-    if let Some((a, rest)) = body.cut("client_assertion=") {
-      let tail = match rest.cut("&") {
-        Some((_, t)) => "&${t}"
-        None => ""
-      }
-      body = "${a}client_assertion=<jwt>${tail}"
-    }
-    f.log.with(fn(var l: List[Str]) { l.push("${section}: REQ POST ${GV_AUTHORITY}${req.escaped_path().trim_start_chars("/")}\n  H ${hs.sort().join(" | ")}\n  B ${body}") })
-    let st = f.next.with(fn(var n: List[Int]) -> Int { if n.is_empty() { 200 } else { n.remove_at(0) } })
-    if st != 200 {
-      return http.text(st, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad secret\",\"error_codes\":[7000215]}")
-    }
-    http.text(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-1\"}")
-  })
+  let f = GvFake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([]), overrides: Mutex[List[(Str, Int, Str)]].new([])}
+  let h = fn(req: http.Request) -> http.Response { gv_answer(f, section, req) }
+  for host in ["https://login.example.test", "https://login.microsoftonline.com", "https://login.microsoftonline.us", "https://other.example.test", "https://westus2.login.example.test"] {
+    net.handle("GET ${host}/{rest...}", h)
+    net.handle("POST ${host}/{rest...}", h)
+  }
   f
 }
 
-fn gv_opts(allowed: List[Str] = []) -> Options {
-  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}, retry: policy.RetryOptions{max_retries: -1}}, additionally_allowed_tenants: allowed}
+fn gv_answer(f: GvFake, section: Str, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
+      hs.push("${lk}=${if lk == "client-request-id" { "<uuid>" } else { v }}")
+    }
+  }
+  var body = req.body.to_str_lossy()
+  if let Some((a, rest)) = body.cut("client_assertion=") {
+    let tail = match rest.cut("&") {
+      Some((_, t)) => "&${t}"
+      None => ""
+    }
+    body = "${a}client_assertion=<jwt>${tail}"
+  }
+  let host = req.header("Host") ?? req.url.host
+  let path = req.escaped_path()
+  let qs = req.raw_query()
+  f.log.with(fn(var l: List[Str]) { l.push("${section}: REQ ${req.method} https://${host}${path}${if qs == "" { "" } else { "?${qs}" }}\n  H ${hs.sort().join(" | ")}\n  B ${body}") })
+  let o = f.overrides.with(fn(var os: List[(Str, Int, Str)]) -> (Int, Str)? {
+    for i in 0..os.len() {
+      if path.contains(os[i].0) {
+        let r = (os[i].1, os[i].2)
+        os.remove_at(i)
+        return Some(r)
+      }
+    }
+    None
+  })
+  if let Some((st, b)) = o {
+    return http.text(st, b)
+  }
+  if path.contains("discovery/instance") {
+    let ae = req.query("authorization_endpoint") ?? ""
+    let t = (ae.trim_prefix("https://login.example.test/").cut("/").map(fn(p: (Str, Str)) -> Str { p.0 })) ?? ""
+    return http.text(200, "{\"tenant_discovery_endpoint\":\"https://login.example.test/${t}/v2.0/.well-known/openid-configuration\",\"api-version\":\"1.1\",\"metadata\":[{\"preferred_network\":\"login.example.test\",\"preferred_cache\":\"login.example.test\",\"aliases\":[\"login.example.test\"]}]}")
+  }
+  if path.ends_with("openid-configuration") {
+    let t = path.trim_prefix("/").cut("/").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? ""
+    return http.text(200, "{\"token_endpoint\":\"https://${host}/${t}/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://${host}/${t}/oauth2/v2.0/authorize\",\"issuer\":\"https://${host}/${t}/v2.0\"}")
+  }
+  let st = f.next.with(fn(var n: List[Int]) -> Int { if n.is_empty() { 200 } else { n.remove_at(0) } })
+  if st != 200 {
+    return http.text(st, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad secret\",\"error_codes\":[7000215]}")
+  }
+  http.text(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-1\"}")
+}
+
+fn gv_opts(allowed: List[Str] = [], authority: Str = GV_AUTHORITY, nodisc: Bool = false) -> Options {
+  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: authority}, retry: policy.RetryOptions{max_retries: -1}}, additionally_allowed_tenants: allowed, disable_instance_discovery: nodisc}
 }
 
 /// The Go program's lines of `section`, and the ones logged here.
@@ -83,7 +119,7 @@ fn gv_get(f: GvFake, section: Str, label: Str, r: Result[azcore.AccessToken, azc
   match r {
     Ok(t) => gv_note(f, "${section}: OUT ${label}: token=${t.token.reveal()} expires=<t>")
     Err(e) => {
-      let kind = if e.status != 0 { "auth failed" } else { "error" }
+      let kind = if e.failed { "auth failed" } else { "error" }
       gv_note(f, "${section}: OUT ${label}: ${kind}: ${e.display().replace("\n", "\n${section}: | ")}")
     }
   }
@@ -120,4 +156,50 @@ test "the workload identity credential's token request is MSAL Go's" {
   let (got, want) = gv_lines(f, "workload")
   // the options taking AZURE_CLIENT_ID and the others come with (9)
   expect(got) == want.filter(fn(l: Str) -> Bool { !l.starts_with("workload: NEW workload empty") })
+}
+
+/// One discovery case of the Go program: a secret credential at
+/// `authority`, with replies overridden by path.
+fn gv_disc(os: testing.TestOs, section: Str, label: Str, authority: Str, nodisc: Bool, overrides: List[(Str, Int, Str)], scopes: List[List[Str]] = [[GV_SCOPE]], labels: List[Str] = [], cae: List[Bool] = [], unlogged: Int = 0) {
+  let f = gv_serve(os.net, section)
+  f.overrides.reset(overrides)
+  let c = new_client_secret_credential("tenant-a", "client-1", "s3cret", os.net, os.clock, os.rand, gv_opts(authority: authority, nodisc: nodisc)) ?? e => {
+    expect(e.display()) == "built"
+    return
+  }
+  for (i, sc) in scopes.indexed() {
+    gv_get(f, section, if labels.is_empty() { label } else { labels[i] }, c.get_token(azcore.TokenRequestOptions{scopes: sc, enable_cae: !cae.is_empty() && cae[i]}))
+  }
+  let (got, want) = gv_lines(f, section)
+  // a request FakeNet fails never reaches the handler, so its three
+  // lines are not logged; the Go program logs them first
+  expect(got) == want[unlogged * 3..want.len()]
+}
+
+const MS: Str = "https://login.microsoftonline.com/"
+
+test "instance discovery and the OpenID configuration are MSAL Go's" {
+  gv_disc(os, "disc-trusted", "", MS, false, [], scopes: [[GV_SCOPE], ["https://other.example.test/.default"]], labels: ["trusted first", "trusted second scope"])
+  gv_disc(os, "disc-trusted-nodisc", "trusted nodisc", MS, true, [])
+  gv_disc(os, "nodisc", "secret no discovery", GV_AUTHORITY, true, [])
+  gv_disc(os, "disc-disc500", "disc500", GV_AUTHORITY, false, [("discovery/instance", 500, "{\"error\":\"server_error\"}")])
+  gv_disc(os, "disc-invalid-instance", "invalid instance", GV_AUTHORITY, false, [("discovery/instance", 400, "{\"error\":\"invalid_instance\",\"error_description\":\"AADSTS50049: Unknown or invalid instance.\"}")])
+  gv_disc(os, "disc-oidc-missing", "oidc missing", GV_AUTHORITY, true, [("openid-configuration", 200, "{\"authorization_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/authorize\",\"issuer\":\"https://login.example.test/tenant-a/v2.0\"}")])
+  gv_disc(os, "disc-oidc-issuer", "oidc issuer", GV_AUTHORITY, true, [("openid-configuration", 200, "{\"token_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/authorize\",\"issuer\":\"https://evil.example.test/tenant-a/v2.0\"}")])
+  gv_disc(os, "disc-oidc-404", "oidc 404", GV_AUTHORITY, true, [("openid-configuration", 404, "{\"error\":\"not_found\"}")])
+  gv_disc(os, "disc-tenant-token", "tenant template", GV_AUTHORITY, true, [("openid-configuration", 200, "{\"token_endpoint\":\"https://login.example.test/{tenant}/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://login.example.test/{tenant}/oauth2/v2.0/authorize\",\"issuer\":\"https://login.example.test/{tenant}/v2.0\"}")])
+  gv_disc(os, "disc-cae", "", GV_AUTHORITY, false, [], scopes: [[GV_SCOPE], [GV_SCOPE]], labels: ["plain", "cae"], cae: [false, true])
+  let other = ["https://other.example.test/.default"]
+  gv_disc(os, "disc-invalid-instance-twice", "", GV_AUTHORITY, false, [("discovery/instance", 400, "{\"error\":\"invalid_instance\",\"error_description\":\"AADSTS50049: Unknown or invalid instance.\"}")], scopes: [[GV_SCOPE], other], labels: ["first", "second scope"])
+  gv_disc(os, "disc-disc500-twice", "", GV_AUTHORITY, false, [("discovery/instance", 500, "{\"error\":\"server_error\"}")], scopes: [[GV_SCOPE], other], labels: ["first", "second scope"])
+  gv_disc(os, "disc-disc-fail", "discovery fails", GV_AUTHORITY, false, [("discovery/instance", 500, "{\"error\":\"server_error\"}"), ("discovery/instance", 500, "{\"error\":\"server_error\"}")])
+  gv_disc(os, "disc-alias", "alias", GV_AUTHORITY, false, [("discovery/instance", 200, "{\"tenant_discovery_endpoint\":\"https://other.example.test/tenant-a/v2.0/.well-known/openid-configuration\",\"api-version\":\"1.1\",\"metadata\":[{\"preferred_network\":\"login.example.test\",\"preferred_cache\":\"login.example.test\",\"aliases\":[\"login.example.test\",\"other.example.test\"]}]}"), ("discovery/instance", 200, "{\"tenant_discovery_endpoint\":\"https://other.example.test/tenant-a/v2.0/.well-known/openid-configuration\",\"api-version\":\"1.1\",\"metadata\":[{\"preferred_network\":\"login.example.test\",\"preferred_cache\":\"login.example.test\",\"aliases\":[\"login.example.test\",\"other.example.test\"]}]}")])
+  gv_disc(os, "disc-alias-miss", "alias miss", GV_AUTHORITY, false, [("discovery/instance", 200, "{\"tenant_discovery_endpoint\":\"https://other.example.test/tenant-a/v2.0/.well-known/openid-configuration\",\"api-version\":\"1.1\",\"metadata\":[{\"preferred_network\":\"x.example.test\",\"preferred_cache\":\"x.example.test\",\"aliases\":[\"x.example.test\",\"other.example.test\"]}]}"), ("discovery/instance", 200, "{\"tenant_discovery_endpoint\":\"https://other.example.test/tenant-a/v2.0/.well-known/openid-configuration\",\"api-version\":\"1.1\",\"metadata\":[{\"preferred_network\":\"x.example.test\",\"preferred_cache\":\"x.example.test\",\"aliases\":[\"x.example.test\",\"other.example.test\"]}]}")])
+  gv_disc(os, "disc-issuer-trusted", "issuer trusted", GV_AUTHORITY, true, [("openid-configuration", 200, "{\"token_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://login.example.test/tenant-a/oauth2/v2.0/authorize\",\"issuer\":\"https://login.microsoftonline.com/tenant-a/v2.0\"}")])
+  gv_disc(os, "disc-issuer-regional", "issuer regional", "https://westus2.login.example.test/", true, [("openid-configuration", 200, "{\"token_endpoint\":\"https://westus2.login.example.test/tenant-a/oauth2/v2.0/token\",\"authorization_endpoint\":\"https://westus2.login.example.test/tenant-a/oauth2/v2.0/authorize\",\"issuer\":\"https://login.example.test/tenant-a/v2.0\"}")])
+  // a transport error on the first instance discovery: MSAL keeps its
+  // fallback entry, so the next token request asks for none
+  os.net.fail_next("GET https://login.microsoftonline.com/common/discovery/instance", http.ClientErr.Connect("fake transport error"))
+  gv_disc(os, "disc-neterr-twice", "", GV_AUTHORITY, false, [], scopes: [[GV_SCOPE], other], labels: ["first", "second scope"], unlogged: 1)
+  gv_disc(os, "disc-trusted-us", "trusted us", "https://login.microsoftonline.us/", false, [])
 }

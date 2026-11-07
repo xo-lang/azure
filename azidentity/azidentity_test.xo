@@ -16,6 +16,18 @@ fn opts() -> Options {
   Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: AUTHORITY}}}
 }
 
+/// Instance discovery and the tenant's OpenID configuration, as MSAL Go
+/// asks for them before the first token request (the replies the Go
+/// program's fake gives; govectors_run_test.xo checks the sequence).
+fn serve_metadata(net: testing.FakeNet) {
+  net.handle("GET https://login.microsoftonline.com/common/discovery/instance", fn(req: http.Request) -> http.Response {
+    http.text(200, "{\"tenant_discovery_endpoint\":\"${AUTHORITY}${TENANT}/v2.0/.well-known/openid-configuration\",\"metadata\":[]}")
+  })
+  net.handle("GET ${AUTHORITY}${TENANT}/v2.0/.well-known/openid-configuration", fn(req: http.Request) -> http.Response {
+    http.text(200, "{\"token_endpoint\":\"${AUTHORITY}${TENANT}/oauth2/v2.0/token\",\"authorization_endpoint\":\"${AUTHORITY}${TENANT}/oauth2/v2.0/authorize\",\"issuer\":\"${AUTHORITY}${TENANT}/v2.0\"}")
+  })
+}
+
 fn token_json(token: Str, expires_in: Int) -> Str {
   "{\"token_type\":\"Bearer\",\"expires_in\":${expires_in},\"access_token\":\"${token}\"}"
 }
@@ -28,6 +40,7 @@ const TEST_PEM: Str = embed("testdata/test-certificate.pem")
 test "a client secret is sent in the client credentials grant, and the token is cached" {
   let n = Atomic[Int].new(0)
   let form = Mutex[Str].new("")
+  serve_metadata(os.net)
   os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
     n.add(1)
     form.reset(req.body.to_str_lossy())
@@ -50,6 +63,7 @@ test "a client secret is sent in the client credentials grant, and the token is 
 }
 
 test "an error response names the code and description; tenants are checked" {
+  serve_metadata(os.net)
   os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
     http.text(401, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: Invalid client secret provided.\"}")
   })
@@ -100,6 +114,7 @@ test "a client assertion is a PS256 JWT with x5t#S256 and MSAL's claims" {
 test "a workload identity sends the token file as its assertion" {
   os.fs.write("/var/run/token", b"federated-token\n")?
   let form = Mutex[Str].new("")
+  serve_metadata(os.net)
   os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
     form.reset(req.body.to_str_lossy())
     http.text(200, token_json("wi", 3600))
@@ -143,6 +158,7 @@ test "IMDS gives a token with expires_on; without IMDS the credential is unavail
 }
 
 test "the default chain skips what is not set up and uses the environment's secret" {
+  serve_metadata(os.net)
   os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
     http.text(200, token_json("env", 3600))
   })
@@ -176,6 +192,7 @@ test "the ARM scope keeps azcore's double slash" {
 
 test "CAE: CP1 is sent as claims, CAE tokens are cached apart, and challenge claims skip the cache" {
   let forms = Mutex[List[Str]].new([])
+  serve_metadata(os.net)
   os.net.handle("POST ${AUTHORITY}${TENANT}/oauth2/v2.0/token", fn(req: http.Request) -> http.Response {
     forms.with(fn(var xs: List[Str]) { xs.push(req.body.to_str_lossy()) })
     http.text(200, token_json("tok", 3600))
