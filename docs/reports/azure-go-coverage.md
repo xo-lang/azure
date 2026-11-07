@@ -56,7 +56,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | messaging/azservicebus | v1.11.0 | stable | 12824 | 14135 | v1.11.0 | 2915 |  |
 | messaging/azwebpubsub | v0.1.1 | v0 | 332 | 2071 | missing |  |  |
 | messaging/eventgrid/azeventgrid | v1.0.0 | stable | 127 | 574 | v1.0.0 | 132 |  |
-| messaging/eventgrid/aznamespaces | v1.0.0 | stable | 537 | 1939 | missing |  |  |
+| messaging/eventgrid/aznamespaces | v1.0.0 | stable | 537 | 1939 | v1.0.0 | 345 |  |
 | messaging/eventgrid/azsystemevents | v1.1.0 | stable | 878 | 19101 | missing |  |  |
 | monitor/azingest | v0.1.2 | v0, deprecated | 95 | 208 | missing |  |  |
 | monitor/azquery | v1.2.0 | stable | 255 | 2257 | missing |  |  |
@@ -426,11 +426,11 @@ Our line counts above are from before these catch-ups.
    Fabric certificate pinning. A gap list against Go v1.15.0 comes
    first, then slices, each with vectors from Go's own code and fakes
    only (no real Azure).
-3. **messaging/eventgrid/aznamespaces v1.0.0**: stable, 537
-   hand-written lines over 1939, and it reuses the CloudEvent,
-   KeyCredential and policies that azeventgrid just added; Event Grid
-   Namespaces is Event Grid's current pull and push model. The
-   typespec generator path already covers this shape.
+3. **messaging/eventgrid/aznamespaces v1.0.0**: done, hand written
+   over the CloudEvent, KeyCredential and policies that azeventgrid
+   added (Go rewrites its generated clients after generation, so the
+   port follows the released package); requests checked against Go's
+   own.
 
 The ARM majors (armstorage v4, armcompute v9, armnetwork v12,
 armresources v4 and armkeyvault v2) are done by regenerating from the

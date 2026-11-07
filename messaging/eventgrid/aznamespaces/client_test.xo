@@ -1,0 +1,219 @@
+// Go's calls (clientvectors_test.xo) made again here against the same
+// fake: every request, token scope and result must be Go's.
+
+use std/http
+use std/json
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/azcore/messaging
+use github.com/xo-lang/azure/policy
+
+const EP: Str = "https://ns1.westus-1.eventgrid.example.test"
+
+const RECV_BODY: Str = "{\"value\":[{\"brokerProperties\":{\"lockToken\":\"lt1\",\"deliveryCount\":2},\"event\":{\"id\":\"e1\",\"source\":\"/s\",\"specversion\":\"1.0\",\"type\":\"t\",\"data\":{\"k\":\"v\"},\"time\":\"2026-11-06T10:00:00.25+01:00\",\"subject\":\"sub\",\"ext1\":\"x\"}},{\"brokerProperties\":{\"lockToken\":\"lt2\",\"deliveryCount\":1},\"event\":{\"id\":\"e2\",\"source\":\"/s\",\"specversion\":\"1.0\",\"type\":\"t\",\"data_base64\":\"aGk=\",\"datacontenttype\":\"text/plain\"}},{\"event\":{\"id\":\"e3\",\"source\":\"/s\",\"specversion\":\"1.0\",\"type\":\"t\"}}]}"
+
+const LOCK_BODY: Str = "{\"failedLockTokens\":[{\"lockToken\":\"bad\",\"error\":{\"code\":\"InvalidLockToken\",\"message\":\"gone\"}},{\"lockToken\":\"bad2\"}],\"succeededLockTokens\":[\"lt1\",\"lt2\"]}"
+
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[List[Int]]
+  bodies: Mutex[List[Str]]
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn pop_first[T](m: Mutex[List[T]]) -> T? {
+  m.with(fn(var l: List[T]) -> T? {
+    let x = l.get(0) ?? return None
+    l = l[1..l.len()]
+    Some(x)
+  })
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  let q = req.raw_query()
+  let p = req.escaped_path()
+  note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${p}${if q == "" { "" } else { "?${q}" }}")
+  note(f, "  H ${hs.sort().join(" | ")}")
+  note(f, "  B ${req.body.to_str_lossy()}")
+  let st = pop_first(f.next) ?? 200
+  if st != 200 {
+    return http.Response{status: st, headers: {"x-ms-error-code": "Bad"}, body: b"{\"error\":{\"code\":\"Bad\",\"message\":\"no\"}}"}
+  }
+  let body = if let Some(b) = pop_first(f.bodies) {
+    b
+  } else if p.ends_with(":receive") {
+    RECV_BODY
+  } else if p.ends_with(":publish") {
+    ""
+  } else {
+    LOCK_BODY
+  }
+  http.Response{status: 200, headers: {}, body: body.bytes()}
+}
+
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    azcore.CallErr.Response(re) => "response error ${re.status_code} ${re.error_code}"
+    // Go's text, without this module's `invalid input: ` prefix
+    azcore.CallErr.InvalidInput(m) => "error ${m}"
+    _ => "error ${e.display()}"
+  }
+}
+
+fn out[T](f: Fake, name: Str, r: Result[T, azcore.CallErr], text: fn(T) -> Str) {
+  let s = match r {
+    Ok(v) => "ok${text(v)}"
+    Err(e) => err_text(e)
+  }
+  note(f, "OUT ${name}: ${s}")
+}
+
+fn none[T](v: T) -> Str {
+  ""
+}
+
+fn ps(s: Str?) -> Str {
+  match s {
+    Some(v) => "[${v}]"
+    None => "<nil>"
+  }
+}
+
+fn ce_text(ce: messaging.CloudEvent) -> Str {
+  let data = match ce.data {
+    Some(messaging.CloudEventData.Bytes(b)) => "bytes:${b.to_str_lossy()}"
+    Some(messaging.CloudEventData.Value(v)) => "value:${v.encode()}"
+    None => "<nil>"
+  }
+  let tm = match ce.time {
+    Some(t) => azcore.date_time_text(t)
+    None => "<nil>"
+  }
+  var ks: List[Str] = []
+  for (k, v) in ce.extensions {
+    ks.push("${k}=${v.encode()}")
+  }
+  "id=${ce.id} source=${ce.source} spec=${ce.spec_version} type=${ce.type_} data=${data} dct=${ps(ce.data_content_type)} ds=${ps(ce.data_schema)} subject=${ps(ce.subject)} time=${tm} ext={${ks.sort().join(",")}}"
+}
+
+fn lock_text(failed: List[FailedLockToken], ok: List[Str]) -> Str {
+  let fs = failed.map(fn(t: FailedLockToken) -> Str {
+    let e = match t.error {
+      Some(x) => "${ps(x.code)}:${ps(x.message)}:${x.display()}"
+      None => "<nil>"
+    }
+    "${ps(t.lock_token)}/${e}"
+  })
+  " failed=[${fs.join(" ")}] ok=[${ok.join(" ")}]"
+}
+
+fn recv_text(r: ReceiveEventsResult) -> Str {
+  let ds = r.details.map(fn(d: ReceiveDetails) -> Str {
+    let bp = match d.broker_properties {
+      Some(b) => {
+        let n = match b.delivery_count {
+          Some(n) => "${n}"
+          None => "<nil>"
+        }
+        "${ps(b.lock_token)}#${n}"
+      }
+      None => "<nil>"
+    }
+    "{${bp} ${ce_text(d.event)}}"
+  })
+  " ${r.details.len()} ${ds.join(" ")}"
+}
+
+fn so() -> SenderClientOptions {
+  SenderClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn ro() -> ReceiverClientOptions {
+  ReceiverClientOptions{client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+test "every call sends and returns what Go's does" {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[List[Int]].new([]), bodies: Mutex[List[Str]].new([])}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  os.net.handle("POST https://ns1.westus-1.eventgrid.example.test/topics/{rest...}", h)
+  os.net.handle("POST http://ns1.example.test/topics/{rest...}", h)
+  let set_next = fn(st: Int) { f.next.with(fn(var l: List[Int]) { l = [st] }) }
+  let set_body = fn(b: Str) { f.bodies.with(fn(var l: List[Str]) { l = [b] }) }
+  let t = azcore.parse_date_time("2026-11-06T10:00:00+01:00").or_fault("time")
+  let ce = messaging.CloudEvent{id: "c1", source: "/s", spec_version: "1.0", type_: "t", data: Some(messaging.CloudEventData.Bytes(b"\x01\x02")), time: Some(t)}
+  let cv = messaging.CloudEvent{id: "c2", source: "/s", spec_version: "1.0", type_: "t", data: Some(messaging.CloudEventData.Value(json.Value.Object([("a", json.Value.Str("<b>"))]))), subject: Some("s")}
+  let cred = Cred{log: f.log}
+
+  let s = new_sender_client(os.net, os.clock, os.rand, EP, "topic1", cred, so())
+  out(f, "send event", s.send_event(ce), none)
+  out(f, "send events", s.send_events([ce, cv]), none)
+  out(f, "send events empty", s.send_events([]), none)
+  set_next(400)
+  out(f, "send 400", s.send_event(cv), none)
+  set_next(204)
+  out(f, "send 204", s.send_events([cv]), none)
+
+  let s2 = new_sender_client(os.net, os.clock, os.rand, "${EP}/", "a/b c", cred, so())
+  out(f, "send escaped", s2.send_event(cv), none)
+  let s3 = new_sender_client(os.net, os.clock, os.rand, EP, "", cred, so())
+  out(f, "send no topic", s3.send_event(cv), none)
+
+  let r = new_receiver_client(os.net, os.clock, os.rand, EP, "topic1", "sub1", cred, ro())
+  out(f, "receive", r.receive_events(), fn(v: ReceiveEventsResponse) -> Str { recv_text(v.result) })
+  out(f, "receive options", r.receive_events(ReceiveEventsOptions{max_events: Some(5), max_wait_time: Some(10)}), fn(v: ReceiveEventsResponse) -> Str { " ${v.result.details.len()}" })
+  set_body("{\"value\":[]}")
+  out(f, "receive none", r.receive_events(ReceiveEventsOptions{max_events: Some(0)}), fn(v: ReceiveEventsResponse) -> Str { recv_text(v.result) })
+  set_next(400)
+  out(f, "receive 400", r.receive_events(), none)
+
+  out(f, "acknowledge", r.acknowledge_events(["lt1", "lt2", "bad"]), fn(v: AcknowledgeEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  out(f, "release", r.release_events(["lt1"]), fn(v: ReleaseEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  out(f, "release delay", r.release_events(["lt1"], ReleaseEventsOptions{release_delay_in_seconds: Some(RELEASE_DELAY_TEN_SECONDS)}), fn(v: ReleaseEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  out(f, "reject", r.reject_events(["lt2"]), fn(v: RejectEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  out(f, "renew", r.renew_event_locks(["lt1", "lt2"]), fn(v: RenewEventLocksResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  set_body("{}")
+  out(f, "acknowledge empty", r.acknowledge_events([]), fn(v: AcknowledgeEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  set_body("")
+  out(f, "acknowledge no body", r.acknowledge_events(["lt1"]), fn(v: AcknowledgeEventsResponse) -> Str { lock_text(v.result.failed_lock_tokens, v.result.succeeded_lock_tokens) })
+  set_next(201)
+  out(f, "renew 201", r.renew_event_locks(["lt1"]), none)
+  let r2 = new_receiver_client(os.net, os.clock, os.rand, EP, "topic1", "", cred, ro())
+  out(f, "reject no subscription", r2.reject_events(["lt1"]), none)
+
+  let key = azcore.new_key_credential("key-1")
+  let ks = new_sender_client_with_shared_key_credential(os.net, os.clock, os.rand, "${EP}?x=1&a=b%20c", "topic1", key, so())
+  out(f, "key send", ks.send_event(ce), none)
+  let kr = new_receiver_client_with_shared_key_credential(os.net, os.clock, os.rand, EP, "topic1", "sub1", key, ro())
+  key.update("key-2")
+  out(f, "key release", kr.release_events(["lt1"], ReleaseEventsOptions{release_delay_in_seconds: Some(RELEASE_DELAY_ONE_HOUR)}), none)
+  let hs = new_sender_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://ns1.example.test", "topic1", key, so())
+  out(f, "key http send", hs.send_event(ce), none)
+  let hr = new_receiver_client_with_shared_key_credential(os.net, os.clock, os.rand, "http://ns1.example.test", "topic1", "sub1", key, ro())
+  out(f, "key http receive", hr.receive_events(), none)
+
+  note(f, "OUT release delays: ${possible_release_delay_values().map(fn(d: ReleaseDelay) -> Str { d.0 }).join(" ")}")
+
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  for i in 0..(if got.len() < CLIENT_GO.len() { got.len() } else { CLIENT_GO.len() }) {
+    expect(got[i]) == CLIENT_GO[i]
+  }
+  expect(got.len()) == CLIENT_GO.len()
+}

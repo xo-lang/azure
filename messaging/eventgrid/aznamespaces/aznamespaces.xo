@@ -1,0 +1,345 @@
+// Event Grid Namespaces' sender and receiver clients, as Go's
+// `sdk/messaging/eventgrid/aznamespaces` v1.0.0 (sender_client.go,
+// receiver_client.go, sender_client_custom.go, receiver_client_custom.go,
+// client_custom.go, custom_models.go, models.go, models_serde.go,
+// options.go, responses.go, constants.go; MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md): CloudEvents published to a namespace topic
+// and received, acknowledged, released, rejected or renewed through an
+// event subscription.
+
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/azcore/messaging
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const MODULE: Str = "aznamespaces"
+pub const VERSION: Str = "v1.0.0"
+pub const API_VERSION: Str = "2024-06-01"
+
+/// Go's token scope for Event Grid.
+const TOKEN_SCOPE: Str = "https://eventgrid.azure.net/.default"
+
+/// The header and prefix of a namespace's access key.
+const KEY_HEADER: Str = "Authorization"
+const KEY_PREFIX: Str = "SharedAccessKey "
+
+/// Options of the sender's constructors.
+pub struct SenderClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// Options of the receiver's constructors.
+pub struct ReceiverClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// Publishes events to one namespace topic.
+pub struct SenderClient[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  endpoint: Str
+  topic: Str
+}
+
+/// Receives and settles events of one event subscription.
+pub struct ReceiverClient[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  endpoint: Str
+  topic: Str
+  subscription: Str
+}
+
+fn pipeline_with[fx: Effects](net: Net, clock: Clock, rand: Rand, auth: policy.Policy[fx], options: policy.ClientOptions[fx]) -> runtime.Pipeline[fx] {
+  // Go names its pipeline's module "aznamespaces.Client" (User-Agent)
+  runtime.new_pipeline("${MODULE}.Client", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, options)
+}
+
+fn key_policy(key: azcore.KeyCredential) -> runtime.KeyCredentialPolicy {
+  runtime.new_key_credential_policy(key, KEY_HEADER, runtime.KeyCredentialPolicyOptions{prefix: KEY_PREFIX})
+}
+
+/// A sender for `topic` of the namespace at `endpoint`
+/// (`https://<namespace>.<region>-1.eventgrid.azure.net`), authorized by
+/// Entra ID tokens (NewSenderClient).
+pub fn new_sender_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, topic: Str, cred: azcore.TokenCredential[fx], options: SenderClientOptions[fx] = SenderClientOptions{}) -> SenderClient[fx] {
+  let pl = pipeline_with(net, clock, rand, runtime.new_bearer_token_policy(cred, [TOKEN_SCOPE], clock), options.client)
+  SenderClient{pipeline: pl, endpoint: endpoint, topic: topic}
+}
+
+/// A sender sending the namespace's access key as
+/// `Authorization: SharedAccessKey <key>`
+/// (NewSenderClientWithSharedKeyCredential).
+pub fn new_sender_client_with_shared_key_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, topic: Str, key: azcore.KeyCredential, options: SenderClientOptions[fx] = SenderClientOptions{}) -> SenderClient[fx] {
+  SenderClient{pipeline: pipeline_with(net, clock, rand, key_policy(key), options.client), endpoint: endpoint, topic: topic}
+}
+
+/// A receiver for `subscription` of `topic`, authorized by Entra ID
+/// tokens (NewReceiverClient).
+pub fn new_receiver_client[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, topic: Str, subscription: Str, cred: azcore.TokenCredential[fx], options: ReceiverClientOptions[fx] = ReceiverClientOptions{}) -> ReceiverClient[fx] {
+  let pl = pipeline_with(net, clock, rand, runtime.new_bearer_token_policy(cred, [TOKEN_SCOPE], clock), options.client)
+  ReceiverClient{pipeline: pl, endpoint: endpoint, topic: topic, subscription: subscription}
+}
+
+/// A receiver sending the namespace's access key
+/// (NewReceiverClientWithSharedKeyCredential).
+pub fn new_receiver_client_with_shared_key_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, topic: Str, subscription: Str, key: azcore.KeyCredential, options: ReceiverClientOptions[fx] = ReceiverClientOptions{}) -> ReceiverClient[fx] {
+  ReceiverClient{pipeline: pipeline_with(net, clock, rand, key_policy(key), options.client), endpoint: endpoint, topic: topic, subscription: subscription}
+}
+
+/// How long a released event waits before it is delivered again, in
+/// seconds (Go's ReleaseDelay).
+pub type ReleaseDelay struct(Str)
+/// Release the event after 0 seconds.
+pub const RELEASE_DELAY_NO_DELAY: ReleaseDelay = ReleaseDelay("0")
+/// Release the event after 3600 seconds.
+pub const RELEASE_DELAY_ONE_HOUR: ReleaseDelay = ReleaseDelay("3600")
+/// Release the event after 60 seconds.
+pub const RELEASE_DELAY_ONE_MINUTE: ReleaseDelay = ReleaseDelay("60")
+/// Release the event after 600 seconds.
+pub const RELEASE_DELAY_TEN_MINUTES: ReleaseDelay = ReleaseDelay("600")
+/// Release the event after 10 seconds.
+pub const RELEASE_DELAY_TEN_SECONDS: ReleaseDelay = ReleaseDelay("10")
+
+/// The values of ReleaseDelay this version knows; the service may send others.
+pub fn possible_release_delay_values() -> List[ReleaseDelay] {
+  [RELEASE_DELAY_NO_DELAY, RELEASE_DELAY_ONE_HOUR, RELEASE_DELAY_ONE_MINUTE, RELEASE_DELAY_TEN_MINUTES, RELEASE_DELAY_TEN_SECONDS]
+}
+
+/// The error of a lock token that failed (Go's Error, named by the
+/// `Model` rule: `Error` is predeclared in Xo).
+pub struct ErrorModel {
+  /// One of a server-defined set of error codes.
+  pub code as "code,omitempty": Str? = None
+  /// A human-readable representation of the error.
+  pub message as "message,omitempty": Str? = None
+} derive Json
+
+/// The message, or "" without one (Go's Error.Error).
+pub fn (e: ErrorModel) display() -> Str {
+  e.message ?? ""
+}
+
+/// A lock token that failed, and why.
+pub struct FailedLockToken {
+  /// Why the token failed.
+  pub error as "error,omitempty": ErrorModel? = None
+  /// The lock token of an entry in the request.
+  pub lock_token as "lockToken,omitempty": Str? = None
+} derive Json
+
+/// Properties of an event set by the broker.
+pub struct BrokerProperties {
+  /// How many times the event was delivered.
+  pub delivery_count as "deliveryCount,omitempty": Int32? = None
+  /// The token of the lock on the event.
+  pub lock_token as "lockToken,omitempty": Str? = None
+} derive Json
+
+/// A received event and its broker properties.
+pub struct ReceiveDetails {
+  /// Set by the broker.
+  pub broker_properties as "brokerProperties,omitempty": BrokerProperties? = None
+  /// The event.
+  pub event as "event": messaging.CloudEvent = messaging.CloudEvent{id: "", source: "", spec_version: "", type_: ""}
+} derive Json
+
+/// The events of one receive.
+pub struct ReceiveEventsResult {
+  /// The events with their broker properties.
+  pub details as "value,omitempty": List[ReceiveDetails] = []
+} derive Json
+
+/// The tokens an acknowledge settled and those it did not.
+pub struct AcknowledgeEventsResult {
+  pub failed_lock_tokens as "failedLockTokens,omitempty": List[FailedLockToken] = []
+  pub succeeded_lock_tokens as "succeededLockTokens,omitempty": List[Str] = []
+} derive Json
+
+/// The tokens a reject settled and those it did not.
+pub struct RejectEventsResult {
+  pub failed_lock_tokens as "failedLockTokens,omitempty": List[FailedLockToken] = []
+  pub succeeded_lock_tokens as "succeededLockTokens,omitempty": List[Str] = []
+} derive Json
+
+/// The tokens a release settled and those it did not.
+pub struct ReleaseEventsResult {
+  pub failed_lock_tokens as "failedLockTokens,omitempty": List[FailedLockToken] = []
+  pub succeeded_lock_tokens as "succeededLockTokens,omitempty": List[Str] = []
+} derive Json
+
+/// The tokens a renewal renewed and those it did not.
+pub struct RenewEventLocksResult {
+  pub failed_lock_tokens as "failedLockTokens,omitempty": List[FailedLockToken] = []
+  pub succeeded_lock_tokens as "succeededLockTokens,omitempty": List[Str] = []
+} derive Json
+
+pub struct SendEventOptions {}
+
+pub struct SendEventResponse {}
+
+pub struct SendEventsOptions {}
+
+pub struct SendEventsResponse {}
+
+pub struct ReceiveEventsOptions {
+  /// The most events to receive (1 to 100, 1 by default).
+  pub max_events: Int32? = None
+  /// How long to wait for events, in seconds (10 to 120, 60 by default).
+  pub max_wait_time: Int32? = None
+}
+
+pub struct ReceiveEventsResponse {
+  pub result: ReceiveEventsResult
+}
+
+pub struct AcknowledgeEventsOptions {}
+
+pub struct AcknowledgeEventsResponse {
+  pub result: AcknowledgeEventsResult
+}
+
+pub struct ReleaseEventsOptions {
+  /// How long to wait before the event is delivered again.
+  pub release_delay_in_seconds: ReleaseDelay? = None
+}
+
+pub struct ReleaseEventsResponse {
+  pub result: ReleaseEventsResult
+}
+
+pub struct RejectEventsOptions {}
+
+pub struct RejectEventsResponse {
+  pub result: RejectEventsResult
+}
+
+pub struct RenewEventLocksOptions {}
+
+pub struct RenewEventLocksResponse {
+  pub result: RenewEventLocksResult
+}
+
+/// The request body of the four settlement operations.
+struct LockTokens {
+  lock_tokens as "lockTokens": List[Str]
+} derive Json
+
+/// `path` joined to the endpoint, with `api-version` and `params` set in
+/// its query, encoded sorted as Go's `reqQP.Set` then `Encode`.
+fn request_url(endpoint: Str, path: Str, params: List[(Str, Str)]) -> Str {
+  let full = runtime.join_paths(endpoint, path)
+  let (base, q) = full.cut("?") ?? (full, "")
+  var vs = url.parse_query(q) ?? _ => url.values()
+  vs.set("api-version", API_VERSION)
+  for (k, v) in params {
+    vs.set(k, v)
+  }
+  "${base}?${vs.encode()}"
+}
+
+fn topic_path(topic: Str) -> Str ! azcore.CallErr {
+  if topic == "" {
+    return Err(azcore.CallErr.InvalidInput("parameter topicName cannot be empty"))
+  }
+  Ok("/topics/${url.path_escape(topic)}")
+}
+
+fn subscription_path(topic: Str, subscription: Str, action: Str) -> Str ! azcore.CallErr {
+  let t = topic_path(topic)?
+  if subscription == "" {
+    return Err(azcore.CallErr.InvalidInput("parameter eventSubscriptionName cannot be empty"))
+  }
+  Ok("${t}/eventsubscriptions/${url.path_escape(subscription)}:${action}")
+}
+
+fn send_ok(pl: runtime.Pipeline, req: policy.Request) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = pl.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status != 200 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+/// The body read as `T`; an empty body is `T`'s zero value, as Go's
+/// runtime.UnmarshalAsJSON leaves it.
+fn decode_or[T: Json](resp: http.Response, zero: T) -> T ! azcore.CallErr {
+  if resp.body.is_empty() {
+    return Ok(zero)
+  }
+  json.decode[T](resp.body) ?? e => Err(azcore.CallErr.Decode(e.display()))
+}
+
+fn (c: SenderClient) publish(body: Bytes, content_type: Str) -> () ! azcore.CallErr uses (net.dial, clock, rand) {
+  let path = topic_path(c.topic)?
+  let req = policy.Request{method: "POST", url: request_url(c.endpoint, "${path}:publish", []), headers: [("Accept", "application/json"), ("Content-Type", content_type)], body: body}
+  send_ok(c.pipeline, req)?
+  Ok(())
+}
+
+/// Publishes one event (`application/cloudevents+json`; SendEvent).
+pub fn (c: SenderClient) send_event(event: messaging.CloudEvent, options: SendEventOptions = SendEventOptions{}) -> SendEventResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.publish(runtime.marshal_json(event), "application/cloudevents+json; charset=utf-8")?
+  Ok(SendEventResponse{})
+}
+
+/// Publishes a batch of events (`application/cloudevents-batch+json`;
+/// SendEvents).
+pub fn (c: SenderClient) send_events(events: List[messaging.CloudEvent], options: SendEventsOptions = SendEventsOptions{}) -> SendEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.publish(runtime.marshal_json(events), "application/cloudevents-batch+json; charset=utf-8")?
+  Ok(SendEventsResponse{})
+}
+
+/// Receives a batch of events, each locked until settled or its lock
+/// expires (ReceiveEvents).
+pub fn (c: ReceiverClient) receive_events(options: ReceiveEventsOptions = ReceiveEventsOptions{}) -> ReceiveEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let path = subscription_path(c.topic, c.subscription, "receive")?
+  var params: List[(Str, Str)] = []
+  if let Some(v) = options.max_events {
+    params.push(("maxEvents", "${v}"))
+  }
+  if let Some(v) = options.max_wait_time {
+    params.push(("maxWaitTime", "${v}"))
+  }
+  let req = policy.Request{method: "POST", url: request_url(c.endpoint, path, params), headers: [("Accept", "application/json")], body: b""}
+  let resp = send_ok(c.pipeline, req)?
+  Ok(ReceiveEventsResponse{result: decode_or(resp, ReceiveEventsResult{})?})
+}
+
+fn (c: ReceiverClient) settle(action: Str, lock_tokens: List[Str], params: List[(Str, Str)]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let path = subscription_path(c.topic, c.subscription, action)?
+  let req = policy.Request{method: "POST", url: request_url(c.endpoint, path, params), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: runtime.marshal_json(LockTokens{lock_tokens: lock_tokens})}
+  send_ok(c.pipeline, req)
+}
+
+/// Acknowledges events by their lock tokens: they are deleted
+/// (AcknowledgeEvents).
+pub fn (c: ReceiverClient) acknowledge_events(lock_tokens: List[Str], options: AcknowledgeEventsOptions = AcknowledgeEventsOptions{}) -> AcknowledgeEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.settle("acknowledge", lock_tokens, [])?
+  Ok(AcknowledgeEventsResponse{result: decode_or(resp, AcknowledgeEventsResult{})?})
+}
+
+/// Releases events by their lock tokens, to be delivered again
+/// (ReleaseEvents).
+pub fn (c: ReceiverClient) release_events(lock_tokens: List[Str], options: ReleaseEventsOptions = ReleaseEventsOptions{}) -> ReleaseEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  var params: List[(Str, Str)] = []
+  if let Some(v) = options.release_delay_in_seconds {
+    params.push(("releaseDelayInSeconds", v.0))
+  }
+  let resp = c.settle("release", lock_tokens, params)?
+  Ok(ReleaseEventsResponse{result: decode_or(resp, ReleaseEventsResult{})?})
+}
+
+/// Rejects events by their lock tokens: they are dead-lettered or
+/// dropped (RejectEvents).
+pub fn (c: ReceiverClient) reject_events(lock_tokens: List[Str], options: RejectEventsOptions = RejectEventsOptions{}) -> RejectEventsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.settle("reject", lock_tokens, [])?
+  Ok(RejectEventsResponse{result: decode_or(resp, RejectEventsResult{})?})
+}
+
+/// Renews the locks of events by their lock tokens (RenewEventLocks).
+pub fn (c: ReceiverClient) renew_event_locks(lock_tokens: List[Str], options: RenewEventLocksOptions = RenewEventLocksOptions{}) -> RenewEventLocksResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.settle("renewLock", lock_tokens, [])?
+  Ok(RenewEventLocksResponse{result: decode_or(resp, RenewEventLocksResult{})?})
+}
