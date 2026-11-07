@@ -1,0 +1,103 @@
+// Replays the Go program's OnBehalfOfCredential cases
+// (obovectors_test.xo) against the same fake token host (gv_serve).
+use github.com/xo-lang/azure/azcore
+
+fn obo_opts(allowed: List[Str] = [], nodisc: Bool = false, send_chain: Bool = false) -> OnBehalfOfOptions {
+  OnBehalfOfOptions{opts: gv_opts(allowed, nodisc: nodisc), send_chain: send_chain}
+}
+
+/// The lines the fake logged for `section` against the Go program's,
+/// line by line, so a failure names the first lines that differ.
+fn obo_compare(f: GvFake, section: Str) {
+  let (got, want) = gv_lines(f, section, GO_OBO_LINES)
+  for i in 0..got.len().min(want.len()) {
+    expect((i, got[i])) == (i, want[i])
+  }
+  expect(got.len()) == want.len()
+}
+
+test "OnBehalfOfCredential with a secret is MSAL Go's" {
+  let s = "obo13-secret"
+  let f = gv_serve(os.net, s)
+  let get = fn(label: Str, c: OnBehalfOfCredential, o: azcore.TokenRequestOptions) {
+    gv_get(f, s, label, c.get_token(o))
+  }
+  let r = new_on_behalf_of_credential_with_secret("tenant-a", "client-1", "user-assert", "s3cret", os.net, os.clock, os.rand, obo_opts(["tenant-b"]))
+  gv_new(f, s, "obo secret", r)
+  let c = r?
+  get("obo first", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  get("obo cached", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  get("obo tenant-b", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"})
+  get("obo tenant-c", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-c"})
+  get("obo two scopes", c, azcore.TokenRequestOptions{scopes: ["a", "b"]})
+  get("obo claims", c, azcore.TokenRequestOptions{scopes: [GV_SCOPE], claims: "{\"access_token\":{\"nbf\":{\"essential\":true}}}", enable_cae: true})
+  f.next.reset([401])
+  get("obo 401", c, azcore.TokenRequestOptions{scopes: ["https://other.example.test/.default"]})
+  let r2 = new_on_behalf_of_credential_with_secret("tenant-a", "client-1", "user-2", "s3cret", os.net, os.clock, os.rand, obo_opts(nodisc: true))
+  gv_new(f, s, "obo user-2", r2)
+  get("obo user-2", r2?, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  gv_new(f, s, "obo empty secret", new_on_behalf_of_credential_with_secret("tenant-a", "client-1", "user-assert", "", os.net, os.clock, os.rand, obo_opts(nodisc: true)))
+  gv_new(f, s, "obo bad tenant", new_on_behalf_of_credential_with_secret("bad tenant!", "client-1", "user-assert", "s3cret", os.net, os.clock, os.rand, obo_opts(nodisc: true)))
+  let r3 = new_on_behalf_of_credential_with_secret("tenant-a", "client-1", "", "s3cret", os.net, os.clock, os.rand, obo_opts(nodisc: true))
+  gv_new(f, s, "obo empty user assertion", r3)
+  get("obo empty user assertion", r3?, azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  obo_compare(f, s)
+}
+
+test "OnBehalfOfCredential with a certificate is MSAL Go's" {
+  let s = "obo13-cert"
+  let f = gv_serve(os.net, s)
+  let (chain, key) = parse_certificates(PFX_CHAIN, PFX_PASSWORD)?
+  let leaf = chain[0]
+  let ca = chain[1]
+  for (label, certs, send) in [("obo cert", [leaf], false), ("obo cert chain", [ca, leaf], true)] {
+    let r = new_on_behalf_of_credential_with_certificate("tenant-a", "client-1", "user-assert", certs, key, os.net, os.clock, os.rand, obo_opts(nodisc: true, send_chain: send))
+    gv_new(f, s, label, r)
+    if let Ok(c) = r {
+      gv_get(f, s, label, c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+    }
+  }
+  obo_compare(f, s)
+}
+
+test "OnBehalfOfCredential calls its assertion callback only on a cache miss, as Go's" {
+  let s = "obo13-assert"
+  let f = gv_serve(os.net, s)
+  let calls = Atomic[Int].new(0)
+  let cb = fn() -> Str ! Str { Ok("assert-${calls.add(1)}") }
+  let r = new_on_behalf_of_credential_with_client_assertions("tenant-a", "client-1", "user-assert", cb, os.net, os.clock, os.rand, obo_opts(["tenant-b"], nodisc: true))
+  gv_new(f, s, "obo assert", r)
+  let c = r?
+  gv_get(f, s, "obo assert first", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, s, "obo assert cached", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  gv_get(f, s, "obo assert tenant-b", c.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"}))
+  // Go's program prints CALLS 2 here
+  expect(calls.get()) == 2
+  let e = new_on_behalf_of_credential_with_client_assertions("tenant-a", "client-1", "user-assert", fn() -> Str ! Str { Err("no assertion here") }, os.net, os.clock, os.rand, obo_opts(nodisc: true))
+  gv_new(f, s, "obo assert error", e)
+  gv_get(f, s, "obo assert error", e?.get_token(azcore.TokenRequestOptions{scopes: [GV_SCOPE]}))
+  obo_compare(f, s)
+}
+
+test "OnBehalfOfCredential redeems the refresh token it was sent, as MSAL Go's" {
+  let s = "obo13-refresh"
+  let f = gv_serve(os.net, s)
+  let reply = fn(status: Int, body: Str) {
+    f.overrides.with(fn(var o: List[(Str, Int, Str)]) { o.push(("oauth2/v2.0/token", status, body)) })
+  }
+  reply(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-1\",\"refresh_token\":\"rt-1\"}")
+  let r = new_on_behalf_of_credential_with_secret("tenant-a", "client-1", "user-assert", "s3cret", os.net, os.clock, os.rand, obo_opts(["tenant-b"], nodisc: true))
+  gv_new(f, s, "obo refresh", r)
+  let c = r?
+  let get = fn(label: Str, o: azcore.TokenRequestOptions) { gv_get(f, s, label, c.get_token(o)) }
+  get("obo rt first", azcore.TokenRequestOptions{scopes: [GV_SCOPE]})
+  get("obo rt claims", azcore.TokenRequestOptions{scopes: [GV_SCOPE], claims: "{\"access_token\":{\"nbf\":{\"essential\":true}}}"})
+  reply(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":\"at-2\",\"refresh_token\":\"rt-2\"}")
+  get("obo rt other scope", azcore.TokenRequestOptions{scopes: ["https://other.example.test/.default"]})
+  get("obo rt third scope", azcore.TokenRequestOptions{scopes: ["https://third.example.test/.default"]})
+  get("obo rt tenant-b", azcore.TokenRequestOptions{scopes: [GV_SCOPE], tenant_id: "tenant-b"})
+  reply(400, "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS70000: bad refresh token\",\"error_codes\":[70000]}")
+  get("obo rt refused", azcore.TokenRequestOptions{scopes: ["https://fourth.example.test/.default"]})
+  get("obo rt after refusal", azcore.TokenRequestOptions{scopes: ["https://fifth.example.test/.default"]})
+  obo_compare(f, s)
+}

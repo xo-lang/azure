@@ -7,6 +7,17 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- OnBehalfOfCredential (gap item 13), as azidentity's with MSAL Go's
+  AcquireTokenOnBehalfOf: `new_on_behalf_of_credential_with_secret`,
+  `_with_certificate` and `_with_client_assertions`, with
+  `OnBehalfOfOptions` (`opts`, `send_chain`). The request is MSAL's JWT
+  bearer grant (`assertion`, `requested_token_use=on_behalf_of`,
+  `client_info=1`). A refresh token in the response is kept (CAE's
+  apart) and redeemed for a later request that misses the cache, for any
+  scope or tenant and with claims; if that fails, the on-behalf-of grant
+  is asked instead and the error is dropped. An empty user assertion is
+  a client credentials request, as in Go. Checked against 4 Go sections
+  (`obovectors_test.xo`). Go's nil callback error cannot happen in Xo.
 - ChainedTokenCredential's `retry_sources` (Go's RetrySources, gap item
   8): every call starts from the first source again instead of keeping
   the one that worked. **Breaking**: `new_chained_token_credential`

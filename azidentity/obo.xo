@@ -1,0 +1,116 @@
+// OnBehalfOfCredential, as azidentity's (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md) with MSAL Go's AcquireTokenOnBehalfOf: a
+// middle-tier service exchanges the token a user sent it (the user
+// assertion) for a token to another resource, proving itself with a
+// secret, a certificate or a client assertion callback.
+use std/crypto
+use std/x509
+use github.com/xo-lang/azure/azcore
+
+const OBO_NAME: Str = "OnBehalfOfCredential"
+const OBO_GRANT: Str = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+
+/// How the service proves itself (MSAL's confidential.Credential).
+enum OboAuth {
+  Secret(secret: Secret[Str])
+  Cert(cert: ClientCertificateCredential)
+  Assertion(get: fn() -> Str ! Str uses (net.dial, clock, rand))
+}
+
+pub struct OnBehalfOfCredential {
+  c: Confidential
+  user_assertion: Secret[Str]
+  auth: OboAuth
+  /// The last refresh token the token endpoint sent, for any tenant and
+  /// scope, CAE's apart (azidentity's CAE client has its own cache).
+  refresh: Mutex[Map[Bool, Secret[Str]]]
+}
+
+/// Go's OnBehalfOfCredentialOptions: `opts` holds the client options,
+/// AdditionallyAllowedTenants and DisableInstanceDiscovery;
+/// `send_chain` is SendCertificateChain.
+pub struct OnBehalfOfOptions {
+  pub opts: Options = Options{}
+  pub send_chain: Bool = false
+}
+
+/// NewOnBehalfOfCredentialWithSecret: `secret` must not be empty (Go's
+/// `secret can't be empty string`).
+pub fn new_on_behalf_of_credential_with_secret(tenant_id: Str, client_id: Str, user_assertion: Str, secret: Str, net: Net, clock: Clock, rand: Rand, o: OnBehalfOfOptions = OnBehalfOfOptions{}) -> OnBehalfOfCredential ! azcore.AuthErr {
+  if secret == "" {
+    return Err(azcore.AuthErr{credential: OBO_NAME, msg: "no client secret", text: "secret can't be empty string"})
+  }
+  obo(tenant_id, client_id, user_assertion, OboAuth.Secret(Secret.new(secret)), net, clock, rand, o)
+}
+
+/// NewOnBehalfOfCredentialWithCertificate: `certs` and `key` as
+/// `new_client_certificate_credential` takes them, with its errors.
+pub fn new_on_behalf_of_credential_with_certificate(tenant_id: Str, client_id: Str, user_assertion: Str, certs: List[x509.Certificate], key: crypto.PrivateKey, net: Net, clock: Clock, rand: Rand, o: OnBehalfOfOptions = OnBehalfOfOptions{}) -> OnBehalfOfCredential ! azcore.AuthErr {
+  let cert = new_client_certificate_credential(tenant_id, client_id, certs, key, net, clock, rand, send_chain: o.send_chain, opts: o.opts)?
+  obo(tenant_id, client_id, user_assertion, OboAuth.Cert(cert), net, clock, rand, o)
+}
+
+/// NewOnBehalfOfCredentialWithClientAssertions: `get_assertion` is
+/// called for each token request that misses the cache; its error is
+/// the credential's (Go's `OnBehalfOfCredential: <error>`).
+pub fn new_on_behalf_of_credential_with_client_assertions(tenant_id: Str, client_id: Str, user_assertion: Str, get_assertion: fn() -> Str ! Str uses (net.dial, clock, rand), net: Net, clock: Clock, rand: Rand, o: OnBehalfOfOptions = OnBehalfOfOptions{}) -> OnBehalfOfCredential ! azcore.AuthErr {
+  obo(tenant_id, client_id, user_assertion, OboAuth.Assertion(get_assertion), net, clock, rand, o)
+}
+
+fn obo(tenant_id: Str, client_id: Str, user_assertion: Str, auth: OboAuth, net: Net, clock: Clock, rand: Rand, o: OnBehalfOfOptions) -> OnBehalfOfCredential ! azcore.AuthErr {
+  Ok(OnBehalfOfCredential{c: confidential(OBO_NAME, tenant_id, client_id, net, clock, rand, o.opts)?, user_assertion: Secret.new(user_assertion), auth: auth, refresh: Mutex.new({})})
+}
+
+/// A token for the user, cached by this credential (whose user
+/// assertion is fixed). An empty user assertion is a client credentials
+/// request, as in Go, where the confidential client only takes the
+/// on-behalf-of path for a non-empty one.
+pub fn (o: OnBehalfOfCredential) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let tenant = o.c.tenant_for(opts)?
+  let key = key_of(tenant, opts.scopes, opts.enable_cae)
+  if let Some(t) = o.c.cached(tenant, key, opts) {
+    return Ok(t)
+  }
+  if opts.claims != "" {
+    // MSAL's on-behalf-of reads its cache even with claims (it only
+    // ignores the cached token), so the host's metadata is fetched
+    o.c.read_metadata(tenant, opts.enable_cae)
+  }
+  let fields = match o.auth {
+    OboAuth.Secret(s) => [("client_secret", s.reveal())]
+    OboAuth.Cert(c) => {
+      let a = client_assertion(c.rand, c.key, c.thumbprint, c.chain, o.c.client_id, o.c.endpoint(tenant, opts.enable_cae)?, o.c.clock.now())?
+      [("client_assertion_type", ASSERTION_TYPE), ("client_assertion", a)]
+    }
+    OboAuth.Assertion(get) => {
+      o.c.endpoint(tenant, opts.enable_cae)?
+      let a = get() ?? e => return Err(failed_text(OBO_NAME, e))
+      [("client_assertion_type", ASSERTION_TYPE), ("client_assertion", a)]
+    }
+  }
+  let ua = o.user_assertion.reveal()
+  if ua == "" {
+    return o.c.request(tenant, key, opts, fields)
+  }
+  // MSAL's silent step redeems a cached refresh token (with claims too,
+  // and for any scope or tenant); if that fails, the on-behalf-of
+  // grant is asked, the error dropped
+  let cae = opts.enable_cae
+  if let Some(rt) = o.refresh.with_read(fn(m: Map[Bool, Secret[Str]]) -> Secret[Str]? { m.get(cae) }) {
+    if let Ok((t, next)) = o.c.request_rt(tenant, key, opts, fields + [("refresh_token", rt.reveal())], grant: "refresh_token") {
+      o.keep_refresh(cae, next)
+      return Ok(t)
+    }
+  }
+  let (t, next) = o.c.request_rt(tenant, key, opts, fields + [("assertion", ua), ("requested_token_use", "on_behalf_of")], grant: OBO_GRANT)?
+  o.keep_refresh(cae, next)
+  Ok(t)
+}
+
+/// A response's refresh token replaces the kept one; a response without
+/// one keeps it.
+fn (o: OnBehalfOfCredential) keep_refresh(cae: Bool, rt: Str) {
+  if rt != "" {
+    o.refresh.with(fn(var m: Map[Bool, Secret[Str]]) { m.put(cae, Secret.new(rt)) })
+  }
+}

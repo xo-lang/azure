@@ -280,10 +280,19 @@ pub const MSAL_SCOPES: List[Str] = ["openid", "offline_access", "profile"]
 /// The form is MSAL Go's: its keys sorted (Go's url.Values.Encode), the
 /// scopes followed by MSAL_SCOPES, `client_info=1` with an assertion,
 /// and MSAL's `client-request-id` and `return-client-request-id` headers.
-pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)]) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
-  var form: List[(Str, Str)] = [("client_id", c.client_id), ("grant_type", "client_credentials"), ("scope", (opts.scopes + MSAL_SCOPES).join(" "))]
+/// A token request with the client's `fields`; `grant` is MSAL's grant
+/// type (an on-behalf-of request's is the JWT bearer grant), and every
+/// grant but client credentials, or a client assertion, adds MSAL's
+/// `client_info=1`.
+pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(c.request_rt(tenant, key, opts, fields, grant)?.0)
+}
+
+/// `request`, with the response's `refresh_token` ("" when it has none).
+pub fn (c: Confidential) request_rt(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> (azcore.AccessToken, Str) ! azcore.AuthErr uses (net.dial, clock, rand) {
+  var form: List[(Str, Str)] = [("client_id", c.client_id), ("grant_type", grant), ("scope", (opts.scopes + MSAL_SCOPES).join(" "))]
   form = form + fields
-  if fields.any(fn(f: (Str, Str)) -> Bool { f.0 == "client_assertion" }) {
+  if grant != "client_credentials" || fields.any(fn(f: (Str, Str)) -> Bool { f.0 == "client_assertion" }) {
     form.push(("client_info", "1"))
   }
   let claims = merge_claims(opts.claims, opts.enable_cae) ?? e => return Err(azcore.AuthErr{credential: c.name, msg: e})
@@ -306,7 +315,11 @@ pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenReques
     xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
     xs.push((key, t))
   })
-  Ok(t)
+  let rt = match json.parse_value(resp.body.to_str_lossy()) {
+    Ok(doc) => str_field(doc, "refresh_token")
+    Err(_) => ""
+  }
+  Ok((t, rt))
 }
 
 fn num_field(doc: json.Value, k: Str) -> Int? {

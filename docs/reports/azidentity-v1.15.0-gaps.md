@@ -1,6 +1,6 @@
 # azidentity: the port against Go v1.15.0
 
-Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11) and (12) are ported (azidentity/CHANGELOG.md).
+Status (2026-11-06): (1), (2), (3), (4), (6), (7), (8), (9), (11), (12) and (13) are ported (azidentity/CHANGELOG.md).
 Lead calls: (11) approved by the owner, built to decision 0009 (accepted); (5) waits on std/tls's `verify_conn` hook (Lang 3). Go's azidentity
 v1.15.0 is 3781 hand-written lines over MSAL Go v1.10.1; our port is
 837 lines, version mark `v0.1.0`, written to decision 0003 (the client
@@ -115,6 +115,10 @@ grant code.
     `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
     `assertion=<user token>`, `requested_token_use=on_behalf_of`, and a
     cache keyed by the user assertion.
+    Ported 2026-11-06 with 4 Go sections (secret, certificate, assertion
+    callback, refresh token): MSAL redeems the refresh token an
+    on-behalf-of response carries for any later scope, tenant or claims
+    request, and falls back to the on-behalf-of grant when that fails.
 14. **AzurePipelinesCredential**: `POST
     <SYSTEM_OIDCREQUESTURI>?api-version=7.1&serviceConnectionId=<id>`
     with `Authorization: Bearer <system token>` and
