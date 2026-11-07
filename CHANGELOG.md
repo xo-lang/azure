@@ -8,6 +8,10 @@ version has been tagged since.
 
 ## Unreleased
 
+ai/azopenai's test: a float -0 is written `-0`, as Go's json.Marshal
+writes a float64 -0, so the float32 case's pin keeps only the float32
+rounding (Go's float32 fields are `Float`). Needs xo f306a31fd or later.
+
 `azcore/gourl.xo`: Go's url.Parse, URL.String, URL.Query, path escaping
 and strconv.Quote (`parse_go_url`, `GoUrl`, `go_query`,
 `go_escape_path`, `go_quote` and the byte helpers), moved unchanged
