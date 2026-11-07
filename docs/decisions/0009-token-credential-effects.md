@@ -54,6 +54,8 @@ pub interface TokenCredential[fx: Effects] {
 - Every existing credential (client secret, certificate, assertion,
   workload identity, and managed identity without Arc) performs none:
   it is a `TokenCredential[()]`, and its code does not change.
+  (Later, gap item 7: WorkloadIdentityCredential reads its token file at
+  token time as Go's does, so it is a `TokenCredential[fs.read]` too.)
 - `policy.Policy`, `runtime.Pipeline`, `runtime.BearerTokenPolicy`,
   `TokenCache`, the storage and Key Vault challenge policies, and
   azidentity's chain take the same parameter, and pass it through.

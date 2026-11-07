@@ -5,6 +5,7 @@
 // and PowerShell credentials are not in it (decision 0003, owner notes).
 
 use std/json
+use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/cloud
 
@@ -31,10 +32,16 @@ pub fn new_environment_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand
   let get = fn(k: Str) -> Str { env.get(k) ?? "" }
   let tenant = get("AZURE_TENANT_ID")
   let client = get("AZURE_CLIENT_ID")
-  if tenant == "" || client == "" {
-    return Err(azcore.AuthErr{credential: name, msg: "AZURE_TENANT_ID and AZURE_CLIENT_ID are not set", unavailable: true})
+  if tenant == "" {
+    return Err(azcore.AuthErr{credential: name, msg: "missing environment variable AZURE_TENANT_ID", unavailable: true})
   }
-  let o = options_from_env(env, opts)
+  if client == "" {
+    return Err(azcore.AuthErr{credential: name, msg: "missing environment variable AZURE_CLIENT_ID", unavailable: true})
+  }
+  // the options' tenants, else AZURE_ADDITIONALLY_ALLOWED_TENANTS (Go's
+  // EnvironmentCredential, which DefaultAzureCredential gives its own)
+  let base = options_from_env(env, opts with {additionally_allowed_tenants: []})
+  let o = if opts.additionally_allowed_tenants.is_empty() { base } else { base with {additionally_allowed_tenants: opts.additionally_allowed_tenants} }
   if get("AZURE_CLIENT_SECRET") != "" {
     return Ok(new_client_secret_credential(tenant, client, get("AZURE_CLIENT_SECRET"), net, clock, rand, o)?)
   }
@@ -55,7 +62,7 @@ pub fn new_environment_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand
   if get("AZURE_USERNAME") != "" {
     return Err(azcore.AuthErr{credential: name, msg: "AZURE_USERNAME and AZURE_PASSWORD are not supported (deprecated by Microsoft: no MFA)", unavailable: true})
   }
-  Err(azcore.AuthErr{credential: name, msg: "set AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH", unavailable: true})
+  Err(azcore.AuthErr{credential: name, msg: "incomplete environment variable configuration. Only AZURE_TENANT_ID and AZURE_CLIENT_ID are set", unavailable: true})
 }
 
 /// Tries each credential in order until one gives a token; after one
@@ -75,7 +82,7 @@ pub fn (c: ChainedTokenCredential[fx]) get_token(opts: azcore.TokenRequestOption
   if i >= 0 {
     return c.sources[i].get_token(opts)
   }
-  var errs: List[Str] = []
+  var errs: List[azcore.AuthErr] = []
   for (k, s) in c.sources.indexed() {
     match s.get_token(opts) {
       Ok(t) => {
@@ -83,16 +90,32 @@ pub fn (c: ChainedTokenCredential[fx]) get_token(opts: azcore.TokenRequestOption
         return Ok(t)
       }
       Err(e) => {
-        errs.push(e.display())
+        errs.push(e)
         // a credential that is set up but failed stops the chain, as
         // azidentity's: trying the next would hide the real error
         if !e.unavailable {
-          return Err(azcore.AuthErr{credential: c.name, msg: errs.join("\n")})
+          break
         }
       }
     }
   }
-  Err(azcore.AuthErr{credential: c.name, msg: "no credential in the chain gave a token:\n${errs.join("\n")}", unavailable: true})
+  Err(chained_err(c.name, errs))
+}
+
+/// azidentity's error for a chain whose sources all failed: each error
+/// under `Attempted credentials:`, its lines indented; unavailable when
+/// the last one is, else an AuthenticationFailedError without the
+/// response block (Go's omitResponse).
+fn chained_err(name: Str, errs: List[azcore.AuthErr]) -> azcore.AuthErr {
+  var msg = "failed to acquire a token.\nAttempted credentials:"
+  for e in errs {
+    msg = msg + "\n\t" + e.display().replace("\n", "\n\t\t")
+  }
+  let last = errs.last() ?? azcore.AuthErr{credential: name, msg: ""}
+  if last.unavailable {
+    return azcore.AuthErr{credential: name, msg: msg, text: "${name}: ${msg}", unavailable: true}
+  }
+  azcore.AuthErr{credential: name, msg: msg, text: "${name}: ${msg}", failed: true, status: last.status}
 }
 
 /// A credential that is never available, standing in for one the
@@ -105,46 +128,96 @@ pub fn (u: Unavailable) get_token(opts: azcore.TokenRequestOptions) -> azcore.Ac
   Err(u.err with {unavailable: true})
 }
 
-/// DefaultAzureCredential: Environment, Workload identity
-/// (AZURE_FEDERATED_TOKEN_FILE), Managed identity. AZURE_TOKEN_CREDENTIALS
-/// set to `prod` keeps these three; set to one credential's name
-/// (`EnvironmentCredential`, `WorkloadIdentityCredential`,
-/// `ManagedIdentityCredential`) keeps only it. A workload identity's token
-/// file is reread by `watch` (see WorkloadIdentityCredential).
-pub fn new_default_azure_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: Options = Options{}) -> ChainedTokenCredential[fs.read] ! azcore.AuthErr uses (env, fs.read) {
-  let only = env.get("AZURE_TOKEN_CREDENTIALS") ?? ""
-  let names = ["EnvironmentCredential", "WorkloadIdentityCredential", "ManagedIdentityCredential"]
-  if only != "" && only != "prod" && !names.contains(only) {
-    return Err(azcore.AuthErr{credential: "DefaultAzureCredential", msg: "AZURE_TOKEN_CREDENTIALS=${only} is not supported here: use prod or one of ${names.join(", ")} (the developer credentials are not in this SDK)"})
+/// DefaultAzureCredential's options (Go's DefaultAzureCredentialOptions).
+pub struct DefaultAzureCredentialOptions {
+  pub client: policy.ClientOptions[()] = policy.ClientOptions{}
+  /// Tenants besides each credential's own; when empty,
+  /// AZURE_ADDITIONALLY_ALLOWED_TENANTS (`;` separated).
+  pub additionally_allowed_tenants: List[Str] = []
+  pub disable_instance_discovery: Bool = false
+  /// Fail unless AZURE_TOKEN_CREDENTIALS is set.
+  pub require_azure_token_credentials: Bool = false
+  /// The workload identity's tenant instead of AZURE_TENANT_ID.
+  pub tenant_id: Str = ""
+}
+
+const DAC_DOCS: Str = "See https://aka.ms/azsdk/go/identity/docs#DefaultAzureCredential for more information"
+const ENV_NAME: Str = "EnvironmentCredential"
+const WI_NAME: Str = "WorkloadIdentityCredential"
+
+fn dac_err(text: Str) -> azcore.AuthErr {
+  azcore.AuthErr{credential: "DefaultAzureCredential", msg: text, text: text}
+}
+
+/// What stands in the chain for a credential that could not be built:
+/// unavailable, with the reason (Go's defaultCredentialErrorReporter).
+fn reporter(name: Str, e: azcore.AuthErr) -> Unavailable {
+  Unavailable{err: azcore.AuthErr{credential: name, msg: if e.text != "" { e.text } else { e.msg }, unavailable: true}}
+}
+
+/// DefaultAzureCredential as Go's: Environment, Workload identity, then
+/// Managed identity. AZURE_TOKEN_CREDENTIALS set to `prod` keeps these
+/// three; set to one's name (any case) keeps only it; unset keeps them
+/// too (Go adds the developer tools, which this SDK does not have), and
+/// is an error with `require_azure_token_credentials`. `dev` and the
+/// developer tools' names are refused here; any other value is Go's
+/// error. A source that cannot be built stays in the chain as
+/// unavailable, with its reason.
+pub fn new_default_azure_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: DefaultAzureCredentialOptions = DefaultAzureCredentialOptions{}) -> ChainedTokenCredential[fs.read] ! azcore.AuthErr uses (env, fs.read) {
+  let names = [ENV_NAME, WI_NAME, MI_NAME]
+  var selected = names
+  match env.get("AZURE_TOKEN_CREDENTIALS") {
+    Some(v) => {
+      let dev = ["AzureCLICredential", "AzureDeveloperCLICredential", "AzurePowerShellCredential"]
+      if v == "prod" {
+        selected = names
+      } else if let Some(n) = names.find(fn(n: Str) -> Bool { n.equal_fold(v) }) {
+        selected = [n]
+      } else if v == "dev" || dev.any(fn(n: Str) -> Bool { n.equal_fold(v) }) {
+        return Err(dac_err("AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)} selects developer credentials (${dev.join(", ")}), which this SDK does not include. Use \"prod\" or one of ${names.join(", ")}. ${DAC_DOCS}"))
+      } else {
+        return Err(dac_err("invalid AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)}. Valid values are \"dev\", \"prod\", or the name of any credential type in the default chain. ${DAC_DOCS}"))
+      }
+    }
+    None => if opts.require_azure_token_credentials {
+      return Err(dac_err("AZURE_TOKEN_CREDENTIALS must be set when RequireAzureTokenCredentials is true. ${DAC_DOCS}"))
+    }
   }
-  let want = fn(n: Str) -> Bool { only == "" || only == "prod" || only == n }
-  let o = options_from_env(env, opts)
+  var tenants = opts.additionally_allowed_tenants
+  if tenants.is_empty() {
+    let t = env.get("AZURE_ADDITIONALLY_ALLOWED_TENANTS") ?? ""
+    if t != "" {
+      tenants = t.split(";")
+    }
+  }
+  let o = options_from_env(env, Options{client: opts.client, disable_instance_discovery: opts.disable_instance_discovery}) with {additionally_allowed_tenants: tenants}
   var chain: List[azcore.TokenCredential[fs.read]] = []
-  if want("EnvironmentCredential") {
+  if selected.contains(ENV_NAME) {
     chain.push(match new_environment_credential(env, fs, net, clock, rand, o) {
       Ok(c) => c
-      Err(e) => Unavailable{err: e}
+      Err(e) => reporter(ENV_NAME, e)
     })
   }
-  if want("WorkloadIdentityCredential") {
-    let file = env.get("AZURE_FEDERATED_TOKEN_FILE") ?? ""
-    let tenant = env.get("AZURE_TENANT_ID") ?? ""
-    let client = env.get("AZURE_CLIENT_ID") ?? ""
-    if file != "" && tenant != "" && client != "" {
-      chain.push(match new_workload_identity_credential(tenant, client, file, fs, net, clock, rand, o) {
-        Ok(c) => c
-        Err(e) => Unavailable{err: e}
-      })
-    } else {
-      chain.push(Unavailable{err: azcore.AuthErr{credential: "WorkloadIdentityCredential", msg: "AZURE_FEDERATED_TOKEN_FILE, AZURE_TENANT_ID and AZURE_CLIENT_ID are not all set"}})
+  if selected.contains(WI_NAME) {
+    // set but empty counts as set (Go's os.LookupEnv)
+    let wi = match (env.get("AZURE_CLIENT_ID"), env.get("AZURE_FEDERATED_TOKEN_FILE"), if opts.tenant_id != "" { Some(opts.tenant_id) } else { env.get("AZURE_TENANT_ID") }) {
+      (None, _, _) => Err(azcore.AuthErr{credential: WI_NAME, msg: "no client ID specified. Check pod configuration or set ClientID in the options"})
+      (_, None, _) => Err(azcore.AuthErr{credential: WI_NAME, msg: "no token file specified. Check pod configuration or set TokenFilePath in the options"})
+      (_, _, None) => Err(azcore.AuthErr{credential: WI_NAME, msg: "no tenant ID specified. Check pod configuration or set TenantID in the options"})
+      (Some(client), Some(file), Some(tenant)) => new_workload_identity_credential(tenant, client, file, fs, net, clock, rand, o)
     }
+    chain.push(match wi {
+      Ok(c) => c
+      Err(e) => reporter(WI_NAME, e)
+    })
   }
-  if want("ManagedIdentityCredential") {
-    let id = match env.get("AZURE_CLIENT_ID") {
-      Some(c) => if c != "" { Some(UserAssigned.ClientId(c)) } else { None }
-      None => None
-    }
-    chain.push(new_managed_identity_credential(env, fs, net, clock, rand, ManagedIdentityOptions{id: id, client: o.client, probe: only == "", chained: true}))
+  if selected.contains(MI_NAME) {
+    let id = env.get("AZURE_CLIENT_ID").map(fn(c: Str) -> UserAssigned { UserAssigned.ClientId(c) })
+    // the probe runs when another source is in the chain
+    chain.push(match new_managed_identity_credential(env, fs, net, clock, rand, ManagedIdentityOptions{id: id, client: o.client, probe: selected.len() > 1, chained: true}) {
+      Ok(c) => c
+      Err(e) => reporter(MI_NAME, e)
+    })
   }
   Ok(new_chained_token_credential(chain, name: "DefaultAzureCredential"))
 }

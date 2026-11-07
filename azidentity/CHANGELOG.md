@@ -7,6 +7,44 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- DefaultAzureCredential's selection, options and errors are Go's (gap
+  item 7; 23 Go cases in `dacvectors_test.xo`):
+  - `AZURE_TOKEN_CREDENTIALS`: `prod`, or one source's name in any case;
+    unset keeps all three. Any other value is Go's error (`invalid
+    AZURE_TOKEN_CREDENTIALS value "x". Valid values are ...`), including
+    `""`, `PROD` and ` prod`. `dev` and the developer tools' names, which
+    Go accepts, are refused with a message saying this SDK does not
+    include them.
+  - **Breaking**: it takes `DefaultAzureCredentialOptions` (`client`,
+    `additionally_allowed_tenants`, `disable_instance_discovery`,
+    `require_azure_token_credentials`, `tenant_id`). The options'
+    tenants replace AZURE_ADDITIONALLY_ALLOWED_TENANTS instead of adding
+    to it. `tenant_id` is the workload identity's tenant.
+  - A source that cannot be built stays in the chain as unavailable,
+    with Go's reason: `missing environment variable AZURE_TENANT_ID`
+    (then AZURE_CLIENT_ID), `incomplete environment variable
+    configuration. Only AZURE_TENANT_ID and AZURE_CLIENT_ID are set`,
+    `no client ID specified. Check pod configuration or set ClientID in
+    the options` (then the token file, then the tenant ID, each read as
+    set even when empty), `empty managedidentity.UserAssignedClientID`.
+  - IMDS is probed whenever another source is in the chain (before: only
+    with AZURE_TOKEN_CREDENTIALS unset).
+- ChainedTokenCredential's error is Go's: `<name>: failed to acquire a
+  token.` then `Attempted credentials:`, each source's error on a tab
+  with its own lines on two. It is unavailable when the last error is,
+  else an AuthenticationFailedError without the response block.
+- **Breaking**: WorkloadIdentityCredential reads its token file when a
+  token is asked for, after the endpoint lookup, and again 10 minutes
+  after each read, as Go's. It is a `TokenCredential[fs.read]`; its
+  constructor no longer reads the file, and `watch` is gone. The file's
+  text is sent as it is (before: trimmed). A missing file is
+  `WorkloadIdentityCredential: open <path>: no such file or directory`.
+- **Breaking**: `new_managed_identity_credential` returns a Result: an
+  empty user-assigned ID is MSAL Go's `empty
+  managedidentity.UserAssignedClientID` (or ObjectID, ResourceID).
+- EnvironmentCredential's own errors are Go's texts (above). The
+  options' additionally allowed tenants replace the environment's.
+
 - ManagedIdentityCredential supports Azure Arc (gap item 11; decision
   0009). It is selected after App Service, Azure ML and Cloud Shell, when
   `IDENTITY_ENDPOINT` and `IMDS_ENDPOINT` are set or the agent's himds

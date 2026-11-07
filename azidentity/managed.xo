@@ -114,7 +114,17 @@ pub fn source_of(env: Env, himds: Bool = false) -> Source uses env {
   Source.Imds
 }
 
-pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential uses (env, fs.read) {
+pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: ManagedIdentityOptions = ManagedIdentityOptions{}) -> ManagedIdentityCredential ! azcore.AuthErr uses (env, fs.read) {
+  // MSAL Go's managedidentity.New refuses an empty ID
+  let empty = match opts.id {
+    Some(UserAssigned.ClientId(v)) => if v == "" { "UserAssignedClientID" } else { "" }
+    Some(UserAssigned.ObjectId(v)) => if v == "" { "UserAssignedObjectID" } else { "" }
+    Some(UserAssigned.ResourceId(v)) => if v == "" { "UserAssignedResourceID" } else { "" }
+    None => ""
+  }
+  if empty != "" {
+    return Err(azcore.AuthErr{credential: MI_NAME, msg: "empty managedidentity.${empty}"})
+  }
   let (dir, himds) = arc_paths(target.os, env.get("ProgramData") ?? "")
   let arc_himds = opts.arc_himds ?? himds
   // Go's os.Stat: any file or directory there, followed through links
@@ -126,12 +136,12 @@ pub fn new_managed_identity_credential(env: Env, fs: Fs, net: Net, clock: Clock,
   // IMDS answers 404 and 410 while it starts (MSAL retries them)
   let client = opts.client with {retry: opts.client.retry with {status_codes: opts.client.retry.status_codes + [404, 410]}}
   let probe_client = opts.client with {timeout: 1s, retry: opts.client.retry with {max_retries: -1}}
-  ManagedIdentityCredential{
+  Ok(ManagedIdentityCredential{
     source: src, id: opts.id, fs: fs, arc_dir: opts.arc_token_dir ?? dir, arc_os: target.os,
     pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, client),
     probe_pipeline: runtime.new_pipeline("azidentity", VERSION, net, clock, rand, runtime.PipelineOptions{}, probe_client),
     probing: Mutex.new(opts.probe && src is Source.Imds), chained: opts.chained, clock: clock, cache: Mutex.new([]),
-  }
+  })
 }
 
 /// The resource of a scope (`https://vault.azure.net/.default` is

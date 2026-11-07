@@ -1,0 +1,88 @@
+// Replays the Go program's DefaultAzureCredential cases
+// (dacvectors_test.xo): the token host is the Go program's fake
+// (gv_serve), IMDS a FakeNet handler, the token file on MemFs.
+use std/http
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const DAC_BAD_SECRET: Str = "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000215: bad secret\",\"error_codes\":[7000215]}"
+
+fn dac_case(os: testing.TestOs, c: DacCase) -> List[Str] {
+  let section = "dac-${c.name}"
+  let f = gv_serve(os.net, section)
+  if c.status != 0 {
+    // the Go fake answers its next two requests with the status: the
+    // two instance discovery requests
+    f.overrides.with(fn(var o: List[(Str, Int, Str)]) {
+      o.push(("discovery/instance", c.status, DAC_BAD_SECRET))
+      o.push(("discovery/instance", c.status, DAC_BAD_SECRET))
+    })
+  }
+  os.net.handle("GET http://169.254.169.254/{rest...}", fn(req: http.Request) -> http.Response {
+    if req.raw_query() == "" { mi_reply(c.probe) } else { mi_reply(c.imds) }
+  })
+  if c.probe == "ERR" {
+    os.net.fail_next("GET ${IMDS_ENDPOINT}", http.ClientErr.Connect("dial tcp 169.254.169.254:80: connect: host is down"))
+  } else if c.probe == "HANG" {
+    os.net.fail_next("GET ${IMDS_ENDPOINT}", http.ClientErr.Timeout)
+  }
+  let fs = os.fs
+  fs.remove_all("/fed") ?? _ => ()
+  if c.fed != "" {
+    fs.write("/fed/token", c.fed.bytes()) ?? e => return ["${section}: write ${e.display()}"]
+  }
+  let env = os.env
+  var names = ["AZURE_TOKEN_CREDENTIALS"]
+  env.set("AZURE_TOKEN_CREDENTIALS", "prod")
+  for (k, v) in c.env {
+    env.set(k, if v == "FED" { "/fed/token" } else if v == "MISSING" { "/fed/missing" } else { v })
+    names.push(k)
+  }
+  let client = policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}, retry: policy.RetryOptions{max_retries: -1}}
+  let d = new_default_azure_credential(env.only(names), fs, os.net, os.clock, os.rand, DefaultAzureCredentialOptions{client: client, require_azure_token_credentials: c.require, tenant_id: c.tenant, additionally_allowed_tenants: c.allowed})
+  let made = match d {
+    Ok(_) => "<nil>"
+    Err(e) => e.display()
+  }
+  var out = ["${section}: NEW ${c.name}: ${made}"]
+  if let Ok(cred) = d {
+    let r = cred.get_token(azcore.TokenRequestOptions{scopes: ["https://vault.example.test/.default"], tenant_id: c.scope})
+    os.net.clear_failures()
+    let reqs = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.map(fn(x: Str) -> Str { x.split("\n")[0] }) })
+    out = out + reqs + mi_out(section, c.name, r)
+  }
+  out
+}
+
+test "DefaultAzureCredential's sources, errors and options are Go's" {
+  var got: List[Str] = []
+  for c in GO_DAC_CASES {
+    got = got + dac_case(os, c)
+  }
+  for i in 0..got.len().min(GO_DAC_LINES.len()) {
+    expect((i, got[i])) == (i, GO_DAC_LINES[i])
+  }
+  expect(got.len()) == GO_DAC_LINES.len()
+}
+
+test "AZURE_TOKEN_CREDENTIALS values are read as Go reads them" {
+  let dev = ["dev", "AzureCLICredential", "AzureDeveloperCLICredential", "AzurePowerShellCredential"]
+  for (v, require, want) in GO_DAC_NEW {
+    let env = os.env
+    let e = if v == "<unset>" { env.only([]) } else {
+      env.set("AZURE_TOKEN_CREDENTIALS", v)
+      env.only(["AZURE_TOKEN_CREDENTIALS"])
+    }
+    let got = match new_default_azure_credential(e, os.fs, os.net, os.clock, os.rand, DefaultAzureCredentialOptions{require_azure_token_credentials: require}) {
+      Ok(_) => "<nil>"
+      Err(err) => err.display()
+    }
+    if dev.contains(v) {
+      // Go builds the developer tools, which this SDK does not have
+      expect((v, got.contains("selects developer credentials"))) == (v, true)
+    } else {
+      expect((v, require, got)) == (v, require, want)
+    }
+  }
+}
