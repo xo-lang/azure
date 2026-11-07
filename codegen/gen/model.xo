@@ -73,6 +73,10 @@ pub struct Param {
   pub client: Bool = false
   /// api-version and other constants
   pub constant: Str? = None
+  /// An optional single-value sealed enum: Go's option is a *string, and
+  /// when set the constant is sent, not its value (armstorage's
+  /// failoverType is always "Planned").
+  pub opt_constant: Str? = None
   pub doc: Str = ""
   /// A body sent as it is (`format: binary` or `file`; Go's
   /// io.ReadSeekCloser), not as JSON.
@@ -996,16 +1000,30 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
   // service's default applies when it is left out)
   let required = (bool_of(p.get("required")) && p.get("x-ms-client-default").is_none()) || loc == "path"
   let one = list_of(p.get("enum"))
-  let constant = if wire == "api-version" {
+  let sealed_one = one.len() == 1 && (model_as_string(p) == Some(false) || b.custom.seal_single_value_enums && model_as_string(p) != Some(true))
+  let one_lit = match one.get(0) {
+    Some(json.Value.Str(c)) => Some("\"${c.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
+    _ => None
+  }
+  // TypeSpec's `@apiVersion(false) @query("api-version") apiVersion:
+  // string` is the method's argument in Go (armresources' generic
+  // resource calls): in the OpenAPI, the only api-version written in the
+  // operation with a client name; a library one is a $ref, and an
+  // autorest file's inline one has no client name and stays the client's
+  // (azwebpubsub, armservicefabric)
+  let method_api_version = wire == "api-version" && one.is_empty() && raw.get("$ref").is_none() && str_of(p.get("x-ms-client-name")) != ""
+  let constant = if wire == "api-version" && one.len() == 1 && one_lit.is_some() {
+    // its own one value (Key Vault's vault list is 2015-11-01)
+    if one_lit == Some("\"${b.api_version}\"") { Some("API_VERSION") } else { one_lit }
+  } else if method_api_version {
+    None
+  } else if wire == "api-version" {
     // The operation's own file's version (compute mixes several);
     // API_VERSION when it is the package's.
     let fv = str_of(b.files.get(file).and_then(fn(d: json.Value) -> json.Value? { d.get("info") }).and_then(fn(i: json.Value) -> json.Value? { i.get("version") }))
     if fv == "" || fv == b.api_version { Some("API_VERSION") } else { Some("\"${fv}\"") }
-  } else if required && one.len() == 1 && (model_as_string(p) == Some(false) || b.custom.seal_single_value_enums && model_as_string(p) != Some(true)) {
-    match one[0] {
-      json.Value.Str(c) => Some("\"${c.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
-      _ => None
-    }
+  } else if required && sealed_one {
+    one_lit
   } else {
     None
   }
@@ -1029,6 +1047,7 @@ fn (var b: Builder) param(file: Str, raw: json.Value) -> Param {
     multi: str_of(p.get("collectionFormat")) == "multi" && loc == "query",
     client: client,
     constant: constant,
+    opt_constant: if !required && sealed_one && wire != "api-version" { one_lit } else { None },
     doc: doc_of(p),
     binary: binary,
   }
