@@ -88,9 +88,10 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
 | resourcemanager/resources/armresources | v4.0.0 (`v4`) | stable | 0 | 8683 | v4.0.0 | 0 + 2566 gen |  |
+| resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (302)
+## ARM modules not ported (301)
 
 <details><summary>The list</summary>
 
@@ -346,7 +347,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/resources/armlocks | v1.2.0 | stable | 3336 |
 | resourcemanager/resources/armmanagedapplications | v1.2.0 | stable | 4180 |
 | resourcemanager/resources/armpolicy | v2.0.0 | stable | 12204 |
-| resourcemanager/resources/armsubscriptions | v2.0.0 | stable | 2718 |
 | resourcemanager/resources/armtemplatespecs | v1.2.0 | stable | 3370 |
 | resourcemanager/saas/armsaas | v0.7.0 | v0 | 4506 |
 | resourcemanager/scheduler/armscheduler | v1.2.0 | stable | 4755 |
@@ -433,7 +433,8 @@ Our line counts above are from before these catch-ups.
    own.
 
 The ARM majors (armstorage v4, armcompute v9, armnetwork v12,
-armresources v4 and armkeyvault v2) are done by regenerating from the
+armresources v4 and armkeyvault v2) and armsubscriptions v2 are done by
+generating from the
 specs. containers/azcontainerregistry v0.2.3 is done: its operations
 generated from the swagger with Go's autorest.md directives as JSON
 patches, and its challenge policy, chunk upload and digest helpers

@@ -8,6 +8,11 @@ use std/regexp
 pub struct Renames {
   /// operation (TypeSpec's name, lower case) to Go's name
   pub ops: Map[Str, Str] = {}
+  /// `@@clientLocation(Iface.op::parameters.p, Iface.op)`: a client
+  /// parameter Go takes on that operation's method instead
+  /// (armsubscriptions' `Client.Get(ctx, subscriptionID, ...)`), as
+  /// `operationid#wire`, lower case operationId.
+  pub method_params: List[Str] = []
   /// model to Go's name
   pub models: Map[Str, Str] = {}
   /// `Model.property` to Go's field name
@@ -238,6 +243,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let param_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)::parameters\\.([A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
   let alt_model = regexp.compile("@@alternateType\\(\\s*(Azure\\.[A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
@@ -467,6 +473,23 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
         }
       }
       r.tsp_ops[id.to_lower()] = (group, name)
+    }
+    for whole in param_loc.find_all(text) {
+      let m = param_loc.captures(whole) ?? continue
+      // unscoped, or scoped to Go; only a parameter moved onto its own
+      // operation
+      let scope = m[4] ?? ""
+      if (scope != "" && !for_go(scope)) || (m[1] ?? "") != (m[3] ?? "") {
+        continue
+      }
+      let segs = (m[1] ?? "").split(".")
+      if segs.len() < 2 {
+        continue
+      }
+      let iface = segs[segs.len() - 2]
+      let op = segs[segs.len() - 1]
+      let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      r.method_params.push("${id.to_lower()}#${m[2] ?? ""}")
     }
   }
   Ok(r)

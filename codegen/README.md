@@ -197,6 +197,11 @@ response type equal, except armkeyvault's `Secret`, which is
   response gets Go's `content_type`, and a JSON body's Content-Type is
   the operation's one consumed type (`application/json;
   odata=minimalmetadata`). `private_ops` applies to pagers too.
+- TypeSpec's `@@clientLocation(Iface.op::parameters.p, Iface.op)`
+  (unscoped or for Go) moves a client parameter onto that operation's
+  method, as Go's emitter does (armsubscriptions' `Client.Get(ctx,
+  subscriptionID, ...)`; a client none of whose operations keep the
+  parameter takes none).
 - `custom/<module>.toml: status_pollers` names the operations whose
   poller is Go's hand written restorePoller (`runtime.new_status_poller`).
 - A model's fields are declared sorted by wire name, the order Go's

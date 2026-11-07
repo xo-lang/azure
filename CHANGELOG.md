@@ -8,6 +8,17 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/resources/armsubscriptions v2.0.0, Go's
+armsubscriptions/v2 v2.0.0 (TypeSpec, API version 2022-12-01): every
+call of its four clients checked against a local Go program's requests
+and results. The generator (`codegen`), for it: TypeSpec's
+`@@clientLocation(Iface.op::parameters.p, Iface.op)` keeps a client
+parameter on that operation's method (Go's `Client.Get(ctx,
+subscriptionID, ...)`, with no subscription in `NewClient`). No other
+module changed. Where it differs from Go, as every generated module: a
+JSON null element in a list of models (Go's `[]*PairedRegion` keeps a
+nil) fails to decode; pinned in its test.
+
 ai/azopenai's test: a float -0 is written `-0`, as Go's json.Marshal
 writes a float64 -0, so the float32 case's pin keeps only the float32
 rounding (Go's float32 fields are `Float`). Needs xo f306a31fd or later.
