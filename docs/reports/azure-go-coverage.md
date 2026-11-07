@@ -87,6 +87,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/compute/armcompute | v9.0.0 (`v9`) | stable | 0 | 85961 | v9.0.0 | 0 + 31271 gen |  |
 | resourcemanager/containerregistry/armcontainerregistry | v3.0.0 (`v3`) | stable | 0 | 15726 | v3.0.0 | 0 + 4883 gen |  |
 | resourcemanager/containerservice/armcontainerservice | v9.7.0 (`v9`) | stable | 0 | 24355 | v9.7.0 | 0 + 6979 gen |  |
+| resourcemanager/dns/armdns | v1.2.0 | stable | 0 | 3889 | v1.2.0 | 0 + 1033 gen |  |
 | resourcemanager/keyvault/armkeyvault | v2.1.0 (`v2`) | stable | 0 | 13812 | v2.1.0 | 0 + 4028 gen |  |
 | resourcemanager/msi/armmsi | v1.3.0 | stable | 0 | 3108 | v1.3.0 | 0 + 859 gen |  |
 | resourcemanager/network/armnetwork | v12.1.0 (`v12`) | stable | 0 | 208724 | v12.1.0 | 0 + 62510 gen |  |
@@ -96,7 +97,7 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/resources/armsubscriptions | v2.0.0 (`v2`) | stable | 0 | 2718 | v2.0.0 | 0 + 673 gen |  |
 | resourcemanager/storage/armstorage | v4.3.0 (`v4`) | stable | 0 | 42130 | v4.3.0 | 0 + 13442 gen |  |
 
-## ARM modules not ported (296)
+## ARM modules not ported (295)
 
 <details><summary>The list</summary>
 
@@ -203,7 +204,6 @@ shipped a newer major whose spec our generator has not been run on.
 | resourcemanager/digitaltwins/armdigitaltwins | v1.2.0 | stable | 6613 |
 | resourcemanager/disconnectedoperations/armdisconnectedoperations | v1.0.0 | stable | 4698 |
 | resourcemanager/discovery/armdiscovery | v0.1.0 | v0 | 14007 |
-| resourcemanager/dns/armdns | v1.2.0 | stable | 3889 |
 | resourcemanager/dnsresolver/armdnsresolver | v1.3.0 | stable; newer v2.0.0-beta.1 | 13369 |
 | resourcemanager/domainregistration/armdomainregistration | v1.0.0 | stable | 5217 |
 | resourcemanager/domainservices/armdomainservices | v1.2.0 | stable; newer v2.0.0-beta.1 | 4483 |

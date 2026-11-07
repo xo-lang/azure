@@ -8,6 +8,12 @@ version has been tagged since.
 
 ## Unreleased
 
+resourcemanager/dns/armdns v1.2.0, Go's armdns v1.2.0 (DNS zones and
+record sets; autorest, API version 2018-05-01): generated with no
+generator change. All 14 calls of its three clients checked against a
+local Go program's requests and results (azcore v1.23.3), the
+long-running zone delete through poll_until_done.
+
 resourcemanager/privatedns/armprivatedns v2.0.0, Go's armprivatedns/v2
 v2.0.0 (private DNS zones, record sets and virtual network links;
 TypeSpec, API version 2024-06-01): generated with no generator change.
