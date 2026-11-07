@@ -13,9 +13,14 @@ for d in $dirs; do
   echo "== $d"
   (cd "$mod" && "$xo" test "./$rel") || fail=1
 done
-# The full gate also checks that regenerating changes nothing, when the
-# specs are fetched (codegen/fetch-specs.sh).
+# The full gate also checks that every .xo file is in xo fmt's layout,
+# and that regenerating changes nothing when the specs are fetched
+# (codegen/fetch-specs.sh).
 if [ $# -eq 0 ]; then
+  if ! "$xo" fmt --check ./...; then
+    echo "gate: xo fmt --check: the files above need xo fmt"
+    fail=1
+  fi
   if [ -d codegen/.specs ]; then
     XO_CLI=$xo scripts/check-generated.sh || fail=1
   else
