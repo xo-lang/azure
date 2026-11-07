@@ -1,0 +1,102 @@
+// Merges the rows codegen/gorows derived from Go's modules into
+// codegen/services.toml, run from the repository root:
+//   xo run ./codegen/cmd/rows -- <derived rows.toml>
+// A row whose derived keys differ is rewritten (its other keys kept); a
+// new module's row is added. Prints the dir of each row it changed or
+// added, one a line.
+
+const SERVICES: Str = "codegen/services.toml"
+
+/// The keys codegen/gorows derives; any other key of a row is kept.
+const DERIVED: List[Str] = ["dir", "spec", "readme_tag", "openapi", "openapi_more", "commit", "go_module", "go_version", "utc_date_times", "seal_single_value_enums"]
+
+struct Block {
+  pub dir: Str
+  pub lines: List[Str]
+}
+
+fn key_of(line: Str) -> Str {
+  (line.cut(" = ") ?? ("", "")).0
+}
+
+fn blocks_of(text: Str) -> (List[Str], List[Block]) {
+  var head: List[Str] = []
+  var blocks: List[Block] = []
+  var cur: List[Str]? = None
+  for line in text.split("\n") {
+    if line == "[[service]]" {
+      if let Some(c) = cur {
+        blocks.push(Block{dir: dir_of(c), lines: c})
+      }
+      cur = Some([line])
+    } else {
+      match cur {
+        None => head.push(line)
+        Some(c) => cur = Some(c + [line])
+      }
+    }
+  }
+  if let Some(c) = cur {
+    blocks.push(Block{dir: dir_of(c), lines: c})
+  }
+  (head, blocks)
+}
+
+fn dir_of(lines: List[Str]) -> Str {
+  for l in lines {
+    if key_of(l) == "dir" {
+      return (l.cut(" = ") ?? ("", "")).1.trim_chars("\"")
+    }
+  }
+  ""
+}
+
+/// The row's own lines: without the blank lines that end it.
+fn body(b: Block) -> List[Str] {
+  var ls = b.lines
+  while ls.len() > 1 && ls[ls.len() - 1].trim() == "" {
+    ls = ls[0..ls.len() - 1]
+  }
+  ls
+}
+
+fn main(os: Os) -> () ! Error {
+  let args = os.env.args()
+  if args.len() != 1 {
+    os.stdio.println("usage: rows <derived rows.toml>")
+    return Ok(())
+  }
+  let (head, have) = blocks_of(os.fs.read_text(SERVICES)?)
+  let (_, derived) = blocks_of(os.fs.read_text(args[0])?)
+  var out = have.map(fn(b: Block) -> Block { Block{dir: b.dir, lines: body(b)} })
+  for d in derived {
+    let new_lines = body(d)
+    var found = false
+    for i in 0..out.len() {
+      if out[i].dir != d.dir {
+        continue
+      }
+      found = true
+      let old = out[i].lines
+      let kept = old.filter(fn(l: Str) -> Bool { l != "[[service]]" && !DERIVED.contains(key_of(l)) })
+      let derived_old = old.filter(fn(l: Str) -> Bool { DERIVED.contains(key_of(l)) }).sort()
+      let derived_new = new_lines.filter(fn(l: Str) -> Bool { DERIVED.contains(key_of(l)) }).sort()
+      if derived_old != derived_new {
+        // the derived keys in gorows' order, then the row's own keys
+        let keys = new_lines.filter(fn(l: Str) -> Bool { l != "[[service]]" && key_of(l) != "version" })
+        let version = old.filter(fn(l: Str) -> Bool { key_of(l) == "version" })
+        out[i] = Block{dir: d.dir, lines: ["[[service]]"] + keys + (if version.is_empty() { new_lines.filter(fn(l: Str) -> Bool { key_of(l) == "version" }) } else { version }) + kept.filter(fn(l: Str) -> Bool { key_of(l) != "version" })}
+        os.stdio.println(d.dir)
+      }
+    }
+    if !found {
+      out.push(Block{dir: d.dir, lines: new_lines})
+      os.stdio.println(d.dir)
+    }
+  }
+  // the head's lines end with the blank line before the first row
+  var text = if head.is_empty() { "" } else { head.join("\n") + "\n" }
+  text = text + out.map(fn(b: Block) -> Str { b.lines.join("\n") }).join("\n\n") + "\n"
+  os.fs.write(SERVICES, text.bytes())?
+  Ok(())
+}
