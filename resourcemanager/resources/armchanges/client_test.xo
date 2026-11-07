@@ -1,0 +1,139 @@
+// The fake Resource Manager the Go calls of govectors_test.xo are made
+// again against: the same response headers as the Go program's fake,
+// each test's status and body, and every request noted in the Go
+// program's form.
+
+use std/http
+use std/testing
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/policy
+
+const GV_EP: Str = "https://management.example.test"
+
+struct GvCred {}
+
+fn (c: GvCred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(4102444800000)})
+}
+
+struct GvFake {
+  log: Mutex[List[Str]]
+  status: Mutex[Int]
+  body: Mutex[Str]
+  /// while a poller polls: its requests go unnoted, as the Go program
+  /// prints only the operation's first request
+  quiet: Mutex[Bool]
+}
+
+fn gv_note(f: GvFake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn gv_set(f: GvFake, status: Int, body: Str) {
+  f.status.with(fn(var s: Int) { s = status })
+  f.body.with(fn(var b: Str) { b = body })
+}
+
+fn gv_quiet(f: GvFake, q: Bool) {
+  f.quiet.with(fn(var x: Bool) { x = q })
+}
+
+fn gv_answer(f: GvFake, req: http.Request) -> http.Response {
+  let st = f.status.with(fn(var s: Int) -> Int { s })
+  let body = f.body.with(fn(var b: Str) -> Str { b })
+  if !f.quiet.with(fn(var x: Bool) -> Bool { x }) {
+    gv_note_request(f, req, st, body)
+  }
+  let h: Map[Str, Str] = {
+    "x-ms-request-id": "rid-1",
+    "Content-Type": "application/json",
+    "Content-Length": "${body.bytes().len()}",
+  }
+  http.Response{status: st, headers: h, body: body.bytes()}
+}
+
+fn gv_note_request(f: GvFake, req: http.Request, st: Int, body: Str) {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "x-ms-client-request-id" && lk != "accept-encoding" && lk != "content-length" && lk != "traceparent" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  let q = req.raw_query()
+  gv_note(f, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+  gv_note(f, "  H ${hs.sort().join(" | ")}")
+  gv_note(f, "  B ${req.body.to_str_lossy()}")
+  gv_note_lines(f, "  SERVED ${st} ${body}")
+}
+
+fn gv_new_fake(net: testing.FakeNet) -> GvFake {
+  let f = GvFake{log: Mutex[List[Str]].new([]), status: Mutex[Int].new(200), body: Mutex[Str].new(""), quiet: Mutex[Bool].new(false)}
+  let h = fn(req: http.Request) -> http.Response { gv_answer(f, req) }
+  for m in ["GET", "PUT", "POST", "DELETE", "HEAD", "PATCH"] {
+    net.handle("${m} ${GV_EP}/{rest...}", h)
+  }
+  f
+}
+
+fn gv_opts() -> arm.ClientOptions {
+  arm.ClientOptions{endpoint: GV_EP, client: policy.ClientOptions{retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn gv_log_of(f: GvFake) -> List[Str] {
+  f.log.with(fn(var l: List[Str]) -> List[Str] { l })
+}
+
+/// An error as the Go program prints it: continuation lines after `| `.
+fn gv_err_text(e: azcore.CallErr) -> Str {
+  let t = match e {
+    azcore.CallErr.InvalidInput(m) => m
+    azcore.CallErr.Decode(m) => m
+    other => other.display()
+  }
+  t.replace("\n", "\n| ")
+}
+
+fn gv_note_lines(f: GvFake, s: Str) {
+  for line in s.split("\n") {
+    gv_note(f, line)
+  }
+}
+
+/// A time as the Go program prints one (RFC 3339, UTC).
+fn gv_t3339(t: Time) -> Str {
+  time.format(t, time.utc(), time.RFC3339)
+}
+
+/// Go's %q of printable ASCII text with `\n`.
+fn gv_go_q(b: Bytes) -> Str {
+  "\"${b.to_str_lossy().replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+fn gv_at3339(s: Str) -> Time {
+  time.parse(s, time.RFC3339, time.utc()) ?? e => fault("time ${s}: ${e}")
+}
+
+/// Compares the lines, but for the KNOWN ones (Go's line, ours).
+fn gv_compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
+  var g = got
+  for (go_line, ours) in known {
+    let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
+    let j = g.index_of(ours) ?? fault("KNOWN line not in ours: ${ours}")
+    if i != j {
+      fault("KNOWN line ${go_line} at ${i}, ours at ${j}")
+    }
+    g[j] = go_line
+  }
+  var k = 0
+  while k < want.len() || k < g.len() {
+    let a = want.get(k) ?? "<end>"
+    let b = g.get(k) ?? "<end>"
+    if a != b {
+      fault("line ${k}:\n  go:   ${a}\n  ours: ${b}")
+    }
+    k += 1
+  }
+}
