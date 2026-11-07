@@ -159,6 +159,15 @@ pub struct Custom {
   /// A common-types model (by name) to the project's model Go uses in
   /// its place (`@@alternateType`: armstorage's UserAssignedIdentity).
   pub alt_models: Map[Str, Str] = {}
+  /// operationId (lower case) to the TypeSpec interface and operation
+  /// that Go's emitter names it by, where they differ.
+  pub tsp_ops: Map[Str, (Str, Str)] = {}
+  /// A rename for one emitted file's model, keyed `<file name>#<Model>`
+  /// (`ComputeRP.json#NetworkAccessPolicy`).
+  pub file_models: Map[Str, Str] = {}
+  /// An ARM module from TypeSpec: operationId (lower case) to its
+  /// `@useFinalStateVia`; the OpenAPI file's final-state-via is not used.
+  pub final_states: Map[Str, Str] = {}
   /// Enum values Go's transforms delete, by enum: wire values.
   pub drop_values: Map[Str, List[Str]] = {}
   /// A data-plane module: operations without a group stay on its Client.
@@ -237,6 +246,25 @@ fn (b: Builder) unstutter(n: Str) -> Str {
     }
   }
   n
+}
+
+/// The rename of model `n` that applies in `file` only.
+fn (b: Builder) renamed_in(file: Str, n: Str) -> Str? {
+  let base = file.split("/").last() ?? file
+  if let Some(r) = b.custom.file_models.get("${base}#${n}") {
+    return Some(reserve(r))
+  }
+  // a library type renamed by its TypeSpec name
+  // (`Azure.ResourceManager.CommonTypes.Operation`), defined in
+  // common-types' own file by its short name
+  if file.contains("/common-types/") {
+    for (k, r) in b.custom.models {
+      if k.starts_with("Azure.") && k.ends_with(".${n}") {
+        return Some(reserve(r))
+      }
+    }
+  }
+  None
 }
 
 /// A schema name as a type name, without the package's stutter.
@@ -476,7 +504,7 @@ fn (var b: Builder) inline(file: Str, v: json.Value, hint: Str) -> Str {
   if v.get("x-ms-enum").is_some() && str_of(v.get("type")) == "string" {
     let name = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
     if name != "" {
-      return b.str_enum(b.enum_name(name), v)
+      return b.str_enum(b.renamed_in(file, name) ?? b.enum_name(name), v)
     }
   }
   match str_of(v.get("type")) {
@@ -575,7 +603,7 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value, inline: Bool = fal
   // schema it names the property. A repeated word is said once only in a
   // definition's own name, not in a name composed for an inline schema.
   let cn = if inline { "" } else { str_of(v.get("x-ms-client-name")) }
-  var name = if inline { b.type_name(def, dedup: false) } else { b.type_name(if cn != "" { cn } else { def }) }
+  var name = if inline { b.type_name(def, dedup: false) } else { b.renamed_in(file, def) ?? b.type_name(if cn != "" { cn } else { def }) }
   if bool_of(v.get("x-ms-external")) {
     b.ids[id] = "json.Value"
     return "json.Value"
@@ -597,7 +625,7 @@ fn (var b: Builder) named(file: Str, def: Str, v: json.Value, inline: Bool = fal
   // An enum is known by its x-ms-enum name, which may repeat.
   if !list_of(v.get("enum")).is_empty() {
     let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
-    let t = b.str_enum(if en != "" { b.enum_name(en) } else { name }, v)
+    let t = b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.enum_name(en) } else { name }, v)
     b.ids[id] = t
     return t
   }
@@ -632,7 +660,7 @@ fn (var b: Builder) named_as(file: Str, def: Str, name: Str, v: json.Value) -> S
   }
   if !list_of(v.get("enum")).is_empty() {
     let en = str_of(v.get("x-ms-enum").and_then(fn(e: json.Value) -> json.Value? { e.get("name") }))
-    return b.str_enum(if en != "" { b.type_name(en) } else { name }, v)
+    return b.str_enum(if en != "" { b.renamed_in(file, en) ?? b.type_name(en) } else { name }, v)
   }
   let props = fields_of(v.get("properties"))
   let t = str_of(v.get("type"))
@@ -764,9 +792,12 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             continue
           }
           let id = str_of(o.get("operationId"))
-          let (raw_group, raw_name) = match id.find("_") {
-            Some(i) => (id[0..i], id[i + 1..id.len()])
-            None => ("", id)
+          let (raw_group, raw_name) = match b.custom.tsp_ops.get(id.to_lower()) {
+            Some((g, n)) => (g, n[0..1].to_upper() + n[1..n.len()])
+            None => match id.find("_") {
+              Some(i) => (id[0..i], id[i + 1..id.len()])
+              None => ("", id)
+            }
           }
           if !b.custom.client_ops.is_empty() && !b.custom.client_ops.contains(id.to_lower()) {
             continue
@@ -828,7 +859,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             _ => None
           }
           let item_name = str_of(pg.and_then(fn(x: json.Value) -> json.Value? { x.get("itemName") }))
-          let fsv = str_of(o.get("x-ms-long-running-operation-options").and_then(fn(x: json.Value) -> json.Value? { x.get("final-state-via") }))
+          let fsv = if b.custom.tsp && !b.custom.data_plane { b.custom.final_states.get(id.to_lower()) ?? "" } else { str_of(o.get("x-ms-long-running-operation-options").and_then(fn(x: json.Value) -> json.Value? { x.get("final-state-via") })) }
           for (k, _) in fields_of(Some(o)) {
             if k.starts_with("x-ms-") && !["x-ms-pageable", "x-ms-long-running-operation", "x-ms-long-running-operation-options", "x-ms-examples", "x-ms-odata", "x-ms-azure-rbac-permissions-required"].contains(k) {
               b.report.push("${id}: extension ${k} not handled")

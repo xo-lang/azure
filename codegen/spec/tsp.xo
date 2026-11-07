@@ -26,6 +26,141 @@ pub struct Renames {
   /// `@@alternateType(Azure.X.Model, Project.Model, "go")`: a library
   /// model (by its name) to the project's model that Go uses in its place.
   pub model_types: Map[Str, Str] = {}
+  /// An operation added after the move to TypeSpec (`@added`) whose
+  /// `@operationId` is not its TypeSpec name
+  /// (`@operationId("GallerySharing_Accept")` on
+  /// `SharedGalleryInvites.gallerySharingAccept`): the operationId, lower
+  /// case, to the interface and the operation, as Go's emitter names it.
+  pub tsp_ops: Map[Str, (Str, Str)] = {}
+  /// A model rename whose target names the project namespace
+  /// (`Compute.NetworkAccessPolicy`), keyed `namespace#Model`: in a
+  /// project of several namespaces, each emitted to its own file, it is
+  /// that file's model only (ComputeDisk's NetworkAccessPolicy keeps its
+  /// name).
+  pub ns_models: Map[Str, Str] = {}
+  /// `@useFinalStateVia("x")` on an operation: its operationId (lower
+  /// case) to x. Go's emitter sets a poller's final state from it alone,
+  /// not from the OpenAPI file's final-state-via.
+  pub final_states: Map[Str, Str] = {}
+}
+
+/// Each operation in an interface of `text` that carries decorator `dec`
+/// (`@useFinalStateVia(`): its operationId (an `@operationId` among its
+/// decorators, else `Interface_Op`) and the decorator's argument.
+fn decorated(text: Str, dec: Str) -> List[(Str, Str)] {
+  var out: List[(Str, Str)] = []
+  let chunks = interface_chunks(text)
+  for ci in 1..chunks.len() {
+    let chunk = chunks[ci]
+    let iface = ident_prefix(chunk)
+    let parts = chunk.split(dec)
+    for pi in 1..parts.len() {
+      let part = parts[pi]
+      let (q, rest) = part.cut(")") ?? continue
+      let arg = q.trim().trim_prefix("\"").trim_suffix("\"")
+      let prev = parts[pi - 1]
+      var from = 0
+      for (i, b) in prev.bytes().indexed() {
+        if b == 0x3b || b == 0x7b {
+          from = i + 1
+        }
+      }
+      let before = prev[from..prev.len()]
+      for line in rest.split("\n") {
+        let l = line.trim()
+        if l == "" || l.starts_with("@") || l.starts_with("#") || l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") || l.starts_with(")") || l.starts_with("\"") {
+          continue
+        }
+        let op = ident_prefix(l)
+        let after = l[op.len()..l.len()].trim()
+        if op != "" && (after.starts_with("is ") || after.starts_with("(")) {
+          let decl = rest.find(l) ?? 0
+          let span = before + rest[0..decl]
+          let id = match span.cut("@operationId(") {
+            Some((_, x)) => (x.cut(")").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? "").trim().trim_prefix("\"").trim_suffix("\"")
+            None => "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+          }
+          out.push((id, arg))
+        }
+        break
+      }
+    }
+  }
+  out
+}
+
+/// `text` split before each interface declaration (a line whose text
+/// starts with `interface `, at any indentation), each chunk after the
+/// first starting at the interface's name.
+fn interface_chunks(text: Str) -> List[Str] {
+  var out: List[Str] = [""]
+  for line in text.split("\n") {
+    let l = line.trim_start()
+    if l.starts_with("interface ") {
+      out.push(l[10..l.len()] + "\n")
+    } else {
+      let i = out.len() - 1
+      out[i] = out[i] + line + "\n"
+    }
+  }
+  out
+}
+
+/// The identifier `s` starts with (letters, digits and `_`).
+fn ident_prefix(s: Str) -> Str {
+  var n = 0
+  for b in s.bytes() {
+    if (b >= 0x61 && b <= 0x7a) || (b >= 0x41 && b <= 0x5a) || (b >= 0x30 && b <= 0x39) || b == 0x5f {
+      n += 1
+    } else {
+      break
+    }
+  }
+  s[0..n]
+}
+
+/// Each interface's operations that carry `@operationId`, from `text`:
+/// (operationId, interface, operation, whether its decorators include
+/// `@added`).
+fn operation_ids(text: Str) -> List[(Str, Str, Str, Bool)] {
+  var out: List[(Str, Str, Str, Bool)] = []
+  let chunks = interface_chunks(text)
+  for ci in 1..chunks.len() {
+    let chunk = chunks[ci]
+    let iface = ident_prefix(chunk)
+    let parts = chunk.split("@operationId(")
+    for pi in 1..parts.len() {
+      let part = parts[pi]
+      // the decorators before @operationId: after the previous
+      // declaration's `;` or `{`
+      let prev = parts[pi - 1]
+      var from = 0
+      for (i, b) in prev.bytes().indexed() {
+        if b == 0x3b || b == 0x7b {
+          from = i + 1
+        }
+      }
+      let before = prev[from..prev.len()]
+      let (q, rest) = part.cut(")") ?? continue
+      let id = q.trim().trim_prefix("\"").trim_suffix("\"")
+      // the declaration: the first line after it that is not a
+      // decorator, a directive or a comment
+      for line in rest.split("\n") {
+        let l = line.trim()
+        if l == "" || l.starts_with("@") || l.starts_with("#") || l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") || l.starts_with(")") || l.starts_with("\"") {
+          continue
+        }
+        let op = ident_prefix(l)
+        let after = l[op.len()..l.len()].trim()
+        if op != "" && (after.starts_with("is ") || after.starts_with("(")) {
+          let decl = rest.find(l) ?? 0
+          out.push((id, iface, op, before.contains("@added(") || rest[0..decl].contains("@added(")))
+        }
+        break
+      }
+    }
+  }
+  out
 }
 
 /// TypeSpec's scalar names as Xo types; a model or union keeps its name.
@@ -129,6 +264,20 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       }
       r.field_types[m[1] ?? ""] = xo_type(m[2] ?? "")
     }
+    // Go's emitter names an operation by its operationId, as autorest
+    // did, except one added after the move to TypeSpec (`@added`), named
+    // by its interface and operation (armcompute v9's
+    // SharedGalleryInvites.gallerySharingAccept, operationId
+    // GallerySharing_Accept)
+    for (id, iface, op, added) in operation_ids(text) {
+      let default = "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      if added && id.to_lower() != default.to_lower() {
+        r.tsp_ops[id.to_lower()] = (iface, op)
+      }
+    }
+    for (id, via) in decorated(text.replace("@Azure.Core.useFinalStateVia(", "@useFinalStateVia("), "@useFinalStateVia(") {
+      r.final_states[id.to_lower()] = via
+    }
     for whole in alt_model.find_all(text) {
       let m = alt_model.captures(whole) ?? continue
       let from = m[1] ?? ""
@@ -149,12 +298,15 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       if !for_go(m[3] ?? "") {
         continue
       }
-      let target = strip_namespace(m[1] ?? "", namespaces)
+      let full = m[1] ?? ""
+      let target = strip_namespace(full, namespaces)
       let name = m[2] ?? ""
       if target.contains(".") && !names_type(target) {
         r.fields[target] = name
       } else if target != "" && target[0..1] >= "a" && target[0..1] <= "z" {
         r.ops[target.to_lower()] = name
+      } else if full != target {
+        r.ns_models["${full[0..full.len() - target.len() - 1]}#${target}"] = name
       } else {
         r.models[target] = name
       }

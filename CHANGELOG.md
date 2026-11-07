@@ -92,6 +92,25 @@ Go's CHANGELOG for v1.5.1 says the API version can be selected
 here `ClientOptions.client.api_version`, which sends it as Go does (a
 vector with `2025-07-01`).
 
+**Breaking**: `resourcemanager/compute/armcompute` matches Go's
+armcompute/v9 v9.0.0, which Go now generates from TypeSpec (API version
+2026-04-01; disks at 2026-03-02, galleries at 2026-03-03, resource SKUs
+at 2021-07-01; Microsoft.Compute/Compute at the commit of Go's
+tsp-location.yaml). Checked against Go's module: all 310 operations'
+requests, all 538 models' JSON keys, every type name and all 173 enums
+with their values and order equal; its Go-backed vectors re-recorded
+from v9.0.0. The Xo module path is unchanged (decision 0001).
+
+The generator, for ARM modules from TypeSpec (`codegen/README.md` has
+the rules): `openapi_more` for a module from several specs; every
+`.tsp` file under the spec read; namespace-qualified renames per
+emitted file; an `@added` operation named by its interface; a path's
+fixed query keys sent; the poller's final state only from
+`@useFinalStateVia`. armstorage's pollers change with that last rule:
+TaskAssignments create, update and stopAssignment use
+`azure-async-operation` and the other 27 long-running operations no
+longer name `location`, as Go v4.3.0.
+
 **Breaking**: `resourcemanager/storage/armstorage` matches Go's
 armstorage/v4 v4.3.0, which Go now generates from TypeSpec (API version
 2026-09-01; Microsoft.Storage/Storage at the commit of Go's

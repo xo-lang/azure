@@ -19,6 +19,10 @@ struct Service {
   pub readme_tag: Str = ""
   /// A TypeSpec module's emitted OpenAPI file, from the repository root.
   pub openapi: Str = ""
+  /// A TypeSpec project that emits several OpenAPI files (armcompute's
+  /// ComputeRP, DiskRP, GalleryRP and skus, each its own api-version):
+  /// the others, after `openapi`.
+  pub openapi_more: List[Str] = []
   /// The spec commit, when not specs.lock's.
   pub commit: Str = ""
   pub go_module: Str = ""
@@ -85,15 +89,44 @@ fn main(os: Os) -> () ! Error {
   var inputs: List[Str] = []
   var source = ""
   if svc.openapi != "" {
-    inputs = ["${base}/${svc.openapi}"]
+    inputs = ["${base}/${svc.openapi}"] + svc.openapi_more.map(fn(o: Str) -> Str { "${base}/${o}" })
+    // every .tsp of the project, its subprojects' folders too
     var texts: List[Str] = []
-    for f in os.fs.read_dir("${base}/${svc.spec}")? {
-      if f.name.ends_with(".tsp") {
-        texts.push(os.fs.read_text("${base}/${svc.spec}/${f.name}")?)
+    // each namespace's emitted file: a folder's main.tsp declares it,
+    // and the folder's tspconfig.yaml names the file (output-file)
+    var ns_file: Map[Str, Str] = {}
+    for f in os.fs.walk("${base}/${svc.spec}")? {
+      if !f.is_dir && f.name.ends_with(".tsp") && !f.path.contains("/examples/") {
+        let text = os.fs.read_text(f.path)?
+        texts.push(text)
+        if f.name == "main.tsp" {
+          let dir = f.path[0..f.path.len() - f.name.len() - 1]
+          let cfg = "${dir}/tspconfig.yaml"
+          if os.fs.exists(cfg)? {
+            if let Some(out) = output_file(os.fs.read_text(cfg)?) {
+              for line in text.split("\n") {
+                let l = line.trim()
+                if l.starts_with("namespace ") && l.ends_with(";") {
+                  ns_file[l[10..l.len() - 1].trim()] = out
+                }
+              }
+            }
+          }
+        }
       }
     }
     let r = spec.renames(texts)?
-    custom = custom with {ops: r.ops, models: r.models, fields: r.fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types}
+    let input_names = inputs.map(fn(i: Str) -> Str { i.split("/").last() ?? i })
+    var file_models: Map[Str, Str] = {}
+    var models = r.models
+    for (k, v) in r.ns_models {
+      let (ns, m) = k.cut("#") ?? continue
+      match ns_file.get(ns) {
+        Some(file) if input_names.contains(file) => file_models["${file}#${m}"] = v
+        _ => models[m] = v
+      }
+    }
+    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, params: r.params, client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states}
     source = "${svc.openapi} (from ${svc.spec})"
   } else {
     let root = "${base}/${svc.spec}"
@@ -151,6 +184,20 @@ fn main(os: Os) -> () ! Error {
     os.stdio.println("  readme.go.md directive not applied: ${w}")
   }
   Ok(())
+}
+
+/// The OpenAPI file name a tspconfig.yaml's autorest emitter writes
+/// (`output-file: "../{version-status}/{version}/DiskRP.json"` is
+/// DiskRP.json).
+fn output_file(cfg: Str) -> Str? {
+  for line in cfg.split("\n") {
+    let l = line.trim()
+    if l.starts_with("output-file:") {
+      let v = l[12..l.len()].trim().trim_prefix("\"").trim_suffix("\"")
+      return Some(v.split("/").last() ?? v)
+    }
+  }
+  None
 }
 
 /// The Go import path of package `name` in module `module`: the module

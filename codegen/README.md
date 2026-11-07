@@ -9,7 +9,7 @@ every module and fails on any difference.
 ## Go's names, as autorest.go and TypeSpec's Go emitter make them
 
 Each rule below was found by diffing a generated module's names with
-Go's (armresources v1.2.0, armstorage v4.3.0, armcompute v7.3.0,
+Go's (armresources v1.2.0, armstorage v4.3.0, armcompute v9.0.0,
 armnetwork v9.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
 azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armnetwork's `Error` and armkeyvault's
@@ -118,6 +118,22 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   a 2xx response has a body; the query's spaces as `%20`; and each next
   page from `runtime.new_next_link_pager` (azcore's
   NewRequestForNextLink: the link's query re-encoded with `%20`).
+- Such a module may span several specs: `openapi_more` lists the other
+  OpenAPI files Go's module is generated from (armcompute v9: DiskRP,
+  GalleryRP, skus), and every `.tsp` file under the spec directory is
+  read, examples excluded. A namespace-qualified rename applies only to
+  the definitions of the file its namespace is emitted to (the main.tsp
+  namespace and tspconfig's `output-file`), so two namespaces' `Disk`
+  stay apart; a library rename also matches the common-types file's
+  short name (`OperationValue`). An operation `@added` in a later
+  version whose `@operationId` differs from its interface and name is
+  named by the interface and name, as Go is (armcompute's
+  `SharedGalleryInvites`). A path's query keys that no parameter sets
+  are sent as written (`?api-version=...&$expand=...`, api-version
+  aside). The poller's final state is only what `@useFinalStateVia`
+  (or `@Azure.Core.useFinalStateVia`) gives; the OpenAPI
+  `final-state-via` the TypeSpec compiler writes is not used, as Go's
+  emitter does not.
 - Documentation keeps the spec's text, except that a GUID in it (a
   spec's example id, armstorage v4's `Ex: ...`) is written as the
   all-zero GUID: the repository holds no ids.
