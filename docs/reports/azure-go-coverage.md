@@ -66,7 +66,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | security/keyvault/azadmin | v1.5.0 | stable | 484 | 4314 | v1.5.0 | 151 + 1000 gen |  |
 | security/keyvault/azcertificates | v1.5.0 | stable | 114 | 5411 | v1.5.0 | 79 + 1827 gen |  |
 | security/keyvault/azkeys | v1.5.0 | stable | 84 | 5135 | v1.5.0 | 50 + 1574 gen |  |
-| security/keyvault/azsecrets | v1.5.1 | stable | 84 | 2376 | v1.4.0 (behind v1.5.1) | 50 + 641 gen |  |
+| security/keyvault/azsecrets | v1.5.1 | stable | 84 | 2376 | v1.5.1 | 50 + 662 gen |  |
 | security/keyvault/internal | v1.2.0 | stable | 259 | 259 | yes | 185 |  |
 | storage/azblob | v1.8.3 | stable | 14774 | 30535 | v1.8.3 | 3645 |  |
 | storage/azdatalake | v1.7.1 | stable | 10622 | 16543 | v1.7.1 | 2986 |  |
@@ -407,7 +407,8 @@ Status (2026-11-06): (1) is under way. azcore v1.24.0 is ported but
 for its SSE stream reader (`streaming/sse.go`), deferred with the lead:
 our pipeline reads a body whole, so SSE becomes its own slice, a
 streaming body first, when a module we port needs it (azopenai would).
-azfile v1.7.2 and azqueue v2.1.2 are done; azsecrets v1.5.1 is next.
+azfile v1.7.2, azqueue v2.1.2 and azsecrets v1.5.1 are done; azidentity
+v1.15.0 (2) is next.
 Our line counts above are from before these catch-ups.
 
 1. **Catch the ported modules up**: azcore v1.24.0 (query-redacted

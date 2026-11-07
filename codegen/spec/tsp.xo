@@ -48,6 +48,18 @@ fn operation_id(target: Str) -> Str {
   if rest.len() > 1 { "${rest[0..rest.len() - 1].join("_")}_${up}" } else { up }
 }
 
+/// `target` without a leading `<namespace>.` from `namespaces` (the
+/// longest one that matches).
+fn strip_namespace(target: Str, namespaces: List[Str]) -> Str {
+  var best = ""
+  for n in namespaces {
+    if target.starts_with("${n}.") && n.len() > best.len() {
+      best = n
+    }
+  }
+  if best == "" { target } else { target[best.len() + 1..target.len()] }
+}
+
 /// The Go renames in `texts` (the project's .tsp files).
 pub fn renames(texts: List[Str]) -> Renames ! Str {
   let aug = regexp.compile("@@clientName\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([^\"]+)\"\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
@@ -57,6 +69,18 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
   let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"go\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  let ns_decl = regexp.compile("(?:^|\\n)\\s*namespace\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
+  // `Namespace.op` names the operation: the project's namespaces, from
+  // every file, are stripped from a target before it is read.
+  var namespaces: List[Str] = []
+  for text in texts {
+    for whole in ns_decl.find_all(text) {
+      let n = (ns_decl.captures(whole) ?? continue)[1] ?? ""
+      if n != "" && !namespaces.contains(n) {
+        namespaces.push(n)
+      }
+    }
+  }
   var r = Renames{}
   for text in texts {
     for whole in client.find_all(text) {
@@ -79,7 +103,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
     }
     for whole in aug.find_all(text) {
       let m = aug.captures(whole) ?? continue
-      let target = m[1] ?? ""
+      let target = strip_namespace(m[1] ?? "", namespaces)
       let name = m[2] ?? ""
       if target.contains(".") {
         r.fields[target] = name

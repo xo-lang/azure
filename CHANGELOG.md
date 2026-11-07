@@ -28,6 +28,41 @@ Not ported from v1.24.0 (this port has no logging or tracing policies):
 the log sanitizer and tracing attribute changes. The `streaming` SSE
 reader is planned as its own change.
 
+`security/keyvault/azsecrets` follows Go's azsecrets v1.5.1 (was
+v1.4.0), checked against the lines a Go program prints with v1.5.1
+(`govectors_test.xo`):
+
+- API version `2026-04-01` (was `7.6`), from the spec at
+  azure-rest-api-specs 569464e8c8b0 (`specification/keyvault/data-plane/Secrets`).
+- `GetSecretOptions.out_content_type` (the `outContentType` query) and
+  `ContentType` with `CONTENT_TYPE_PEM` and `CONTENT_TYPE_PFX`.
+- `previous_version` on `Secret` and `DeletedSecret`.
+- **Behavior change**: `purge_deleted_secret` sends no `Accept`
+  (v1.4.0's emitter sent it on every operation), and a space in the
+  query is `%20`, not `+`, as v1.5.1's emitter writes it.
+
+Go's CHANGELOG for v1.5.1 names a `serviceVersion` option; v1.5.1's
+code has none, so neither has this port.
+
+The generator (`codegen`), every generated module regenerated:
+
+- **Behavior change**: an enum's constants and its
+  `possible_<type>_values()` are in Go's order, sorted by Go constant
+  name as autorest.go and the TypeSpec Go emitter sort them (was the
+  spec's order). Checked against Go's `Possible<Type>Values` for each
+  generated module: 566 of 570 enums match name for name and in order;
+  the other 4 are older naming and value set differences
+  (armnetwork's `SecurityRuleProtocol` `*` is `EMPTY` where Go has
+  `Asterisk`, `NetworkAPIVersion`, and two `ProvisioningState` enums
+  whose values differ from Go's).
+- `@@clientName(Namespace.op, ...)`: a target qualified by one of the
+  project's namespaces is read without it (azsecrets v1.5.1's
+  `KeyVault.updateSecret` is `UpdateSecretProperties`), where it was
+  read as a model field.
+- `query_pct20` in `codegen/custom/<module>.toml`: the query's spaces
+  as `%20` (azsecrets, and azappconfig's generated client, whose query
+  normalization writes the query again as Go's does).
+
 Go's azcore v1.21.1 to v1.23.0 (each checked against the lines a Go
 program prints with azcore v1.23.0, `runtime/azcore123vectors_test.xo`):
 

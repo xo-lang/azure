@@ -6,12 +6,20 @@ use std/json
 
 const GV_SB: Str = "{\"value\":\"v&1 <x>\",\"id\":\"https://kv1.vault.example.test/secrets/s1/v1\",\"contentType\":\"text/plain\",\"kid\":\"https://kv1.vault.example.test/keys/s1/v1\",\"managed\":false,\"attributes\":{\"enabled\":true,\"created\":1767225600,\"updated\":1767225600,\"recoveryLevel\":\"Recoverable\"},\"tags\":{\"env\":\"a&b\"},\"previousVersion\":\"v0\"}"
 
-test "get_secret of the latest version and the version pages match Go's" {
+test "azsecrets v1.5.1's requests and results match Go's" {
   let f = gv_serve(os.net)
   let c = new_client(os.net, os.clock, os.rand, GV_HOST, fixed())
   gv_add(f, "GET", "/secrets/s1/", GvReply{status: 200, body: GV_SB})
   gv_show(f, "get_secret", c.get_secret("s1", ""), fn(r: GetSecretResponse) -> Str { gv_json(json.to_value(r.secret)) })
-  gv_add(f, "GET", "/secrets/s1/versions", GvReply{status: 200, body: "{\"value\":[{\"id\":\"https://kv1.vault.example.test/secrets/s1/v1\",\"attributes\":{\"enabled\":false,\"exp\":1893456000},\"contentType\":\"text/plain\"}],\"nextLink\":\"https://kv1.vault.example.test/secrets/s1/versions?api-version=7.6&\$skiptoken=s%2B1\"}"})
+  gv_add(f, "GET", "/secrets/s1/v1", GvReply{status: 200, body: GV_SB})
+  gv_show(f, "get_secret_pem", c.get_secret("s1", "v1", GetSecretOptions{out_content_type: Some(CONTENT_TYPE_PEM)}), fn(r: GetSecretResponse) -> Str { gv_json(json.to_value(r.secret)) })
+  gv_show(f, "get_secret_odd_type", c.get_secret("s1", "v1", GetSecretOptions{out_content_type: Some(ContentType("a b+c&d"))}), fn(r: GetSecretResponse) -> Str { gv_json(json.to_value(r.secret)) })
+  gv_add(f, "GET", "/deletedsecrets/s1", GvReply{status: 200, body: "{\"recoveryId\":\"https://kv1.vault.example.test/deletedsecrets/s1\",\"deletedDate\":1767225600,\"scheduledPurgeDate\":1774224000,\"id\":\"https://kv1.vault.example.test/secrets/s1/v2\",\"previousVersion\":\"v1\",\"attributes\":{\"enabled\":true}}"})
+  gv_show(f, "get_deleted_secret", c.get_deleted_secret("s1"), fn(r: GetDeletedSecretResponse) -> Str { gv_json(json.to_value(r.deleted_secret)) })
+  gv_add(f, "PATCH", "/secrets/s1/v1", GvReply{status: 200, body: GV_SB})
+  let params = UpdateSecretPropertiesParameters{content_type: json.Patch.Value("text/plain"), tags: json.Patch.Value({"k": "v"})}
+  gv_show(f, "update_secret_properties", c.update_secret_properties("s1", "v1", params), fn(r: UpdateSecretPropertiesResponse) -> Str { gv_json(json.to_value(r.secret)) })
+  gv_add(f, "GET", "/secrets/s1/versions", GvReply{status: 200, body: "{\"value\":[{\"id\":\"https://kv1.vault.example.test/secrets/s1/v1\",\"attributes\":{\"enabled\":false,\"exp\":1893456000},\"contentType\":\"text/plain\",\"previousVersion\":\"v0\"}],\"nextLink\":\"https://kv1.vault.example.test/secrets/s1/versions?api-version=2026-04-01&\$skiptoken=s%2B1\"}"})
   gv_add(f, "GET", "/secrets/s1/versions", GvReply{status: 200, body: "{\"value\":[]}"})
   var pl = c.new_list_secret_properties_versions_pager("s1")?
   while pl.more() {
@@ -21,5 +29,8 @@ test "get_secret of the latest version and the version pages match Go's" {
       break
     }
   }
+  gv_add(f, "DELETE", "/deletedsecrets/s1", GvReply{status: 204, body: ""})
+  gv_show(f, "purge_deleted_secret", c.purge_deleted_secret("s1"), fn(r: PurgeDeletedSecretResponse) -> Str { "{}" })
+  gv_note(f, "CONST [${possible_content_type_values().map(fn(v: ContentType) -> Str { v.0 }).join(" ")}]")
   gv_check(f)
 }

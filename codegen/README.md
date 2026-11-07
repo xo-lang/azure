@@ -11,7 +11,7 @@ every module and fails on any difference.
 Each rule below was found by diffing a generated module's names with
 Go's (armresources v1.2.0, armstorage v1.8.1, armcompute v6.4.0,
 armnetwork v8.0.0, armkeyvault v1.5.0, armauthorization v2.2.0,
-azsecrets v1.4.0, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
+azsecrets v1.5.1, azkeys v1.5.0, azcertificates v1.5.0: every method, model, enum, interface, options and
 response type equal, except armnetwork's `Error` and armkeyvault's
 `Secret`, which are `ErrorModel` and `SecretModel` by the last rule).
 
@@ -33,6 +33,8 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   subtype (every definition that descends from it, by its
   `x-ms-discriminator-value`) and the base for any other value, with
   `derive Json(via: json.Value)`; encoding writes the subtype's value.
+- An enum's constants, and its `possible_<type>_values()`, are sorted
+  by Go constant name, case and all, as Go's `Possible<Type>Values`.
 - An integer x-ms-enum is a newtype of Int whose constants are named in
   words (`FIREWALL_POLICY_IDPS_SIGNATURE_SEVERITY_ONE`), as Go's int32.
 - An object definition with no properties, parent or map values is
@@ -109,7 +111,8 @@ response type equal, except armnetwork's `Error` and armkeyvault's
   escapes) and named as Go names it (`client.subscriptionID`,
   `vmName`), `Accept` only when a response has a schema
   (`custom/<module>.toml: accept_always` for an emitter that always
-  sends it), and a path's disambiguating query dropped. An enum of one
+  sends it), a query's spaces as `%20` where Go's emitter writes them so
+  (`query_pct20`), and a path's disambiguating query dropped. An enum of one
   value is a constant when `modelAsString` is false, or unset in a
   module that seals them.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
