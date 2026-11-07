@@ -28,3 +28,6 @@
   trusted by nothing. `govectors_run_test.xo` reads them as Go's
   azidentity ParseCertificates does; the Go program that wrote the
   expected lines read the same files.
+  gitleaks's `pkcs12-file` rule flags every `.pfx`; the allowlist in
+  `scripts/gitleaks-extra.toml` takes `test-*.pfx` in this directory
+  only.
