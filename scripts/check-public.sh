@@ -17,8 +17,12 @@ report() {
   fail=1
 }
 
-# the all-zero GUID is the placeholder tests and docs use
-hits=$(echo "$files" | xargs grep -n -I -i -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' 2>/dev/null | grep -v -E '00000000-0000-0000-0000-000000000000' )
+# the all-zero GUID is the placeholder tests and docs use;
+# 04b07795-8ddb-461a-bbee-02f9e1bf7b46 is Microsoft's public Azure CLI
+# application, the default client of Go azidentity's public credentials
+# (developerSignOnClientID in its source), not an owner's id (allowed by
+# the owner, 2026-11-08)
+hits=$(echo "$files" | xargs grep -n -I -i -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' 2>/dev/null | grep -v -E '00000000-0000-0000-0000-000000000000|04b07795-8ddb-461a-bbee-02f9e1bf7b46' )
 [ -n "$hits" ] && report "GUIDs (subscription, tenant or client ids?)" "$hits"
 
 # storage/azblob/sas/testdata/sas_vectors.json holds SAS signed with
