@@ -180,15 +180,16 @@ refresh token by home account, environment and client, or family `1`).
     into `AuthenticationRequiredError` with its `TokenRequestOptions`
     instead of starting the flow.
 
-Porting 15 to 18 needs decision 0003 amended: its Amendment 2
-(Proposed, 2026-11-07) adds public clients and the account model by
+Decision 0003's Amendment 2 (Accepted by the owner, 2026-11-07) allows
+15 to 18: it adds public clients and the account model by
 hand, as 0003 did the client credentials grant, and gives 16 the
 authorize URL through a caller callback instead of starting a browser.
 
 ### Waiting on a token-cache decision
 
 19. **The persistent `Cache` and `azidentity/cache`** wait on decision
-    [0012](../decisions/0012-persistent-token-cache.md) (Proposed,
+    [0012](../decisions/0012-persistent-token-cache.md) (step a, the
+    optional store, Accepted; step b, the per-OS file, Deferred; owner,
     2026-11-07): MSAL's `ExportReplace` (`Replace` before each lookup,
     `Export` after each token response) over MSAL's shared cache schema,
     stored at `.IdentityService/<name>` (and `<name>.cae`) with a

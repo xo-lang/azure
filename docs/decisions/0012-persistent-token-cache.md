@@ -1,7 +1,9 @@
 # 0012: A persistent token cache (azidentity/cache)
 
-Status: Proposed (drafted by Xo Azure 1 at the Xo Lead's request,
-2026-11-07; waits on the owner).
+Status: Option 1, step a (an optional store on `runtime.TokenCache`
+in MSAL's cache schema) Accepted; step b (the per-OS protected file)
+Deferred (owner, 2026-11-07, through the lead; drafted by Xo Azure 1 at
+the Xo Lead's request).
 
 ## Context
 

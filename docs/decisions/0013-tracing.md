@@ -1,8 +1,9 @@
 # 0013: Distributed tracing (azcore's tracing, then tracing/azotel)
 
-Status: Proposed (drafted by Xo Azure 1, 2026-11-07, when porting
-tracing/azotel v0.4.0 found nothing to adapt; waits on the owner,
-through the lead).
+Status: Step 1 (azcore's tracing layer) Accepted; step 2
+(tracing/azotel over a std span API) Deferred (owner, 2026-11-07,
+through the lead; drafted by Xo Azure 1 when porting tracing/azotel
+v0.4.0 found nothing to adapt).
 
 ## Context
 
