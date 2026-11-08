@@ -131,11 +131,71 @@ grant code.
 
 AzureCLICredential, AzureDeveloperCLICredential and
 AzurePowerShellCredential (owner: not without the owner's word; the CLI
-may come as an opt-in through its own decision record),
-DeviceCodeCredential, InteractiveBrowserCredential,
-UsernamePasswordCredential, AuthenticationRecord,
-AuthenticationRequiredError and the persistent `Cache` (decision 0003:
-no MSAL port, no interactive flows, no shared cache file).
+may come as an opt-in through its own decision record). The user flows
+and the persistent cache below are out by decision 0003 (no MSAL port,
+no interactive flows, no shared cache file); each lists exactly what it
+waits on, read from azidentity v1.15.0 over MSAL Go v1.10.1 and
+azidentity/cache v0.4.0.
+
+### Waiting on MSAL behaviour
+
+Common to all three user flows: a public client (no client secret),
+`AcquireTokenSilent` first with the account of the credential's
+`AuthenticationRecord`, which redeems a cached refresh token
+(`grant_type=refresh_token`, `client_info=1`) before any user step;
+MSAL's account model (`home_account_id` = `<uid>.<utid>` from the
+base64url `client_info` the token response carries, `environment`,
+`realm`, the ID token's `preferred_username`), from which azidentity
+builds the `AuthenticationRecord`; and the per-account cache lookup
+(access token by home account, environment, client, realm and scopes;
+refresh token by home account, environment and client, or family `1`).
+
+15. **DeviceCodeCredential**: `POST <authority>/<tenant>/oauth2/v2.0/devicecode`
+    (`client_id`, `scope` with `openid offline_access profile`), the
+    `UserPrompt` callback with Go's message, then polling the token
+    endpoint with `grant_type=device_code` and `device_code`, waiting
+    `interval` seconds, continuing on `authorization_pending` and
+    `slow_down`, stopping at `expires_in` or on any other error.
+16. **InteractiveBrowserCredential**: a loopback HTTP server on
+    `RedirectURL` or `http://localhost:<free port>`, the authorize URL
+    (`response_type=code`, `code_challenge` with
+    `code_challenge_method=S256`, `prompt=select_account`, `login_hint`,
+    `state`) opened in the system browser, the redirect's `code` and
+    `state` checked, then `grant_type=authorization_code` with
+    `code_verifier`. Starting a browser is an outside-process effect
+    this port has no decision for.
+17. **UsernamePasswordCredential** (deprecated in Go, kept for ROPC):
+    `GET https://<authority host>/common/UserRealm/<user>?api-version=1.0`;
+    `account_type` `Managed` posts `grant_type=password` with
+    `username` and `password`; `Federated` fetches the mex document at
+    `federation_metadata_url`, sends a WS-Trust 1.3 or 2005 SOAP
+    request to its username endpoint, and exchanges the SAML assertion
+    with `grant_type=urn:ietf:params:oauth:grant-type:saml1_1-bearer`
+    or `saml2-bearer`.
+18. **AuthenticationRecord and AuthenticationRequiredError**: the record
+    is MSAL's account (item 15's common part) serialized as Go's JSON
+    (`authority`, `clientId`, `homeAccountId`, `tenantId`, `username`,
+    `version` `1.0`); `Authenticate()` runs the flow once and returns
+    it. `DisableAutomaticAuthentication` turns a failed silent request
+    into `AuthenticationRequiredError` with its `TokenRequestOptions`
+    instead of starting the flow.
+
+Porting 15 to 18 needs decision 0003 amended (public clients and the
+account model by hand, as 0003 did the client credentials grant), and
+for 16 a decision on starting the browser.
+
+### Waiting on a token-cache decision
+
+19. **The persistent `Cache` and `azidentity/cache`** wait on decision
+    [0012](../decisions/0012-persistent-token-cache.md) (Proposed,
+    2026-11-07): MSAL's `ExportReplace` (`Replace` before each lookup,
+    `Export` after each token response) over MSAL's shared cache schema,
+    stored at `.IdentityService/<name>` (and `<name>.cae`) with a
+    `.lockfile`, in the macOS keychain, under Windows DPAPI, or as
+    A128CBC-HS256 JWE with its key in the Linux user keyring. Its first
+    step (an optional store on `runtime.TokenCache`, access tokens only)
+    does not need 15 to 18; refresh tokens and accounts surviving a
+    restart do.
 
 ## Already the same as Go (checked by the same program)
 

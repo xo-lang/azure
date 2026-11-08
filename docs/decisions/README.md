@@ -16,3 +16,4 @@ deleted.
 - [0009](0009-token-credential-effects.md): an effect parameter on TokenCredential (decision 0534's pattern), so Azure Arc's managed identity can read its key file; needs the native backends to dispatch an effect-generic struct's method through an interface (Accepted; the native support is on xo main as fb952a75a)
 - [0010](0010-float32.md): Go's float32 fields and parameters are Float32, written as Go writes a float32; int32 stays Int (Accepted)
 - [0011](0011-refresh-from-go.md): every ARM module is generated and refreshed from Go's releases (rows derived from Go, vectors from Go's source, scripts/refresh.sh); hand-written code only in the core Go hand-writes too (Accepted)
+- [0012](0012-persistent-token-cache.md): a persistent token cache (azidentity/cache): an optional store on runtime.TokenCache in MSAL's cache schema, then Go's per-OS protected file; waits on std AES-CBC, keychain, DPAPI and keyctl (Proposed)
