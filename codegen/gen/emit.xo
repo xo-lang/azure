@@ -342,7 +342,8 @@ pub fn emit_models(p: Package, api: Api) -> File {
 /// options hold.
 fn split_params(op: Op) -> (List[Param], List[Param]) {
   let mine = op.params.filter(fn(x: Param) -> Bool { !x.client && x.constant.is_none() })
-  (mine.filter(fn(x: Param) -> Bool { x.required }), mine.filter(fn(x: Param) -> Bool { !x.required }))
+  // a parameter group's members, optional ones too, are its struct's
+  (mine.filter(fn(x: Param) -> Bool { x.required || x.group != "" }), mine.filter(fn(x: Param) -> Bool { !x.required && x.group == "" }))
 }
 
 /// Go's client name: `<Group>Client`, or `Client` for the group named
@@ -473,7 +474,7 @@ fn emit_groups(api: Api, op: Op) -> Str {
     s = s + "\n/// ${x.group_type}: a parameter group, Go's ${x.group_type}.\npub struct ${x.group_type} {\n"
     for f in op.params.filter(fn(q: Param) -> Bool { q.group_type == x.group_type }) {
       let gf = f.go_name.cut(".").map(fn(t: (Str, Str)) -> Str { t.1 }) ?? f.wire
-      s = s + doc("  ", f.doc) + "  pub ${f.name} as \"${esc(gf)}\": ${f.typ}\n"
+      s = s + doc("  ", f.doc) + (if f.required { "  pub ${f.name} as \"${esc(gf)}\": ${f.typ}\n" } else { "  pub ${f.name} as \"${esc(gf)},omitempty\": ${f.typ}? = None\n" })
     }
     s = s + "} derive Json\n"
   }
@@ -624,6 +625,8 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
   }
   for x in op.params.filter(fn(x: Param) -> Bool { x.loc == "query" || x.loc == "header" }) {
     let raw = x.loc == "query" && x.skip_encoding
+    // an optional value: the options', or its parameter group's
+    let opt_src = if x.group != "" { "${x.group}.${x.name}" } else { "options.${x.name}" }
     let target = if raw { "raw_q.push(\"${esc(x.wire)}=\" + " } else if x.loc == "query" { "q.add(\"${esc(x.wire)}\", " } else { "headers.push((\"${esc(x.wire)}\", " }
     let close = if x.loc == "query" { ")" } else { "))" }
     let elem = if x.typ.starts_with("List[") { x.typ[5..x.typ.len() - 1] } else { "Str" }
@@ -632,17 +635,17 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       if x.required {
         s = s + "  for qv in ${x.name} {\n    q.add(\"${esc(x.wire)}\", ${one})\n  }\n"
       } else {
-        s = s + "  if let Some(v) = options.${x.name} {\n    for qv in v {\n      q.add(\"${esc(x.wire)}\", ${one})\n    }\n  }\n"
+        s = s + "  if let Some(v) = ${opt_src} {\n    for qv in v {\n      q.add(\"${esc(x.wire)}\", ${one})\n    }\n  }\n"
       }
     } else if let Some(k) = x.constant {
       s = s + "  ${target}${k}${close}\n"
     } else if let Some(k) = x.opt_constant {
       // Go sends the constant whenever the option is set
-      s = s + "  if options.${x.name}.is_some() {\n    ${target}${k}${close}\n  }\n"
+      s = s + "  if ${opt_src}.is_some() {\n    ${target}${k}${close}\n  }\n"
     } else if x.required {
-      s = s + "  ${target}${param_text(api, x, x.name)}${close}\n"
+      s = s + "  ${target}${param_text(api, x, if x.group != "" { "${x.group}.${x.name}" } else { x.name })}${close}\n"
     } else {
-      s = s + "  if let Some(v) = options.${x.name} {\n    ${target}${param_text(api, x, "v")}${close}\n  }\n"
+      s = s + "  if let Some(v) = ${opt_src} {\n    ${target}${param_text(api, x, "v")}${close}\n  }\n"
     }
   }
   var body = "b\"\""
