@@ -29,6 +29,20 @@ pub struct Renames {
   /// parameter group struct. By operationId, lower case: (the
   /// parameter's name, Go's type name, the model's path properties).
   pub param_groups: Map[Str, List[(Str, Str, List[Str])]] = {}
+  /// `@header("x-ms-request-id") xMsRequestId: string`: a response
+  /// header's wire name (lower case) to the property's name, which Go's
+  /// emitter names its field after (armstoragesync's XMSRequestID). The
+  /// first declaration of a wire name wins.
+  pub header_props: Map[Str, Str] = {}
+  /// `@@Legacy.nextLinkVerb(Iface.op, "POST")`: the verb a pageable
+  /// operation's next link is sent with (armpanngfw's listAppIds), by
+  /// operationId, lower case.
+  pub next_verbs: Map[Str, Str] = {}
+  /// Operations whose response declares `@header contentType` (armpeering's
+  /// checkServiceProviderAvailability): Go's response carries a
+  /// ContentType field the OpenAPI file does not show. By operationId,
+  /// lower case.
+  pub content_type_ops: List[Str] = []
   /// model to Go's name
   pub models: Map[Str, Str] = {}
   /// `Model.property` to Go's field name
@@ -422,7 +436,11 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let negs = (m[4] ?? "").split(",").all(fn(x: Str) -> Bool { x.trim().starts_with("!") })
       if segs.len() >= 2 && negs {
         let dest = m[2] ?? ""
-        let group = if dest != "" { dest.trim_suffix("Client") } else { (m[3] ?? "").split(".").last() ?? "" }
+        // to a namespace (`Microsoft.RecoveryServices`): no group, the
+        // operationId is the operation's name alone
+        // (armrecoveryservicesbackup's BMSPrepareDataMove)
+        let to_ns = dest == "" && ((m[3] ?? "").contains(".") || namespaces.contains(m[3] ?? ""))
+        let group = if dest != "" { dest.trim_suffix("Client") } else if to_ns { "" } else { (m[3] ?? "").split(".").last() ?? "" }
         moved["${segs[segs.len() - 2]}.${segs[segs.len() - 1]}".to_lower()] = group
       }
     }
@@ -791,7 +809,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       // unscoped `@@clientName(Iface.op, "Name")` renames its part
       // (armnetwork's PrivateDnsZoneGroups_List)
       let opn = emitted.get("${iface}.${op}") ?? neg_named.get("${iface}.${op}") ?? op
-      let id = ids.get("${iface}.${op}".to_lower()) ?? "${moved.get("${iface}.${op}".to_lower()) ?? iface}_${opn[0..1].to_upper()}${opn[1..opn.len()]}"
+      let id = ids.get("${iface}.${op}".to_lower()) ?? moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, opn)
       for t in texts {
         let order = override_path_order(t, m[2] ?? "")
         if !order.is_empty() {
@@ -816,6 +834,73 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
             r.method_params.push("${id.to_lower()}#${c[1] ?? ""}")
           }
         }
+      }
+    }
+  }
+  let verb_re = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?(?:Legacy\\.)?nextLinkVerb\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"([A-Za-z]+)\"\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
+  for text in texts {
+    for whole in verb_re.find_all(text) {
+      let c = verb_re.captures(whole) ?? continue
+      if (c[3] ?? "") != "" && !for_go(c[3] ?? "") {
+        continue
+      }
+      let segs = strip_namespace(c[1] ?? "", namespaces).split(".")
+      if segs.len() < 2 {
+        continue
+      }
+      let iface = segs[segs.len() - 2]
+      let op = segs[segs.len() - 1]
+      let opn = emitted.get("${iface}.${op}") ?? neg_named.get("${iface}.${op}") ?? op
+      let id = ids.get("${iface}.${op}".to_lower()) ?? moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, opn)
+      r.next_verbs[id.to_lower()] = (c[2] ?? "GET").to_upper()
+    }
+  }
+  let op_decl = regexp.compile("(?:^|\\n)[ \\t]*(?:op[ \\t]+)?([A-Za-z0-9_]+)[ \\t]+is[ \\t]+[A-Za-z0-9_.]+<") ?? e => return Err(e.display())
+  for text in texts {
+    for whole in op_decl.find_all(text) {
+      let c = op_decl.captures(whole) ?? continue
+      let at = text.find(whole) ?? continue
+      let rest = text[at + whole.len()..text.len()]
+      let decl = rest[0..(rest.find(">;") ?? 0)]
+      if !decl.contains("@header contentType") {
+        continue
+      }
+      let op = c[1] ?? ""
+      // in an interface (one not closed before it), or the namespace's own
+      let before = text[0..at]
+      let after_iface = before.split("\ninterface ").last() ?? ""
+      let iface = if before.contains("\ninterface ") && !after_iface.contains("\n}") { after_iface.split(" ").get(0) ?? "" } else { "" }
+      let opn = if iface == "" { op } else { emitted.get("${iface}.${op}") ?? neg_named.get("${iface}.${op}") ?? op }
+      let id = if iface == "" { moved_id("", op) } else { ids.get("${iface}.${op}".to_lower()) ?? moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, opn) }
+      r.content_type_ops.push(id.to_lower())
+    }
+  }
+  let header_re = regexp.compile("@header\\(\\s*\"([^\"]+)\"\\s*\\)((?:\\s*@[A-Za-z.]+(?:\\(\"[^\"]*\"\\))?)*)\\s*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
+  for text in texts {
+    // each match's place, after the one before it (two declarations of
+    // a header can match the same text)
+    var cursor = 0
+    for whole in header_re.find_all(text) {
+      let c = header_re.captures(whole) ?? continue
+      let at = cursor + (text[cursor..text.len()].find(whole) ?? continue)
+      cursor = at + whole.len()
+      let wire = (c[1] ?? "").to_lower()
+      // the model that declares it, for a `@@clientName(Model.prop,
+      // "name", "go")` (armpostgresqlflexibleservers'
+      // RequestIdResponseHeader.requestId is xMsRequestId)
+      // (a `model X {` or an `alias X = {`, the nearer)
+      let after_model = text[0..at].split("model ").last() ?? ""
+      let after_alias = text[0..at].split("alias ").last() ?? ""
+      let tail = if after_alias.len() < after_model.len() { after_alias } else { after_model }
+      let model = tail.split(" ").get(0) ?? ""
+      let declared = c[3] ?? ""
+      let renamed = r.fields.get("${model}.${declared}")
+      let prop = renamed ?? declared
+      // the first declaration of a wire name, or a renamed one over it
+      // (armpostgresqlflexibleservers' CustomErrorResponse.requestId and
+      // RequestIdResponseHeader.requestId, which Go names xMsRequestId)
+      if wire != "" && prop != "" && (!r.header_props.contains(wire) || renamed.is_some()) {
+        r.header_props[wire] = prop
       }
     }
   }
@@ -851,6 +936,13 @@ fn model_props(text: Str, name: Str) -> List[Str] {
     out.push(c[1] ?? "")
   }
   out
+}
+
+/// An operation's operationId by its group (`""` for one a
+/// `@@clientLocation` put in a namespace) and name.
+fn moved_id(group: Str, op: Str) -> Str {
+  let n = "${op[0..1].to_upper()}${op[1..op.len()]}"
+  if group == "" { n } else { "${group}_${n}" }
 }
 
 /// The parameter list of `op name(...)` in `text` (None when `text` has

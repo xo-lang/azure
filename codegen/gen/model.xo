@@ -107,8 +107,13 @@ pub struct Op {
   pub resp: Str? = None
   pub pageable: Bool = false
   pub next_link: Str? = None
+  /// The verb the next link is sent with (TypeSpec's
+  /// `@@Legacy.nextLinkVerb`; armpanngfw's POST).
+  pub next_verb: Str = "GET"
   pub item_name: Str = "value"
   pub lro: Bool = false
+  /// `resp` is the final-state-schema only: no response has a body.
+  pub final_only: Bool = false
   /// Whether a response has a body schema (Go sends Accept then).
   pub accept: Bool = true
   /// A TypeSpec ARM success response of `ArmResponse<ErrorResponse>`
@@ -238,6 +243,11 @@ pub struct Custom {
   /// Go's module has no MarshalJSON (codegen/gorows'
   /// `struct_order_json`): models encode in Go's struct order.
   pub struct_order_json: Bool = false
+  /// TypeSpec's `@@Legacy.nextLinkVerb` (spec.Renames' next_verbs).
+  pub next_verbs: Map[Str, Str] = {}
+  /// TypeSpec responses with `@header contentType` (spec.Renames'
+  /// content_type_ops).
+  pub content_type_ops: List[Str] = []
   /// Go's autorest module keeps a PUT's or PATCH's optional body in the
   /// options (older autorest.go: armdatadog 1.3.0).
   pub put_body_in_options: Bool = false
@@ -1460,11 +1470,25 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           // typespec-go reads a binary body's media type into ContentType
           // (the tsp's implicit content-type header), absent from the
           // OpenAPI headers (azbatch's GetNodeFile)
-          if b.custom.tsp && binary_resp && !resp_headers.any(fn(x: (Str, Str)) -> Bool { x.0.to_lower() == "content-type" }) {
+          // and a response that declares `@header contentType` (armpeering)
+          if b.custom.tsp && (binary_resp || b.custom.content_type_ops.contains(id.to_lower())) && !resp_headers.any(fn(x: (Str, Str)) -> Bool { x.0.to_lower() == "content-type" }) {
             resp_headers.push(("content-type", ""))
           }
           let pg = o.get("x-ms-pageable")
           let lro = bool_of(o.get("x-ms-long-running-operation"))
+          // a long-running operation whose responses have no body: its
+          // result is the final-state-schema (TypeSpec's
+          // ArmAcceptedLroResponse with a FinalResult; Go's
+          // armpostgresqlflexibleservers DatabasesClientCreateResponse is
+          // a Database), with no Accept on the first request
+          var final_only = false
+          if lro && resp.is_none() {
+            let fss = str_of(o.get("x-ms-long-running-operation-options").and_then(fn(x: json.Value) -> json.Value? { x.get("final-state-schema") }))
+            if fss.contains("#/definitions/") {
+              resp = Some(b.type_of(file, json.Value.Object([("\$ref", json.Value.Str(fss))]), "${group}${name}Response"))
+              final_only = true
+            }
+          }
           let next = match pg.and_then(fn(x: json.Value) -> json.Value? { x.get("nextLinkName") }) {
             Some(json.Value.Str(s)) => Some(s)
             _ => None
@@ -1479,6 +1503,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
           ops.push(Op{
             group: group,
             name: name,
+            next_verb: b.custom.next_verbs.get(id.to_lower()) ?? "GET",
             method: method.to_upper(),
             path: rg_routed(b.custom, match b.custom.action_routes.get(id.to_lower()) {
               Some((old, new)) if path.ends_with("/${old}") => path[0..path.len() - old.len()] + new
@@ -1491,6 +1516,7 @@ pub fn (var b: Builder) build(inputs: List[Str]) -> Api {
             next_link: next,
             item_name: if item_name == "" { "value" } else { item_name },
             lro: lro,
+            final_only: final_only,
             paged_lro: pg.is_some() && lro,
             final_state: fsv,
             accept: accept,
