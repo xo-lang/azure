@@ -17,3 +17,4 @@ deleted.
 - [0010](0010-float32.md): Go's float32 fields and parameters are Float32, written as Go writes a float32; int32 stays Int (Accepted)
 - [0011](0011-refresh-from-go.md): every ARM module is generated and refreshed from Go's releases (rows derived from Go, vectors from Go's source, scripts/refresh.sh); hand-written code only in the core Go hand-writes too (Accepted)
 - [0012](0012-persistent-token-cache.md): a persistent token cache (azidentity/cache): an optional store on runtime.TokenCache in MSAL's cache schema, then Go's per-OS protected file; waits on std AES-CBC, keychain, DPAPI and keyctl (Proposed)
+- [0013](0013-tracing.md): distributed tracing: azcore's tracing layer in Go's shape (provider, spans, the HTTP trace policy, a span per client call, the active span carried in Request.values), then tracing/azotel over an OpenTelemetry span API asked of std (Proposed)
