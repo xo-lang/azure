@@ -1,0 +1,193 @@
+// Replays the Go program's InteractiveBrowserCredential cases
+// (interactivevectors_test.xo) against the device code tests' fake token
+// host. The browser is the test's open_url: it logs the sign-in URL and
+// sends the redirect to the credential's listener, through the fake
+// network, as the Go program's hook does.
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+
+/// What the browser saw: the values to mask (the state, the PKCE
+/// challenge, the port) and its answer, logged before the next result.
+struct IbSeen {
+  marks: Mutex[List[(Str, Str)]]
+  line: Mutex[Str]
+}
+
+fn ib_seen() -> IbSeen {
+  IbSeen{marks: Mutex[List[(Str, Str)]].new([]), line: Mutex[Str].new("")}
+}
+
+fn ib_mask(seen: IbSeen, s: Str) -> Str {
+  seen.marks.with_read(fn(ms: List[(Str, Str)]) -> Str {
+    var out = s
+    for (v, m) in ms {
+      if v != "" {
+        out = out.replace(v, m)
+      }
+    }
+    out
+  })
+}
+
+/// Go's %q of the pages' text.
+fn go_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\t", "\\t")}\""
+}
+
+/// The test's browser: `method` (GET or POST) with the form `query`,
+/// STATE the request's state.
+fn ib_browser(f: PcFake, seen: IbSeen, net: Net, method: Str, query: Str) -> fn(Str) -> () ! Str uses net.dial {
+  fn(u: Str) -> () ! Str uses net.dial {
+    let (_, qs) = u.cut("?") ?? (u, "")
+    let q = url.parse_query(qs) ?? e => return Err(e.display())
+    let state = q.get("state") ?? ""
+    let redirect = q.get("redirect_uri") ?? ""
+    let port = redirect[(redirect.rfind(":") ?? -1) + 1..redirect.len()]
+    seen.marks.with(fn(var ms: List[(Str, Str)]) { ms = [(state, "<state>"), (q.get("code_challenge") ?? "", "<challenge>"), (port, "<port>")] })
+    pc_note(f, "${pc_sec(f)}: OPEN ${ib_mask(seen, u)}")
+    let form = query.replace("STATE", state)
+    let req = if method == "GET" {
+      http.new_request("GET", "${redirect}/?${form}")
+    } else {
+      http.new_request("POST", redirect, {"Content-Type": "application/x-www-form-urlencoded"}, form.bytes())
+    }
+    let line = match http.client(net, timeout: 5s).send(req) {
+      Ok(r) => "BROWSER ${r.status} ${r.header("Content-Type") ?? ""} ${r.body.len()} bytes ${go_q(ib_mask(seen, r.body.to_str_lossy()))}"
+      Err(e) => "BROWSER error ${e.display()}"
+    }
+    seen.line.with(fn(var l: Str) { l = line })
+    Ok(())
+  }
+}
+
+fn ib_show(f: PcFake, seen: IbSeen, label: Str, r: Result[azcore.AccessToken, azcore.AuthErr]) {
+  let line = seen.line.with(fn(var l: Str) -> Str {
+    let x = l
+    l = ""
+    x
+  })
+  if line != "" {
+    pc_note(f, "${pc_sec(f)}: ${line}")
+  }
+  match r {
+    Ok(t) => pc_note(f, "${pc_sec(f)}: ${label}: token ${t.token.reveal()}")
+    Err(e) => pc_note(f, "${pc_sec(f)}: ${label}: error: ${ib_mask(seen, e.display()).replace("\n", "\n| ")}")
+  }
+}
+
+fn ib_opts() -> InteractiveBrowserCredentialOptions {
+  InteractiveBrowserCredentialOptions{opts: gv_opts(nodisc: true), tenant_id: "tenant-a", client_id: "client-1"}
+}
+
+/// The logged lines with the browser's values and the PKCE verifier
+/// masked, against the Go program's.
+fn ib_compare(f: PcFake, seen: IbSeen, sections: List[Str]) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l }).map(fn(l: Str) -> Str {
+    if !l.starts_with("  B ") || !l.contains("code_verifier=") {
+      return l
+    }
+    let body = l.trim_prefix("  B ").split("&").map(fn(kv: Str) -> Str {
+      if kv.starts_with("code_verifier=") { "code_verifier=<verifier>" } else if kv.starts_with("redirect_uri=") { "redirect_uri=http%3A%2F%2Flocalhost%3A<port>" } else { kv }
+    }).join("&")
+    "  B ${body}"
+  })
+  let want = pc_only(GO_IB_LINES, sections)
+  for i in 0..got.len().min(want.len()) {
+    expect((i, got[i])) == (i, want[i])
+  }
+  expect(got.len()) == want.len()
+}
+
+test "InteractiveBrowserCredential signs in, caches and refreshes as MSAL Go" {
+  let f = pc_serve(os.net)
+  let seen = ib_seen()
+  pc_start(f, "ib1")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token authorization_code", [(200, pc_token("at-i1", "rt-i1", "${PC_S1} openid profile offline_access"))])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [(200, pc_token("at-i2", "rt-i2", "${PC_S2} openid profile offline_access"))])
+  let c = new_interactive_browser_credential(ib_browser(f, seen, os.net, "POST", "code=code-1&state=STATE"), os.net, os.clock, os.rand, ib_opts() with {login_hint: "user@example.com"})?
+  ib_show(f, seen, "first", c.get_token(tro([PC_S1])))
+  ib_show(f, seen, "cached", c.get_token(tro([PC_S1])))
+  ib_show(f, seen, "other scope", c.get_token(tro([PC_S2])))
+
+  pc_start(f, "ib2")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token authorization_code", [(200, pc_token("at-i3", "rt-i3", "${PC_S1} openid profile offline_access"))])
+  let c2 = new_interactive_browser_credential(ib_browser(f, seen, os.net, "POST", "code=code-3&state=STATE"), os.net, os.clock, os.rand, ib_opts())?
+  match c2.authenticate() {
+    Ok(_) => pc_note(f, "ib2: authenticate no scope: err=<nil>")
+    Err(e) => pc_note(f, "ib2: authenticate no scope: err=${e.display()}")
+  }
+  let rec = c2.authenticate(tro([PC_S1]))
+  ib_show(f, seen, "authenticate", match rec {
+    Ok(_) => Ok(azcore.AccessToken{token: Secret.new(""), expires_on: Time.from_unix(0)})
+    Err(e) => Err(e)
+  })
+  pc_note(f, "ib2: record=${c2.record().encode()}")
+  ib_show(f, seen, "after authenticate", c2.get_token(tro([PC_S1])))
+
+  pc_start(f, "ib3")
+  let c3 = new_interactive_browser_credential(ib_browser(f, seen, os.net, "POST", ""), os.net, os.clock, os.rand, ib_opts() with {disable_automatic_authentication: true})?
+  let r3 = c3.get_token(tro([PC_S1], claims: "{}"))
+  ib_show(f, seen, "disabled", r3)
+  if let Err(e) = r3 {
+    expect(e.unavailable) == true
+    expect(e.required.map(fn(o: azcore.TokenRequestOptions) -> Str { o.claims })) == Some("{}")
+  }
+  ib_compare(f, seen, ["ib1", "ib2", "ib3"])
+}
+
+test "InteractiveBrowserCredential's redirect errors are MSAL Go's" {
+  let f = pc_serve(os.net)
+  let seen = ib_seen()
+  let cases = [
+    ("ib4", "state mismatch", "POST", "code=code-1&state=wrong", ""),
+    ("ib5", "denied", "POST", "error=access_denied&error_description=the+user+said+%3Cno%3E+%26+%22x%27&state=STATE", ""),
+    ("ib6", "bad code", "POST", "code=code-2&state=STATE", "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS70000: bad code\",\"error_codes\":[70000]}"),
+    ("ib7", "get", "GET", "code=code-1&state=STATE", ""),
+    ("ib8", "no state", "POST", "code=code-1", ""),
+    ("ib9", "no code", "POST", "state=STATE", ""),
+  ]
+  for (sec, label, method, query, bad) in cases {
+    pc_start(f, sec)
+    if bad != "" {
+      pc_on(f, "POST /tenant-a/oauth2/v2.0/token authorization_code", [(400, bad)])
+    }
+    let c = new_interactive_browser_credential(ib_browser(f, seen, os.net, method, query), os.net, os.clock, os.rand, ib_opts())?
+    ib_show(f, seen, label, c.get_token(tro([PC_S1])))
+  }
+
+  pc_start(f, "ib10")
+  let refuse = fn(u: Str) -> () ! Str { Err("no browser here") }
+  let c10 = new_interactive_browser_credential(refuse, os.net, os.clock, os.rand, ib_opts())?
+  ib_show(f, seen, "open fails", c10.get_token(tro([PC_S1])))
+
+  pc_start(f, "ib11")
+  let c11 = new_interactive_browser_credential(refuse, os.net, os.clock, os.rand, ib_opts() with {redirect_url: "http://localhost:abc"})?
+  ib_show(f, seen, "bad redirect", c11.get_token(tro([PC_S1])))
+  ib_compare(f, seen, ["ib4", "ib5", "ib6", "ib7", "ib8", "ib9", "ib10", "ib11"])
+}
+
+test "InteractiveBrowserCredential's listener skips a silent connection and takes the given port" {
+  let f = pc_serve(os.net)
+  let seen = ib_seen()
+  pc_start(f, "ibx")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token authorization_code", [(200, pc_token("at-x", "rt-x", "${PC_S1} openid profile offline_access"))])
+  // a port the fake network has free
+  let probe = os.net.listen("localhost:0")?
+  let addr = probe.addr()
+  probe.close()
+  let port = addr[(addr.rfind(":") ?? -1) + 1..addr.len()]
+  // a browser that first opens a connection and closes it unused
+  let net = os.net
+  let spare = fn(u: Str) -> () ! Str uses net.dial {
+    let c = net.dial("localhost:${port}") ?? e => return Err(e.display())
+    c.close()
+    ib_browser(f, seen, net, "POST", "code=code-x&state=STATE")(u)
+  }
+  let c = new_interactive_browser_credential(spare, os.net, os.clock, os.rand, ib_opts() with {redirect_url: "http://localhost:${port}"})?
+  expect(c.get_token(tro([PC_S1])).map(fn(t: azcore.AccessToken) -> Str { t.token.reveal() })) == Ok("at-x")
+  let opened = f.log.with_read(fn(l: List[Str]) -> List[Str] { l.filter(fn(x: Str) -> Bool { x.starts_with("ibx: OPEN ") }) })
+  expect(opened.len()) == 1
+  expect(seen.marks.with_read(fn(ms: List[(Str, Str)]) -> Bool { ms.contains((port, "<port>")) })) == true
+}

@@ -1,0 +1,312 @@
+// InteractiveBrowserCredential, by hand (decision 0003, Amendment 2): the
+// authorization code flow with PKCE that azidentity v1.15.0 runs through
+// MSAL Go v1.10.1's AcquireTokenInteractive (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). A listener on localhost takes the browser's
+// redirect, which the service sends as a form POST (response_mode
+// form_post), as MSAL's local.Server does.
+//
+// Unlike Go's, the credential never opens a browser itself: the caller's
+// `open_url` does, so starting a process is the caller's effect `fx`.
+
+use std/base64
+use std/crypto
+use std/html
+use std/url
+use std/uuid
+use github.com/xo-lang/azure/azcore
+
+/// InteractiveBrowserCredential's options (Go's
+/// InteractiveBrowserCredentialOptions).
+pub struct InteractiveBrowserCredentialOptions {
+  pub opts: Options = Options{}
+  pub tenant_id: Str = ORGANIZATIONS_TENANT
+  pub client_id: Str = DEVELOPER_SIGN_ON_CLIENT_ID
+  /// An account signed in before, to start from silently.
+  pub authentication_record: AuthenticationRecord = AuthenticationRecord{}
+  /// When the silent request fails, return an AuthenticationRequired
+  /// error (`AuthErr.required`) instead of opening the browser; call
+  /// `authenticate` to open it.
+  pub disable_automatic_authentication: Bool = false
+  /// The user to sign in, filled in on the sign-in page.
+  pub login_hint: Str = ""
+  /// The app's registered redirect URL, `http://localhost:<port>`: the
+  /// listener takes that port. Empty: a free port, with the redirect URL
+  /// `http://localhost` the app must have registered.
+  pub redirect_url: Str = ""
+}
+
+/// Signs a user in with the system browser (Go's
+/// InteractiveBrowserCredential): `open_url` shows the sign-in page's URL
+/// in a browser, and the credential waits on localhost for the redirect
+/// that carries the authorization code. Like Go's without a context
+/// deadline, the wait has no limit; a caller that wants one cancels the
+/// task.
+///
+/// `open_url` is required: a program passes one that runs the system's
+/// opener with the URL (`open` on macOS, `xdg-open` on Linux, `rundll32
+/// url.dll,FileProtocolHandler` on Windows) through its Proc; see
+/// `system_browser` in interactive_example_test.xo.
+pub struct InteractiveBrowserCredential[fx: Effects] {
+  p: Public
+  net: Net
+  open_url: fn(Str) -> () ! Str uses (fx)
+  login_hint: Str
+  redirect_url: Str
+}
+
+pub fn new_interactive_browser_credential[fx: Effects](open_url: fn(Str) -> () ! Str uses (fx), net: Net, clock: Clock, rand: Rand, o: InteractiveBrowserCredentialOptions = InteractiveBrowserCredentialOptions{}) -> InteractiveBrowserCredential[fx] ! azcore.AuthErr {
+  let p = public_client("InteractiveBrowserCredential", o.tenant_id, o.client_id, net, clock, rand, o.opts, o.authentication_record, o.disable_automatic_authentication)?
+  Ok(InteractiveBrowserCredential{p: p, net: net, open_url: open_url, login_hint: o.login_hint, redirect_url: o.redirect_url})
+}
+
+/// A token: silently when it can, else by signing in with the browser
+/// (an AuthenticationRequired error instead, with automatic
+/// authentication off).
+pub fn (b: InteractiveBrowserCredential[fx]) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, net.listen, clock, rand, fx) {
+  let tenant = b.p.check(opts)?
+  if let Ok(t) = b.p.silent(tenant, opts) {
+    return Ok(t)
+  }
+  if b.p.disable_auto {
+    return Err(b.p.required(opts))
+  }
+  b.flow(opts)
+}
+
+/// Signs the user in once and gives the account (Go's Authenticate): no
+/// silent request first. With no scopes, the cloud's Resource Manager
+/// scope.
+pub fn (b: InteractiveBrowserCredential[fx]) authenticate(opts: azcore.TokenRequestOptions = azcore.TokenRequestOptions{scopes: []}) -> AuthenticationRecord ! azcore.AuthErr uses (net.dial, net.listen, clock, rand, fx) {
+  let o = b.p.auth_opts(opts)?
+  b.flow(o)?
+  Ok(b.p.record())
+}
+
+/// The account signed in last, as an AuthenticationRecord.
+pub fn (b: InteractiveBrowserCredential[fx]) record() -> AuthenticationRecord {
+  b.p.record()
+}
+
+/// The port of a redirect URL (MSAL's parsePort): 0 for none.
+fn redirect_port(u: Str) -> Int ! Str {
+  if u == "" {
+    return Ok(0)
+  }
+  let (_, rest) = u.cut("://") ?? ("", u)
+  let host = rest.cut("/").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? rest
+  let hp = if host.starts_with("[") { host.cut("]").map(fn(p: (Str, Str)) -> Str { p.1 }) ?? "" } else { host }
+  let (_, port) = hp.cut(":") ?? return Ok(0)
+  if port == "" {
+    return Ok(0)
+  }
+  Ok(Int.parse(port).or_err("parse ${json_quote(u)}: invalid port ${json_quote(":${port}")} after host")?)
+}
+
+/// The sign-in flow (MSAL's AcquireTokenInteractive): a PKCE verifier,
+/// the listener, the authorization URL to `open_url`, the redirect's
+/// code, then the authorization code grant.
+fn (b: InteractiveBrowserCredential[fx]) flow(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, net.listen, clock, rand, fx) {
+  let p = b.p
+  let name = p.c.name
+  let tenant = p.c.tenant_for(opts)?
+  let verifier = crypto.token(p.c.rand, 32)
+  let challenge = base64.encode(crypto.sha256(verifier.bytes()), base64.Base64.RawUrl)
+  let port = redirect_port(b.redirect_url) ?? e => return Err(failed_text(name, e))
+  let state = uuid.v4(p.c.rand).display()
+  // MSAL's local.New: the given port, else a free one (ten tries)
+  var tries = if port > 0 { 1 } else { 10 }
+  var listened: Result[Listener, NetErr] = b.net.listen("localhost:${port}")
+  while listened.is_err() && tries > 1 {
+    tries -= 1
+    listened = b.net.listen("localhost:${port}")
+  }
+  let l = listened ?? e => return Err(failed_text(name, e.display()))
+  let bound = l.addr()
+  let redirect = "http://localhost:${bound[(bound.rfind(":") ?? -1) + 1..bound.len()]}"
+  let auth_ep = p.c.authorize_endpoint(tenant, opts.enable_cae) ?? e => {
+    l.close()
+    return Err(e)
+  }
+  let claims = merge_claims(opts.claims, opts.enable_cae) ?? e => {
+    l.close()
+    return Err(azcore.AuthErr{credential: name, msg: e})
+  }
+  var q = [
+    ("client_id", p.c.client_id),
+    ("response_type", "code"),
+    ("response_mode", "form_post"),
+    ("redirect_uri", redirect),
+    ("scope", (opts.scopes + MSAL_SCOPES).join(" ")),
+    ("state", state),
+    ("code_challenge", challenge),
+    ("code_challenge_method", "S256"),
+    ("prompt", "select_account"),
+  ]
+  if claims != "" {
+    q.push(("claims", claims))
+  }
+  if b.login_hint != "" {
+    q.push(("login_hint", b.login_hint))
+  }
+  let base = auth_ep.cut("?").map(fn(x: (Str, Str)) -> Str { x.0 }) ?? auth_ep
+  let auth_url = "${base}?${q.sort_by(fn(f: (Str, Str)) -> Str { f.0 }).map(fn(f: (Str, Str)) -> Str { "${url.query_escape(f.0)}=${url.query_escape(f.1)}" }).join("&")}"
+  let clock = p.c.clock
+  var opened: Result[(), Str] = Ok(())
+  var got: Result[Str, Str] = Err("")
+  scope s {
+    let t = s.spawn(fn() -> Str ! Str { loopback(l, state, clock) })
+    opened = (b.open_url)(auth_url)
+    if opened.is_err() {
+      l.close()
+    }
+    got = t.await
+    l.close()
+  }
+  if let Err(e) = opened {
+    return Err(failed_text(name, e))
+  }
+  let code = got ?? e => return Err(failed_text(name, e))
+  let token_ep = p.c.endpoint(tenant, opts.enable_cae)?
+  let r = p.post_token(tenant, opts, [("code", code), ("code_verifier", verifier), ("redirect_uri", redirect)], "authorization_code")?
+  if r.status != 200 {
+    return Err(auth_failed(name, "POST", p.c.target(token_ep), r))
+  }
+  p.accept(tenant, opts, r)
+}
+
+const OK_PAGE: Str = "\n<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"utf-8\" />\n    <title>Authentication Complete</title>\n</head>\n<body>\n    <p>Authentication complete. You can return to the application. Feel free to close this browser tab.</p>\n    <p><strong>For your security:</strong> Do not share the contents of this page, the address bar, or take screenshots.</p>\n</body>\n</html>\n"
+
+fn fail_page(err: Str, desc: Str) -> Str {
+  "\n<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"utf-8\" />\n    <title>Authentication Failed</title>\n</head>\n<body>\n\t<p>Authentication failed. You can return to the application. Feel free to close this browser tab.</p>\n\t<p>Error details: error ${err} error_description: ${desc}</p>\n</body>\n</html>\n"
+}
+
+const GET_PAGE: Str = "\n<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"utf-8\" />\n    <title>Authentication Failed</title>\n</head>\n<body>\n    <p>Authentication failed. The response was received via a GET operation, which is not supported.</p>\n    <p>You can return to the application. Feel free to close this browser tab.</p>\n</body>\n</html>\n"
+
+const HTML: Str = "text/html; charset=utf-8"
+const TEXT: Str = "text/plain; charset=utf-8"
+
+/// What the listener answers a redirect: the status, the page and its
+/// type, and the flow's result, the code or MSAL's error (Go's
+/// local.Server.handler).
+fn answer(method: Str, ctype: Str, body: Str, state: Str) -> (Int, Str, Str, Result[Str, Str]) {
+  let fail = fn(status: Int, msg: Str) -> (Int, Str, Str, Result[Str, Str]) { (status, "${msg}\n", TEXT, Err(msg)) }
+  if method != "POST" {
+    return (405, GET_PAGE, HTML, Err("response was received via a GET operation, which is not supported"))
+  }
+  // net/http's ParseForm reads only a form body
+  let media = ctype.to_lower().cut(";").map(fn(x: (Str, Str)) -> Str { x.0 }) ?? ctype.to_lower()
+  let form = if media.trim() == "application/x-www-form-urlencoded" {
+    url.parse_query(body) ?? e => return fail(400, "failed to parse form data: ${e.display()}")
+  } else {
+    url.parse_query("") ?? e => return fail(400, "failed to parse form data: ${e.display()}")
+  }
+  let err = form.get("error") ?? ""
+  if err != "" {
+    let desc = html.escape_string(form.get("error_description") ?? "")
+    return (200, fail_page(html.escape_string(err), desc), HTML, Err(desc))
+  }
+  let got = form.get("state") ?? ""
+  if got == "" {
+    return fail(500, "server didn't send OAuth state")
+  }
+  if got != state {
+    return fail(500, "mismatched OAuth state, req(${state}), resp(${got})")
+  }
+  let code = form.get("code") ?? ""
+  if code == "" {
+    return fail(500, "authorization code missing in response")
+  }
+  (200, OK_PAGE, HTML, Ok(code))
+}
+
+fn reason(status: Int) -> Str {
+  match status {
+    200 => "OK"
+    400 => "Bad Request"
+    405 => "Method Not Allowed"
+    431 => "Request Header Fields Too Large"
+    _ => "Internal Server Error"
+  }
+}
+
+fn reply(status: Int, ctype: Str, page: Str) -> Bytes {
+  let sniff = if ctype == TEXT { "X-Content-Type-Options: nosniff\r\n" } else { "" }
+  "HTTP/1.1 ${status} ${reason(status)}\r\nContent-Type: ${ctype}\r\n${sniff}Content-Length: ${page.bytes().len()}\r\nConnection: close\r\n\r\n${page}".bytes()
+}
+
+/// Go's ReadHeaderTimeout of MSAL's server.
+const HEADER_TIMEOUT: Duration = 1s
+/// The most of a request head and body the listener reads.
+const MAX_REQUEST: Int = 1048576
+
+/// One request on `c`: its method, Content-Type and body. None for a
+/// connection that closes or stays silent first (a browser's spare
+/// connection); Err for one that is not HTTP.
+fn read_request(c: ServerConn, clock: Clock) -> (Str, Str, Str)? ! Str uses (net.listen, clock) {
+  c.set_read_deadline(clock, Some(Time.from_unix_millis(clock.now().unix_millis() + HEADER_TIMEOUT.millis())))
+  var buf = b""
+  var end = -1
+  while end < 0 {
+    let chunk = c.read(65536) ?? _ => return Ok(None)
+    match chunk {
+      None => return Ok(None)
+      Some(x) => buf = buf + x
+    }
+    end = buf.find(b"\r\n\r\n") ?? -1
+    if end < 0 && buf.len() > MAX_REQUEST {
+      return Err("request head too large")
+    }
+  }
+  c.set_read_deadline(clock, None)
+  let head = buf[0..end].to_str_lossy()
+  let lines = head.split("\r\n")
+  let parts = lines[0].split(" ")
+  if parts.len() != 3 || !parts[2].starts_with("HTTP/1.") {
+    return Err("malformed request line")
+  }
+  var ctype = ""
+  var length = 0
+  for line in lines[1..lines.len()] {
+    let (k, v) = line.cut(":") ?? return Err("malformed header")
+    let key = k.trim().to_lower()
+    if key == "content-type" {
+      ctype = v.trim()
+    } else if key == "content-length" {
+      length = Int.parse(v.trim()) ?? return Err("bad Content-Length")
+    }
+  }
+  if length < 0 || length > MAX_REQUEST {
+    return Err("bad Content-Length")
+  }
+  var body = buf[end + 4..buf.len()]
+  while body.len() < length {
+    let chunk = c.read(65536) ?? _ => return Ok(None)
+    match chunk {
+      None => return Ok(None)
+      Some(x) => body = body + x
+    }
+  }
+  Ok(Some((parts[0], ctype, body[0..length].to_str_lossy())))
+}
+
+/// MSAL's loopback server for one result: the first request that reads
+/// whole gets the answer and decides the flow; the listener's close (the
+/// browser not opened) ends the wait.
+fn loopback(l: Listener, state: Str, clock: Clock) -> Str ! Str uses (net.listen, clock) {
+  while {
+    let c = l.accept() ?? e => return Err(e.display())
+    match read_request(c, clock) {
+      Ok(None) => c.close()
+      Err(_) => {
+        c.write(reply(400, TEXT, "400 Bad Request")).ignore_err("the browser's request is answered best effort")
+        c.close()
+      }
+      Ok(Some((method, ctype, body))) => {
+        let (status, page, pt, result) = answer(method, ctype, body, state)
+        c.write(reply(status, pt, page)).ignore_err("the browser's page is best effort; the result stands")
+        c.close()
+        return result
+      }
+    }
+  }
+}

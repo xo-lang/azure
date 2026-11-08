@@ -7,6 +7,25 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- InteractiveBrowserCredential (gap item 16, decision 0003 Amendment 2),
+  as azidentity v1.15.0 runs it through MSAL Go v1.10.1's
+  AcquireTokenInteractive: the silent request first, then a PKCE
+  verifier (32 random bytes, S256 challenge), a listener on
+  `localhost` (the port of `redirect_url`, else a free one), and the
+  authorize URL (`response_mode=form_post`, `prompt=select_account`,
+  `login_hint`, the claims, `state`) handed to the caller's `open_url`,
+  which is required: the module never starts a process
+  (`interactive_example_test.xo` shows a caller passing the system's
+  opener). The listener answers the first whole request as MSAL's
+  local.Server does: a GET is refused (405), `error` gives the escaped
+  `error_description` as the error, a missing or wrong `state` and a
+  missing `code` are 500s with MSAL's texts; a connection that sends
+  nothing is skipped. Then `grant_type=authorization_code` with the
+  code, `code_verifier` and `redirect_uri`. `authenticate`, the
+  AuthenticationRecord and `disable_automatic_authentication` are the
+  device code credential's. Checked line for line against a Go program
+  whose browser is a scratch hook passing MSAL's WithOpenURL
+  (`interactivevectors_test.xo`).
 - DeviceCodeCredential and the public client account model (gap items 15
   and 18, decision 0003 Amendment 2), as azidentity v1.15.0 makes them
   through MSAL Go v1.10.1: the silent request first (the cached access
