@@ -37,6 +37,12 @@ pub fn (c: Client) endpoint() -> Str {
   c.setup.endpoint
 }
 
+/// The client with every request it sends carrying the values `vs` (the
+/// azappconfig method span's, as Go passes its ctx).
+pub fn (c: Client[fx]) with_values(vs: Map[Str, Str]) -> Client[fx] {
+  Client{setup: c.setup with {pipeline: c.setup.pipeline.with_values(vs)}}
+}
+
 /// An If-Match and an If-None-Match ETag (azcore.MatchConditions).
 pub struct MatchConditions {
   pub if_match: Str? = None
@@ -61,6 +67,15 @@ pub struct Pager[T, fx: Effects] {
   started: Bool = false
   link: Str = ""
   failed: azcore.CallErr? = None
+  /// The public page type Go's span names (`Pager[<type>].NextPage`);
+  /// empty, no span.
+  type_name: Str = ""
+}
+
+/// The pager with Go's NextPage span, named for page type `type_name`
+/// (the azappconfig pager's PagingHandler.Tracer).
+pub fn (p: Pager[T, fx]) traced_as(type_name: Str) -> Pager[T, fx] {
+  p with {type_name: type_name}
 }
 
 /// Whether another page can be fetched.
@@ -79,7 +94,14 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
   if p.started && p.link == "" {
     return Err(azcore.CallErr.InvalidInput("no more pages"))
   }
-  match p.fetch() {
+  // Go's Pager.NextPage opens its span after these checks, around the
+  // fetch
+  let sp = if p.type_name == "" { runtime.ActiveSpan{} } else {
+    runtime.start_span({}, "Pager[${p.type_name}].NextPage", p.pipeline.tracer)
+  }
+  let r = p.fetch(sp)
+  sp.end_with(r)
+  match r {
     Ok(page) => {
       p.started = true
       p.link = (p.next_link)(page) ?? ""
@@ -92,7 +114,7 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
   }
 }
 
-fn (var p: Pager[T, fx]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+fn (var p: Pager[T, fx]) fetch(sp: runtime.ActiveSpan) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   var cond = MatchConditions{}
   if !p.conditions.is_empty() {
     cond = p.conditions[0]
@@ -114,7 +136,7 @@ fn (var p: Pager[T, fx]) fetch() -> T ! azcore.CallErr uses (net.dial, clock, ra
     }
     r
   }
-  let resp = p.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let resp = p.pipeline.send(sp.on(req)) ?? e => return Err(azcore.CallErr.Send(e))
   if !p.ok_status.contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }

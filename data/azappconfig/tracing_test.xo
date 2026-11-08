@@ -1,0 +1,98 @@
+// Decision 0013: azappconfig's spans against Go's. A Go program
+// (azappconfig/v2 v2.3.0, azcore v1.24.0, a recording tracing.Provider
+// over a fake transport; local only) printed TRACE_GO
+// (tracevectors_test.xo).
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+const TR_EP: Str = "https://acct.azconfig.example.test"
+const TR_KV: Str = "{\"key\":\"k1\",\"value\":\"v1\",\"etag\":\"e1\",\"last_modified\":\"2025-01-01T00:00:00Z\"}"
+const TR_NOT_FOUND: Str = "{\"type\":\"https://azconfig.io/errors/key-not-found\",\"title\":\"Key not found\",\"status\":404}"
+const TR_SNAP: Str = "{\"name\":\"s1\",\"status\":\"ready\",\"filters\":[{\"key\":\"a*\"}],\"composition_type\":\"key\",\"etag\":\"e2\"}"
+
+/// Go's reply: a success also has a Sync-Token, as the service sends.
+fn tr_ok(status: Int, body: Str, headers: Map[Str, Str] = {}) -> TrReply {
+  var hs = headers
+  hs.put("Sync-Token", "t=1;sn=1")
+  tr_r(status, body, hs)
+}
+
+fn tr_client(net: Net, clock: Clock, rand: Rand, log: TrLog) -> Client {
+  new_client(net, clock, rand, TR_EP, Cred{log: Mutex[List[Str]].new([])}, ClientOptions{client: policy.ClientOptions{tracing_provider: tr_provider(log), retry: policy.RetryOptions{max_retries: -1}}}).ok() ?? fault("client")
+}
+
+test "spans as Go's azappconfig v2.3.0 makes them" {
+  let log = tr_new_log(os.net, ["acct.azconfig.example.test"])
+
+  tr_replies(log, [tr_ok(200, TR_KV)])
+  tr_dump(log, "add setting", tr_err(tr_client(os.net, os.clock, os.rand, log).add_setting("k1", Some("v1"))))
+
+  tr_replies(log, [tr_r(412, "{\"title\":\"precondition failed\",\"status\":412}")])
+  tr_dump(log, "set setting 412", tr_err(tr_client(os.net, os.clock, os.rand, log).set_setting("k1", Some("v1"), SetSettingOptions{only_if_unchanged: Some("e0")})))
+
+  tr_replies(log, [tr_ok(200, TR_KV)])
+  tr_dump(log, "get setting", tr_err(tr_client(os.net, os.clock, os.rand, log).get_setting("k1")))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "get setting 404", tr_err(tr_client(os.net, os.clock, os.rand, log).get_setting("k1")))
+
+  tr_replies(log, [tr_ok(200, TR_KV)])
+  tr_dump(log, "delete setting", tr_err(tr_client(os.net, os.clock, os.rand, log).delete_setting("k1")))
+
+  tr_replies(log, [tr_ok(200, TR_KV)])
+  tr_dump(log, "set read only", tr_err(tr_client(os.net, os.clock, os.rand, log).set_read_only("k1", true)))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "set read write 404", tr_err(tr_client(os.net, os.clock, os.rand, log).set_read_only("k1", false)))
+
+  tr_replies(log, [tr_ok(200, "{\"items\":[${TR_KV}]}", {"Link": "</kv?after=k1&api-version=2026-04-01>; rel=\"next\""}), tr_ok(200, "{\"items\":[]}")])
+  var lp = tr_client(os.net, os.clock, os.rand, log).new_list_settings_pager(SettingSelector{key_filter: Some("k*")})
+  var lerr: azcore.CallErr? = None
+  while lp.more() {
+    if let Err(e) = lp.next_page() {
+      lerr = Some(e)
+      break
+    }
+  }
+  tr_dump(log, "list settings two pages", lerr)
+
+  tr_replies(log, [tr_r(500, "{}")])
+  var rp = tr_client(os.net, os.clock, os.rand, log).new_list_revisions_pager(SettingSelector{})
+  tr_dump(log, "list revisions error", tr_err(rp.next_page()))
+
+  tr_replies(log, [tr_ok(200, "", {"ETag": "e9"})])
+  var cp = tr_client(os.net, os.clock, os.rand, log).new_check_settings_pager(SettingSelector{})
+  tr_dump(log, "check settings", tr_err(cp.next_page()))
+
+  tr_replies(log, [tr_ok(200, "{\"items\":[${TR_SNAP}]}")])
+  var sp = tr_client(os.net, os.clock, os.rand, log).new_list_snapshots_pager()
+  tr_dump(log, "list snapshots", tr_err(sp.next_page()))
+
+  tr_replies(log, [tr_ok(200, "{\"items\":[${TR_KV}]}")])
+  var fp = tr_client(os.net, os.clock, os.rand, log).new_list_settings_for_snapshot_pager("s1")
+  tr_dump(log, "list settings for snapshot", tr_err(fp.next_page()))
+
+  tr_replies(log, [tr_ok(200, TR_SNAP)])
+  tr_dump(log, "get snapshot", tr_err(tr_client(os.net, os.clock, os.rand, log).get_snapshot("s1")))
+
+  tr_replies(log, [tr_ok(200, TR_SNAP)])
+  tr_dump(log, "archive snapshot", tr_err(tr_client(os.net, os.clock, os.rand, log).archive_snapshot("s1")))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "recover snapshot 404", tr_err(tr_client(os.net, os.clock, os.rand, log).recover_snapshot("s1")))
+
+  tr_replies(log, [tr_r(400, "{\"title\":\"bad\",\"status\":400}")])
+  tr_dump(log, "begin create snapshot 400", tr_err(tr_client(os.net, os.clock, os.rand, log).begin_create_snapshot("s1", [])))
+
+  tr_replies(log, [tr_ok(201, TR_SNAP, {"Operation-Location": "${TR_EP}/operations?snapshot=s1&api-version=2026-04-01"}), tr_ok(200, "{\"id\":\"s1\",\"status\":\"Succeeded\"}"), tr_ok(200, TR_SNAP)])
+  let begun = tr_client(os.net, os.clock, os.rand, log).begin_create_snapshot("s1", [SettingFilter{key_filter: Some("a*")}])
+  tr_dump(log, "begin create snapshot", tr_err(begun))
+  if let Ok(p0) = begun {
+    var p = p0
+    tr_dump(log, "create snapshot poll", tr_err(p.poll()))
+    tr_dump(log, "create snapshot result", tr_err(p.result()))
+  }
+
+  tr_compare(tr_got(log), TRACE_GO)
+}

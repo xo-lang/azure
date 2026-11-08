@@ -148,7 +148,7 @@ pub fn new_client_from_connection_string[fx: Effects](net: Net, clock: Clock, ra
 
 fn client_with[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy[fx], options: ClientOptions[fx]) -> Client {
   let cache = new_sync_token_cache()
-  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [QueryNormalizationPolicy{}, auth, SyncTokenPolicy{cache: cache}, AudiencePolicy{configured: configured_audience(options).is_some()}]}, options.client)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [QueryNormalizationPolicy{}, auth, SyncTokenPolicy{cache: cache}, AudiencePolicy{configured: configured_audience(options).is_some()}], tracing_namespace: "Microsoft.AppConfig"}, options.client)
   Client{gen: generated.new_client(pl, endpoint), cache: cache}
 }
 
@@ -212,8 +212,10 @@ pub struct AddSettingResponse {
 /// AddSetting).
 pub fn (c: Client) add_setting(key: Str, value: Str?, options: AddSettingOptions = AddSettingOptions{}) -> AddSettingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let s = Setting{key: Some(key), value: value, label: options.label, content_type: options.content_type, description: options.description, tags: options.tags}
-  let r = c.gen.put_key_value(key, generated.PutKeyValueOptions{entity: Some(key_value_of(s)), if_none_match: quoted_etag(Some("*")), label: s.label})?
-  Ok(AddSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.AddSetting", fn(vs: Map[Str, Str]) -> AddSettingResponse ! azcore.CallErr {
+    let r = c.gen.with_values(vs).put_key_value(key, generated.PutKeyValueOptions{entity: Some(key_value_of(s)), if_none_match: quoted_etag(Some("*")), label: s.label})?
+    Ok(AddSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  })
 }
 
 pub struct DeleteSettingOptions {
@@ -229,8 +231,10 @@ pub struct DeleteSettingResponse {
 
 /// Deletes a setting (DeleteSetting).
 pub fn (c: Client) delete_setting(key: Str, options: DeleteSettingOptions = DeleteSettingOptions{}) -> DeleteSettingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let r = c.gen.delete_key_value(key, generated.DeleteKeyValueOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
-  Ok(DeleteSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.DeleteSetting", fn(vs: Map[Str, Str]) -> DeleteSettingResponse ! azcore.CallErr {
+    let r = c.gen.with_values(vs).delete_key_value(key, generated.DeleteKeyValueOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
+    Ok(DeleteSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  })
 }
 
 pub struct GetSettingOptions {
@@ -251,9 +255,11 @@ pub struct GetSettingResponse {
 
 /// Gets a setting (GetSetting).
 pub fn (c: Client) get_setting(key: Str, options: GetSettingOptions = GetSettingOptions{}) -> GetSettingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let r = c.gen.get_key_value(key, generated.GetKeyValueOptions{accept_datetime: accept_time(options.accept_date_time), if_none_match: quoted_etag(options.only_if_changed), label: options.label})?
-  let st = setting_of(r.key_value)
-  Ok(GetSettingResponse{setting: st, last_modified: st.last_modified, sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.GetSetting", fn(vs: Map[Str, Str]) -> GetSettingResponse ! azcore.CallErr {
+    let r = c.gen.with_values(vs).get_key_value(key, generated.GetKeyValueOptions{accept_datetime: accept_time(options.accept_date_time), if_none_match: quoted_etag(options.only_if_changed), label: options.label})?
+    let st = setting_of(r.key_value)
+    Ok(GetSettingResponse{setting: st, last_modified: st.last_modified, sync_token: r.sync_token ?? ""})
+  })
 }
 
 pub struct SetReadOnlyOptions {
@@ -268,12 +274,15 @@ pub struct SetReadOnlyResponse {
 
 /// Locks (`is_read_only` true) or unlocks a setting (SetReadOnly).
 pub fn (c: Client) set_read_only(key: Str, is_read_only: Bool, options: SetReadOnlyOptions = SetReadOnlyOptions{}) -> SetReadOnlyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  if is_read_only {
-    let r = c.gen.put_lock(key, generated.PutLockOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
-    return Ok(SetReadOnlyResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
-  }
-  let r = c.gen.delete_lock(key, generated.DeleteLockOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
-  Ok(SetReadOnlyResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.SetReadOnly", fn(vs: Map[Str, Str]) -> SetReadOnlyResponse ! azcore.CallErr {
+    let g = c.gen.with_values(vs)
+    if is_read_only {
+      let r = g.put_lock(key, generated.PutLockOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
+      return Ok(SetReadOnlyResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+    }
+    let r = g.delete_lock(key, generated.DeleteLockOptions{if_match: quoted_etag(options.only_if_unchanged), label: options.label})?
+    Ok(SetReadOnlyResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  })
 }
 
 pub struct SetSettingOptions {
@@ -292,8 +301,10 @@ pub struct SetSettingResponse {
 /// Creates or replaces a setting (SetSetting).
 pub fn (c: Client) set_setting(key: Str, value: Str?, options: SetSettingOptions = SetSettingOptions{}) -> SetSettingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let s = Setting{key: Some(key), value: value, label: options.label, content_type: options.content_type, description: options.description, tags: options.tags}
-  let r = c.gen.put_key_value(key, generated.PutKeyValueOptions{entity: Some(key_value_of(s)), if_match: quoted_etag(options.only_if_unchanged), label: s.label})?
-  Ok(SetSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.SetSetting", fn(vs: Map[Str, Str]) -> SetSettingResponse ! azcore.CallErr {
+    let r = c.gen.with_values(vs).put_key_value(key, generated.PutKeyValueOptions{entity: Some(key_value_of(s)), if_match: quoted_etag(options.only_if_unchanged), label: s.label})?
+    Ok(SetSettingResponse{setting: setting_of(r.key_value), sync_token: r.sync_token ?? ""})
+  })
 }
 
 // Listing settings.
@@ -333,7 +344,7 @@ pub struct ListSettingsPageResponse {
 /// Lists the settings the selector matches (NewListSettingsPager).
 pub fn (c: Client) new_list_settings_pager(selector: SettingSelector, options: ListSettingsOptions = ListSettingsOptions{}) -> ListSettingsPager {
   let o = generated.GetKeyValuesOptions{after: accept_time(selector.accept_date_time), key: selector.key_filter, label: selector.label_filter, select_: Some(selector.fields ?? []), tags: selector.tags_filter}
-  ListSettingsPager{inner: c.gen.new_get_key_values_pager_with_match_conditions(options.match_conditions, o)}
+  ListSettingsPager{inner: c.gen.new_get_key_values_pager_with_match_conditions(options.match_conditions, o).traced_as("ListSettingsPageResponse")}
 }
 
 pub struct ListRevisionsOptions {}
@@ -347,7 +358,7 @@ pub struct ListRevisionsPageResponse {
 /// (NewListRevisionsPager).
 pub fn (c: Client) new_list_revisions_pager(selector: SettingSelector, options: ListRevisionsOptions = ListRevisionsOptions{}) -> ListRevisionsPager {
   let o = generated.GetRevisionsOptions{after: accept_time(selector.accept_date_time), key: selector.key_filter, label: selector.label_filter, select_: Some(selector.fields ?? []), tags: selector.tags_filter}
-  ListRevisionsPager{inner: c.gen.new_get_revisions_pager_with_next_links(o)}
+  ListRevisionsPager{inner: c.gen.new_get_revisions_pager_with_next_links(o).traced_as("ListRevisionsPageResponse")}
 }
 
 pub struct CheckSettingsOptions {
@@ -363,7 +374,7 @@ pub struct CheckSettingsPageResponse {
 /// ETag and sync token without its settings (NewCheckSettingsPager).
 pub fn (c: Client) new_check_settings_pager(selector: SettingSelector, options: CheckSettingsOptions = CheckSettingsOptions{}) -> CheckSettingsPager {
   let o = generated.CheckKeyValuesOptions{accept_datetime: accept_time(selector.accept_date_time), key: selector.key_filter, label: selector.label_filter, select_: Some(selector.fields ?? []), tags: selector.tags_filter}
-  CheckSettingsPager{inner: c.gen.new_check_key_values_pager_with_match_conditions(options.match_conditions, o)}
+  CheckSettingsPager{inner: c.gen.new_check_key_values_pager_with_match_conditions(options.match_conditions, o).traced_as("CheckSettingsPageResponse")}
 }
 
 // Snapshots.
@@ -421,7 +432,7 @@ pub struct ListSnapshotsResponse {
 
 /// Lists the store's snapshots (NewListSnapshotsPager).
 pub fn (c: Client) new_list_snapshots_pager(options: ListSnapshotsOptions = ListSnapshotsOptions{}) -> ListSnapshotsPager {
-  ListSnapshotsPager{inner: c.gen.new_get_snapshots_pager_with_next_links(generated.GetSnapshotsOptions{after: options.after, name: options.name, select_: options.select_, status: options.status})}
+  ListSnapshotsPager{inner: c.gen.new_get_snapshots_pager_with_next_links(generated.GetSnapshotsOptions{after: options.after, name: options.name, select_: options.select_, status: options.status}).traced_as("ListSnapshotsResponse")}
 }
 
 pub struct ListSettingsForSnapshotOptions {
@@ -445,7 +456,7 @@ pub struct ListSettingsForSnapshotResponse {
 /// (NewListSettingsForSnapshotPager).
 pub fn (c: Client) new_list_settings_for_snapshot_pager(snapshot_name: Str, options: ListSettingsForSnapshotOptions = ListSettingsForSnapshotOptions{}) -> ListSettingsForSnapshotPager {
   let o = generated.GetKeyValuesOptions{accept_datetime: options.accept_datetime, after: options.after, if_match: options.if_match, if_none_match: options.if_none_match, select_: options.select_, snapshot: Some(snapshot_name), key: Some(options.key), label: Some(options.label)}
-  ListSettingsForSnapshotPager{inner: c.gen.new_get_key_values_pager_with_next_links(o)}
+  ListSettingsForSnapshotPager{inner: c.gen.new_get_key_values_pager_with_next_links(o).traced_as("ListSettingsForSnapshotResponse")}
 }
 
 pub struct BeginCreateSnapshotOptions {
@@ -472,15 +483,17 @@ pub fn (c: Client[fx]) begin_create_snapshot(snapshot_name: Str, setting_filter:
   }
   let decode = fn(r: http.Response) -> CreateSnapshotResponse ! Str { create_snapshot_result(r) }
   if options.resume_token != "" {
-    return runtime.resume_poller(c.gen.pipeline(), options.resume_token, "CreateSnapshotResponse", decode)
+    return runtime.resume_poller(c.gen.pipeline(), options.resume_token, "CreateSnapshotResponse", decode, traced: true)
   }
   let entity = generated.Snapshot{composition_type: options.composition_type, description: options.description, filters: Some(filters), name: Some(snapshot_name), retention_period: options.retention_period, tags: options.tags}
-  let req = c.gen.create_snapshot_request(snapshot_name, entity)?
-  let resp = c.gen.pipeline().send(req) ?? e => return Err(azcore.CallErr.Send(e))
-  if resp.status != 201 {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
-  }
-  runtime.new_poller(c.gen.pipeline(), req, resp, "", "CreateSnapshotResponse", decode)
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.BeginCreateSnapshot", fn(vs: Map[Str, Str]) -> runtime.Poller[CreateSnapshotResponse, fx] ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let req = runtime.with_values(c.gen.create_snapshot_request(snapshot_name, entity)?, vs)
+    let resp = c.gen.pipeline().send(req) ?? e => return Err(azcore.CallErr.Send(e))
+    if resp.status != 201 {
+      return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    }
+    runtime.new_poller(c.gen.pipeline(), req, resp, "", "CreateSnapshotResponse", decode, traced: true)
+  })
 }
 
 /// A finished snapshot operation's result, decoded as Go decodes it into
@@ -510,8 +523,10 @@ pub struct GetSnapshotResponse {
 
 /// Gets a snapshot (GetSnapshot).
 pub fn (c: Client) get_snapshot(snapshot_name: Str, options: GetSnapshotOptions = GetSnapshotOptions{}) -> GetSnapshotResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let r = c.gen.get_snapshot(snapshot_name, generated.GetSnapshotOptions{if_match: options.if_match, if_none_match: options.if_none_match, select_: options.select_})?
-  Ok(GetSnapshotResponse{snapshot: snapshot_of(r.snapshot), link: r.link, sync_token: r.sync_token ?? ""})
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.GetSnapshot", fn(vs: Map[Str, Str]) -> GetSnapshotResponse ! azcore.CallErr {
+    let r = c.gen.with_values(vs).get_snapshot(snapshot_name, generated.GetSnapshotOptions{if_match: options.if_match, if_none_match: options.if_none_match, select_: options.select_})?
+    Ok(GetSnapshotResponse{snapshot: snapshot_of(r.snapshot), link: r.link, sync_token: r.sync_token ?? ""})
+  })
 }
 
 pub struct ArchiveSnapshotOptions {
@@ -536,17 +551,21 @@ pub type RecoverSnapshotResponse = UpdateSnapshotStatusResponse
 
 /// Archives a ready snapshot (ArchiveSnapshot).
 pub fn (c: Client) archive_snapshot(snapshot_name: Str, options: ArchiveSnapshotOptions = ArchiveSnapshotOptions{}) -> ArchiveSnapshotResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  c.update_snapshot_status(snapshot_name, SNAPSHOT_STATUS_ARCHIVED, options.if_match, options.if_none_match)
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.ArchiveSnapshot", fn(vs: Map[Str, Str]) -> ArchiveSnapshotResponse ! azcore.CallErr {
+    c.update_snapshot_status(vs, snapshot_name, SNAPSHOT_STATUS_ARCHIVED, options.if_match, options.if_none_match)
+  })
 }
 
 /// Makes an archived snapshot ready again (RecoverSnapshot).
 pub fn (c: Client) recover_snapshot(snapshot_name: Str, options: RecoverSnapshotOptions = RecoverSnapshotOptions{}) -> RecoverSnapshotResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  c.update_snapshot_status(snapshot_name, SNAPSHOT_STATUS_READY, options.if_match, options.if_none_match)
+  runtime.traced(c.gen.pipeline().tracer, {}, "Client.RecoverSnapshot", fn(vs: Map[Str, Str]) -> RecoverSnapshotResponse ! azcore.CallErr {
+    c.update_snapshot_status(vs, snapshot_name, SNAPSHOT_STATUS_READY, options.if_match, options.if_none_match)
+  })
 }
 
-fn (c: Client) update_snapshot_status(name: Str, status: SnapshotStatus, if_match: Str?, if_none_match: Str?) -> UpdateSnapshotStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+fn (c: Client) update_snapshot_status(vs: Map[Str, Str], name: Str, status: SnapshotStatus, if_match: Str?, if_none_match: Str?) -> UpdateSnapshotStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   let entity = generated.SnapshotUpdateParameters{status: json.Patch.Value(status)}
-  let r = c.gen.update_snapshot(name, entity, generated.UpdateSnapshotOptions{if_match: if_match, if_none_match: if_none_match})?
+  let r = c.gen.with_values(vs).update_snapshot(name, entity, generated.UpdateSnapshotOptions{if_match: if_match, if_none_match: if_none_match})?
   Ok(UpdateSnapshotStatusResponse{snapshot: snapshot_of(r.snapshot), link: r.link, sync_token: r.sync_token ?? ""})
 }
 
