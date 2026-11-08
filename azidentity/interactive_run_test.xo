@@ -4,7 +4,6 @@
 // sends the redirect to the credential's listener, through the fake
 // network, as the Go program's hook does.
 
-use std/http
 use std/url
 use github.com/xo-lang/azure/azcore
 
@@ -48,18 +47,44 @@ fn ib_browser(f: PcFake, seen: IbSeen, net: Net, method: Str, query: Str) -> fn(
     seen.marks.with(fn(var ms: List[(Str, Str)]) { ms = [(state, "<state>"), (q.get("code_challenge") ?? "", "<challenge>"), (port, "<port>")] })
     pc_note(f, "${pc_sec(f)}: OPEN ${ib_mask(seen, u)}")
     let form = query.replace("STATE", state)
-    let req = if method == "GET" {
-      http.new_request("GET", "${redirect}/?${form}")
-    } else {
-      http.new_request("POST", redirect, {"Content-Type": "application/x-www-form-urlencoded"}, form.bytes())
-    }
-    let line = match http.client(net, timeout: 5s).send(req) {
-      Ok(r) => "BROWSER ${r.status} ${r.header("Content-Type") ?? ""} ${r.body.len()} bytes ${go_q(ib_mask(seen, r.body.to_str_lossy()))}"
+    let line = match ib_send(net, port, method, form) {
+      Ok((status, ctype, body)) => "BROWSER ${status} ${ctype} ${body.len()} bytes ${go_q(ib_mask(seen, body.to_str_lossy()))}"
       Err(e) => "BROWSER error ${e.display()}"
     }
     seen.line.with(fn(var l: Str) { l = line })
     Ok(())
   }
+}
+
+/// The browser's request on the wire: std's http client reaches only an
+/// http.server under the fake network, not a bare listener, so the
+/// browser writes HTTP/1.1 itself. Its status, Content-Type and body.
+fn ib_send(net: Net, port: Str, method: Str, form: Str) -> (Int, Str, Bytes) ! NetErr uses net.dial {
+  let c = net.dial("localhost:${port}")?
+  let req = if method == "GET" {
+    "GET /?${form} HTTP/1.1\r\nHost: localhost:${port}\r\nConnection: close\r\n\r\n"
+  } else {
+    "POST / HTTP/1.1\r\nHost: localhost:${port}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: ${form.bytes().len()}\r\nConnection: close\r\n\r\n${form}"
+  }
+  c.write(req.bytes())?
+  var buf = b""
+  while {
+    let chunk = c.read(65536)? ?? break
+    buf = buf + chunk
+  }
+  c.close()
+  let end = buf.find(b"\r\n\r\n") ?? return Err(NetErr.Io("no response head"))
+  let lines = buf[0..end].to_str_lossy().split("\r\n")
+  let status = Int.parse(lines[0].split(" ")[1]) ?? 0
+  var ctype = ""
+  for l in lines[1..lines.len()] {
+    if let Some((k, v)) = l.cut(":") {
+      if k.to_lower() == "content-type" {
+        ctype = v.trim()
+      }
+    }
+  }
+  Ok((status, ctype, buf[end + 4..buf.len()]))
 }
 
 fn ib_show(f: PcFake, seen: IbSeen, label: Str, r: Result[azcore.AccessToken, azcore.AuthErr]) {
