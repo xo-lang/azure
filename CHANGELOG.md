@@ -65,6 +65,15 @@ that name (armchaos' executionDetails); TypeSpec's
 file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
 list and map arguments (armbilling, armcdn, armcognitiveservices).
 
+Generator, from the batch-4d differentials (third part): a client
+parameter `@@clientLocation` moves onto an `@@override` operation (in
+the override's order), a namespace's own operation, or from a spread
+parameter model's property (armpolicyinsights' and armreservations'
+subscriptionID); autorest's `x-ms-parameter-grouping` is Go's group
+struct before the options, optional members too
+(armsearch's SearchManagementRequestOptions). The Go vector program
+leaves nil a Classification it has no type for (armservicefabric).
+
 Generator, from the batch-4d differentials (second part): a TypeSpec
 header property named `xMs...` keeps its `x-ms-` prefix in Go's field
 (armstoragesync's XMSRequestID, armoperationalinsights'
