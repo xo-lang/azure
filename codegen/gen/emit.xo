@@ -310,7 +310,7 @@ pub fn emit_models(p: Package, api: Api) -> File {
     }
     let disc = if m.patch { None } else { disc_of(api, m.name, p.null_base_discriminator) }
     let consts = !m.patch && m.fields.any(fn(f: Field) -> Bool { f.constant != "" })
-    if (m.extra && !m.patch) || disc.is_some() || consts {
+    if m.extra || disc.is_some() || consts {
       s = s + emit_extra(m, disc)
     } else if m.fields.is_empty() {
       // xo fmt's layout of an empty struct
@@ -324,10 +324,13 @@ pub fn emit_models(p: Package, api: Api) -> File {
         let v = if api.models.any(fn(x: Model) -> Bool { x.name == f.typ && x.twin_of != "" }) { "json.Patch.Value(x.patch())" } else { "json.Patch.Value(x)" }
         s = s + "    ${f.name}: match m.${f.name} {\n      Some(x) => ${v}\n      None => json.Patch.Absent\n    },\n"
       }
+      if m.extra {
+        s = s + "    additional_properties: m.additional_properties,\n"
+      }
       s = s + "  }\n}\n"
     }
   }
-  if api.models.any(fn(m: Model) -> Bool { m.extra && !m.patch }) {
+  if api.models.any(fn(m: Model) -> Bool { m.extra }) {
     s = s + "\n/// `v` with `extra`'s keys added (over a field's of the same name), as\n/// Go's MarshalJSON writes AdditionalProperties (its keys sorted).\nfn with_additional(v: json.Value, extra: Map[Str, json.Value]?) -> json.Value {\n  let m = extra ?? return v\n  match v {\n    json.Value.Object(fs) => {\n      var all = fs.filter(fn(f: (Str, json.Value)) -> Bool { !m.contains(f.0) })\n      for (k, x) in m {\n        all.push((k, x))\n      }\n      json.Value.Object(all.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }))\n    }\n    other => other\n  }\n}\n"
     s = s + "\n/// The keys of `v` no field names (Go's AdditionalProperties); None\n/// when there are none.\nfn additional_of(v: json.Value, known: List[Str]) -> Map[Str, json.Value]? {\n  match v {\n    json.Value.Object(fs) => {\n      var m: Map[Str, json.Value] = {}\n      for (k, x) in fs {\n        if !known.contains(k) {\n          m[k] = x\n        }\n      }\n      if m.is_empty() { None } else { Some(m) }\n    }\n    _ => None\n  }\n}\n"
   }
@@ -940,11 +943,12 @@ fn emit_extra(m: Model, disc: (Str, Str, Bool)? = None) -> Str {
   let sn = snake(m.name)
   let known = "${m.name}Known"
   let fs = m.fields.sort_by(fn(f: Field) -> Str { f.wire })
-  var s = if m.extra && !m.patch { "  /// The keys no field names, as they came (Go's AdditionalProperties).\n  pub additional_properties: Map[Str, json.Value]? = None\n" } else { "" }
+  var s = if m.extra { "  /// The keys no field names, as they came (Go's AdditionalProperties).\n  pub additional_properties: Map[Str, json.Value]? = None\n" } else { "" }
   s = s + "} derive Json(via: json.Value, to: ${sn}_json, from: parse_${sn})\n"
   s = s + "\n/// ${m.name}'s named fields, for its JSON.\nstruct ${known} {\n"
   for f in fs {
-    s = s + "  ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n"
+    // a PATCH body's field: Absent left out, Null written as null
+    s = s + if m.patch { "  ${f.name} as \"${esc(f.wire)},omitempty\": json.Patch[${f.typ}] = json.Patch.Absent\n" } else { "  ${f.name} as \"${esc(f.wire)},omitempty\": ${f.typ}? = None\n" }
   }
   s = if fs.is_empty() { s.trim_suffix(" {\n") + " {} derive Json\n" } else { s + "} derive Json\n" }
   s = s + "\nfn ${sn}_json(x: ${m.name}) -> json.Value {\n  let known = ${known}{\n"
@@ -952,7 +956,7 @@ fn emit_extra(m: Model, disc: (Str, Str, Bool)? = None) -> Str {
     // Go writes a CONSTANT field as its constant: always when
     // required, when set when optional
     let c = "\"${esc(f.constant)}\""
-    let value = if f.constant == "" { "x.${f.name}" } else if f.required { "Some(${c})" } else { "x.${f.name}.map(fn(_: Str) -> Str { ${c} })" }
+    let value = if f.constant == "" || m.patch { "x.${f.name}" } else if f.required { "Some(${c})" } else { "x.${f.name}.map(fn(_: Str) -> Str { ${c} })" }
     s = s + "    ${f.name}: ${value},\n"
   }
   let v = match disc {
@@ -960,12 +964,12 @@ fn emit_extra(m: Model, disc: (Str, Str, Bool)? = None) -> Str {
     Some((tag, value, false)) => "with_discriminator(json.to_value(known), \"${esc(tag)}\", \"${esc(value)}\")"
     None => "json.to_value(known)"
   }
-  s = s + if m.extra && !m.patch { "  }\n  with_additional(${v}, x.additional_properties)\n}\n" } else { "  }\n  ${v}\n}\n" }
+  s = s + if m.extra { "  }\n  with_additional(${v}, x.additional_properties)\n}\n" } else { "  }\n  ${v}\n}\n" }
   s = s + "\nfn parse_${sn}(v: json.Value) -> ${m.name} ! json.DecodeErr {\n  let k = json.from_value[${known}](v)?\n  Ok(${m.name}{\n"
   for f in fs {
     s = s + "    ${f.name}: k.${f.name},\n"
   }
-  if m.extra && !m.patch {
+  if m.extra {
     let wires = fs.map(fn(f: Field) -> Str { "\"${esc(f.wire)}\"" }).join(", ")
     s = s + "    additional_properties: additional_of(v, [${wires}]),\n"
   }

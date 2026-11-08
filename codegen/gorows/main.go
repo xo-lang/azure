@@ -243,7 +243,9 @@ func first(re *regexp.Regexp, s string) string {
 }
 
 // readmeTag: a package-X flag's section in readme.go.md or readme.md,
-// else readme.md's first tag.
+// else readme.md's default tag: the last unconditional block's, as
+// autorest reads them in order (armstorageimportexport's readme sets
+// package-2016-11 and then package-preview-2021-01, Go's 2021-01-01).
 func readmeTag(readme, gomd string, flags []string) string {
 	for _, flag := range flags {
 		re := regexp.MustCompile("(?s)```\\s*yaml\\s+\\$\\(" + regexp.QuoteMeta(flag) + "\\)[^\n]*\n(.*?)```")
@@ -255,12 +257,13 @@ func readmeTag(readme, gomd string, flags []string) string {
 			}
 		}
 	}
+	last := ""
 	for _, m := range reYAML.FindAllStringSubmatch(readme, -1) {
 		if tag := first(reTag, m[1]); tag != "" {
-			return tag
+			last = tag
 		}
 	}
-	return ""
+	return last
 }
 
 // openapiFiles: the files of one api-version. The newest version takes
