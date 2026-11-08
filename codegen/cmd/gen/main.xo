@@ -236,8 +236,13 @@ fn main(os: Os) -> () ! Error {
       }
     }
     let r = spec.renames(texts)?
+    // a header property named `xMs...` keeps the wire name's `x-ms-`
+    // prefix in Go's field (XMSRequestID), which the TypeSpec rule drops
+    // for every other property (requestid is RequestID, eTag ETag)
     for (w, prop) in r.header_props {
-      tsp_headers[w] = gen.snake("${prop[0..1].to_upper()}${prop[1..prop.len()]}")
+      if prop.to_lower().starts_with("xms") && w.starts_with("x-ms-") {
+        tsp_headers[w] = gen.snake(w.split("-").map(fn(x: Str) -> Str { if x == "" { x } else { "${x[0..1].to_upper()}${x[1..x.len()]}" } }).join(""))
+      }
     }
     let input_names = inputs.map(fn(i: Str) -> Str { i.split("/").last() ?? i })
     var file_models: Map[Str, Str] = {}
@@ -249,7 +254,7 @@ fn main(os: Os) -> () ! Error {
         _ => models[m] = v
       }
     }
-    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, client_params: r.client_params, action_routes: r.action_routes, rg_segment: r.rg_segment, routes: r.routes, patch_bodies: r.patch_bodies, tsp_declared: r.declared, param_order: merged_orders(r.param_order, custom.param_order), param_groups: r.param_groups, next_verbs: r.next_verbs, content_type_ops: r.content_type_ops}
+    custom = custom with {ops: r.ops, models: models, file_models: file_models, fields: r.fields, not_go_fields: r.not_go_fields, params: merged(r.params, cf.param_names), client_ops: r.client_ops, alt_fields: r.field_types, param_types: r.param_types, alt_models: r.model_types, tsp_ops: r.tsp_ops, final_states: r.final_states, body_roots: r.body_roots, method_params: r.method_params, client_params: r.client_params, action_routes: r.action_routes, rg_segment: r.rg_segment, routes: r.routes, patch_bodies: r.patch_bodies, tsp_declared: r.declared, param_order: merged_orders(r.param_order, custom.param_order), param_groups: r.param_groups, next_verbs: r.next_verbs, content_type_ops: r.content_type_ops, provider_action_ops: r.provider_action_ops, provider_ns: combined_provider_ns(os, "${base}/${svc.spec}")?}
     source = "${svc.openapi} (from ${svc.spec})"
   } else if svc.swagger != "" {
     inputs = ["${base}/${svc.swagger}"]
@@ -438,4 +443,36 @@ fn clean_path(p: Str) -> Str {
     out.push(seg)
   }
   out.join("/")
+}
+
+/// A combined client's provider namespace: the `@armProviderNamespace` of
+/// the first project its client.tsp imports (armmonitor's Insights
+/// client.tsp imports DataCollectionApi first, Microsoft.Insights), or ""
+/// for a single project.
+fn combined_provider_ns(os: Os, root: Str) -> Str ! Error {
+  let client = "${root}/client.tsp"
+  if !os.fs.exists(client)? {
+    return Ok("")
+  }
+  var imports: List[Str] = []
+  for line in os.fs.read_text(client)?.split("\n") {
+    let l = line.trim()
+    if l.starts_with("import \"./") && l.contains("/main.tsp\"") {
+      imports.push(l.trim_prefix("import \"./").split("\"").get(0) ?? "")
+    }
+  }
+  if imports.len() < 2 {
+    return Ok("")
+  }
+  let main = "${root}/${imports[0]}"
+  if !os.fs.exists(main)? {
+    return Ok("")
+  }
+  for line in os.fs.read_text(main)?.split("\n") {
+    let l = line.trim()
+    if l.starts_with("@armProviderNamespace(\"") {
+      return Ok(l.trim_prefix("@armProviderNamespace(\"").split("\"").get(0) ?? "")
+    }
+  }
+  Ok("")
 }

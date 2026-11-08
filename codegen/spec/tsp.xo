@@ -43,6 +43,11 @@ pub struct Renames {
   /// ContentType field the OpenAPI file does not show. By operationId,
   /// lower case.
   pub content_type_ops: List[Str] = []
+  /// The operations declared `is ArmProviderAction*<...>`, whose route's
+  /// provider segment a combined client takes from its first project
+  /// (armmonitor's AlertRuleIncidents_ListByAlertRule). By operationId,
+  /// lower case.
+  pub provider_action_ops: List[Str] = []
   /// model to Go's name
   pub models: Map[Str, Str] = {}
   /// `Model.property` to Go's field name
@@ -359,7 +364,7 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let bare_loc = regexp.compile("@(?:path|query)\\b(?:\\s*\\(\\s*\\))?[\\s\\S]*?([A-Za-z0-9_]+)\\??\\s*:\\s*[A-Za-z]") ?? e => return Err(e.display())
   let client = regexp.compile("@client\\(\\s*\\{[^}]*\\}\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)\\s*interface\\s+[A-Za-z0-9_]+\\s*\\{([^}]*)\\}") ?? e => return Err(e.display())
   let member = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+([A-Za-z0-9_.]+)\\s*;") ?? e => return Err(e.display())
-  let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
+  let alt_field = regexp.compile("@@alternateType\\(\\s*([A-Za-z0-9_.]+\\.[A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
   let unscoped_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"?([A-Za-z0-9_]+)\"?\\s*,?\\s*\\)") ?? e => return Err(e.display())
   let override_re = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?override\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
@@ -572,7 +577,10 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       if !for_go(m[3] ?? "") {
         continue
       }
-      r.field_types[m[1] ?? ""] = xo_type(m[2] ?? "")
+      // `Model.property`, a library model's by its last two segments
+      // (armmonitor's Azure.ResourceManager.CommonTypes.AccessRuleProperties.subscriptions)
+      let segs = (m[1] ?? "").split(".")
+      r.field_types["${segs[segs.len() - 2]}.${segs[segs.len() - 1]}"] = xo_type(m[2] ?? "")
     }
     // Go's emitter names an operation by its operationId, as autorest
     // did, except one added after the move to TypeSpec (`@added`), named
@@ -862,7 +870,8 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let at = text.find(whole) ?? continue
       let rest = text[at + whole.len()..text.len()]
       let decl = rest[0..(rest.find(">;") ?? 0)]
-      if !decl.contains("@header contentType") {
+      let provider_action = whole.contains("ArmProviderAction")
+      if !decl.contains("@header contentType") && !provider_action {
         continue
       }
       let op = c[1] ?? ""
@@ -872,7 +881,12 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       let iface = if before.contains("\ninterface ") && !after_iface.contains("\n}") { after_iface.split(" ").get(0) ?? "" } else { "" }
       let opn = if iface == "" { op } else { emitted.get("${iface}.${op}") ?? neg_named.get("${iface}.${op}") ?? op }
       let id = if iface == "" { moved_id("", op) } else { ids.get("${iface}.${op}".to_lower()) ?? moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, opn) }
-      r.content_type_ops.push(id.to_lower())
+      if provider_action {
+        r.provider_action_ops.push(id.to_lower())
+      }
+      if decl.contains("@header contentType") {
+        r.content_type_ops.push(id.to_lower())
+      }
     }
   }
   let header_re = regexp.compile("@header\\(\\s*\"([^\"]+)\"\\s*\\)((?:\\s*@[A-Za-z.]+(?:\\(\"[^\"]*\"\\))?)*)\\s*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())

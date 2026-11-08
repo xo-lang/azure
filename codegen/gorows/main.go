@@ -345,7 +345,7 @@ func openapiFiles(rel, commit, directory, ver string, latest bool, used map[stri
 		}
 		return out
 	}
-	picked, ok := cover(info, used)
+	picked, ok := coverPref(info, used, tspEmitted(base, directory))
 	if !ok {
 		problem("%s: %s paths not in any file", rel, ver)
 	}
@@ -372,6 +372,14 @@ func pathsOf(b []byte) map[string]bool {
 // cover: the fewest files (greedy: the most of Go's paths, then the
 // fewest paths, then the name) holding every path in need.
 func cover(info []fileInfo, used map[string]bool) ([]string, bool) {
+	return coverPref(info, used, nil)
+}
+
+// coverPref is cover, a file named in emitted ahead of an equal one: the
+// TypeSpec output over a hand-written file of the same paths left beside
+// it (armmonitor's 2016-09-01 serviceDiagnosticsSettings.json, Go's
+// TrackedResource with systemData, over serviceDiagnosticsSettings_API.json)
+func coverPref(info []fileInfo, used map[string]bool, emitted map[string]bool) ([]string, bool) {
 	need := map[string]bool{}
 	for k := range used {
 		need[k] = true
@@ -386,7 +394,8 @@ func cover(info []fileInfo, used map[string]bool) ([]string, bool) {
 					hit++
 				}
 			}
-			if best < 0 || hit > bestHit || hit == bestHit && (len(f.paths) < len(info[best].paths) || len(f.paths) == len(info[best].paths) && f.name > info[best].name) {
+			ea, eb := emitted[path.Base(f.name)], best >= 0 && emitted[path.Base(info[best].name)]
+			if best < 0 || hit > bestHit || hit == bestHit && (ea && !eb || ea == eb && (len(f.paths) < len(info[best].paths) || len(f.paths) == len(info[best].paths) && f.name > info[best].name)) {
 				best, bestHit = i, hit
 			}
 		}
@@ -433,6 +442,23 @@ func lsTree(commit, directory string) []string {
 	b, _ := exec.Command("git", "-C", filepath.Join(specs, ".store"), "ls-tree", "-r", "--name-only", commit, "--", "specification/"+svc).Output()
 	trees[key] = strings.Split(string(b), "\n")
 	return trees[key]
+}
+
+// tspEmitted: the file names the project's tspconfig.yaml files (its
+// own and its subfolders') emit, from their output-file.
+func tspEmitted(base, directory string) map[string]bool {
+	out := map[string]bool{}
+	cfgs, _ := filepath.Glob(filepath.Join(base, directory, "*", "tspconfig.yaml"))
+	cfgs = append(cfgs, filepath.Join(base, directory, "tspconfig.yaml"))
+	re := regexp.MustCompile(`(?m)^\s+output-file:\s*"?([^"\n]+)"?`)
+	for _, c := range cfgs {
+		for _, m := range re.FindAllStringSubmatch(read(c), -1) {
+			if b := path.Base(strings.TrimSpace(m[1])); !strings.Contains(b, "{") {
+				out[b] = true
+			}
+		}
+	}
+	return out
 }
 
 func tspOutput(base, commit, directory, kind, ver string) string {
