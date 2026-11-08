@@ -282,7 +282,8 @@ struct FeedPage {
 fn fetch_page[fx: Effects](core: Core[fx], link: Str, etag: Str) -> FeedPage ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   var hs = [("A-IM", "Incremental Feed"), ("x-ms-max-item-count", "-1")]
   if etag != "" { hs.push(("If-None-Match", etag)) }
-  let resp = core.send(Call{method: "GET", path: "${link}/pkranges", headers: hs})?
+  // outside any operation's span, as Go's cache reads them
+  let resp = core.with_values({}).send(Call{method: "GET", path: "${link}/pkranges", headers: hs})?
   let new_etag = first_header(resp, "etag") ?? ""
   if resp.status == 304 {
     return Ok(FeedPage{etag: new_etag, not_modified: true})
@@ -359,6 +360,13 @@ fn refresh_routing[fx: Effects](core: Core[fx], link: Str, prev: RoutingMap?) ->
 /// The ranges are cached per container; Go shares its cache between
 /// clients of the same endpoint, the port within one Client.
 pub fn (c: ContainerClient) read_feed_ranges() -> List[FeedRange] ! azcore.CallErr uses (net.dial, clock, rand) {
-  let m = c.routing_map()?
+  let m = c.traced_routing_map()?
   Ok(m.ordered.map(fn(r: PkRange) -> FeedRange { FeedRange{min_inclusive: r.min_inclusive, max_exclusive: r.max_exclusive} }))
+}
+
+/// The routing map in Go's getPartitionKeyRanges span: the container's
+/// properties are read in it; the cache reads the ranges outside it,
+/// with its own context (fetch_page).
+fn (c: ContainerClient[fx]) traced_routing_map() -> RoutingMap ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  container_traced(c, "read_partition_key_ranges", fn(t: ContainerClient[fx]) -> RoutingMap ! azcore.CallErr uses net.dial, clock, rand, fx { t.routing_map() })
 }

@@ -5,6 +5,7 @@
 // that holds them, one parameterized query per partition (up to 1000
 // items each), and the ranges read again when one is gone.
 
+use std/http
 use std/json
 use github.com/xo-lang/azure/azcore
 
@@ -283,9 +284,14 @@ fn (c: ContainerClient) run_chunk(chunk: QueryChunk, options: ReadManyItemsOptio
     if token != "" { hs.push(("x-ms-continuation", token)) }
     hs = hs + [("x-ms-documentdb-populatequerymetrics", "true"), ("x-ms-documentdb-query-enablecrosspartition", "true"), ("x-ms-documentdb-partitionkeyrangeid", chunk.range_id)]
     let call = query_call("${c.link}/docs", chunk.query, chunk.params, hs) with {priority_level: options.priority_level, throughput_bucket: options.throughput_bucket}
-    let resp = c.core.send(call)?
+    // Go's executeOneChunkPage span, around each page
+    let (page, resp) = container_traced(c, "query_items", fn(t: ContainerClient) -> (List[Str], http.Response) ! azcore.CallErr uses net.dial, clock, rand, fx {
+      let resp = t.core.send(call)?
+      let docs = documents(resp) ?? e => return Err(azcore.CallErr.Decode(e))
+      Ok((docs, resp))
+    })?
     charge = charge + response_of(resp).request_charge
-    items = items + (documents(resp) ?? e => return Err(azcore.CallErr.Decode(e)))
+    items = items + page
     token = continuation(resp) ?? ""
     if token == "" {
       break
@@ -318,7 +324,7 @@ pub fn (c: ContainerClient) read_many_items(items: List[ItemIdentity], options: 
   }
   for attempt in 0..MAX_PK_RANGE_GONE_RETRIES + 1 {
     let def = c.cached_properties()?.partition_key_definition
-    let m = c.routing_map()?
+    let m = c.traced_routing_map()?
     let (order, groups) = group_by_range(items, def, m) ?? e => return Err(azcore.CallErr.InvalidInput(e))
     var out = ReadManyItemsResponse{}
     var gone = false

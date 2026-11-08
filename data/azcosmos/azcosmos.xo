@@ -13,6 +13,7 @@ use std/uuid
 use github.com/xo-lang/azure/azcore
 use github.com/xo-lang/azure/policy
 use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/tracing
 
 /// `name`'s first field, as Go's `resp.Header.Get` reads one; the
 /// fields of a repeated header are not joined.
@@ -148,6 +149,8 @@ struct Core[fx: Effects] {
   gem: Gem[fx]
   clock: Clock
   caches: Caches
+  /// The operation span's values, carried by each request (Go's ctx).
+  values: Map[Str, Str] = {}
 }
 
 /// Go's two pipelines: the account reads go through one with only the
@@ -156,9 +159,11 @@ struct Core[fx: Effects] {
 /// authorization in each try. The authorization policy (and its token
 /// cache) is the same value in both.
 fn new_core[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, auth: policy.Policy[fx], opts: ClientOptions[fx]) -> Core[fx] {
-  let internal = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  let internal = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth], tracing_namespace: TRACING_NAMESPACE}, opts.client)
   let gem = new_gem(endpoint, internal, clock, rand, opts.preferred_regions)
-  let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [GemPolicy{gem: gem}], per_retry: [CosmosRetryPolicy{gem: gem}, auth]}, opts.client)
+  // one tracer for both: Go's internal pipeline traces with the tracer
+  // of the operation's span
+  let pl = runtime.new_pipeline("azcosmos", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: [GemPolicy{gem: gem}], per_retry: [CosmosRetryPolicy{gem: gem}, auth], tracing_namespace: TRACING_NAMESPACE, tracer: Some(internal.tracer)}, opts.client)
   Core{endpoint: endpoint, pipeline: pl, rand: rand, content_on_write: opts.enable_content_response_on_write, priority_level: opts.priority_level, throughput_bucket: opts.throughput_bucket, gem: gem, clock: clock, caches: new_caches()}
 }
 
@@ -246,16 +251,26 @@ fn (c: Core) send(call: Call) -> http.Response ! azcore.CallErr uses (net.dial, 
   if let Some(p) = call.priority_level ?? c.priority_level { hs.push(("x-ms-cosmos-priority-level", p)) }
   if let Some(b) = call.throughput_bucket ?? c.throughput_bucket { hs.push(("x-ms-cosmos-throughput-bucket", "${b}")) }
   let (_, rtype) = resource_of(call.path)
-  let req = cosmos_request(c.rand, call with {headers: hs}, c.endpoint) with {values: {"cosmos.write": if call.write { "1" } else { "0" }, "cosmos.document": if rtype == "docs" { "1" } else { "0" }}}
+  var vs = c.values
+  vs.put("cosmos.write", if call.write { "1" } else { "0" })
+  vs.put("cosmos.document", if rtype == "docs" { "1" } else { "0" })
+  let req = cosmos_request(c.rand, call with {headers: hs}, c.endpoint) with {values: vs}
   let resp = match c.pipeline.send(req) {
-    Ok(r) => r
+    Ok(r) => {
+      // Go's addResponseValuesToSpan
+      let charge = Float.parse(first_header(r, "x-ms-request-charge") ?? "") ?? 0.0
+      c.pipeline.tracer.span_from_context(tracing.Context{values: req.values}).set_attributes([tracing.Attribute{key: "db.cosmosdb.request_charge", value: tracing.Value.Float(charge)}, tracing.int_attr("db.cosmosdb.status_code", r.status)])
+      r
+    }
     Err(policy.SendErr.FinalResponse(r)) => return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, r)))
     Err(e) => return Err(azcore.CallErr.Send(e))
   }
   if (resp.status >= 200 && resp.status < 300) || resp.status == 304 {
     return Ok(resp)
   }
-  Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  // Go's NewResponseErrorWithErrorCode(resp, resp.Status): the error
+  // code is the status line, not the body's code
+  Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp) with {error_code: "${resp.status} ${azcore.status_text(resp.status)}"}))
 }
 
 // Responses.

@@ -229,7 +229,7 @@ fn (s: GemState) should_refresh(now: Time) -> Bool {
 
 /// Reads the account when due (or now, when `force`); the error of the
 /// last read while the account was never read.
-fn (g: Gem[fx]) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+fn (g: Gem[fx]) update(force: Bool, values: Map[Str, Str] = {}) -> () ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   // The closure's value is the outcome, so a failed read still records
   // its attempt and error (a closure's Err would undo them).
   let outcome = g.state.with(fn(var s: GemState) -> Result[(), azcore.CallErr] uses net.dial, clock, rand, fx {
@@ -240,7 +240,7 @@ fn (g: Gem[fx]) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock
         None => Ok(())
       }
     }
-    let read = g.read_account()
+    let read = g.read_account(values)
     s = s with {last_attempt: Some(now)}
     match read {
       Ok(v) => {
@@ -256,8 +256,10 @@ fn (g: Gem[fx]) update(force: Bool) -> () ! azcore.CallErr uses (net.dial, clock
   outcome
 }
 
-fn (g: Gem) read_account() -> json.Value ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = cosmos_request(g.rand, Call{method: "GET", path: ""}, g.endpoint)
+/// The account read, carrying `values`: the span of the operation that
+/// needs it, as Go reads it with the operation's context.
+fn (g: Gem) read_account(values: Map[Str, Str]) -> json.Value ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = cosmos_request(g.rand, Call{method: "GET", path: ""}, g.endpoint) with {values: values}
   let resp = g.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if resp.status < 200 || resp.status >= 300 {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
@@ -290,7 +292,7 @@ struct GemPolicy[fx: Effects] {
 }
 
 fn (p: GemPolicy[fx]) send(req: policy.Request, next: policy.Next[fx]) -> http.Response ! policy.SendErr uses (net.dial, clock, rand, fx) {
-  match p.gem.update(false) {
+  match p.gem.update(false, values: req.values) {
     Ok(_) => ()
     Err(azcore.CallErr.Send(e)) => return Err(e)
     Err(e) => return Err(policy.SendErr.Auth(e.display()))

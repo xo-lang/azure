@@ -87,6 +87,9 @@ pub struct QueryPager[T, fx: Effects] {
   /// A failed fetch: the terminal state of azcore v1.23.0's Pager, which
   /// Go's QueryItems pager is.
   failed: azcore.CallErr? = None
+  /// Go's span around each page's fetch: operation, id, database and
+  /// container.
+  span: (Str, Str, Str?, Str?)? = None
 }
 
 pub fn (p: QueryPager[T, fx]) more() -> Bool {
@@ -116,8 +119,15 @@ fn (var p: QueryPager[T, fx]) fetch() -> T ! azcore.CallErr uses (net.dial, cloc
     let tok = p.next_token ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
     call = call with {headers: call.headers.filter(fn(h: (Str, Str)) -> Bool { h.0 != "x-ms-continuation" }) + [("x-ms-continuation", tok)]}
   }
-  let resp = p.core.send(call)?
-  let page = (p.decode)(resp) ?? e => return Err(azcore.CallErr.Decode(e))
+  let decode = p.decode
+  let get = fn(core: Core[fx]) -> T ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let resp = core.send(call)?
+    (decode)(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  }
+  let page = match p.span {
+    Some((op, id, db, coll)) => cosmos_traced(p.core, op, id, db, coll, get)?
+    None => get(p.core)?
+  }
   p.started = true
   p.next_token = (p.continuation_of)(page)
   Ok(page)
@@ -167,8 +177,9 @@ pub fn (c: Client) create_database(properties: DatabaseProperties, options: Crea
     Some(t) => [t.header()]
     None => []
   }
-  let resp = c.core.send(Call{method: "POST", path: "dbs", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?
-  database_response(resp)
+  cosmos_traced(c.core, "create_database", properties.id, Some(properties.id), None, fn(core: Core) -> DatabaseResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    database_response(core.send(Call{method: "POST", path: "dbs", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?)
+  })
 }
 
 /// A client of the database `id`.
@@ -201,7 +212,7 @@ pub fn (c: Client[fx]) new_query_databases_pager(query: Str, options: QueryDatab
   QueryPager{core: c.core, call: query_call("dbs", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryDatabasesResponse ! Str {
     let v = parse_json(resp.body.to_str_lossy())?
     Ok(QueryDatabasesResponse{response: response_of(resp), continuation_token: continuation(resp), databases: list_of(v, "Databases").map(database_of)})
-  }, continuation_of: fn(r: QueryDatabasesResponse) -> Str? { r.continuation_token }}
+  }, continuation_of: fn(r: QueryDatabasesResponse) -> Str? { r.continuation_token }, span: Some(("query_databases", host_port(c.core.endpoint).0, None, None))}
 }
 
 pub struct DatabaseClient[fx: Effects] {
@@ -211,16 +222,20 @@ pub struct DatabaseClient[fx: Effects] {
 }
 
 pub fn (db: DatabaseClient) read() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  db_traced(db, "read_database", fn(d: DatabaseClient) -> DatabaseResponse ! azcore.CallErr uses net.dial, clock, rand, fx { d.read_raw() })
+}
+
+fn (db: DatabaseClient) read_raw() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
   database_response(db.core.send(Call{method: "GET", path: db.link})?)
 }
 
 pub fn (db: DatabaseClient) delete() -> DatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  database_response(db.core.send(Call{method: "DELETE", path: db.link, write: true})?)
+  db_traced(db, "delete_database", fn(d: DatabaseClient) -> DatabaseResponse ! azcore.CallErr uses net.dial, clock, rand, fx { database_response(d.core.send(Call{method: "DELETE", path: d.link, write: true})?) })
 }
 
 pub fn (db: DatabaseClient[fx]) new_container(id: Str) -> ContainerClient[fx] ! azcore.CallErr {
   require_id(id)?
-  Ok(ContainerClient{id: id, link: link(db.link, "colls", id), core: db.core})
+  Ok(ContainerClient{id: id, database_id: db.id, link: link(db.link, "colls", id), core: db.core})
 }
 
 pub struct ContainerResponse {
@@ -244,7 +259,9 @@ pub fn (db: DatabaseClient) create_container(properties: ContainerProperties, op
     Some(t) => [t.header()]
     None => []
   }
-  container_response(db.core.send(Call{method: "POST", path: "${db.link}/colls", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?)
+  cosmos_traced(db.core, "create_container", properties.id, Some(db.id), Some(properties.id), fn(core: Core) -> ContainerResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    container_response(core.send(Call{method: "POST", path: "${db.link}/colls", write: true, headers: hs, body: properties.to_json().bytes(), content_type: "application/json"})?)
+  })
 }
 
 pub struct QueryContainersOptions {
@@ -266,13 +283,14 @@ pub fn (db: DatabaseClient[fx]) new_query_containers_pager(query: Str, options: 
   QueryPager{core: db.core, call: query_call("${db.link}/colls", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryContainersResponse ! Str {
     let v = parse_json(resp.body.to_str_lossy())?
     Ok(QueryContainersResponse{response: response_of(resp), continuation_token: continuation(resp), containers: list_of(v, "DocumentCollections").map(container_of)})
-  }, continuation_of: fn(r: QueryContainersResponse) -> Str? { r.continuation_token }}
+  }, continuation_of: fn(r: QueryContainersResponse) -> Str? { r.continuation_token }, span: Some(("query_containers", db.id, Some(db.id), None))}
 }
 
 // Containers.
 
 pub struct ContainerClient[fx: Effects] {
   pub id: Str
+  database_id: Str
   link: Str
   core: Core[fx]
 }
@@ -280,9 +298,11 @@ pub struct ContainerClient[fx: Effects] {
 /// Reads the container; its properties are cached for the partition key
 /// range cache.
 pub fn (c: ContainerClient) read() -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let r = c.read_raw()?
-  c.cache_properties(r)
-  Ok(r)
+  container_traced(c, "read_container", fn(t: ContainerClient) -> ContainerResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let r = t.read_raw()?
+    t.cache_properties(r)
+    Ok(r)
+  })
 }
 
 fn (c: ContainerClient) read_raw() -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
@@ -290,13 +310,15 @@ fn (c: ContainerClient) read_raw() -> ContainerResponse ! azcore.CallErr uses (n
 }
 
 pub fn (c: ContainerClient) replace(properties: ContainerProperties) -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let r = container_response(c.core.send(Call{method: "PUT", path: c.link, write: true, body: properties.to_json().bytes(), content_type: "application/json"})?)?
-  c.cache_properties(r)
-  Ok(r)
+  container_traced(c, "replace_container", fn(t: ContainerClient) -> ContainerResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let r = container_response(t.core.send(Call{method: "PUT", path: t.link, write: true, body: properties.to_json().bytes(), content_type: "application/json"})?)?
+    t.cache_properties(r)
+    Ok(r)
+  })
 }
 
 pub fn (c: ContainerClient) delete() -> ContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  container_response(c.core.send(Call{method: "DELETE", path: c.link, write: true})?)
+  container_traced(c, "delete_container", fn(t: ContainerClient) -> ContainerResponse ! azcore.CallErr uses net.dial, clock, rand, fx { container_response(t.core.send(Call{method: "DELETE", path: t.link, write: true})?) })
 }
 
 // Items.
@@ -354,24 +376,34 @@ fn (c: ContainerClient) item_headers(pk: PartitionKey, o: ItemOptions, write: Bo
 }
 
 pub fn (c: ContainerClient) create_item(partition_key: PartitionKey, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "POST", path: "${c.link}/docs", write: true, headers: c.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+  container_traced(c, "create_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "POST", path: "${t.link}/docs", write: true, headers: t.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+  })
 }
 
 pub fn (c: ContainerClient) upsert_item(partition_key: PartitionKey, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let hs = c.item_headers(partition_key, options, true) + [("x-ms-documentdb-is-upsert", "true")]
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "POST", path: "${c.link}/docs", write: true, headers: hs, body: item.bytes(), content_type: "application/json"})?))
+  container_traced(c, "upsert_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let hs = t.item_headers(partition_key, options, true) + [("x-ms-documentdb-is-upsert", "true")]
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "POST", path: "${t.link}/docs", write: true, headers: hs, body: item.bytes(), content_type: "application/json"})?))
+  })
 }
 
 pub fn (c: ContainerClient) replace_item(partition_key: PartitionKey, item_id: Str, item: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "PUT", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+  container_traced(c, "replace_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "PUT", path: link(t.link, "docs", item_id), write: true, headers: t.item_headers(partition_key, options, true), body: item.bytes(), content_type: "application/json"})?))
+  })
 }
 
 pub fn (c: ContainerClient) read_item(partition_key: PartitionKey, item_id: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "GET", path: link(c.link, "docs", item_id), headers: c.item_headers(partition_key, options, false)})?))
+  container_traced(c, "read_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "GET", path: link(t.link, "docs", item_id), headers: t.item_headers(partition_key, options, false)})?))
+  })
 }
 
 pub fn (c: ContainerClient) delete_item(partition_key: PartitionKey, item_id: Str, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "DELETE", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true)})?))
+  container_traced(c, "delete_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "DELETE", path: link(t.link, "docs", item_id), write: true, headers: t.item_headers(partition_key, options, true)})?))
+  })
 }
 
 /// Patch operations on one item, applied in order, with an optional
@@ -425,7 +457,9 @@ pub fn (p: PatchOperations) to_json() -> Str {
 }
 
 pub fn (c: ContainerClient) patch_item(partition_key: PartitionKey, item_id: Str, operations: PatchOperations, options: ItemOptions = ItemOptions{}) -> ItemResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  Ok(item_response(c.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "PATCH", path: link(c.link, "docs", item_id), write: true, headers: c.item_headers(partition_key, options, true), body: operations.to_json().bytes(), content_type: "application/json"})?))
+  container_traced(c, "patch_item", fn(t: ContainerClient) -> ItemResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    Ok(item_response(t.core.send(Call{priority_level: options.priority_level, throughput_bucket: options.throughput_bucket, method: "PATCH", path: link(t.link, "docs", item_id), write: true, headers: t.item_headers(partition_key, options, true), body: operations.to_json().bytes(), content_type: "application/json"})?))
+  })
 }
 
 pub struct QueryOptions {
@@ -469,5 +503,5 @@ pub fn (c: ContainerClient[fx]) new_query_items_pager(query: Str, partition_key:
   hs.push(("x-ms-cosmos-correlated-activityid", uuid.v4(c.core.rand).display()))
   QueryPager{core: c.core, call: query_call("${c.link}/docs", query, options.query_parameters, hs), decode: fn(resp: http.Response) -> QueryItemsResponse ! Str {
     Ok(QueryItemsResponse{response: response_of(resp), continuation_token: continuation(resp), items: documents(resp)?, query_metrics: first_header(resp, "x-ms-documentdb-query-metrics"), index_metrics: first_header(resp, "x-ms-cosmos-index-utilization")})
-  }, continuation_of: fn(r: QueryItemsResponse) -> Str? { r.continuation_token }}
+  }, continuation_of: fn(r: QueryItemsResponse) -> Str? { r.continuation_token }, span: Some(("query_items", c.id, Some(c.database_id), Some(c.id)))}
 }

@@ -220,22 +220,24 @@ pub fn (c: ContainerClient) new_transactional_batch(partition_key: PartitionKey)
 /// Executes the batch as one transaction; check `success` for whether it
 /// was committed. An empty batch is an error before anything is sent.
 pub fn (c: ContainerClient) execute_transactional_batch(batch: TransactionalBatch, options: TransactionalBatchOptions = TransactionalBatchOptions{}) -> TransactionalBatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  if batch.ops.is_empty() {
-    return Err(azcore.CallErr.InvalidInput("no operations in batch"))
-  }
-  var parts: List[Str] = []
-  for op in batch.ops {
-    parts.push(op.to_json() ?? e => return Err(azcore.CallErr.InvalidInput(e)))
-  }
-  let has_read = batch.ops.any(fn(o: BatchOp) -> Bool { o is BatchOp.Read(..) })
-  let content = has_read || (options.enable_content_response_on_write ?? c.core.content_on_write)
-  var hs: List[(Str, Str)] = []
-  if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
-  if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }
-  hs = hs + [("x-ms-cosmos-is-batch-request", "True"), ("x-ms-cosmos-batch-atomic", "True"), ("x-ms-cosmos-batch-ordered", "True")]
-  if !batch.partition_key.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", batch.partition_key.to_json_string())) }
-  if !content { hs.push(("Prefer", "return=minimal")) }
-  let resp = c.core.send(Call{method: "POST", path: "${c.link}/docs", write: true, headers: hs, body: "[${parts.join(",")}]".bytes(), content_type: "application/json", priority_level: options.priority_level, throughput_bucket: options.throughput_bucket})?
-  let results = batch_results(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
-  Ok(TransactionalBatchResponse{response: response_of(resp), session_token: first_header(resp, "x-ms-session-token") ?? "", operation_results: results, success: resp.status != 207})
+  container_traced(c, "execute_batch", fn(t: ContainerClient) -> TransactionalBatchResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    if batch.ops.is_empty() {
+      return Err(azcore.CallErr.InvalidInput("no operations in batch"))
+    }
+    var parts: List[Str] = []
+    for op in batch.ops {
+      parts.push(op.to_json() ?? e => return Err(azcore.CallErr.InvalidInput(e)))
+    }
+    let has_read = batch.ops.any(fn(o: BatchOp) -> Bool { o is BatchOp.Read(..) })
+    let content = has_read || (options.enable_content_response_on_write ?? t.core.content_on_write)
+    var hs: List[(Str, Str)] = []
+    if let Some(x) = options.consistency_level { hs.push(("x-ms-consistency-level", x)) }
+    if let Some(x) = options.session_token { hs.push(("x-ms-session-token", x)) }
+    hs = hs + [("x-ms-cosmos-is-batch-request", "True"), ("x-ms-cosmos-batch-atomic", "True"), ("x-ms-cosmos-batch-ordered", "True")]
+    if !batch.partition_key.values.is_empty() { hs.push(("x-ms-documentdb-partitionkey", batch.partition_key.to_json_string())) }
+    if !content { hs.push(("Prefer", "return=minimal")) }
+    let resp = t.core.send(Call{method: "POST", path: "${t.link}/docs", write: true, headers: hs, body: "[${parts.join(",")}]".bytes(), content_type: "application/json", priority_level: options.priority_level, throughput_bucket: options.throughput_bucket})?
+    let results = batch_results(resp.body.to_str_lossy()) ?? e => return Err(azcore.CallErr.Decode(e))
+    Ok(TransactionalBatchResponse{response: response_of(resp), session_token: first_header(resp, "x-ms-session-token") ?? "", operation_results: results, success: resp.status != 207})
+  })
 }

@@ -1,0 +1,127 @@
+// Decision 0013: azcosmos's spans against Go's. A Go program (azcosmos
+// v1.5.0, azcore v1.24.0, a recording tracing.Provider over a fake
+// transport; local only) printed TRACE_GO (tracevectors_test.xo). Go
+// shares its container and partition key range caches between clients
+// of one endpoint, so the cases that read them have hosts of their own.
+
+use std/json
+use github.com/xo-lang/azure/policy
+
+const TR_DB1: Str = "{\"id\":\"db1\",\"_rid\":\"dr1=\",\"_self\":\"dbs/dr1=/\",\"_etag\":\"\\\"d-e1\\\"\",\"_colls\":\"colls/\",\"_users\":\"users/\",\"_ts\":1762311845}"
+const TR_COLL: Str = "{\"id\":\"c1\",\"partitionKey\":{\"paths\":[\"/pk\"],\"kind\":\"Hash\",\"version\":2},\"_rid\":\"cr1=\",\"_ts\":1762311845,\"_self\":\"dbs/dr1=/colls/cr1=/\",\"_etag\":\"\\\"c-e1\\\"\"}"
+const TR_ITEM: Str = "{\"id\":\"i1\",\"pk\":\"p1\"}"
+const TR_NOT_FOUND: Str = "{\"code\":\"NotFound\",\"message\":\"Entity with the specified id does not exist in the system.\"}"
+const TR_OFFER: Str = "{\"resource\":\"dbs/dr1=/\",\"offerType\":\"Invalid\",\"offerResourceId\":\"dr1=\",\"offerVersion\":\"V2\",\"content\":{\"offerThroughput\":400},\"id\":\"o1\",\"_rid\":\"o1\",\"_self\":\"offers/o1/\",\"_etag\":\"\\\"o-e1\\\"\",\"_ts\":1762311845}"
+const TR_PKRANGES: Str = "{\"_rid\":\"cr1=\",\"PartitionKeyRanges\":[{\"id\":\"0\",\"minInclusive\":\"\",\"maxExclusive\":\"FF\",\"_rid\":\"p0\",\"_self\":\"p0\",\"_etag\":\"\\\"p\\\"\",\"_ts\":1}],\"_count\":1}"
+
+const TR_HOSTS: List[Str] = ["acct.documents.example.test", "acct2.documents.example.test", "acct3.documents.example.test", "acct4.documents.example.test", "acct.documents.example.test:8081"]
+
+/// Each host's account, its one region at the host itself.
+fn tr_accounts() -> Map[Str, TrReply] {
+  var out: Map[Str, TrReply] = {}
+  for h in TR_HOSTS {
+    out.put("GET https://${h}/", tr_r(200, "{\"id\":\"acct\",\"writableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://${h}/\"}],\"readableLocations\":[{\"name\":\"West US\",\"databaseAccountEndpoint\":\"https://${h}/\"}],\"enableMultipleWriteLocations\":false,\"userConsistencyPolicy\":{\"defaultConsistencyLevel\":\"Session\"}}"))
+  }
+  out
+}
+
+fn tr_client(net: Net, clock: Clock, rand: Rand, log: TrLog, host: Str = "acct.documents.example.test") -> Client[()] {
+  let cred = new_key_credential("aW52ZW50ZWQta2V5").ok() ?? fault("key")
+  new_client_with_key(net, clock, rand, "https://${host}/", cred, ClientOptions{client: policy.ClientOptions{tracing_provider: tr_provider(log), retry: policy.RetryOptions{max_retries: -1}}})
+}
+
+fn tr_db(net: Net, clock: Clock, rand: Rand, log: TrLog, host: Str = "acct.documents.example.test") -> DatabaseClient[()] {
+  tr_client(net, clock, rand, log, host: host).new_database("db1").ok() ?? fault("db")
+}
+
+fn tr_co(net: Net, clock: Clock, rand: Rand, log: TrLog, host: Str = "acct.documents.example.test") -> ContainerClient[()] {
+  tr_db(net, clock, rand, log, host: host).new_container("c1").ok() ?? fault("container")
+}
+
+test "spans as Go's azcosmos v1.5.0 makes them" {
+  let log = tr_new_log(os.net, TR_HOSTS, fixed: tr_accounts())
+  let pk = new_partition_key_string("p1")
+  let props = ContainerProperties{id: "c1", partition_key_definition: PartitionKeyDefinition{paths: ["/pk"]}}
+
+  tr_replies(log, [tr_r(201, TR_DB1)])
+  tr_dump(log, "create database", tr_err(tr_client(os.net, os.clock, os.rand, log).create_database(DatabaseProperties{id: "db1"})))
+
+  tr_replies(log, [tr_r(200, "{\"_rid\":\"\",\"Databases\":[${TR_DB1}],\"_count\":1}")])
+  var qd = tr_client(os.net, os.clock, os.rand, log).new_query_databases_pager("SELECT * FROM c")
+  tr_dump(log, "query databases", tr_err(qd.next_page()))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "database read 404", tr_err(tr_db(os.net, os.clock, os.rand, log).read()))
+
+  tr_replies(log, [tr_r(204)])
+  tr_dump(log, "database delete", tr_err(tr_db(os.net, os.clock, os.rand, log).delete()))
+
+  tr_replies(log, [tr_r(200, TR_DB1), tr_r(200, "{\"_rid\":\"\",\"Offers\":[${TR_OFFER}],\"_count\":1}"), tr_r(200, TR_OFFER)])
+  tr_dump(log, "database read throughput", tr_err(tr_db(os.net, os.clock, os.rand, log).read_throughput()))
+
+  tr_replies(log, [tr_r(201, TR_COLL)])
+  tr_dump(log, "create container", tr_err(tr_db(os.net, os.clock, os.rand, log).create_container(props)))
+
+  tr_replies(log, [tr_r(400, "{\"code\":\"BadRequest\",\"message\":\"bad query\"}")])
+  var qc = tr_db(os.net, os.clock, os.rand, log).new_query_containers_pager("SELECT * FROM c")
+  tr_dump(log, "query containers 400", tr_err(qc.next_page()))
+
+  tr_replies(log, [tr_r(200, TR_COLL)])
+  tr_dump(log, "container read", tr_err(tr_co(os.net, os.clock, os.rand, log).read()))
+
+  tr_replies(log, [tr_r(200, TR_COLL)])
+  tr_dump(log, "container replace", tr_err(tr_co(os.net, os.clock, os.rand, log).replace(props)))
+
+  tr_replies(log, [tr_r(204)])
+  tr_dump(log, "container delete", tr_err(tr_co(os.net, os.clock, os.rand, log).delete()))
+
+  tr_replies(log, [tr_r(201, TR_ITEM)])
+  tr_dump(log, "create item", tr_err(tr_co(os.net, os.clock, os.rand, log).create_item(pk, TR_ITEM)))
+
+  tr_replies(log, [tr_r(409, "{\"code\":\"Conflict\",\"message\":\"exists\"}")])
+  tr_dump(log, "create item 409", tr_err(tr_co(os.net, os.clock, os.rand, log).create_item(pk, TR_ITEM)))
+
+  tr_replies(log, [tr_r(200, TR_ITEM)])
+  tr_dump(log, "upsert item", tr_err(tr_co(os.net, os.clock, os.rand, log).upsert_item(pk, TR_ITEM)))
+
+  tr_replies(log, [tr_r(200, TR_ITEM)])
+  tr_dump(log, "replace item", tr_err(tr_co(os.net, os.clock, os.rand, log).replace_item(pk, "i1", TR_ITEM)))
+
+  tr_replies(log, [tr_r(200, TR_ITEM)])
+  tr_dump(log, "read item", tr_err(tr_co(os.net, os.clock, os.rand, log).read_item(pk, "i1")))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "read item 404", tr_err(tr_co(os.net, os.clock, os.rand, log).read_item(pk, "i1")))
+
+  tr_replies(log, [tr_r(204)])
+  tr_dump(log, "delete item", tr_err(tr_co(os.net, os.clock, os.rand, log).delete_item(pk, "i1")))
+
+  tr_replies(log, [tr_r(200, TR_ITEM)])
+  tr_dump(log, "patch item", tr_err(tr_co(os.net, os.clock, os.rand, log).patch_item(pk, "i1", PatchOperations{}.append_set("/v", json.Value.Int(1)))))
+
+  tr_replies(log, [tr_r(200, "{\"_rid\":\"\",\"Documents\":[${TR_ITEM}],\"_count\":1}")])
+  var qi = tr_co(os.net, os.clock, os.rand, log).new_query_items_pager("SELECT * FROM c", pk)
+  tr_dump(log, "query items", tr_err(qi.next_page()))
+
+  tr_replies(log, [tr_r(200, "[{\"statusCode\":201,\"requestCharge\":1.0}]")])
+  let bc = tr_co(os.net, os.clock, os.rand, log)
+  tr_dump(log, "transactional batch", tr_err(bc.execute_transactional_batch(bc.new_transactional_batch(pk).create_item(TR_ITEM))))
+
+  tr_replies(log, [tr_r(200, TR_COLL), tr_r(200, TR_PKRANGES), tr_r(304)])
+  tr_dump(log, "read feed ranges", tr_err(tr_co(os.net, os.clock, os.rand, log, host: "acct4.documents.example.test").read_feed_ranges()))
+
+  tr_replies(log, [tr_r(200, TR_COLL), tr_r(200, TR_PKRANGES), tr_r(304), tr_r(200, "{\"_rid\":\"\",\"Documents\":[${TR_ITEM},{\"id\":\"i2\",\"pk\":\"p1\"}],\"_count\":2}")])
+  tr_dump(log, "read many items", tr_err(tr_co(os.net, os.clock, os.rand, log, host: "acct2.documents.example.test").read_many_items([ItemIdentity{id: "i1", partition_key: pk}, ItemIdentity{id: "i2", partition_key: pk}])))
+
+  tr_replies(log, [tr_r(200, TR_COLL), tr_r(200, TR_PKRANGES), tr_r(304), tr_r(200, "{\"_rid\":\"\",\"Documents\":[${TR_ITEM}],\"_count\":1}")])
+  tr_dump(log, "read change feed", tr_err(tr_co(os.net, os.clock, os.rand, log, host: "acct3.documents.example.test").read_change_feed(ChangeFeedOptions{feed_range: Some(FeedRange{min_inclusive: "", max_exclusive: "FF"})})))
+
+  tr_replies(log, [tr_r(201, TR_DB1)])
+  tr_dump(log, "create database port 8081", tr_err(tr_client(os.net, os.clock, os.rand, log, host: "acct.documents.example.test:8081").create_database(DatabaseProperties{id: "db1"})))
+
+  // Known difference: Go sets the request charge as a float32; Xo's
+  // tracing.Value has one float, 64 bits (decision 0013)
+  tr_compare(tr_got(log), TRACE_GO, known: [
+    ("    ATTR +db.cosmosdb.request_charge=float32:0", "    ATTR +db.cosmosdb.request_charge=float64:0"),
+  ])
+}

@@ -1,0 +1,81 @@
+// The operation spans of azcosmos v1.5.0 (otel_constants.go and
+// trace.go's startSpan; MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md): `<operation> <id>`, of kind Client, with the database
+// attributes OpenTelemetry names; each response sets the span's request
+// charge and status code (Go's addResponseValuesToSpan, in Core.send).
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/tracing
+
+/// The `az.namespace` of every span (Go's TracingOptions.Namespace).
+const TRACING_NAMESPACE: Str = "Microsoft.DocumentDB"
+
+/// The core with each request carrying the span values `vs`.
+fn (c: Core[fx]) with_values(vs: Map[Str, Str]) -> Core[fx] {
+  c with {values: vs}
+}
+
+/// The endpoint's host and port as Go's URL.Hostname and URL.Port give
+/// them: no port is "".
+fn host_port(endpoint: Str) -> (Str, Str) {
+  var h = match endpoint.cut("://") {
+    Some((_, rest)) => rest
+    None => endpoint
+  }
+  for sep in ["/", "?", "#"] {
+    if let Some((before, _)) = h.cut(sep) {
+      h = before
+    }
+  }
+  if let Some(i) = h.rfind("@") {
+    h = h[i + 1..h.len()]
+  }
+  if h.starts_with("[") {
+    return match h.cut("]") {
+      Some((inner, rest)) => (inner[1..inner.len()], if rest.starts_with(":") { rest[1..rest.len()] } else { "" })
+      None => (h, "")
+    }
+  }
+  match h.rfind(":") {
+    Some(i) => (h[0..i], h[i + 1..h.len()])
+    None => (h, "")
+  }
+}
+
+/// Go's getSpanPropertiesFor{Client,Database,Container}: the database
+/// and the container when the operation has them; `server.port` unless
+/// it is "443" (also when the endpoint has none, as Go's).
+fn (c: Core) span_attributes(operation: Str, database: Str?, container: Str?) -> List[tracing.Attribute] {
+  let (host, port) = host_port(c.endpoint)
+  var out = [tracing.str_attr("db.system", "cosmosdb"), tracing.str_attr("db.cosmosdb.connection_mode", "gateway")]
+  if let Some(d) = database {
+    out.push(tracing.str_attr("db.namespace", d))
+  }
+  if let Some(n) = container {
+    out.push(tracing.str_attr("db.collection.name", n))
+  }
+  out.push(tracing.str_attr("db.operation.name", operation))
+  out.push(tracing.str_attr("server.address", host))
+  if port != "443" {
+    out.push(tracing.str_attr("server.port", port))
+  }
+  out
+}
+
+/// The span `<operation> <id>` (Go's startSpan with getSpanNameFor...)
+/// around `f`, which gets the core whose requests carry it.
+fn cosmos_traced[T, fx: Effects](core: Core[fx], operation: Str, id: Str, database: Str?, container: Str?, f: fn(Core[fx]) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx)) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  runtime.traced(core.pipeline.tracer, core.values, "${operation} ${id}", fn(vs: Map[Str, Str]) -> T ! azcore.CallErr uses net.dial, clock, rand, fx { f(core.with_values(vs)) }, kind: tracing.SpanKind.Client, attributes: core.span_attributes(operation, database, container))
+}
+
+/// A database operation's span (getSpanNameForDatabases).
+fn db_traced[T, fx: Effects](db: DatabaseClient[fx], operation: Str, f: fn(DatabaseClient[fx]) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx)) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  cosmos_traced(db.core, operation, db.id, Some(db.id), None, fn(core: Core[fx]) -> T ! azcore.CallErr uses net.dial, clock, rand, fx { f(db with {core: core}) })
+}
+
+/// A container or item operation's span (getSpanNameForContainers and
+/// getSpanNameForItems: both are named for the container).
+fn container_traced[T, fx: Effects](c: ContainerClient[fx], operation: Str, f: fn(ContainerClient[fx]) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx)) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  cosmos_traced(c.core, operation, c.id, Some(c.database_id), Some(c.id), fn(core: Core[fx]) -> T ! azcore.CallErr uses net.dial, clock, rand, fx { f(c with {core: core}) })
+}

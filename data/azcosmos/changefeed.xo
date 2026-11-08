@@ -209,82 +209,85 @@ fn change_page(resp: http.Response) -> ChangeFeedResponse ! azcore.CallErr {
 /// changes, or every range has been read once. Read on from the
 /// response's `continuation_token`.
 pub fn (c: ContainerClient) read_change_feed(options: ChangeFeedOptions = ChangeFeedOptions{}) -> ChangeFeedResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let (t0, rs0) = c.initial_queue(options)?
-  var token = t0
-  var ranges = rs0
-  var queue_len = token.ranges.len()
-  let max_queue_len = 4 * (queue_len + 1)
-  var rotations = 0
-  var gone_attempts = 0
-  var last: ChangeFeedResponse? = None
-  var charge = 0.0
-  let finish = fn(r: ChangeFeedResponse, t: CompositeToken, total: Float) -> ChangeFeedResponse {
-    let tok = if t.ranges.is_empty() { "" } else { token_json(if t.version == 0 { t with {version: COMPOSITE_TOKEN_VERSION} } else { t }) }
-    r with {continuation_token: tok, response: r.response with {request_charge: total}}
-  }
-  while rotations < queue_len {
-    let head = token.ranges[0]
-    let head_fr = FeedRange{min_inclusive: head.min_inclusive, max_exclusive: head.max_exclusive}
-    var over = overlapping_ranges(head_fr, ranges)
-    if over.is_empty() {
-      c.refresh_ranges()?
-      ranges = c.current_ranges()?
-      over = overlapping_ranges(head_fr, ranges)
+  // Go names the change feed's span read_item
+  container_traced(c, "read_item", fn(t: ContainerClient) -> ChangeFeedResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let (t0, rs0) = t.initial_queue(options)?
+    var token = t0
+    var ranges = rs0
+    var queue_len = token.ranges.len()
+    let max_queue_len = 4 * (queue_len + 1)
+    var rotations = 0
+    var gone_attempts = 0
+    var last: ChangeFeedResponse? = None
+    var charge = 0.0
+    let finish = fn(r: ChangeFeedResponse, t: CompositeToken, total: Float) -> ChangeFeedResponse {
+      let tok = if t.ranges.is_empty() { "" } else { token_json(if t.version == 0 { t with {version: COMPOSITE_TOKEN_VERSION} } else { t }) }
+      r with {continuation_token: tok, response: r.response with {request_charge: total}}
+    }
+    while rotations < queue_len {
+      let head = token.ranges[0]
+      let head_fr = FeedRange{min_inclusive: head.min_inclusive, max_exclusive: head.max_exclusive}
+      var over = overlapping_ranges(head_fr, ranges)
       if over.is_empty() {
-        return Err(unresolved(head))
-      }
-    }
-    if over.len() > 1 {
-      let clamped = clamp_to_parent(over, head)
-      if clamped.is_empty() {
-        return Err(unresolved(head))
-      }
-      let children = child_entries(clamped, head.etag)
-      token = token.replace_head(children)
-      queue_len += children.len() - 1
-      if queue_len > max_queue_len {
-        if let Some(l) = last {
-          return Ok(finish(l, token, charge))
+        t.refresh_ranges()?
+        ranges = t.current_ranges()?
+        over = overlapping_ranges(head_fr, ranges)
+        if over.is_empty() {
+          return Err(unresolved(head))
         }
-        return Err(azcore.CallErr.InvalidInput("ReadChangeFeed: drain queue exceeded safety cap of ${max_queue_len} entries; suspected overlap-resolution bug"))
       }
-      gone_attempts = 0
-      continue
-    }
-    let call = Call{method: "GET", path: "${c.link}/docs", headers: options.headers(head, over[0].id), priority_level: options.priority_level, throughput_bucket: options.throughput_bucket}
-    let resp = match c.core.send(call) {
-      Ok(r) => r
-      Err(e) => {
-        if is_pk_range_gone(e) {
-          if gone_attempts >= MAX_PK_RANGE_GONE_RETRIES {
-            // Go returns the pages so far with the error; a Result
-            // carries one of them, so the port returns the error.
-            return Err(e)
+      if over.len() > 1 {
+        let clamped = clamp_to_parent(over, head)
+        if clamped.is_empty() {
+          return Err(unresolved(head))
+        }
+        let children = child_entries(clamped, head.etag)
+        token = token.replace_head(children)
+        queue_len += children.len() - 1
+        if queue_len > max_queue_len {
+          if let Some(l) = last {
+            return Ok(finish(l, token, charge))
           }
-          gone_attempts += 1
-          c.refresh_ranges()?
-          ranges = c.current_ranges()?
-          continue
+          return Err(azcore.CallErr.InvalidInput("ReadChangeFeed: drain queue exceeded safety cap of ${max_queue_len} entries; suspected overlap-resolution bug"))
         }
-        return Err(e)
+        gone_attempts = 0
+        continue
+      }
+      let call = Call{method: "GET", path: "${t.link}/docs", headers: options.headers(head, over[0].id), priority_level: options.priority_level, throughput_bucket: options.throughput_bucket}
+      let resp = match t.core.send(call) {
+        Ok(r) => r
+        Err(e) => {
+          if is_pk_range_gone(e) {
+            if gone_attempts >= MAX_PK_RANGE_GONE_RETRIES {
+              // Go returns the pages so far with the error; a Result
+              // carries one of them, so the port returns the error.
+              return Err(e)
+            }
+            gone_attempts += 1
+            t.refresh_ranges()?
+            ranges = t.current_ranges()?
+            continue
+          }
+          return Err(e)
+        }
+      }
+      let page = change_page(resp)?
+      charge = charge + page.response.request_charge
+      if token.resource_id == "" && page.resource_id != "" {
+        token = token with {resource_id: page.resource_id}
+      }
+      token = token.advance(page.response.etag)
+      rotations += 1
+      gone_attempts = 0
+      let p = page with {feed_range: Some(head_fr)}
+      last = Some(p)
+      if p.response.status == 200 && (p.count > 0 || !p.items.is_empty()) {
+        return Ok(finish(p, token, charge))
       }
     }
-    let page = change_page(resp)?
-    charge = charge + page.response.request_charge
-    if token.resource_id == "" && page.resource_id != "" {
-      token = token with {resource_id: page.resource_id}
+    match last {
+      Some(l) => Ok(finish(l, token, charge))
+      None => Ok(ChangeFeedResponse{response: Response{}})
     }
-    token = token.advance(page.response.etag)
-    rotations += 1
-    gone_attempts = 0
-    let p = page with {feed_range: Some(head_fr)}
-    last = Some(p)
-    if p.response.status == 200 && (p.count > 0 || !p.items.is_empty()) {
-      return Ok(finish(p, token, charge))
-    }
-  }
-  match last {
-    Some(l) => Ok(finish(l, token, charge))
-    None => Ok(ChangeFeedResponse{response: Response{}})
-  }
+  })
 }

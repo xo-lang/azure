@@ -25,6 +25,10 @@ pub struct PipelineOptions[fx: Effects] {
   /// in progress as `az.namespace` on each try, after `per_retry` (Go's
   /// httpTraceNamespacePolicy).
   pub namespace_of_path: (fn(Str) -> Str?)? = None
+  /// Trace with this tracer instead of making one: a second pipeline
+  /// of one client, as Go's runtime.NewPipeline traces with the tracer
+  /// of the span in progress (azcosmos's account reads).
+  pub tracer: tracing.Tracer? = None
 }
 
 pub struct Pipeline[fx: Effects] {
@@ -53,11 +57,16 @@ pub fn new_pipeline[fx: Effects](module: Str, version: Str, net: Net, clock: Clo
   // the client's tracer, as azcore.NewClient and arm.NewClient make it:
   // the namespace attribute, then the sanitizer's wrapper
   let sanitizer = new_sanitizer(opts.allowed_query_params)
-  var tracer = opts.tracing_provider.new_tracer(module, version)
-  if tracer.enabled() && pl.tracing_namespace != "" {
-    tracer = tracer.with_attributes([tracing.str_attr(NAMESPACE_ATTR, pl.tracing_namespace)])
+  let tracer = match pl.tracer {
+    Some(t) => t
+    None => {
+      var t = opts.tracing_provider.new_tracer(module, version)
+      if t.enabled() && pl.tracing_namespace != "" {
+        t = t.with_attributes([tracing.str_attr(NAMESPACE_ATTR, pl.tracing_namespace)])
+      }
+      sanitized_tracer(t, sanitizer)
+    }
   }
-  tracer = sanitized_tracer(tracer, sanitizer)
   if let Some(f) = pl.namespace_of_path {
     ps.push(NamespacePolicy{tracer: tracer, namespace_of_path: f})
   }
