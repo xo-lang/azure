@@ -1,0 +1,261 @@
+// Replays the Go program's DeviceCodeCredential cases
+// (devicecodevectors_test.xo) against the same fake token host: reply
+// queues per endpoint (and grant), the last reply repeating, and the
+// same ID token and client_info.
+
+use std/base64
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+const PC_S1: Str = "https://svc.example.test/.default"
+const PC_S2: Str = "https://other.example.test/.default"
+
+struct PcFake {
+  section: Mutex[Str]
+  log: Mutex[List[Str]]
+  /// replies per "METHOD path[ grant]"; the last one repeats
+  q: Mutex[Map[Str, List[(Int, Str)]]]
+}
+
+fn pc_b64(s: Str) -> Str {
+  base64.encode(s.bytes(), base64.Base64.RawUrl)
+}
+
+fn pc_id_token(tid: Str) -> Str {
+  let claims = "{\"aud\":\"client-1\",\"iss\":\"https://login.example.test/${tid}/v2.0\",\"iat\":1700000000,\"nbf\":1700000000,\"exp\":4102444800,\"name\":\"Test User\",\"oid\":\"oid-1\",\"preferred_username\":\"user@example.test\",\"sub\":\"sub-1\",\"tid\":\"${tid}\",\"ver\":\"2.0\"}"
+  "${pc_b64("{\"alg\":\"none\",\"typ\":\"JWT\"}")}.${pc_b64(claims)}."
+}
+
+fn pc_token(at: Str, rt: Str, scope: Str, tid: Str = "tenant-a") -> Str {
+  "{\"token_type\":\"Bearer\",\"scope\":${json_q(scope)},\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":${json_q(at)},\"refresh_token\":${json_q(rt)},\"id_token\":${json_q(pc_id_token(tid))},\"client_info\":${json_q(pc_b64("{\"uid\":\"uid-1\",\"utid\":\"${tid}\"}"))}}"
+}
+
+/// Go's %q of printable ASCII text.
+fn json_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+fn pc_openid(t: Str) -> Str {
+  "{\"authorization_endpoint\":\"https://login.example.test/${t}/oauth2/v2.0/authorize\",\"token_endpoint\":\"https://login.example.test/${t}/oauth2/v2.0/token\",\"device_authorization_endpoint\":\"https://login.example.test/${t}/oauth2/v2.0/devicecode\",\"issuer\":\"https://login.example.test/{tenantid}/v2.0\",\"jwks_uri\":\"https://login.example.test/${t}/discovery/v2.0/keys\",\"tenant_region_scope\":null,\"cloud_instance_name\":\"example.test\",\"msgraph_host\":\"graph.example.test\"}"
+}
+
+const PC_DEVCODE: Str = "{\"device_code\":\"dev-code-1\",\"user_code\":\"ABCD-EFGH\",\"verification_uri\":\"https://login.example.test/device\",\"expires_in\":900,\"interval\":1,\"message\":\"To sign in, use a web browser to open the page https://login.example.test/device and enter the code ABCD-EFGH to authenticate.\"}"
+
+fn pc_note(f: PcFake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l = l + s.split("\n") })
+}
+
+fn pc_sec(f: PcFake) -> Str {
+  f.section.with_read(fn(s: Str) -> Str { s })
+}
+
+fn pc_on(f: PcFake, key: Str, rs: List[(Int, Str)]) {
+  f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) { m[key] = (m.get(key) ?? []) + rs })
+}
+
+fn pc_set(f: PcFake, key: Str, rs: List[(Int, Str)]) {
+  f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) { m[key] = rs })
+}
+
+fn pc_answer(f: PcFake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
+      hs.push("${lk}=${if lk == "client-request-id" { "<uuid>" } else { v }}")
+    }
+  }
+  let body = req.body.to_str_lossy()
+  let path = req.escaped_path()
+  let qs = req.raw_query()
+  pc_note(f, "${pc_sec(f)}: REQ ${req.method} https://${req.url.host}${path}${if qs == "" { "" } else { "?${qs}" }}")
+  pc_note(f, "  H ${hs.sort().join(" | ")}")
+  pc_note(f, "  B ${body}")
+  var key = "${req.method} ${req.url.path}"
+  if req.method == "POST" && path.ends_with("/oauth2/v2.0/token") {
+    for kv in body.split("&") {
+      if kv.starts_with("grant_type=") {
+        key = "${key} ${kv.trim_prefix("grant_type=")}"
+      }
+    }
+  }
+  let r = f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) -> (Int, Str)? {
+    let rs = m.get(key) ?? return None
+    if rs.is_empty() {
+      return None
+    }
+    if rs.len() > 1 {
+      m[key] = rs[1..rs.len()]
+    }
+    Some(rs[0])
+  })
+  match r {
+    Some((st, b)) => http.text(st, b)
+    None => {
+      pc_note(f, "${pc_sec(f)}: NO REPLY for ${key}")
+      http.text(404, "{}")
+    }
+  }
+}
+
+/// The Go program's fake for a section: the tenant's OpenID
+/// configuration and a device code.
+fn pc_serve(net: testing.FakeNet) -> PcFake {
+  let f = PcFake{section: Mutex[Str].new(""), log: Mutex[List[Str]].new([]), q: Mutex[Map[Str, List[(Int, Str)]]].new({})}
+  let h = fn(req: http.Request) -> http.Response { pc_answer(f, req) }
+  net.handle("GET https://login.example.test/{rest...}", h)
+  net.handle("POST https://login.example.test/{rest...}", h)
+  f
+}
+
+fn pc_start(f: PcFake, section: Str) {
+  f.section.with(fn(var s: Str) { s = section })
+  f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) {
+    m = {}
+    m["GET /tenant-a/v2.0/.well-known/openid-configuration"] = [(200, pc_openid("tenant-a"))]
+    m["POST /tenant-a/oauth2/v2.0/devicecode"] = [(200, PC_DEVCODE)]
+  })
+}
+
+fn pc_show(f: PcFake, label: Str, r: Result[azcore.AccessToken, azcore.AuthErr]) {
+  match r {
+    Ok(t) => pc_note(f, "${pc_sec(f)}: ${label}: token ${t.token.reveal()}")
+    Err(e) => pc_note(f, "${pc_sec(f)}: ${label}: error: ${e.display().replace("\n", "\n| ")}")
+  }
+}
+
+fn dc_opts() -> DeviceCodeCredentialOptions {
+  DeviceCodeCredentialOptions{opts: gv_opts(nodisc: true), tenant_id: "tenant-a", client_id: "client-1"}
+}
+
+fn dc_prompt(f: PcFake) -> fn(DeviceCodeMessage) -> () ! Str {
+  fn(m: DeviceCodeMessage) -> () ! Str {
+    pc_note(f, "${pc_sec(f)}: PROMPT user_code=${m.user_code} url=${m.verification_url} message=${json_q(m.message)}")
+    Ok(())
+  }
+}
+
+/// The lines logged against the Go program's for `sections`, so a
+/// failure names the first lines that differ.
+fn pc_compare(f: PcFake, sections: List[Str], all: List[Str] = GO_DC_LINES) {
+  let got = f.log.with_read(fn(l: List[Str]) -> List[Str] { l })
+  let want = pc_only(all, sections)
+  for i in 0..got.len().min(want.len()) {
+    expect((i, got[i])) == (i, want[i])
+  }
+  expect(got.len()) == want.len()
+}
+
+fn tro(scopes: List[Str], claims: Str = "", tenant: Str = "", cae: Bool = false) -> azcore.TokenRequestOptions {
+  azcore.TokenRequestOptions{scopes: scopes, claims: claims, tenant_id: tenant, enable_cae: cae}
+}
+
+test "DeviceCodeCredential polls, caches and refreshes as MSAL Go" {
+  let f = pc_serve(os.net)
+  pc_start(f, "dc1")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [(400, "{\"error\":\"authorization_pending\",\"error_description\":\"pending\"}"), (200, pc_token("at-1", "rt-1", "${PC_S1} openid profile offline_access"))])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [(200, pc_token("at-2", "rt-2", "${PC_S2} openid profile offline_access"))])
+  let c = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "first", c.get_token(tro([PC_S1])))
+  pc_show(f, "cached", c.get_token(tro([PC_S1])))
+  pc_show(f, "other scope", c.get_token(tro([PC_S2])))
+  pc_compare(f, ["dc1"])
+}
+
+test "DeviceCodeCredential.authenticate gives Go's AuthenticationRecord" {
+  let f = pc_serve(os.net)
+  pc_start(f, "dc2")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [(200, pc_token("at-3", "rt-3", "${PC_S1} openid profile offline_access"))])
+  let c = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  match c.authenticate() {
+    Ok(_) => pc_note(f, "dc2: authenticate no scope: err=<nil>")
+    Err(e) => pc_note(f, "dc2: authenticate no scope: err=${e.display()}")
+  }
+  match c.authenticate(tro([PC_S1])) {
+    Ok(r) => pc_note(f, "dc2: authenticate: err=<nil> record=${r.encode()}")
+    Err(e) => pc_note(f, "dc2: authenticate: err=${e.display()}")
+  }
+  pc_show(f, "after authenticate", c.get_token(tro([PC_S1])))
+  pc_compare(f, ["dc2"])
+  let r = parse_authentication_record(c.record().encode())?
+  expect(r.home_account_id) == "uid-1.tenant-a"
+  expect(parse_authentication_record("{\"authority\":\"x\"}").is_err()) == true
+  expect(parse_authentication_record("{\"version\":\"2.0\"}")) == Err("unsupported AuthenticationRecord version \"2.0\". This module supports [1.0]")
+}
+
+test "DeviceCodeCredential with automatic authentication off asks for authenticate" {
+  let f = pc_serve(os.net)
+  pc_start(f, "dc3")
+  let c = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts() with {disable_automatic_authentication: true})?
+  let r = c.get_token(tro([PC_S1], claims: "{}"))
+  pc_show(f, "disabled", r)
+  if let Err(e) = r {
+    if let Some(o) = e.required {
+      pc_note(f, "dc3: required: scopes=[${o.scopes.join(" ")}] claims=${json_q(o.claims)}")
+    }
+    expect(e.unavailable) == true
+  }
+  pc_compare(f, ["dc3"])
+}
+
+test "DeviceCodeCredential's errors are Go's" {
+  let f = pc_serve(os.net)
+  pc_start(f, "dc4")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [(400, "{\"error\":\"expired_token\",\"error_description\":\"AADSTS70020: The provided value for the input parameter 'device_code' is not valid. This device code has expired.\",\"error_codes\":[70020]}")])
+  let c4 = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "expired", c4.get_token(tro([PC_S1])))
+
+  pc_start(f, "dc5")
+  pc_set(f, "POST /tenant-a/oauth2/v2.0/devicecode", [(400, "{\"error\":\"invalid_client\",\"error_description\":\"AADSTS7000218: bad client\",\"error_codes\":[7000218]}")])
+  let c5 = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "devicecode error", c5.get_token(tro([PC_S1])))
+
+  pc_start(f, "dc6")
+  let refuse = fn(m: DeviceCodeMessage) -> () ! Str {
+    pc_note(f, "dc6: PROMPT refuses")
+    Err("the user went away")
+  }
+  let c6 = new_device_code_credential(refuse, os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "prompt error", c6.get_token(tro([PC_S1])))
+
+  pc_start(f, "dc7")
+  let c7 = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "other tenant", c7.get_token(tro([PC_S1], tenant: "tenant-b")))
+  pc_show(f, "no scope", c7.get_token(tro([])))
+
+  pc_start(f, "dc8")
+  pc_set(f, "POST /tenant-a/oauth2/v2.0/devicecode", [(200, PC_DEVCODE.replace("\"expires_in\":900", "\"expires_in\":1"))])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [(400, "{\"error\":\"authorization_pending\",\"error_description\":\"pending\"}")])
+  let c8 = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "deadline", c8.get_token(tro([PC_S1])))
+  pc_compare(f, ["dc4", "dc5", "dc6", "dc7", "dc8"])
+}
+
+/// The Go lines of the given sections, in order.
+fn pc_only(all: List[Str], sections: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var keep = false
+  for l in all {
+    if !l.starts_with("  ") && !l.starts_with("| ") {
+      keep = sections.any(fn(s: Str) -> Bool { l.starts_with("${s}: ") })
+    }
+    if keep {
+      out.push(l)
+    }
+  }
+  out
+}
+
+test "DeviceCodeCredential's slow_down, failed refresh, claims and CAE are MSAL Go's" {
+  let f = pc_serve(os.net)
+  pc_start(f, "dc9")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [(400, "{\"error\":\"slow_down\",\"error_description\":\"slow\"}"), (400, "{\"error\":\"authorization_pending\",\"error_description\":\"pending\"}"), (200, pc_token("at-9", "rt-9", "${PC_S1} openid profile offline_access"))])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [(400, "{\"error\":\"invalid_grant\",\"error_description\":\"AADSTS700082: The refresh token has expired\",\"error_codes\":[700082]}")])
+  let c = new_device_code_credential(dc_prompt(f), os.net, os.clock, os.rand, dc_opts())?
+  pc_show(f, "slow down", c.get_token(tro([PC_S1])))
+  pc_show(f, "refresh fails", c.get_token(tro([PC_S2])))
+  pc_show(f, "claims", c.get_token(tro([PC_S1], claims: "{\"access_token\":{\"nbf\":{\"essential\":true,\"value\":\"1700000000\"}}}")))
+  pc_show(f, "cae", c.get_token(tro([PC_S1], cae: true)))
+  pc_compare(f, ["dc9"])
+}

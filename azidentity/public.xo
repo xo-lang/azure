@@ -1,0 +1,354 @@
+// Public clients and the user's account, by hand (decision 0003,
+// Amendment 2): the requests azidentity v1.15.0 makes through MSAL Go
+// v1.10.1 for a client without a secret (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md). MSAL's account is the token response's
+// `client_info` (`<uid>.<utid>`) and ID token; its refresh tokens are kept
+// per account in the credential's memory, and every token request tries
+// the silent one first: the cached access token, then the refresh token
+// grant. Only then does a credential's own flow (the device code, the
+// browser, the password) run.
+
+use std/base64
+use std/http
+use std/json
+use std/url
+use std/uuid
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// azidentity's default tenant of a public client.
+pub const ORGANIZATIONS_TENANT: Str = "organizations"
+/// azidentity's default client of a public client (the Azure CLI's
+/// application, developerSignOnClientID).
+pub const DEVELOPER_SIGN_ON_CLIENT_ID: Str = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+
+/// The account a public credential signed in (Go's AuthenticationRecord):
+/// keep it (its JSON) to sign the same user in silently later, with a
+/// cache that outlives the process (decision 0012).
+pub struct AuthenticationRecord {
+  /// The authority's scheme and host (`https://login.microsoftonline.com`).
+  pub authority as "authority": Str = ""
+  pub client_id as "clientId": Str = ""
+  /// MSAL's account id: `<uid>.<utid>`.
+  pub home_account_id as "homeAccountId": Str = ""
+  pub tenant_id as "tenantId": Str = ""
+  pub username as "username": Str = ""
+  pub version as "version": Str = ""
+} derive Json
+
+/// The record's JSON, as Go's json.Marshal writes it.
+pub fn (r: AuthenticationRecord) encode() -> Str {
+  json.encode_str(r)
+}
+
+/// The record in `text` (Go's AuthenticationRecord.UnmarshalJSON): its
+/// version must be one this module reads.
+pub fn parse_authentication_record(text: Str) -> AuthenticationRecord ! Str {
+  let r = json.decode_str[AuthenticationRecord](text) ?? e => return Err(e.display())
+  if r.version == "" {
+    return Err("AuthenticationRecord must have a version")
+  }
+  if r.version != "1.0" {
+    return Err("unsupported AuthenticationRecord version ${json.encode_str(r.version)}. This module supports [1.0]")
+  }
+  Ok(r)
+}
+
+/// azidentity's errScopeRequired.
+const SCOPE_REQUIRED: Str = "authenticating in this environment requires specifying a scope in TokenRequestOptions"
+
+/// The state every public credential shares: the confidential client's
+/// endpoints, pipeline and access token cache, the account, and its
+/// refresh tokens per MSAL client (`<cae>|<home account>`).
+pub struct Public {
+  c: Confidential
+  account: Mutex[AuthenticationRecord]
+  refresh: Mutex[Map[Str, Secret[Str]]]
+  default_scope: List[Str]
+  disable_auto: Bool
+}
+
+/// A public client named `name` (Go's newPublicClient).
+pub fn public_client(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options, record: AuthenticationRecord, disable_auto: Bool) -> Public ! azcore.AuthErr {
+  let c = confidential(name, tenant_id, client_id, net, clock, rand, opts)?
+  // the default scope of Authenticate: the cloud's Resource Manager
+  // audience, as Go finds it (the configuration's, else one of the
+  // known clouds' by authority host)
+  var audience = match opts.client.cloud.services.get("resourceManager") {
+    Some(s) => s.audience
+    None => ""
+  }
+  if audience == "" {
+    audience = match c.authority_host {
+      "https://login.chinacloudapi.cn/" => "https://management.core.chinacloudapi.cn/"
+      "https://login.microsoftonline.us/" => "https://management.core.usgovcloudapi.net/"
+      "https://login.microsoftonline.com/" => "https://management.core.windows.net/"
+      _ => ""
+    }
+  }
+  Ok(Public{c: c, account: Mutex.new(record), refresh: Mutex.new({}), default_scope: if audience == "" { [] } else { ["${audience}.default"] }, disable_auto: disable_auto})
+}
+
+/// The account signed in last (or given), as an AuthenticationRecord.
+pub fn (p: Public) record() -> AuthenticationRecord {
+  p.account.with_read(fn(r: AuthenticationRecord) -> AuthenticationRecord { r })
+}
+
+fn rt_key(cae: Bool, home: Str) -> Str {
+  "${cae}|${home}"
+}
+
+/// MSAL's AcquireTokenSilent for the account: the cached access token
+/// (not with claims), else the refresh token grant. Err when neither
+/// gives a token; the caller then runs its flow.
+fn (p: Public) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! () uses (net.dial, clock, rand) {
+  let home = p.record().home_account_id
+  if home == "" {
+    return Err(())
+  }
+  let key = key_of(tenant, opts.scopes, opts.enable_cae)
+  if let Some(t) = p.c.cached(tenant, key, opts) {
+    return Ok(t)
+  }
+  let rt = p.refresh.with_read(fn(m: Map[Str, Secret[Str]]) -> Secret[Str]? { m.get(rt_key(opts.enable_cae, home)) }) ?? return Err(())
+  let resp = p.post_token(tenant, opts, [("refresh_token", rt.reveal())], "refresh_token") ?? _ => return Err(())
+  if resp.status != 200 {
+    return Err(())
+  }
+  p.accept(tenant, opts, resp) ?? _ => Err(())
+}
+
+/// A form as MSAL Go posts it: `fields`, the scopes with MSAL_SCOPES,
+/// the claims, keys sorted.
+fn msal_body(opts: azcore.TokenRequestOptions, fields: List[(Str, Str)]) -> Str ! Str {
+  var form = fields + [("scope", (opts.scopes + MSAL_SCOPES).join(" "))]
+  let claims = merge_claims(opts.claims, opts.enable_cae)?
+  if claims != "" {
+    form.push(("claims", claims))
+  }
+  Ok(form.sort_by(fn(f: (Str, Str)) -> Str { f.0 }).map(fn(f: (Str, Str)) -> Str { "${url.query_escape(f.0)}=${url.query_escape(f.1)}" }).join("&"))
+}
+
+/// POSTs MSAL's form to `u`.
+fn (p: Public) post(u: Str, body: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let headers = [
+    ("Content-Type", "application/x-www-form-urlencoded; charset=utf-8"),
+    ("client-request-id", uuid.v4(p.c.rand).display()),
+    ("return-client-request-id", "false"),
+  ]
+  p.c.send(policy.Request{method: "POST", url: u, headers: headers, body: body.bytes()}) ?? e => Err(failed_text(p.c.name, e.display()))
+}
+
+/// A token request of `grant` with `fields`, to `tenant`'s token
+/// endpoint; its response, whatever its status.
+fn (p: Public) post_token(tenant: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
+  let body = msal_body(opts, fields + [("client_id", p.c.client_id), ("client_info", "1"), ("grant_type", grant)]) ?? e => return Err(azcore.AuthErr{credential: p.c.name, msg: e})
+  p.post(p.c.endpoint(tenant, opts.enable_cae)?, body)
+}
+
+/// A 200 token response as MSAL takes it: no requested scope declined,
+/// the access token cached, the refresh token kept for the account, and
+/// the account recorded (Go's newAuthenticationRecord).
+fn (p: Public) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: http.Response) -> azcore.AccessToken ! azcore.AuthErr {
+  let t = parse_token_response(p.c.name, resp, p.c.clock.now())?
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => json.Value.Object([])
+  let granted = str_field(doc, "scope").split(" ").filter(fn(s: Str) -> Bool { s != "" }).map(fn(s: Str) -> Str { s.to_lower() })
+  if !granted.is_empty() {
+    let declined = opts.scopes.filter(fn(s: Str) -> Bool { !granted.contains(s.to_lower()) })
+    if !declined.is_empty() {
+      return Err(failed_text(p.c.name, "token response failed because declined scopes are present: ${declined.join(",")}"))
+    }
+  }
+  let rec = record_of(doc, p.c.authority_host) ?? e => return Err(failed_text(p.c.name, e))
+  let key = key_of(tenant, opts.scopes, opts.enable_cae)
+  p.c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {
+    xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
+    xs.push((key, t))
+  })
+  let rt = str_field(doc, "refresh_token")
+  if rt != "" {
+    p.refresh.with(fn(var m: Map[Str, Secret[Str]]) { m[rt_key(opts.enable_cae, rec.home_account_id)] = Secret.new(rt) })
+  }
+  p.account.with(fn(var r: AuthenticationRecord) { r = rec })
+  Ok(t)
+}
+
+/// The JSON of a JWT's payload, unverified (MSAL reads the ID token so).
+fn jwt_claims(token: Str) -> json.Value {
+  let parts = token.split(".")
+  if parts.len() < 2 {
+    return json.Value.Object([])
+  }
+  let b = base64.decode(parts[1].trim_end_chars("="), base64.Base64.RawUrl) ?? _ => return json.Value.Object([])
+  json.parse_value(b.to_str_lossy()) ?? _ => json.Value.Object([])
+}
+
+/// The account of a token response: `client_info`'s `<uid>.<utid>`, and
+/// the ID token's issuer, audience, tenant and user name.
+fn record_of(doc: json.Value, authority_host: Str) -> AuthenticationRecord ! Str {
+  let ci = jwt_claims("x.${str_field(doc, "client_info")}")
+  let uid = str_field(ci, "uid")
+  let utid = str_field(ci, "utid")
+  let home = if uid == "" && utid == "" { "" } else { "${uid}.${utid}" }
+  let idt = jwt_claims(str_field(doc, "id_token"))
+  let iss = str_field(idt, "iss")
+  let (scheme, rest) = iss.cut("://") ?? ("", iss)
+  let (host, path) = rest.cut("/") ?? (rest, "")
+  var tenant = str_field(idt, "tid")
+  if tenant == "" {
+    tenant = path.trim_end_chars("/")
+  }
+  var user = str_field(idt, "preferred_username")
+  if user == "" {
+    user = str_field(idt, "upn")
+  }
+  Ok(AuthenticationRecord{authority: "${scheme}://${host}", client_id: str_field(idt, "aud"), home_account_id: home, tenant_id: tenant, username: user, version: "1.0"})
+}
+
+/// Go's AuthenticationRequiredError for `opts`.
+fn (p: Public) required(opts: azcore.TokenRequestOptions) -> azcore.AuthErr {
+  azcore.AuthErr{credential: p.c.name, msg: "authentication required", text: "${p.c.name} can't acquire a token without user interaction. Call Authenticate to authenticate a user interactively", unavailable: true, required: Some(opts)}
+}
+
+/// What GetToken checks before any request: a scope, an allowed tenant.
+fn (p: Public) check(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
+  if opts.scopes.is_empty() {
+    return Err(azcore.AuthErr{credential: p.c.name, msg: "requires at least one scope", text: "${p.c.name}.GetToken() requires at least one scope"})
+  }
+  p.c.tenant_for(opts)
+}
+
+/// Authenticate's scopes: the caller's, else the cloud's default.
+fn (p: Public) auth_opts(opts: azcore.TokenRequestOptions) -> azcore.TokenRequestOptions ! azcore.AuthErr {
+  if !opts.scopes.is_empty() {
+    return Ok(opts)
+  }
+  if p.default_scope.is_empty() {
+    return Err(azcore.AuthErr{credential: p.c.name, msg: SCOPE_REQUIRED, text: SCOPE_REQUIRED})
+  }
+  Ok(opts with {scopes: p.default_scope})
+}
+
+/// What the user is asked to do (Go's DeviceCodeMessage).
+pub struct DeviceCodeMessage {
+  pub user_code: Str
+  /// Where the user enters the code.
+  pub verification_url: Str
+  /// The service's instructions, to show the user as they are.
+  pub message: Str
+}
+
+/// DeviceCodeCredential's options (Go's DeviceCodeCredentialOptions).
+pub struct DeviceCodeCredentialOptions {
+  pub opts: Options = Options{}
+  pub tenant_id: Str = ORGANIZATIONS_TENANT
+  pub client_id: Str = DEVELOPER_SIGN_ON_CLIENT_ID
+  /// An account signed in before, to start from silently.
+  pub authentication_record: AuthenticationRecord = AuthenticationRecord{}
+  /// When the silent request fails, return an AuthenticationRequired
+  /// error (`AuthErr.required`) instead of asking the user; call
+  /// `authenticate` to ask.
+  pub disable_automatic_authentication: Bool = false
+}
+
+/// Signs a user in on another device (Go's DeviceCodeCredential): the
+/// service gives a code, `user_prompt` shows it to the user, and the
+/// credential polls until the user has entered it. Unlike Go's, there
+/// is no default prompt: printing is the caller's effect `fx`.
+pub struct DeviceCodeCredential[fx: Effects] {
+  p: Public
+  user_prompt: fn(DeviceCodeMessage) -> () ! Str uses (fx)
+}
+
+pub fn new_device_code_credential[fx: Effects](user_prompt: fn(DeviceCodeMessage) -> () ! Str uses (fx), net: Net, clock: Clock, rand: Rand, o: DeviceCodeCredentialOptions = DeviceCodeCredentialOptions{}) -> DeviceCodeCredential[fx] ! azcore.AuthErr {
+  let p = public_client("DeviceCodeCredential", o.tenant_id, o.client_id, net, clock, rand, o.opts, o.authentication_record, o.disable_automatic_authentication)?
+  Ok(DeviceCodeCredential{p: p, user_prompt: user_prompt})
+}
+
+/// A token: silently when it can, else by the device code flow (an
+/// AuthenticationRequired error instead, with automatic authentication
+/// off).
+pub fn (d: DeviceCodeCredential[fx]) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
+  let tenant = d.p.check(opts)?
+  if let Ok(t) = d.p.silent(tenant, opts) {
+    return Ok(t)
+  }
+  if d.p.disable_auto {
+    return Err(d.p.required(opts))
+  }
+  d.flow(opts)
+}
+
+/// Runs the device code flow once and gives the account it signed in
+/// (Go's Authenticate): no silent request first. With no scopes, the
+/// cloud's Resource Manager scope.
+pub fn (d: DeviceCodeCredential[fx]) authenticate(opts: azcore.TokenRequestOptions = azcore.TokenRequestOptions{scopes: []}) -> AuthenticationRecord ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
+  let o = d.p.auth_opts(opts)?
+  d.flow(o)?
+  Ok(d.p.record())
+}
+
+/// The account signed in last, as an AuthenticationRecord.
+pub fn (d: DeviceCodeCredential[fx]) record() -> AuthenticationRecord {
+  d.p.record()
+}
+
+/// MSAL's first poll waits 50 ms; each next wait is three times the last,
+/// at most 5 s. The service's `interval` is not read (MSAL Go v1.10.1).
+const FIRST_POLL: Duration = 50ms
+const MAX_POLL: Duration = 5s
+
+/// The device code flow (MSAL's AcquireTokenByDeviceCode, then
+/// DeviceCode.AuthenticationResult).
+fn (d: DeviceCodeCredential[fx]) flow(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
+  let p = d.p
+  let name = p.c.name
+  let tenant = p.c.tenant_for(opts)?
+  let token_ep = p.c.endpoint(tenant, opts.enable_cae)?
+  // MSAL derives the device code endpoint from the token endpoint
+  let dc_ep = token_ep.replace("token", "devicecode")
+  let body = msal_body(opts, [("client_id", p.c.client_id)]) ?? e => return Err(azcore.AuthErr{credential: name, msg: e})
+  let resp = p.post(dc_ep, body)?
+  if resp.status != 200 {
+    // MSAL's own error, which azidentity returns as it is
+    let text = "http call(${dc_ep})(POST) error: reply status code was ${resp.status}:\n${resp.body.to_str_lossy()}"
+    return Err(azcore.AuthErr{credential: name, msg: "HTTP ${resp.status}", text: text, status: resp.status})
+  }
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? e => return Err(failed_text(name, e.display()))
+  let expires_in = num_field(doc, "expires_in") ?? 0
+  let deadline = Time.from_unix_millis(p.c.clock.now().unix_millis() + expires_in * 1000)
+  let msg = DeviceCodeMessage{user_code: str_field(doc, "user_code"), verification_url: str_field(doc, "verification_uri"), message: str_field(doc, "message")}
+  (d.user_prompt)(msg) ?? e => return Err(failed_text(name, e))
+  let fields = [("device_code", str_field(doc, "device_code"))]
+  var wait = FIRST_POLL
+  while {
+    let now = p.c.clock.now()
+    if now.unix_millis() + wait.millis() > deadline.unix_millis() {
+      // Go's context deadline at the code's expiry
+      let left = deadline.unix_millis() - now.unix_millis()
+      if left > 0 {
+        p.c.clock.sleep(Duration.from_millis(left))
+      }
+      return Err(failed_text(name, "context deadline exceeded"))
+    }
+    p.c.clock.sleep(wait)
+    wait = if wait * 3 > MAX_POLL { MAX_POLL } else { wait * 3 }
+    let r = p.post_token(tenant, opts, fields, "device_code")?
+    if r.status == 200 {
+      return p.accept(tenant, opts, r)
+    }
+    if r.status == 400 {
+      let code = match json.parse_value(r.body.to_str_lossy()) {
+        Ok(e) => str_field(e, "error")
+        Err(_) => ""
+      }
+      if code == "authorization_pending" || code == "slow_down" {
+        continue
+      }
+      // MSAL read the body to look for those, so azidentity's error has
+      // none
+      return Err(auth_failed(name, "POST", p.c.target(token_ep), r with {body: b""}))
+    }
+    return Err(auth_failed(name, "POST", p.c.target(token_ep), r))
+  }
+}

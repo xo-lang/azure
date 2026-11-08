@@ -7,6 +7,28 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- DeviceCodeCredential and the public client account model (gap items 15
+  and 18, decision 0003 Amendment 2), as azidentity v1.15.0 makes them
+  through MSAL Go v1.10.1: the silent request first (the cached access
+  token, not with claims; then `grant_type=refresh_token` for the
+  account), then `POST .../oauth2/v2.0/devicecode` (the token endpoint
+  with `token` replaced, as MSAL derives it), the caller's prompt, and
+  `grant_type=device_code` polls. As MSAL's, the polls wait 50 ms, then
+  three times longer each time up to 5 s, whatever the service's
+  `interval`; `authorization_pending` and `slow_down` go on; the code's
+  `expires_in` is the deadline ("context deadline exceeded"); another
+  400 is azidentity's error with no body, as MSAL read it. A token
+  response must grant every requested scope ("declined scopes are
+  present"). The account (`AuthenticationRecord`, Go's JSON and version
+  check) comes from `client_info` and the ID token; refresh tokens are
+  kept per account and per CAE client in memory. `authenticate` runs the
+  flow once with no silent request (the cloud's Resource Manager scope
+  when none is given); `disable_automatic_authentication` turns a failed
+  silent request into an AuthenticationRequired error (`AuthErr.required`
+  with the request's options, `unavailable` so a chain goes on). Unlike
+  Go's, the prompt is a required parameter: printing is the caller's
+  effect. Checked against a Go program's 136 lines over a fake token
+  host (`devicecodevectors_test.xo`, nine sections).
 - Service Fabric managed identity (gap item 5), as MSAL Go v1.10.1's:
   chosen when IDENTITY_ENDPOINT, IDENTITY_HEADER and
   IDENTITY_SERVER_THUMBPRINT are set. The thumbprint (colons and white

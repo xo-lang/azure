@@ -185,6 +185,9 @@ Decision 0003's Amendment 2 (Accepted by the owner, 2026-11-07) allows
 hand, as 0003 did the client credentials grant, and gives 16 the
 authorize URL through a caller callback instead of starting a browser.
 
+Status (2026-11-08): 15 and 18 are done (`azidentity/public.xo`,
+checked against a Go program over fakes); 16, then 17, are next.
+
 ### Waiting on a token-cache decision
 
 19. **The persistent `Cache` and `azidentity/cache`** wait on decision
