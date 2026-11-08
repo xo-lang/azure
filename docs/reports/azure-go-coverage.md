@@ -59,7 +59,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | messaging/eventgrid/aznamespaces | v1.0.0 | stable | 537 | 1939 | v1.0.0 | 345 |  |
 | messaging/eventgrid/azsystemevents | v1.1.0 | stable | 878 | 19101 | v1.1.0 | 243 + 5263 gen |  |
 | monitor/azingest | v0.1.2 | v0, deprecated | 95 | 208 | missing |  |  |
-| monitor/azquery | v1.2.0 | stable | 255 | 2257 | missing |  |  |
+| monitor/azquery | v1.2.0 | stable | 255 | 2257 | v1.2.0 | 918 |  |
 | monitor/ingestion/azlogs | v1.1.0 | stable | 81 | 372 | v1.1.0 | 138 |  |
 | monitor/query/azlogs | v1.2.0 | stable | 180 | 1328 | v1.2.0 | 570 |  |
 | monitor/query/azmetrics | v1.3.0 | stable | 90 | 1258 | v1.3.0 | 232 |  |

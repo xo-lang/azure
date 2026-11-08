@@ -1,0 +1,296 @@
+// LogsClient and MetricsClient against a fake service that answers as
+// the Go program's fake does: each request must be Go's, byte for byte,
+// and each result must print as Go printed it (govectors_test.xo). Where
+// the port differs from Go on purpose, the test says so.
+
+use std/http
+use std/json
+use std/testing
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+/// Go's credential: each token request logged with its scopes.
+struct Cred {
+  log: Mutex[List[Str]]
+}
+
+fn (c: Cred) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+  c.log.with(fn(var l: List[Str]) { l.push("TOKEN ${opts.scopes.join(" ")}") })
+  Ok(azcore.AccessToken{token: Secret.new("tok"), expires_on: Time.from_unix_millis(1893456000000)})
+}
+
+/// Go's fake: what it answers next, and each request logged as Go logs it.
+struct Fake {
+  log: Mutex[List[Str]]
+  next: Mutex[(Int, Str)]
+}
+
+fn serve(net: testing.FakeNet) -> Fake {
+  let f = Fake{log: Mutex[List[Str]].new([]), next: Mutex[(Int, Str)].new((200, ""))}
+  let h = fn(req: http.Request) -> http.Response { answer(f, req) }
+  for host in ["https://api.loganalytics.io", "https://api.loganalytics.us", "https://api.loganalytics.azure.cn", "https://logs.example.test"] {
+    net.handle("POST ${host}/{rest...}", h)
+  }
+  for host in ["https://management.azure.com", "https://management.usgovcloudapi.net", "https://management.chinacloudapi.cn"] {
+    net.handle("GET ${host}/{rest...}", h)
+  }
+  f
+}
+
+fn answer(f: Fake, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    // Xo's pipeline sets a request ID, Go's does not (decision 0003)
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  // Go's transport writes Content-Length on the wire for a body;
+  // FakeNet hands the request over in process, so the recorder writes
+  // the body's length
+  if req.method != "GET" {
+    hs.push("content-length=${req.body.len()}")
+  }
+  let qs = req.raw_query()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let line = (["REQ ${req.method} https://${req.url.host}${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + ["  body=${req.body.to_str_lossy()}"]).join("\n")
+  f.log.with(fn(var l: List[Str]) { l.push(line) })
+  let (st, body) = f.next.with(fn(var n: (Int, Str)) -> (Int, Str) { n })
+  http.text(st, body).with_header("Content-Type", "application/json")
+}
+
+fn set_next(f: Fake, st: Int, body: Str) {
+  f.next.with(fn(var n: (Int, Str)) { n = (st, body) })
+}
+
+fn note(f: Fake, s: Str) {
+  f.log.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+/// Go's `%v` of a call's error, or errText's form of a response error.
+fn err_text(e: azcore.CallErr) -> Str {
+  match e {
+    InvalidInput(m) => m
+    Response(re) => "response error ${re.status_code} ${re.error_code}"
+    Decode(m) => m
+    _ => "error ${e.display()}"
+  }
+}
+
+fn err_v[T](r: Result[T, azcore.CallErr]) -> Str {
+  match r {
+    Ok(_) => "<nil>"
+    Err(e) => err_text(e)
+  }
+}
+
+/// A JSON value as Go's json.Marshal writes the `any` it decoded: an
+/// object's keys sorted, `<`, `>` and `&` escaped.
+fn go_json(v: json.Value) -> Str {
+  var w = json.json_writer()
+  w.value(sorted(v)) ?? _ => return "marshal error"
+  w.finish().to_str_lossy()
+}
+
+fn sorted(v: json.Value) -> json.Value {
+  match v {
+    List(xs) => json.Value.List(xs.map(sorted))
+    Object(fs) => json.Value.Object(fs.sort_by(fn(f: (Str, json.Value)) -> Str { f.0 }).map(fn(f: (Str, json.Value)) -> (Str, json.Value) { (f.0, sorted(f.1)) }))
+    _ => v
+  }
+}
+
+fn columns_json(cs: List[Column]) -> Str {
+  go_json(json.Value.List(cs.map(fn(c: Column) -> json.Value {
+    var fs: List[(Str, json.Value)] = []
+    if let Some(n) = c.name {
+      fs.push(("name", json.Value.Str(n)))
+    }
+    if let Some(t) = c.type_ {
+      fs.push(("type", json.Value.Str(t.0)))
+    }
+    json.Value.Object(fs)
+  })))
+}
+
+fn rows_json(rows: List[List[json.Value]]) -> Str {
+  go_json(json.Value.List(rows.map(fn(r: List[json.Value]) -> json.Value { json.Value.List(r) })))
+}
+
+fn logs_opts(c: cloud.Configuration) -> LogsClientOptions {
+  LogsClientOptions{client: policy.ClientOptions{cloud: c, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+fn metrics_opts(c: cloud.Configuration, api: Str = "") -> MetricsClientOptions {
+  MetricsClientOptions{client: policy.ClientOptions{cloud: c, api_version: api, retry: policy.RetryOptions{max_retries: -1}}}
+}
+
+const RESULTS: Str = "{\"tables\":[{\"name\":\"PrimaryResult\",\"columns\":[{\"name\":\"TimeGenerated\",\"type\":\"datetime\"},{\"name\":\"Count\",\"type\":\"long\"},{\"name\":\"Rate\",\"type\":\"real\"},{\"name\":\"Tags\",\"type\":\"dynamic\"},{\"name\":\"Ok\",\"type\":\"bool\"},{\"name\":\"Msg\",\"type\":\"string\"}],\"rows\":[[\"2026-11-05T03:04:05Z\",9007199254740993,0.5,{\"a\":[1,2]},true,\"x<y\"],[null,1,null,null,false,\"\"]]}],\"statistics\":{\"query\":{\"executionTime\":0.25}},\"render\":{\"visualization\":\"table\"},\"error\":{\"code\":\"PartialError\",\"message\":\"some\",\"details\":[{\"code\":\"Inner\"}]}}"
+
+const METRICS: Str = "{\"cost\":7,\"timespan\":\"2026-11-05T00:00:00Z/2026-11-05T01:00:00Z\",\"interval\":\"PT1M\",\"namespace\":\"Microsoft.Storage/storageAccounts\",\"resourceregion\":\"westus\",\"value\":[{\"id\":\"m1\",\"type\":\"Microsoft.Insights/metrics\",\"name\":{\"value\":\"Ingress\",\"localizedValue\":\"Ingress\"},\"displayDescription\":\"d\",\"unit\":\"Bytes\",\"timeseries\":[{\"metadatavalues\":[{\"name\":{\"value\":\"GeoType\"},\"value\":\"Primary\"}],\"data\":[{\"timeStamp\":\"2026-11-05T00:00:00Z\",\"total\":1.5,\"average\":0.25},{\"timeStamp\":\"2026-11-05T00:01:00.1234567\",\"count\":3,\"minimum\":0,\"maximum\":9}]}],\"errorCode\":\"Success\",\"errorMessage\":\"\"}]}"
+
+const DEFINITIONS: Str = "{\"value\":[{\"id\":\"d1\",\"resourceId\":\"/r1\",\"namespace\":\"ns\",\"name\":{\"value\":\"Ingress\",\"localizedValue\":\"Ingress\"},\"displayDescription\":\"x\",\"category\":\"Traffic\",\"metricClass\":\"Transactions\",\"unit\":\"Bytes\",\"primaryAggregationType\":\"Total\",\"supportedAggregationTypes\":[\"Total\",\"Average\"],\"metricAvailabilities\":[{\"timeGrain\":\"PT1M\",\"retention\":\"P93D\"}],\"isDimensionRequired\":false,\"dimensions\":[{\"value\":\"GeoType\",\"localizedValue\":\"Geo type\"}]}]}"
+
+const NAMESPACES: Str = "{\"value\":[{\"id\":\"n1\",\"name\":\"Microsoft.Storage-x\",\"type\":\"Microsoft.Insights/metricNamespaces\",\"classification\":\"Platform\",\"properties\":{\"metricNamespaceName\":\"Microsoft.Storage/storageAccounts\"}}]}"
+
+fn results_line(f: Fake, r: Results) ! Str {
+  let t = r.tables[0]
+  note(f, "table ${t.name ?? ""} cols ${columns_json(t.columns)} rows ${rows_json(t.rows)}")
+  let e = r.error ?? return Err("no error")
+  note(f, "stats ${r.statistics ?? ""} render ${r.visualization ?? ""} error ${e.code} ${e.display()}")
+  Ok(())
+}
+
+test "every logs and metrics call sends Go's request and reads back what Go reads" {
+  let f = serve(os.net)
+  let cred = Cred{log: f.log}
+  let start = Time.parse_rfc3339("2026-11-05T03:04:05Z") ?? return Err("start")
+  let end = Time.parse_rfc3339("2026-11-06T02:04:05Z") ?? return Err("end")
+  let ti = new_time_interval_in(start, time.utc(), end, time.fixed("x", 1h))
+
+  note(f, "== logs")
+  note(f, "interval ${ti.0}")
+  for t in [ti, TimeInterval("2026-11-05T03:04:05Z"), TimeInterval("a/b"), TimeInterval("2026-11-05T03:04:05Z/x")] {
+    match t.values() {
+      Ok((a, z)) => note(f, "values \"${t.0}\" ${a.format_rfc3339()} ${z.format_rfc3339()}")
+      Err(e) => note(f, "values \"${t.0}\" err ${e}")
+    }
+  }
+  set_next(f, 200, RESULTS)
+  let lcr = new_logs_client(os.net, os.clock, os.rand, cred, logs_opts(cloud.AZURE_PUBLIC))
+  note(f, "new ${lcr.err() ?? "<nil>"}")
+  let lc = lcr?
+  match lc.query_workspace("ws 1/x", Body{query: Some("T | take 5"), timespan: Some(ti), additional_workspaces: Some(["w2", "w3"])}, LogsClientQueryWorkspaceOptions{options: Some(LogsQueryOptions{statistics: Some(true), visualization: Some(true), wait: Some(600)})}) {
+    Ok(r) => results_line(f, r)?
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 200, "{\"tables\":[]}")
+  note(f, "prefer empty ${err_v(lc.query_workspace("ws", Body{query: Some("q")}, LogsClientQueryWorkspaceOptions{options: Some(LogsQueryOptions{})}))}")
+  note(f, "no query ${err_v(lc.query_workspace("ws", Body{additional_workspaces: Some([])}, LogsClientQueryWorkspaceOptions{options: Some(LogsQueryOptions{statistics: Some(false), wait: Some(-1)})}))}")
+  note(f, "empty workspace ${err_v(lc.query_workspace("", Body{query: Some("q")}))}")
+  for rid in ["/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/a b", "subscriptions/s1/x", ""] {
+    note(f, "resource \"${rid}\" ${err_v(lc.query_resource(rid, Body{query: Some("q")}, LogsClientQueryResourceOptions{options: Some(LogsQueryOptions{visualization: Some(true)})}))}")
+  }
+  set_next(f, 200, "{\"responses\":[{\"id\":\"1\",\"status\":200,\"headers\":{\"x\":\"y\"},\"body\":${RESULTS}},{\"id\":\"2\",\"status\":400,\"body\":{\"error\":{\"code\":\"BadArgumentError\",\"message\":\"bad\"}}}]}")
+  let req1 = new_batch_query_request("w1", "q1", ti, "1", LogsQueryOptions{wait: Some(10), statistics: Some(true)})
+  let req3 = new_batch_query_request("w3", "q3 <&>", TimeInterval(""), "3", LogsQueryOptions{})
+  note(f, "new batch request ${req1.to_json()} | ${req3.to_json()}")
+  let br = lc.query_batch(BatchRequest{requests: [
+    req1,
+    BatchQueryRequest{correlation_id: Some("2"), workspace_id: Some("w2"), body: Some(Body{query: Some("q2")}), method: Some(BatchQueryRequestMethod("GET")), path: Some(BatchQueryRequestPath("/other"))},
+    req3,
+  ]})
+  match br {
+    Ok(b) => {
+      for x in b.responses {
+        let body = x.body ?? Results{}
+        let e = match body.error {
+          Some(ei) => "${ei.code} ${ei.display()}"
+          None => ""
+        }
+        let hs = match x.headers {
+          Some(m) => go_json(json.Value.Object(m.keys().sort().map(fn(k: Str) -> (Str, json.Value) { (k, json.Value.Str(m.get(k) ?? "")) })))
+          None => "null"
+        }
+        note(f, "batch ${x.correlation_id ?? ""} ${x.status ?? 0} headers ${hs} tables ${body.tables.len()} error ${e}")
+      }
+    }
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 403, "{\"error\":{\"code\":\"InsufficientAccessError\",\"message\":\"no\"}}")
+  note(f, err_v(lc.query_workspace("ws", Body{query: Some("q")})))
+  set_next(f, 200, "{\"tables\":")
+  note(f, "bad json ${err_v(lc.query_workspace("ws", Body{query: Some("q")}))}")
+  let custom = new_logs_client(os.net, os.clock, os.rand, cred, logs_opts(cloud.Configuration{authority_host: "https://login.example.test/"}))
+  note(f, "custom cloud ${custom.err() ?? "<nil>"}")
+  let cust = cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME_LOGS: cloud.ServiceConfiguration{audience: "https://aud.example.test", endpoint: "https://logs.example.test/v9?k=1"}}}
+  set_next(f, 200, "{}")
+  let xcr = new_logs_client(os.net, os.clock, os.rand, cred, logs_opts(cust))
+  note(f, "custom cloud with logs ${xcr.err() ?? "<nil>"}")
+  note(f, "custom ${err_v(xcr?.query_workspace("ws", Body{query: Some("q")}))}")
+  for c in [cloud.AZURE_GOVERNMENT, cloud.AZURE_CHINA] {
+    let gc = new_logs_client(os.net, os.clock, os.rand, cred, logs_opts(c))?
+    note(f, "cloud ${err_v(gc.query_workspace("ws", Body{query: Some("q")}))}")
+  }
+
+  note(f, "== metrics")
+  set_next(f, 200, METRICS)
+  let mcr = new_metrics_client(os.net, os.clock, os.rand, cred, metrics_opts(cloud.AZURE_PUBLIC))
+  note(f, "new ${mcr.err() ?? "<nil>"}")
+  let mc = mcr?
+  match mc.query_resource("subscriptions/s1/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/a b", MetricsClientQueryResourceOptions{aggregation: Some([AGGREGATION_TYPE_AVERAGE, AGGREGATION_TYPE_TOTAL]), auto_adjust_timegrain: Some(true), filter: Some("GeoType eq '*'"), interval: Some("PT1M"), metric_names: Some("Ingress,Egress"), metric_namespace: Some("Microsoft.Storage/storageAccounts"), order_by: Some("total desc"), result_type: Some(RESULT_TYPE_DATA), roll_up_by: Some("GeoType"), timespan: Some(ti), top: Some(3), validate_dimensions: Some(false)}) {
+    Ok(r) => note(f, "metrics ${json.encode_str(r)}")
+    Err(e) => note(f, err_text(e))
+  }
+  set_next(f, 200, "{}")
+  note(f, "minimal ${err_v(mc.query_resource("/r1"))}")
+  note(f, "empty uri ${err_v(mc.query_resource("", MetricsClientQueryResourceOptions{aggregation: Some([])}))}")
+  set_next(f, 200, DEFINITIONS)
+  var dp = mc.new_list_definitions_pager("/r1", MetricsClientListDefinitionsOptions{metric_namespace: Some("ns 1")})
+  while dp.more() {
+    match dp.next_page() {
+      Ok(pg) => note(f, "definitions ${json.encode_str(pg)}")
+      Err(e) => {
+        note(f, err_text(e))
+        break
+      }
+    }
+  }
+  note(f, "definitions more ${dp.more()}")
+  set_next(f, 200, NAMESPACES)
+  var np = mc.new_list_namespaces_pager("r1", MetricsClientListNamespacesOptions{start_time: Some("2026-11-05T00:00:00Z")})
+  match np.next_page() {
+    Ok(pg) => note(f, "namespaces ${json.encode_str(pg)} more ${np.more()}")
+    Err(e) => note(f, err_text(e))
+  }
+  var np2 = mc.new_list_namespaces_pager("/r1")
+  note(f, "namespaces no options ${err_v(np2.next_page())}")
+  set_next(f, 200, "{\"value\":[{\"timeseries\":[{\"data\":[{\"timeStamp\":\"bad\"}]}]}]}")
+  note(f, "bad time ${err_v(mc.query_resource("r1"))}")
+  set_next(f, 400, "{\"error\":{\"code\":\"BadRequest\",\"message\":\"x\"}}")
+  note(f, err_v(mc.query_resource("r1")))
+  var ep = mc.new_list_definitions_pager("r1")
+  note(f, err_v(ep.next_page()))
+  set_next(f, 200, "{}")
+  for c in [cloud.AZURE_GOVERNMENT, cloud.AZURE_CHINA] {
+    match new_metrics_client(os.net, os.clock, os.rand, cred, metrics_opts(c)) {
+      Ok(gc) => note(f, "cloud ${err_v(gc.query_resource("/r1"))}")
+      Err(e) => note(f, "cloud new ${e}")
+    }
+  }
+  let ac = new_metrics_client(os.net, os.clock, os.rand, cred, metrics_opts(cloud.AZURE_PUBLIC, "2023-10-01"))?
+  note(f, "api version ${err_v(ac.query_resource("/r1", MetricsClientQueryResourceOptions{top: Some(1)}))}")
+  var anp = ac.new_list_namespaces_pager("/r1")
+  note(f, "api version namespaces ${err_v(anp.next_page())}")
+  let mcustom = new_metrics_client(os.net, os.clock, os.rand, cred, metrics_opts(cloud.Configuration{authority_host: "https://login.example.test/"}))
+  note(f, "custom cloud ${mcustom.err() ?? "<nil>"}")
+
+  let got = f.log.with(fn(var l: List[Str]) -> List[Str] { l }).join("\n").split("\n")
+  let want = GO_OUT.map(fn(w: Str) -> Str {
+    // Xo's Time has no zone: the end Go parsed keeps its +01:00, Xo's is
+    // the same instant in UTC
+    let v = w.replace("Z 2026-11-06T03:04:05+01:00", "Z 2026-11-06T02:04:05Z")
+      // a long keeps every digit, where Go's any rounds it to a float64
+      .replace(",9007199254740992,", ",9007199254740993,")
+    // Go's decoder errors name each struct on the way down; Xo's name
+    // the JSON path
+    if v.starts_with("bad json unmarshalling type *azquery.Results: ") {
+      "bad json unmarshalling type Results: at \$: invalid JSON: unexpected EOF"
+    } else if v.starts_with("bad time ") {
+      "bad time unmarshalling type Response: at \$.value[0].timeseries[0].data[0].timeStamp: invalid date-time \"bad\""
+    } else {
+      v
+    }
+  })
+  expect(got.join("\n")) == want.join("\n")
+}
+
+test "a cloud entry with an empty field is Go's error" {
+  let f = serve(os.net)
+  let half = cloud.Configuration{authority_host: "https://login.example.test/", services: {SERVICE_NAME_LOGS: cloud.ServiceConfiguration{audience: "https://aud.example.test", endpoint: ""}, SERVICE_NAME_METRICS: cloud.ServiceConfiguration{audience: "", endpoint: "https://m.example.test"}}}
+  expect(new_logs_client(os.net, os.clock, os.rand, Cred{log: f.log}, logs_opts(half)).err()) == Some("provided Cloud field is missing Azure Monitor Logs configuration")
+  expect(new_metrics_client(os.net, os.clock, os.rand, Cred{log: f.log}, metrics_opts(half)).err()) == Some("provided Cloud field is missing Azure Monitor Metrics configuration")
+}

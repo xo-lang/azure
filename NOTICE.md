@@ -71,8 +71,8 @@ each under the MIT License, Copyright (c) Microsoft Corporation:
   parser and SAS signer, and the `$management` READ requests of
   `mgmt.go`, hand written over std/amqp; the batch encoding checked
   against its own), `sdk/monitor/query/azlogs` v1.2.0,
-  `sdk/monitor/query/azmetrics` v1.3.0 and `sdk/monitor/ingestion/azlogs`
-  v1.1.0 (their clients, options, models, cloud configuration and
+  `sdk/monitor/query/azmetrics` v1.3.0, `sdk/monitor/ingestion/azlogs`
+  v1.1.0 and `sdk/monitor/azquery` v1.2.0 (their clients, options, models, cloud configuration and
   serialization, hand written; requests checked against their own),
   `sdk/data/azappconfig/v2` v2.3.0 (its client, settings, selectors,
   snapshots, responses, cloud configuration, the HMAC-SHA256 policy

@@ -1,0 +1,273 @@
+// Azure Monitor queries, a port of Go's sdk/monitor/azquery v1.2.0
+// (logs_client.go, metrics_client.go, custom_client.go, cloud_config.go,
+// options.go; MIT, Copyright (c) Microsoft Corporation; NOTICE.md): Kusto
+// queries against Log Analytics workspaces and Azure resources (REST API
+// v1), and the metrics, metric definitions and metric namespaces of an
+// Azure resource through Azure Resource Manager (API version 2024-02-01).
+// Go's newer modules split these: query/azlogs for logs, and
+// query/azmetrics for metrics over many resources at once.
+
+use std/http
+use std/json
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+pub const MODULE: Str = "azquery"
+pub const VERSION: Str = "v0.1.0"
+/// The metrics API version; `policy.ClientOptions.api_version` overrides
+/// it, as Go's pipeline does.
+pub const METRICS_API_VERSION: Str = "2024-02-01"
+
+/// The key of the logs service in `cloud.Configuration.services` (Go's
+/// ServiceNameLogs).
+pub const SERVICE_NAME_LOGS: Str = "azqueryLogs"
+/// The key of the metrics service (Go's ServiceNameMetrics).
+pub const SERVICE_NAME_METRICS: Str = "azqueryMetrics"
+
+/// The entries Go's cloud_config.go adds to azcore's three clouds. The
+/// logs endpoint carries the API version; the metrics audience of China
+/// and Government ends in `/`, so their scope has `//.default`, as Go's.
+fn builtin_service(c: cloud.Configuration, name: Str) -> cloud.ServiceConfiguration? {
+  let (logs, metrics) = if c == cloud.AZURE_PUBLIC {
+    (("https://api.loganalytics.io", "https://api.loganalytics.io/v1"), "https://management.azure.com")
+  } else if c == cloud.AZURE_CHINA {
+    (("https://api.loganalytics.azure.cn", "https://api.loganalytics.azure.cn/v1"), "https://management.chinacloudapi.cn/")
+  } else if c == cloud.AZURE_GOVERNMENT {
+    (("https://api.loganalytics.us", "https://api.loganalytics.us/v1"), "https://management.usgovcloudapi.net/")
+  } else {
+    return None
+  }
+  if name == SERVICE_NAME_LOGS {
+    Some(cloud.ServiceConfiguration{audience: logs.0, endpoint: logs.1})
+  } else {
+    Some(cloud.ServiceConfiguration{audience: metrics, endpoint: metrics})
+  }
+}
+
+fn service(c: cloud.Configuration, name: Str) -> cloud.ServiceConfiguration {
+  c.services.get(name) ?? builtin_service(c, name) ?? cloud.ServiceConfiguration{audience: "", endpoint: ""}
+}
+
+/// Options of new_logs_client.
+pub struct LogsClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// Options of new_metrics_client.
+pub struct MetricsClientOptions[fx: Effects] {
+  pub client: policy.ClientOptions[fx] = policy.ClientOptions{}
+}
+
+/// LogsClient queries Log Analytics workspaces and resources.
+pub struct LogsClient[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  host: Str
+}
+
+/// MetricsClient reads one Azure resource's metrics, metric definitions
+/// and metric namespaces.
+pub struct MetricsClient[fx: Effects] {
+  pipeline: runtime.Pipeline[fx]
+  host: Str
+}
+
+/// A logs client for the cloud in `opts`: its `SERVICE_NAME_LOGS` entry
+/// gives the endpoint (with the API version, `.../v1`) and the token
+/// audience. Azure's three clouds have one built in; another cloud
+/// without one, or with an empty field, is Go's error.
+pub fn new_logs_client[fx: Effects](net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential[fx], opts: LogsClientOptions[fx] = LogsClientOptions{}) -> LogsClient[fx] ! Str {
+  let svc = service(opts.client.cloud, SERVICE_NAME_LOGS)
+  if svc.audience == "" || svc.endpoint == "" {
+    return Err("provided Cloud field is missing Azure Monitor Logs configuration")
+  }
+  let auth = runtime.new_bearer_token_policy(cred, ["${svc.audience}/.default"], clock)
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  Ok(LogsClient{pipeline: pl, host: svc.endpoint})
+}
+
+/// A metrics client for the cloud in `opts` (Azure Resource Manager's
+/// endpoint and audience from its `SERVICE_NAME_METRICS` entry, built in
+/// for Azure's three clouds). `policy.ClientOptions.api_version` replaces
+/// METRICS_API_VERSION in every request.
+pub fn new_metrics_client[fx: Effects](net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential[fx], opts: MetricsClientOptions[fx] = MetricsClientOptions{}) -> MetricsClient[fx] ! Str {
+  let svc = service(opts.client.cloud, SERVICE_NAME_METRICS)
+  if svc.audience == "" || svc.endpoint == "" {
+    return Err("provided Cloud field is missing Azure Monitor Metrics configuration")
+  }
+  let auth = runtime.new_bearer_token_policy(cred, ["${svc.audience}/.default"], clock)
+  // Go's APIVersionOptions name the query parameter only: the pipeline
+  // sets it when ClientOptions.api_version is set, after the request
+  // wrote METRICS_API_VERSION
+  let pl = runtime.new_pipeline(MODULE, VERSION, net, clock, rand, runtime.PipelineOptions{per_retry: [auth]}, opts.client)
+  Ok(MetricsClient{pipeline: pl, host: svc.endpoint})
+}
+
+/// Options of LogsClient.query_workspace.
+pub struct LogsClientQueryWorkspaceOptions {
+  /// The `Prefer` header: sent when set, even with nothing in it.
+  pub options: LogsQueryOptions? = None
+}
+
+/// Options of LogsClient.query_resource.
+pub type LogsClientQueryResourceOptions = LogsClientQueryWorkspaceOptions
+
+/// Options of LogsClient.query_batch (none yet).
+pub struct LogsClientQueryBatchOptions {}
+
+fn (c: LogsClient) query_request(url_path: Str, body: Body, options: LogsQueryOptions?) -> policy.Request {
+  var headers: List[(Str, Str)] = [("Accept", "application/json")]
+  if let Some(o) = options {
+    headers.push(("Prefer", o.prefer_header()))
+  }
+  headers.push(("Content-Type", "application/json"))
+  policy.Request{method: "POST", url: runtime.join_paths(c.host, url_path), headers: headers, body: body.to_json().bytes()}
+}
+
+fn (c: LogsClient) send_query(req: policy.Request) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = send(c.pipeline, req)?
+  parse_results(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type Results: ${e}"))
+}
+
+fn send[fx: Effects](p: runtime.Pipeline[fx], req: policy.Request) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let resp = p.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  if resp.status != 200 {
+    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+  }
+  Ok(resp)
+}
+
+/// Runs `body`'s query against workspace `workspace_id` (with any
+/// `additional_workspaces`). A partial failure is a success whose
+/// `error` is set.
+pub fn (c: LogsClient) query_workspace(workspace_id: Str, body: Body, options: LogsClientQueryWorkspaceOptions = LogsClientQueryWorkspaceOptions{}) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
+  if workspace_id == "" {
+    return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
+  }
+  c.send_query(c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+}
+
+/// Runs `body`'s query against the Azure resource `resource_id`
+/// (`/subscriptions/.../providers/...`). As Go, the ID is put in the path
+/// as it is, unescaped and unchecked.
+pub fn (c: LogsClient) query_resource(resource_id: Str, body: Body, options: LogsClientQueryResourceOptions = LogsClientQueryResourceOptions{}) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
+  c.send_query(c.query_request("/${resource_id}/query", body, options.options))
+}
+
+/// Runs several workspace queries in one request; each answer has its own
+/// status, and a failed one is not an error of the call.
+pub fn (c: LogsClient) query_batch(body: BatchRequest, options: LogsClientQueryBatchOptions = LogsClientQueryBatchOptions{}) -> BatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = policy.Request{method: "POST", url: runtime.join_paths(c.host, "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes()}
+  let resp = send(c.pipeline, req)?
+  parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+}
+
+/// Options of MetricsClient.query_resource: each is a query parameter
+/// when set.
+pub struct MetricsClientQueryResourceOptions {
+  /// The aggregations (`aggregation`, comma separated; set but empty
+  /// sends `aggregation=`).
+  pub aggregation: List[AggregationType]? = None
+  /// Whether an unsupported time grain is replaced by a supported one
+  /// (`AutoAdjustTimegrain`).
+  pub auto_adjust_timegrain: Bool? = None
+  /// An OData filter on the dimensions (`$filter`, `GeoType eq '*'`).
+  pub filter: Str? = None
+  /// The time grain, ISO 8601 (`PT1M`), or `FULL`.
+  pub interval: Str? = None
+  /// The metrics, comma separated (`metricnames`).
+  pub metric_names: Str? = None
+  /// The metric namespace (`metricnamespace`).
+  pub metric_namespace: Str? = None
+  /// The aggregation to sort by and its direction (`orderby`, `sum asc`).
+  pub order_by: Str? = None
+  /// Data or metadata only (`resultType`).
+  pub result_type: ResultType? = None
+  /// The dimension to roll up by (`rollupby`).
+  pub roll_up_by: Str? = None
+  /// The time span (`timespan`).
+  pub timespan: TimeInterval? = None
+  /// The maximum number of records (`top`).
+  pub top: Int? = None
+  /// Whether unknown dimensions are an error (`ValidateDimensions`).
+  pub validate_dimensions: Bool? = None
+}
+
+/// Options of MetricsClient.new_list_definitions_pager.
+pub struct MetricsClientListDefinitionsOptions {
+  /// The metric namespace (`metricnamespace`).
+  pub metric_namespace: Str? = None
+}
+
+/// Options of MetricsClient.new_list_namespaces_pager.
+pub struct MetricsClientListNamespacesOptions {
+  /// The earliest time to look for namespaces from, ISO 8601
+  /// (`startTime`).
+  pub start_time: Str? = None
+}
+
+/// A GET of `<host>/<resource_uri><suffix>` with `q`, as Go's generated
+/// request: the resource URI put in the path as it is, the query encoded
+/// with its keys sorted.
+fn (c: MetricsClient) get_request(resource_uri: Str, suffix: Str, q: url.Values) -> policy.Request {
+  let u = runtime.join_paths(c.host, "/${resource_uri}${suffix}")
+  policy.Request{method: "GET", url: runtime.with_query(u, q), headers: [("Accept", "application/json")]}
+}
+
+/// The metrics of the Azure resource `resource_uri`
+/// (`subscriptions/.../providers/...`, put in the path as it is).
+pub fn (c: MetricsClient) query_resource(resource_uri: Str, options: MetricsClientQueryResourceOptions = MetricsClientQueryResourceOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var q = url.values()
+  if let Some(x) = o.filter {
+    q.set("\$filter", x)
+  }
+  if let Some(x) = o.auto_adjust_timegrain {
+    q.set("AutoAdjustTimegrain", "${x}")
+  }
+  if let Some(x) = o.validate_dimensions {
+    q.set("ValidateDimensions", "${x}")
+  }
+  if let Some(xs) = o.aggregation {
+    q.set("aggregation", xs.map(fn(a: AggregationType) -> Str { a.0 }).join(","))
+  }
+  q.set("api-version", METRICS_API_VERSION)
+  for (name, v) in [("interval", o.interval), ("metricnames", o.metric_names), ("metricnamespace", o.metric_namespace), ("orderby", o.order_by), ("resultType", o.result_type.map(fn(r: ResultType) -> Str { r.0 })), ("rollupby", o.roll_up_by), ("timespan", o.timespan.map(fn(t: TimeInterval) -> Str { t.0 })), ("top", o.top.map(fn(n: Int) -> Str { "${n}" }))] {
+    if let Some(x) = v {
+      q.set(name, x)
+    }
+  }
+  let req = c.get_request(resource_uri, "/providers/Microsoft.Insights/metrics", q)
+  let resp = send(c.pipeline, req)?
+  json.decode_str[Response](resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type Response: ${e.display()}"))
+}
+
+/// The metric definitions of the resource `resource_uri`: one page, as
+/// Go's pager (the API has no next link).
+pub fn (c: MetricsClient[fx]) new_list_definitions_pager(resource_uri: Str, options: MetricsClientListDefinitionsOptions = MetricsClientListDefinitionsOptions{}) -> runtime.Pager[MetricDefinitionCollection, fx] {
+  var q = url.values()
+  q.set("api-version", METRICS_API_VERSION)
+  if let Some(ns) = options.metric_namespace {
+    q.set("metricnamespace", ns)
+  }
+  let first = c.get_request(resource_uri, "/providers/Microsoft.Insights/metricDefinitions", q)
+  runtime.new_pager_with(c.pipeline, first, fn(r: http.Response) -> MetricDefinitionCollection ! Str {
+    json.decode_str[MetricDefinitionCollection](r.body.to_str_lossy()) ?? e => Err("unmarshalling type MetricDefinitionCollection: ${e.display()}")
+  }, fn(prev: policy.Request, page: MetricDefinitionCollection) -> policy.Request? { None })
+}
+
+/// The metric namespaces of the resource `resource_uri`: one page, as
+/// Go's pager. Go's path has `microsoft.insights` in lower case here.
+pub fn (c: MetricsClient[fx]) new_list_namespaces_pager(resource_uri: Str, options: MetricsClientListNamespacesOptions = MetricsClientListNamespacesOptions{}) -> runtime.Pager[MetricNamespaceCollection, fx] {
+  var q = url.values()
+  q.set("api-version", METRICS_API_VERSION)
+  if let Some(t) = options.start_time {
+    q.set("startTime", t)
+  }
+  let first = c.get_request(resource_uri, "/providers/microsoft.insights/metricNamespaces", q)
+  runtime.new_pager_with(c.pipeline, first, fn(r: http.Response) -> MetricNamespaceCollection ! Str {
+    json.decode_str[MetricNamespaceCollection](r.body.to_str_lossy()) ?? e => Err("unmarshalling type MetricNamespaceCollection: ${e.display()}")
+  }, fn(prev: policy.Request, page: MetricNamespaceCollection) -> policy.Request? { None })
+}
