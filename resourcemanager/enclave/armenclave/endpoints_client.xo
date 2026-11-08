@@ -53,7 +53,7 @@ fn (c: EndpointsClient) list_by_subscription_create_request(virtual_enclave_name
 /// List EnclaveEndpointResource resources by subscription ID
 pub fn (c: EndpointsClient[fx]) new_list_by_subscription_pager(virtual_enclave_name: Str, options: EndpointsClientListBySubscriptionOptions = EndpointsClientListBySubscriptionOptions{}) -> runtime.Pager[EndpointsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(virtual_enclave_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListBySubscriptionResponse ! Str { endpoints_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListBySubscriptionResponse) -> Str? { r.endpoint_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListBySubscriptionResponse ! Str { endpoints_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListBySubscriptionResponse) -> Str? { r.endpoint_resource_list_result.next_link }).traced_as("EndpointsClientListBySubscriptionResponse"))
 }
 
 /// EndpointsClientListByEnclaveResourceOptions: the optional parameters of EndpointsClient.new_list_by_enclave_resource_pager.
@@ -92,7 +92,7 @@ fn (c: EndpointsClient) list_by_enclave_resource_create_request(resource_group_n
 /// List EnclaveEndpointResource resources by EnclaveResource
 pub fn (c: EndpointsClient[fx]) new_list_by_enclave_resource_pager(resource_group_name: Str, virtual_enclave_name: Str, options: EndpointsClientListByEnclaveResourceOptions = EndpointsClientListByEnclaveResourceOptions{}) -> runtime.Pager[EndpointsClientListByEnclaveResourceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_enclave_resource_create_request(resource_group_name, virtual_enclave_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListByEnclaveResourceResponse ! Str { endpoints_list_by_enclave_resource_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListByEnclaveResourceResponse) -> Str? { r.endpoint_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListByEnclaveResourceResponse ! Str { endpoints_list_by_enclave_resource_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListByEnclaveResourceResponse) -> Str? { r.endpoint_resource_list_result.next_link }).traced_as("EndpointsClientListByEnclaveResourceResponse"))
 }
 
 /// EndpointsClientGetOptions: the optional parameters of EndpointsClient.get.
@@ -134,12 +134,15 @@ fn (c: EndpointsClient) get_create_request(resource_group_name: Str, virtual_enc
 
 /// Get a EnclaveEndpointResource
 pub fn (c: EndpointsClient) get(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, options: EndpointsClientGetOptions = EndpointsClientGetOptions{}) -> EndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// EndpointsClientBeginCreateOrUpdateOptions: the optional parameters of EndpointsClient.begin_create_or_update.
@@ -186,14 +189,16 @@ fn (c: EndpointsClient) create_or_update_create_request(resource_group_name: Str
 /// Create a EnclaveEndpointResource
 pub fn (c: EndpointsClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, resource: EndpointResource, options: EndpointsClientBeginCreateOrUpdateOptions = EndpointsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[EndpointsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> EndpointsClientCreateOrUpdateResponse ! Str { endpoints_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> EndpointsClientCreateOrUpdateResponse ! Str { endpoints_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "EndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> EndpointsClientCreateOrUpdateResponse ! Str { endpoints_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "EndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> EndpointsClientCreateOrUpdateResponse ! Str { endpoints_create_or_update_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginUpdateOptions: the optional parameters of EndpointsClient.begin_update.
@@ -240,14 +245,16 @@ fn (c: EndpointsClient) update_create_request(resource_group_name: Str, virtual_
 /// Update a EnclaveEndpointResource
 pub fn (c: EndpointsClient[fx]) begin_update(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, properties: EndpointPatchModel, options: EndpointsClientBeginUpdateOptions = EndpointsClientBeginUpdateOptions{}) -> runtime.Poller[EndpointsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginDeleteOptions: the optional parameters of EndpointsClient.begin_delete.
@@ -290,14 +297,16 @@ fn (c: EndpointsClient) delete_create_request(resource_group_name: Str, virtual_
 /// Delete a EnclaveEndpointResource
 pub fn (c: EndpointsClient[fx]) begin_delete(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, options: EndpointsClientBeginDeleteOptions = EndpointsClientBeginDeleteOptions{}) -> runtime.Poller[EndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginHandleApprovalCreationOptions: the optional parameters of EndpointsClient.begin_handle_approval_creation.
@@ -344,14 +353,16 @@ fn (c: EndpointsClient) handle_approval_creation_create_request(resource_group_n
 /// Callback that triggers on approval state change.
 pub fn (c: EndpointsClient[fx]) begin_handle_approval_creation(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, body: ApprovalCallbackRequest, options: EndpointsClientBeginHandleApprovalCreationOptions = EndpointsClientBeginHandleApprovalCreationOptions{}) -> runtime.Poller[EndpointsClientHandleApprovalCreationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientHandleApprovalCreationResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalCreationResponse ! Str { endpoints_handle_approval_creation_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientHandleApprovalCreationResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalCreationResponse ! Str { endpoints_handle_approval_creation_handle(r) }, traced: true)
   }
-  let req = c.handle_approval_creation_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginHandleApprovalCreation", c.setup.pipeline.tracer)
+  let req = c.handle_approval_creation_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientHandleApprovalCreationResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalCreationResponse ! Str { endpoints_handle_approval_creation_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientHandleApprovalCreationResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalCreationResponse ! Str { endpoints_handle_approval_creation_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginHandleApprovalDeletionOptions: the optional parameters of EndpointsClient.begin_handle_approval_deletion.
@@ -398,12 +409,14 @@ fn (c: EndpointsClient) handle_approval_deletion_create_request(resource_group_n
 /// Callback that triggers on approval deletion state change.
 pub fn (c: EndpointsClient[fx]) begin_handle_approval_deletion(resource_group_name: Str, virtual_enclave_name: Str, enclave_endpoint_name: Str, body: ApprovalDeletionCallbackRequest, options: EndpointsClientBeginHandleApprovalDeletionOptions = EndpointsClientBeginHandleApprovalDeletionOptions{}) -> runtime.Poller[EndpointsClientHandleApprovalDeletionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientHandleApprovalDeletionResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalDeletionResponse ! Str { endpoints_handle_approval_deletion_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientHandleApprovalDeletionResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalDeletionResponse ! Str { endpoints_handle_approval_deletion_handle(r) }, traced: true)
   }
-  let req = c.handle_approval_deletion_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginHandleApprovalDeletion", c.setup.pipeline.tracer)
+  let req = c.handle_approval_deletion_create_request(resource_group_name, virtual_enclave_name, enclave_endpoint_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientHandleApprovalDeletionResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalDeletionResponse ! Str { endpoints_handle_approval_deletion_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientHandleApprovalDeletionResponse", fn(r: http.Response) -> EndpointsClientHandleApprovalDeletionResponse ! Str { endpoints_handle_approval_deletion_handle(r) }, traced: true)
 }

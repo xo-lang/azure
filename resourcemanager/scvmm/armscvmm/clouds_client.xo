@@ -49,7 +49,7 @@ fn (c: CloudsClient) list_by_subscription_create_request(options: CloudsClientLi
 /// List of Clouds in a subscription.
 pub fn (c: CloudsClient[fx]) new_list_by_subscription_pager(options: CloudsClientListBySubscriptionOptions = CloudsClientListBySubscriptionOptions{}) -> runtime.Pager[CloudsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudsClientListBySubscriptionResponse ! Str { clouds_list_by_subscription_handle(r) }, fn(r: CloudsClientListBySubscriptionResponse) -> Str? { r.cloud_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudsClientListBySubscriptionResponse ! Str { clouds_list_by_subscription_handle(r) }, fn(r: CloudsClientListBySubscriptionResponse) -> Str? { r.cloud_list_result.next_link }).traced_as("CloudsClientListBySubscriptionResponse"))
 }
 
 /// CloudsClientListByResourceGroupOptions: the optional parameters of CloudsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: CloudsClient) list_by_resource_group_create_request(resource_group_name: 
 /// List of Clouds in a resource group.
 pub fn (c: CloudsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: CloudsClientListByResourceGroupOptions = CloudsClientListByResourceGroupOptions{}) -> runtime.Pager[CloudsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudsClientListByResourceGroupResponse ! Str { clouds_list_by_resource_group_handle(r) }, fn(r: CloudsClientListByResourceGroupResponse) -> Str? { r.cloud_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudsClientListByResourceGroupResponse ! Str { clouds_list_by_resource_group_handle(r) }, fn(r: CloudsClientListByResourceGroupResponse) -> Str? { r.cloud_list_result.next_link }).traced_as("CloudsClientListByResourceGroupResponse"))
 }
 
 /// CloudsClientGetOptions: the optional parameters of CloudsClient.get.
@@ -122,12 +122,15 @@ fn (c: CloudsClient) get_create_request(resource_group_name: Str, cloud_resource
 
 /// Implements Cloud GET method.
 pub fn (c: CloudsClient) get(resource_group_name: Str, cloud_resource_name: Str, options: CloudsClientGetOptions = CloudsClientGetOptions{}) -> CloudsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cloud_resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cloud_resource_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  clouds_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = clouds_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CloudsClientBeginCreateOrUpdateOptions: the optional parameters of CloudsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: CloudsClient) create_or_update_create_request(resource_group_name: Str, c
 /// Onboards the ScVmm fabric cloud as an Azure cloud resource.
 pub fn (c: CloudsClient[fx]) begin_create_or_update(resource_group_name: Str, cloud_resource_name: Str, resource: Cloud, options: CloudsClientBeginCreateOrUpdateOptions = CloudsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[CloudsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientCreateOrUpdateResponse", fn(r: http.Response) -> CloudsClientCreateOrUpdateResponse ! Str { clouds_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientCreateOrUpdateResponse", fn(r: http.Response) -> CloudsClientCreateOrUpdateResponse ! Str { clouds_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cloud_resource_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cloud_resource_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientCreateOrUpdateResponse", fn(r: http.Response) -> CloudsClientCreateOrUpdateResponse ! Str { clouds_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientCreateOrUpdateResponse", fn(r: http.Response) -> CloudsClientCreateOrUpdateResponse ! Str { clouds_create_or_update_handle(r) }, traced: true)
 }
 
 /// CloudsClientBeginUpdateOptions: the optional parameters of CloudsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: CloudsClient) update_create_request(resource_group_name: Str, cloud_resou
 /// Updates the Clouds resource.
 pub fn (c: CloudsClient[fx]) begin_update(resource_group_name: Str, cloud_resource_name: Str, properties: CloudTagsUpdate, options: CloudsClientBeginUpdateOptions = CloudsClientBeginUpdateOptions{}) -> runtime.Poller[CloudsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientUpdateResponse", fn(r: http.Response) -> CloudsClientUpdateResponse ! Str { clouds_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientUpdateResponse", fn(r: http.Response) -> CloudsClientUpdateResponse ! Str { clouds_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cloud_resource_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cloud_resource_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientUpdateResponse", fn(r: http.Response) -> CloudsClientUpdateResponse ! Str { clouds_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientUpdateResponse", fn(r: http.Response) -> CloudsClientUpdateResponse ! Str { clouds_update_handle(r) }, traced: true)
 }
 
 /// CloudsClientBeginDeleteOptions: the optional parameters of CloudsClient.begin_delete.
@@ -271,12 +278,14 @@ fn (c: CloudsClient) delete_create_request(resource_group_name: Str, cloud_resou
 /// Deregisters the ScVmm fabric cloud from Azure.
 pub fn (c: CloudsClient[fx]) begin_delete(resource_group_name: Str, cloud_resource_name: Str, options: CloudsClientBeginDeleteOptions = CloudsClientBeginDeleteOptions{}) -> runtime.Poller[CloudsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientDeleteResponse", fn(r: http.Response) -> CloudsClientDeleteResponse ! Str { clouds_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudsClientDeleteResponse", fn(r: http.Response) -> CloudsClientDeleteResponse ! Str { clouds_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cloud_resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cloud_resource_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientDeleteResponse", fn(r: http.Response) -> CloudsClientDeleteResponse ! Str { clouds_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CloudsClientDeleteResponse", fn(r: http.Response) -> CloudsClientDeleteResponse ! Str { clouds_delete_handle(r) }, traced: true)
 }

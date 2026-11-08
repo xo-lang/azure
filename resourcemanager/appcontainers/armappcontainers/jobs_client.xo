@@ -49,7 +49,7 @@ fn (c: JobsClient) list_by_subscription_create_request(options: JobsClientListBy
 /// Get the Container Apps Jobs in a given subscription.
 pub fn (c: JobsClient[fx]) new_list_by_subscription_pager(options: JobsClientListBySubscriptionOptions = JobsClientListBySubscriptionOptions{}) -> runtime.Pager[JobsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListBySubscriptionResponse ! Str { jobs_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: JobsClientListBySubscriptionResponse) -> Str? { r.jobs_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListBySubscriptionResponse ! Str { jobs_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: JobsClientListBySubscriptionResponse) -> Str? { r.jobs_collection.next_link }).traced_as("JobsClientListBySubscriptionResponse"))
 }
 
 /// JobsClientListByResourceGroupOptions: the optional parameters of JobsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: JobsClient) list_by_resource_group_create_request(resource_group_name: St
 /// Get the Container Apps Jobs in a given resource group.
 pub fn (c: JobsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: JobsClientListByResourceGroupOptions = JobsClientListByResourceGroupOptions{}) -> runtime.Pager[JobsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListByResourceGroupResponse ! Str { jobs_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: JobsClientListByResourceGroupResponse) -> Str? { r.jobs_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListByResourceGroupResponse ! Str { jobs_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: JobsClientListByResourceGroupResponse) -> Str? { r.jobs_collection.next_link }).traced_as("JobsClientListByResourceGroupResponse"))
 }
 
 /// JobsClientGetOptions: the optional parameters of JobsClient.get.
@@ -122,12 +122,15 @@ fn (c: JobsClient) get_create_request(resource_group_name: Str, job_name: Str, o
 
 /// Get the properties of a Container Apps Job.
 pub fn (c: JobsClient) get(resource_group_name: Str, job_name: Str, options: JobsClientGetOptions = JobsClientGetOptions{}) -> JobsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientBeginCreateOrUpdateOptions: the optional parameters of JobsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: JobsClient) create_or_update_create_request(resource_group_name: Str, job
 /// Create or Update a Container Apps Job.
 pub fn (c: JobsClient[fx]) begin_create_or_update(resource_group_name: Str, job_name: Str, job_envelope: Job, options: JobsClientBeginCreateOrUpdateOptions = JobsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[JobsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobsClientCreateOrUpdateResponse ! Str { jobs_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobsClientCreateOrUpdateResponse ! Str { jobs_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, job_name, job_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, job_name, job_envelope, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobsClientCreateOrUpdateResponse ! Str { jobs_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobsClientCreateOrUpdateResponse ! Str { jobs_create_or_update_handle(r) }, traced: true)
 }
 
 /// JobsClientBeginUpdateOptions: the optional parameters of JobsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: JobsClient) update_create_request(resource_group_name: Str, job_name: Str
 /// Patches a Container Apps Job using JSON Merge Patch
 pub fn (c: JobsClient[fx]) begin_update(resource_group_name: Str, job_name: Str, job_envelope: JobPatchProperties, options: JobsClientBeginUpdateOptions = JobsClientBeginUpdateOptions{}) -> runtime.Poller[JobsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientUpdateResponse", fn(r: http.Response) -> JobsClientUpdateResponse ! Str { jobs_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientUpdateResponse", fn(r: http.Response) -> JobsClientUpdateResponse ! Str { jobs_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, job_name, job_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, job_name, job_envelope, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientUpdateResponse", fn(r: http.Response) -> JobsClientUpdateResponse ! Str { jobs_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientUpdateResponse", fn(r: http.Response) -> JobsClientUpdateResponse ! Str { jobs_update_handle(r) }, traced: true)
 }
 
 /// JobsClientBeginDeleteOptions: the optional parameters of JobsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: JobsClient) delete_create_request(resource_group_name: Str, job_name: Str
 /// Delete a Container Apps Job.
 pub fn (c: JobsClient[fx]) begin_delete(resource_group_name: Str, job_name: Str, options: JobsClientBeginDeleteOptions = JobsClientBeginDeleteOptions{}) -> runtime.Poller[JobsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) }, traced: true)
 }
 
 /// JobsClientProxyGetOptions: the optional parameters of JobsClient.proxy_get.
@@ -315,12 +324,15 @@ fn (c: JobsClient) proxy_get_create_request(resource_group_name: Str, job_name: 
 
 /// Get the properties for a given Container App Job.
 pub fn (c: JobsClient) proxy_get(resource_group_name: Str, job_name: Str, api_name: Str, options: JobsClientProxyGetOptions = JobsClientProxyGetOptions{}) -> JobsClientProxyGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.proxy_get_create_request(resource_group_name, job_name, api_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.ProxyGet", c.setup.pipeline.tracer)
+  let req = sp.on(c.proxy_get_create_request(resource_group_name, job_name, api_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_proxy_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_proxy_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientListDetectorsOptions: the optional parameters of JobsClient.new_list_detectors_pager.
@@ -359,7 +371,7 @@ fn (c: JobsClient) list_detectors_create_request(resource_group_name: Str, job_n
 /// Get the list of diagnostics for a Container App Job.
 pub fn (c: JobsClient[fx]) new_list_detectors_pager(resource_group_name: Str, job_name: Str, options: JobsClientListDetectorsOptions = JobsClientListDetectorsOptions{}) -> runtime.Pager[JobsClientListDetectorsResponse, fx] ! azcore.CallErr {
   let req = c.list_detectors_create_request(resource_group_name, job_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListDetectorsResponse ! Str { jobs_list_detectors_handle(r) }, c.setup.endpoint, fn(r: JobsClientListDetectorsResponse) -> Str? { r.diagnostics_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListDetectorsResponse ! Str { jobs_list_detectors_handle(r) }, c.setup.endpoint, fn(r: JobsClientListDetectorsResponse) -> Str? { r.diagnostics_collection.next_link }).traced_as("JobsClientListDetectorsResponse"))
 }
 
 /// JobsClientGetDetectorOptions: the optional parameters of JobsClient.get_detector.
@@ -401,12 +413,15 @@ fn (c: JobsClient) get_detector_create_request(resource_group_name: Str, job_nam
 
 /// Get the diagnostics data for a Container App Job.
 pub fn (c: JobsClient) get_detector(resource_group_name: Str, job_name: Str, detector_name: Str, options: JobsClientGetDetectorOptions = JobsClientGetDetectorOptions{}) -> JobsClientGetDetectorResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_detector_create_request(resource_group_name, job_name, detector_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.GetDetector", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_detector_create_request(resource_group_name, job_name, detector_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_get_detector_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_get_detector_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientBeginStopExecutionOptions: the optional parameters of JobsClient.begin_stop_execution.
@@ -449,14 +464,16 @@ fn (c: JobsClient) stop_execution_create_request(resource_group_name: Str, job_n
 /// Terminates execution of a running container apps job
 pub fn (c: JobsClient[fx]) begin_stop_execution(resource_group_name: Str, job_name: Str, job_execution_name: Str, options: JobsClientBeginStopExecutionOptions = JobsClientBeginStopExecutionOptions{}) -> runtime.Poller[JobsClientStopExecutionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStopExecutionResponse", fn(r: http.Response) -> JobsClientStopExecutionResponse ! Str { jobs_stop_execution_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStopExecutionResponse", fn(r: http.Response) -> JobsClientStopExecutionResponse ! Str { jobs_stop_execution_handle(r) }, traced: true)
   }
-  let req = c.stop_execution_create_request(resource_group_name, job_name, job_execution_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginStopExecution", c.setup.pipeline.tracer)
+  let req = c.stop_execution_create_request(resource_group_name, job_name, job_execution_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStopExecutionResponse", fn(r: http.Response) -> JobsClientStopExecutionResponse ! Str { jobs_stop_execution_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStopExecutionResponse", fn(r: http.Response) -> JobsClientStopExecutionResponse ! Str { jobs_stop_execution_handle(r) }, traced: true)
 }
 
 /// JobsClientListSecretsOptions: the optional parameters of JobsClient.list_secrets.
@@ -494,12 +511,15 @@ fn (c: JobsClient) list_secrets_create_request(resource_group_name: Str, job_nam
 
 /// List secrets for a container apps job
 pub fn (c: JobsClient) list_secrets(resource_group_name: Str, job_name: Str, options: JobsClientListSecretsOptions = JobsClientListSecretsOptions{}) -> JobsClientListSecretsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_secrets_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.ListSecrets", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_secrets_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_list_secrets_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_list_secrets_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientBeginResumeOptions: the optional parameters of JobsClient.begin_resume.
@@ -541,14 +561,16 @@ fn (c: JobsClient) resume_create_request(resource_group_name: Str, job_name: Str
 /// Resumes execution for a suspended Container Apps job.
 pub fn (c: JobsClient[fx]) begin_resume(resource_group_name: Str, job_name: Str, options: JobsClientBeginResumeOptions = JobsClientBeginResumeOptions{}) -> runtime.Poller[JobsClientResumeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientResumeResponse", fn(r: http.Response) -> JobsClientResumeResponse ! Str { jobs_resume_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientResumeResponse", fn(r: http.Response) -> JobsClientResumeResponse ! Str { jobs_resume_handle(r) }, traced: true)
   }
-  let req = c.resume_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginResume", c.setup.pipeline.tracer)
+  let req = c.resume_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "JobsClientResumeResponse", fn(r: http.Response) -> JobsClientResumeResponse ! Str { jobs_resume_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "JobsClientResumeResponse", fn(r: http.Response) -> JobsClientResumeResponse ! Str { jobs_resume_handle(r) }, traced: true)
 }
 
 /// JobsClientBeginStartOptions: the optional parameters of JobsClient.begin_start.
@@ -597,14 +619,16 @@ fn (c: JobsClient) start_create_request(resource_group_name: Str, job_name: Str,
 /// Start a Container Apps Job
 pub fn (c: JobsClient[fx]) begin_start(resource_group_name: Str, job_name: Str, options: JobsClientBeginStartOptions = JobsClientBeginStartOptions{}) -> runtime.Poller[JobsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStartResponse", fn(r: http.Response) -> JobsClientStartResponse ! Str { jobs_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStartResponse", fn(r: http.Response) -> JobsClientStartResponse ! Str { jobs_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStartResponse", fn(r: http.Response) -> JobsClientStartResponse ! Str { jobs_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStartResponse", fn(r: http.Response) -> JobsClientStartResponse ! Str { jobs_start_handle(r) }, traced: true)
 }
 
 /// JobsClientBeginStopMultipleExecutionsOptions: the optional parameters of JobsClient.begin_stop_multiple_executions.
@@ -646,14 +670,16 @@ fn (c: JobsClient) stop_multiple_executions_create_request(resource_group_name: 
 /// Terminates execution of a running container apps job
 pub fn (c: JobsClient[fx]) begin_stop_multiple_executions(resource_group_name: Str, job_name: Str, options: JobsClientBeginStopMultipleExecutionsOptions = JobsClientBeginStopMultipleExecutionsOptions{}) -> runtime.Poller[JobsClientStopMultipleExecutionsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStopMultipleExecutionsResponse", fn(r: http.Response) -> JobsClientStopMultipleExecutionsResponse ! Str { jobs_stop_multiple_executions_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientStopMultipleExecutionsResponse", fn(r: http.Response) -> JobsClientStopMultipleExecutionsResponse ! Str { jobs_stop_multiple_executions_handle(r) }, traced: true)
   }
-  let req = c.stop_multiple_executions_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginStopMultipleExecutions", c.setup.pipeline.tracer)
+  let req = c.stop_multiple_executions_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStopMultipleExecutionsResponse", fn(r: http.Response) -> JobsClientStopMultipleExecutionsResponse ! Str { jobs_stop_multiple_executions_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobsClientStopMultipleExecutionsResponse", fn(r: http.Response) -> JobsClientStopMultipleExecutionsResponse ! Str { jobs_stop_multiple_executions_handle(r) }, traced: true)
 }
 
 /// JobsClientBeginSuspendOptions: the optional parameters of JobsClient.begin_suspend.
@@ -695,12 +721,14 @@ fn (c: JobsClient) suspend_create_request(resource_group_name: Str, job_name: St
 /// Suspends execution for a running Container Apps job.
 pub fn (c: JobsClient[fx]) begin_suspend(resource_group_name: Str, job_name: Str, options: JobsClientBeginSuspendOptions = JobsClientBeginSuspendOptions{}) -> runtime.Poller[JobsClientSuspendResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientSuspendResponse", fn(r: http.Response) -> JobsClientSuspendResponse ! Str { jobs_suspend_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientSuspendResponse", fn(r: http.Response) -> JobsClientSuspendResponse ! Str { jobs_suspend_handle(r) }, traced: true)
   }
-  let req = c.suspend_create_request(resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginSuspend", c.setup.pipeline.tracer)
+  let req = c.suspend_create_request(resource_group_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "JobsClientSuspendResponse", fn(r: http.Response) -> JobsClientSuspendResponse ! Str { jobs_suspend_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "JobsClientSuspendResponse", fn(r: http.Response) -> JobsClientSuspendResponse ! Str { jobs_suspend_handle(r) }, traced: true)
 }

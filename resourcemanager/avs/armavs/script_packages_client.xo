@@ -57,7 +57,7 @@ fn (c: ScriptPackagesClient) list_create_request(resource_group_name: Str, priva
 /// List ScriptPackage resources by PrivateCloud
 pub fn (c: ScriptPackagesClient[fx]) new_list_pager(resource_group_name: Str, private_cloud_name: Str, options: ScriptPackagesClientListOptions = ScriptPackagesClientListOptions{}) -> runtime.Pager[ScriptPackagesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, private_cloud_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ScriptPackagesClientListResponse ! Str { script_packages_list_handle(r) }, c.setup.endpoint, fn(r: ScriptPackagesClientListResponse) -> Str? { r.script_packages_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ScriptPackagesClientListResponse ! Str { script_packages_list_handle(r) }, c.setup.endpoint, fn(r: ScriptPackagesClientListResponse) -> Str? { r.script_packages_list.next_link }).traced_as("ScriptPackagesClientListResponse"))
 }
 
 /// ScriptPackagesClientGetOptions: the optional parameters of ScriptPackagesClient.get.
@@ -99,10 +99,13 @@ fn (c: ScriptPackagesClient) get_create_request(resource_group_name: Str, privat
 
 /// Get a ScriptPackage
 pub fn (c: ScriptPackagesClient) get(resource_group_name: Str, private_cloud_name: Str, script_package_name: Str, options: ScriptPackagesClientGetOptions = ScriptPackagesClientGetOptions{}) -> ScriptPackagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_cloud_name, script_package_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ScriptPackagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_cloud_name, script_package_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  script_packages_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = script_packages_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

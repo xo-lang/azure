@@ -49,7 +49,7 @@ fn (c: PipelinesClient) list_by_subscription_create_request(options: PipelinesCl
 /// Lists all Pipeline resources within the current subscription.
 pub fn (c: PipelinesClient[fx]) new_list_by_subscription_pager(options: PipelinesClientListBySubscriptionOptions = PipelinesClientListBySubscriptionOptions{}) -> runtime.Pager[PipelinesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PipelinesClientListBySubscriptionResponse ! Str { pipelines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PipelinesClientListBySubscriptionResponse) -> Str? { r.pipeline_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PipelinesClientListBySubscriptionResponse ! Str { pipelines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PipelinesClientListBySubscriptionResponse) -> Str? { r.pipeline_list_result.next_link }).traced_as("PipelinesClientListBySubscriptionResponse"))
 }
 
 /// PipelinesClientListByResourceGroupOptions: the optional parameters of PipelinesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: PipelinesClient) list_by_resource_group_create_request(resource_group_nam
 /// Lists all Pipeline resources within the specified resource group.
 pub fn (c: PipelinesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: PipelinesClientListByResourceGroupOptions = PipelinesClientListByResourceGroupOptions{}) -> runtime.Pager[PipelinesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PipelinesClientListByResourceGroupResponse ! Str { pipelines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PipelinesClientListByResourceGroupResponse) -> Str? { r.pipeline_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PipelinesClientListByResourceGroupResponse ! Str { pipelines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PipelinesClientListByResourceGroupResponse) -> Str? { r.pipeline_list_result.next_link }).traced_as("PipelinesClientListByResourceGroupResponse"))
 }
 
 /// PipelinesClientGetOptions: the optional parameters of PipelinesClient.get.
@@ -122,12 +122,15 @@ fn (c: PipelinesClient) get_create_request(resource_group_name: Str, pipeline_na
 
 /// Retrieves the specified Pipeline resource.
 pub fn (c: PipelinesClient) get(resource_group_name: Str, pipeline_name: Str, options: PipelinesClientGetOptions = PipelinesClientGetOptions{}) -> PipelinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, pipeline_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, pipeline_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  pipelines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = pipelines_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PipelinesClientBeginCreateOrUpdateOptions: the optional parameters of PipelinesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: PipelinesClient) create_or_update_create_request(resource_group_name: Str
 /// Creates a new Pipeline resource or updates an existing one. This operation is asynchronous and returns the resulting Pipeline.
 pub fn (c: PipelinesClient[fx]) begin_create_or_update(resource_group_name: Str, pipeline_name: Str, pipeline: Pipeline, options: PipelinesClientBeginCreateOrUpdateOptions = PipelinesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[PipelinesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientCreateOrUpdateResponse", fn(r: http.Response) -> PipelinesClientCreateOrUpdateResponse ! Str { pipelines_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientCreateOrUpdateResponse", fn(r: http.Response) -> PipelinesClientCreateOrUpdateResponse ! Str { pipelines_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, pipeline_name, pipeline, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, pipeline_name, pipeline, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientCreateOrUpdateResponse", fn(r: http.Response) -> PipelinesClientCreateOrUpdateResponse ! Str { pipelines_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientCreateOrUpdateResponse", fn(r: http.Response) -> PipelinesClientCreateOrUpdateResponse ! Str { pipelines_create_or_update_handle(r) }, traced: true)
 }
 
 /// PipelinesClientBeginUpdateOptions: the optional parameters of PipelinesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: PipelinesClient) update_create_request(resource_group_name: Str, pipeline
 /// Applies partial updates to an existing Pipeline resource. This operation supports patch semantics and returns the updated Pipeline.
 pub fn (c: PipelinesClient[fx]) begin_update(resource_group_name: Str, pipeline_name: Str, pipeline: PipelinesPatch, options: PipelinesClientBeginUpdateOptions = PipelinesClientBeginUpdateOptions{}) -> runtime.Poller[PipelinesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientUpdateResponse", fn(r: http.Response) -> PipelinesClientUpdateResponse ! Str { pipelines_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientUpdateResponse", fn(r: http.Response) -> PipelinesClientUpdateResponse ! Str { pipelines_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, pipeline_name, pipeline, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, pipeline_name, pipeline, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientUpdateResponse", fn(r: http.Response) -> PipelinesClientUpdateResponse ! Str { pipelines_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientUpdateResponse", fn(r: http.Response) -> PipelinesClientUpdateResponse ! Str { pipelines_update_handle(r) }, traced: true)
 }
 
 /// PipelinesClientBeginDeleteOptions: the optional parameters of PipelinesClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: PipelinesClient) delete_create_request(resource_group_name: Str, pipeline
 /// Deletes the specified Pipeline resource.
 pub fn (c: PipelinesClient[fx]) begin_delete(resource_group_name: Str, pipeline_name: Str, options: PipelinesClientBeginDeleteOptions = PipelinesClientBeginDeleteOptions{}) -> runtime.Poller[PipelinesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientDeleteResponse", fn(r: http.Response) -> PipelinesClientDeleteResponse ! Str { pipelines_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientDeleteResponse", fn(r: http.Response) -> PipelinesClientDeleteResponse ! Str { pipelines_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, pipeline_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, pipeline_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientDeleteResponse", fn(r: http.Response) -> PipelinesClientDeleteResponse ! Str { pipelines_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientDeleteResponse", fn(r: http.Response) -> PipelinesClientDeleteResponse ! Str { pipelines_delete_handle(r) }, traced: true)
 }
 
 /// PipelinesClientBeginApproveConnectionOptions: the optional parameters of PipelinesClient.begin_approve_connection.
@@ -316,14 +325,16 @@ fn (c: PipelinesClient) approve_connection_create_request(resource_group_name: S
 /// Approves a pending connection request associated with the specified Pipeline.
 pub fn (c: PipelinesClient[fx]) begin_approve_connection(resource_group_name: Str, pipeline_name: Str, connection: ResourceBody, options: PipelinesClientBeginApproveConnectionOptions = PipelinesClientBeginApproveConnectionOptions{}) -> runtime.Poller[PipelinesClientApproveConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientApproveConnectionResponse", fn(r: http.Response) -> PipelinesClientApproveConnectionResponse ! Str { pipelines_approve_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientApproveConnectionResponse", fn(r: http.Response) -> PipelinesClientApproveConnectionResponse ! Str { pipelines_approve_connection_handle(r) }, traced: true)
   }
-  let req = c.approve_connection_create_request(resource_group_name, pipeline_name, connection, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginApproveConnection", c.setup.pipeline.tracer)
+  let req = c.approve_connection_create_request(resource_group_name, pipeline_name, connection, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientApproveConnectionResponse", fn(r: http.Response) -> PipelinesClientApproveConnectionResponse ! Str { pipelines_approve_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientApproveConnectionResponse", fn(r: http.Response) -> PipelinesClientApproveConnectionResponse ! Str { pipelines_approve_connection_handle(r) }, traced: true)
 }
 
 /// PipelinesClientBeginExecuteActionOptions: the optional parameters of PipelinesClient.begin_execute_action.
@@ -366,14 +377,16 @@ fn (c: PipelinesClient) execute_action_create_request(resource_group_name: Str, 
 /// Executes a privileged or administrative action on the specified Pipeline.
 pub fn (c: PipelinesClient[fx]) begin_execute_action(resource_group_name: Str, pipeline_name: Str, action: Action, options: PipelinesClientBeginExecuteActionOptions = PipelinesClientBeginExecuteActionOptions{}) -> runtime.Poller[PipelinesClientExecuteActionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientExecuteActionResponse", fn(r: http.Response) -> PipelinesClientExecuteActionResponse ! Str { pipelines_execute_action_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientExecuteActionResponse", fn(r: http.Response) -> PipelinesClientExecuteActionResponse ! Str { pipelines_execute_action_handle(r) }, traced: true)
   }
-  let req = c.execute_action_create_request(resource_group_name, pipeline_name, action, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginExecuteAction", c.setup.pipeline.tracer)
+  let req = c.execute_action_create_request(resource_group_name, pipeline_name, action, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientExecuteActionResponse", fn(r: http.Response) -> PipelinesClientExecuteActionResponse ! Str { pipelines_execute_action_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientExecuteActionResponse", fn(r: http.Response) -> PipelinesClientExecuteActionResponse ! Str { pipelines_execute_action_handle(r) }, traced: true)
 }
 
 /// PipelinesClientBeginRejectConnectionOptions: the optional parameters of PipelinesClient.begin_reject_connection.
@@ -416,12 +429,14 @@ fn (c: PipelinesClient) reject_connection_create_request(resource_group_name: St
 /// Rejects a pending connection request associated with the specified Pipeline.
 pub fn (c: PipelinesClient[fx]) begin_reject_connection(resource_group_name: Str, pipeline_name: Str, connection: ResourceBody, options: PipelinesClientBeginRejectConnectionOptions = PipelinesClientBeginRejectConnectionOptions{}) -> runtime.Poller[PipelinesClientRejectConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientRejectConnectionResponse", fn(r: http.Response) -> PipelinesClientRejectConnectionResponse ! Str { pipelines_reject_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PipelinesClientRejectConnectionResponse", fn(r: http.Response) -> PipelinesClientRejectConnectionResponse ! Str { pipelines_reject_connection_handle(r) }, traced: true)
   }
-  let req = c.reject_connection_create_request(resource_group_name, pipeline_name, connection, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PipelinesClient.BeginRejectConnection", c.setup.pipeline.tracer)
+  let req = c.reject_connection_create_request(resource_group_name, pipeline_name, connection, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientRejectConnectionResponse", fn(r: http.Response) -> PipelinesClientRejectConnectionResponse ! Str { pipelines_reject_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PipelinesClientRejectConnectionResponse", fn(r: http.Response) -> PipelinesClientRejectConnectionResponse ! Str { pipelines_reject_connection_handle(r) }, traced: true)
 }

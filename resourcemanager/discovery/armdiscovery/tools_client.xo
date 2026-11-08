@@ -49,7 +49,7 @@ fn (c: ToolsClient) list_by_subscription_create_request(options: ToolsClientList
 /// List Tool resources by subscription ID
 pub fn (c: ToolsClient[fx]) new_list_by_subscription_pager(options: ToolsClientListBySubscriptionOptions = ToolsClientListBySubscriptionOptions{}) -> runtime.Pager[ToolsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ToolsClientListBySubscriptionResponse ! Str { tools_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ToolsClientListBySubscriptionResponse) -> Str? { r.tool_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ToolsClientListBySubscriptionResponse ! Str { tools_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ToolsClientListBySubscriptionResponse) -> Str? { r.tool_list_result.next_link }).traced_as("ToolsClientListBySubscriptionResponse"))
 }
 
 /// ToolsClientListByResourceGroupOptions: the optional parameters of ToolsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ToolsClient) list_by_resource_group_create_request(resource_group_name: S
 /// List Tool resources by resource group
 pub fn (c: ToolsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ToolsClientListByResourceGroupOptions = ToolsClientListByResourceGroupOptions{}) -> runtime.Pager[ToolsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ToolsClientListByResourceGroupResponse ! Str { tools_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ToolsClientListByResourceGroupResponse) -> Str? { r.tool_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ToolsClientListByResourceGroupResponse ! Str { tools_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ToolsClientListByResourceGroupResponse) -> Str? { r.tool_list_result.next_link }).traced_as("ToolsClientListByResourceGroupResponse"))
 }
 
 /// ToolsClientGetOptions: the optional parameters of ToolsClient.get.
@@ -122,12 +122,15 @@ fn (c: ToolsClient) get_create_request(resource_group_name: Str, tool_name: Str,
 
 /// Get a Tool
 pub fn (c: ToolsClient) get(resource_group_name: Str, tool_name: Str, options: ToolsClientGetOptions = ToolsClientGetOptions{}) -> ToolsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, tool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ToolsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, tool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  tools_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = tools_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ToolsClientBeginCreateOrUpdateOptions: the optional parameters of ToolsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ToolsClient) create_or_update_create_request(resource_group_name: Str, to
 /// Create a Tool
 pub fn (c: ToolsClient[fx]) begin_create_or_update(resource_group_name: Str, tool_name: Str, resource: Tool, options: ToolsClientBeginCreateOrUpdateOptions = ToolsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ToolsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientCreateOrUpdateResponse", fn(r: http.Response) -> ToolsClientCreateOrUpdateResponse ! Str { tools_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientCreateOrUpdateResponse", fn(r: http.Response) -> ToolsClientCreateOrUpdateResponse ! Str { tools_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, tool_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ToolsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, tool_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientCreateOrUpdateResponse", fn(r: http.Response) -> ToolsClientCreateOrUpdateResponse ! Str { tools_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientCreateOrUpdateResponse", fn(r: http.Response) -> ToolsClientCreateOrUpdateResponse ! Str { tools_create_or_update_handle(r) }, traced: true)
 }
 
 /// ToolsClientBeginUpdateOptions: the optional parameters of ToolsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ToolsClient) update_create_request(resource_group_name: Str, tool_name: S
 /// Update a Tool
 pub fn (c: ToolsClient[fx]) begin_update(resource_group_name: Str, tool_name: Str, properties: Tool, options: ToolsClientBeginUpdateOptions = ToolsClientBeginUpdateOptions{}) -> runtime.Poller[ToolsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientUpdateResponse", fn(r: http.Response) -> ToolsClientUpdateResponse ! Str { tools_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientUpdateResponse", fn(r: http.Response) -> ToolsClientUpdateResponse ! Str { tools_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, tool_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ToolsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, tool_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientUpdateResponse", fn(r: http.Response) -> ToolsClientUpdateResponse ! Str { tools_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientUpdateResponse", fn(r: http.Response) -> ToolsClientUpdateResponse ! Str { tools_update_handle(r) }, traced: true)
 }
 
 /// ToolsClientBeginDeleteOptions: the optional parameters of ToolsClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: ToolsClient) delete_create_request(resource_group_name: Str, tool_name: S
 /// Delete a Tool
 pub fn (c: ToolsClient[fx]) begin_delete(resource_group_name: Str, tool_name: Str, options: ToolsClientBeginDeleteOptions = ToolsClientBeginDeleteOptions{}) -> runtime.Poller[ToolsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientDeleteResponse", fn(r: http.Response) -> ToolsClientDeleteResponse ! Str { tools_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ToolsClientDeleteResponse", fn(r: http.Response) -> ToolsClientDeleteResponse ! Str { tools_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, tool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ToolsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, tool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientDeleteResponse", fn(r: http.Response) -> ToolsClientDeleteResponse ! Str { tools_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ToolsClientDeleteResponse", fn(r: http.Response) -> ToolsClientDeleteResponse ! Str { tools_delete_handle(r) }, traced: true)
 }

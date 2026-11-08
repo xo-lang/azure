@@ -49,10 +49,13 @@ fn (c: SaaSClient) activate_resource_create_request(request: ActivateSaaSParamet
 
 /// Resolve the token to get the SaaS resource ID and activate the SaaS resource
 pub fn (c: SaaSClient) activate_resource(request: ActivateSaaSParameterRequest, options: SaaSClientActivateResourceOptions = SaaSClientActivateResourceOptions{}) -> SaaSClientActivateResourceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.activate_resource_create_request(request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SaaSClient.ActivateResource", c.setup.pipeline.tracer)
+  let req = sp.on(c.activate_resource_create_request(request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  saa_s_activate_resource_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = saa_s_activate_resource_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

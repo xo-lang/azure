@@ -63,7 +63,7 @@ fn (c: MaintenanceEventsClient) list_create_request(resource_group_name: Str, se
 /// Lists all maintenance events for a flexible server.
 pub fn (c: MaintenanceEventsClient[fx]) new_list_pager(resource_group_name: Str, server_name: Str, options: MaintenanceEventsClientListOptions = MaintenanceEventsClientListOptions{}) -> runtime.Pager[MaintenanceEventsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MaintenanceEventsClientListResponse ! Str { maintenance_events_list_handle(r) }, c.setup.endpoint, fn(r: MaintenanceEventsClientListResponse) -> Str? { r.maintenance_event_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MaintenanceEventsClientListResponse ! Str { maintenance_events_list_handle(r) }, c.setup.endpoint, fn(r: MaintenanceEventsClientListResponse) -> Str? { r.maintenance_event_resource_list_result.next_link }).traced_as("MaintenanceEventsClientListResponse"))
 }
 
 /// MaintenanceEventsClientGetOptions: the optional parameters of MaintenanceEventsClient.get.
@@ -105,12 +105,15 @@ fn (c: MaintenanceEventsClient) get_create_request(resource_group_name: Str, ser
 
 /// Gets information about a maintenance event for a flexible server.
 pub fn (c: MaintenanceEventsClient) get(resource_group_name: Str, server_name: Str, maintenance_event_id: Str, options: MaintenanceEventsClientGetOptions = MaintenanceEventsClientGetOptions{}) -> MaintenanceEventsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, maintenance_event_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MaintenanceEventsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, maintenance_event_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  maintenance_events_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = maintenance_events_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MaintenanceEventsClientBeginApplyNowOptions: the optional parameters of MaintenanceEventsClient.begin_apply_now.
@@ -156,14 +159,16 @@ fn (c: MaintenanceEventsClient) apply_now_create_request(resource_group_name: St
 /// Applies the maintenance event immediately.
 pub fn (c: MaintenanceEventsClient[fx]) begin_apply_now(resource_group_name: Str, server_name: Str, maintenance_event_id: Str, options: MaintenanceEventsClientBeginApplyNowOptions = MaintenanceEventsClientBeginApplyNowOptions{}) -> runtime.Poller[MaintenanceEventsClientApplyNowResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenanceEventsClientApplyNowResponse", fn(r: http.Response) -> MaintenanceEventsClientApplyNowResponse ! Str { maintenance_events_apply_now_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenanceEventsClientApplyNowResponse", fn(r: http.Response) -> MaintenanceEventsClientApplyNowResponse ! Str { maintenance_events_apply_now_handle(r) }, traced: true)
   }
-  let req = c.apply_now_create_request(resource_group_name, server_name, maintenance_event_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MaintenanceEventsClient.BeginApplyNow", c.setup.pipeline.tracer)
+  let req = c.apply_now_create_request(resource_group_name, server_name, maintenance_event_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MaintenanceEventsClientApplyNowResponse", fn(r: http.Response) -> MaintenanceEventsClientApplyNowResponse ! Str { maintenance_events_apply_now_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MaintenanceEventsClientApplyNowResponse", fn(r: http.Response) -> MaintenanceEventsClientApplyNowResponse ! Str { maintenance_events_apply_now_handle(r) }, traced: true)
 }
 
 /// MaintenanceEventsClientBeginRescheduleOptions: the optional parameters of MaintenanceEventsClient.begin_reschedule.
@@ -210,12 +215,14 @@ fn (c: MaintenanceEventsClient) reschedule_create_request(resource_group_name: S
 /// Reschedules a maintenance event to a new date and time.
 pub fn (c: MaintenanceEventsClient[fx]) begin_reschedule(resource_group_name: Str, server_name: Str, maintenance_event_id: Str, body: MaintenanceEventRescheduleRequest, options: MaintenanceEventsClientBeginRescheduleOptions = MaintenanceEventsClientBeginRescheduleOptions{}) -> runtime.Poller[MaintenanceEventsClientRescheduleResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenanceEventsClientRescheduleResponse", fn(r: http.Response) -> MaintenanceEventsClientRescheduleResponse ! Str { maintenance_events_reschedule_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenanceEventsClientRescheduleResponse", fn(r: http.Response) -> MaintenanceEventsClientRescheduleResponse ! Str { maintenance_events_reschedule_handle(r) }, traced: true)
   }
-  let req = c.reschedule_create_request(resource_group_name, server_name, maintenance_event_id, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MaintenanceEventsClient.BeginReschedule", c.setup.pipeline.tracer)
+  let req = c.reschedule_create_request(resource_group_name, server_name, maintenance_event_id, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MaintenanceEventsClientRescheduleResponse", fn(r: http.Response) -> MaintenanceEventsClientRescheduleResponse ! Str { maintenance_events_reschedule_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MaintenanceEventsClientRescheduleResponse", fn(r: http.Response) -> MaintenanceEventsClientRescheduleResponse ! Str { maintenance_events_reschedule_handle(r) }, traced: true)
 }

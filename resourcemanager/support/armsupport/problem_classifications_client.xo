@@ -48,7 +48,7 @@ fn (c: ProblemClassificationsClient) list_create_request(service_name: Str, opti
 /// Lists all the problem classifications (categories) available for a specific Azure service. Always use the service and problem classifications obtained programmatically. This practice ensures that you always have the most recent set of service and problem classification Ids.
 pub fn (c: ProblemClassificationsClient[fx]) new_list_pager(service_name: Str, options: ProblemClassificationsClientListOptions = ProblemClassificationsClientListOptions{}) -> runtime.Pager[ProblemClassificationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(service_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProblemClassificationsClientListResponse ! Str { problem_classifications_list_handle(r) }, c.setup.endpoint, fn(r: ProblemClassificationsClientListResponse) -> Str? { r.problem_classifications_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProblemClassificationsClientListResponse ! Str { problem_classifications_list_handle(r) }, c.setup.endpoint, fn(r: ProblemClassificationsClientListResponse) -> Str? { r.problem_classifications_list_result.next_link }).traced_as("ProblemClassificationsClientListResponse"))
 }
 
 /// ProblemClassificationsClientGetOptions: the optional parameters of ProblemClassificationsClient.get.
@@ -82,10 +82,13 @@ fn (c: ProblemClassificationsClient) get_create_request(service_name: Str, probl
 
 /// Get problem classification details for a specific Azure service.
 pub fn (c: ProblemClassificationsClient) get(service_name: Str, problem_classification_name: Str, options: ProblemClassificationsClientGetOptions = ProblemClassificationsClientGetOptions{}) -> ProblemClassificationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(service_name, problem_classification_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ProblemClassificationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(service_name, problem_classification_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  problem_classifications_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = problem_classifications_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

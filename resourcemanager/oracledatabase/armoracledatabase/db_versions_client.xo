@@ -84,7 +84,7 @@ fn (c: DbVersionsClient) list_by_location_create_request(location: Str, options:
 /// List DbVersion resources by SubscriptionLocationResource
 pub fn (c: DbVersionsClient[fx]) new_list_by_location_pager(location: Str, options: DbVersionsClientListByLocationOptions = DbVersionsClientListByLocationOptions{}) -> runtime.Pager[DbVersionsClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DbVersionsClientListByLocationResponse ! Str { db_versions_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DbVersionsClientListByLocationResponse) -> Str? { r.db_version_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DbVersionsClientListByLocationResponse ! Str { db_versions_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DbVersionsClientListByLocationResponse) -> Str? { r.db_version_list_result.next_link }).traced_as("DbVersionsClientListByLocationResponse"))
 }
 
 /// DbVersionsClientGetOptions: the optional parameters of DbVersionsClient.get.
@@ -122,10 +122,13 @@ fn (c: DbVersionsClient) get_create_request(location: Str, dbversionsname: Str, 
 
 /// Get a DbVersion
 pub fn (c: DbVersionsClient) get(location: Str, dbversionsname: Str, options: DbVersionsClientGetOptions = DbVersionsClientGetOptions{}) -> DbVersionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, dbversionsname, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DbVersionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, dbversionsname, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  db_versions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = db_versions_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

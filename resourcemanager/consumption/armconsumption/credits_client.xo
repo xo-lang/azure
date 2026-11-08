@@ -51,10 +51,13 @@ fn (c: CreditsClient) get_create_request(billing_account_id: Str, billing_profil
 
 /// The credit summary by billingAccountId and billingProfileId.
 pub fn (c: CreditsClient) get(billing_account_id: Str, billing_profile_id: Str, options: CreditsClientGetOptions = CreditsClientGetOptions{}) -> CreditsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(billing_account_id, billing_profile_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CreditsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(billing_account_id, billing_profile_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  credits_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = credits_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

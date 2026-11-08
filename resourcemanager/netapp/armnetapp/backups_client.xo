@@ -67,7 +67,7 @@ fn (c: BackupsClient) list_by_vault_create_request(resource_group_name: Str, acc
 /// List all backups Under a Backup Vault
 pub fn (c: BackupsClient[fx]) new_list_by_vault_pager(resource_group_name: Str, account_name: Str, backup_vault_name: Str, options: BackupsClientListByVaultOptions = BackupsClientListByVaultOptions{}) -> runtime.Pager[BackupsClientListByVaultResponse, fx] ! azcore.CallErr {
   let req = c.list_by_vault_create_request(resource_group_name, account_name, backup_vault_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BackupsClientListByVaultResponse ! Str { backups_list_by_vault_handle(r) }, c.setup.endpoint, fn(r: BackupsClientListByVaultResponse) -> Str? { r.backups_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BackupsClientListByVaultResponse ! Str { backups_list_by_vault_handle(r) }, c.setup.endpoint, fn(r: BackupsClientListByVaultResponse) -> Str? { r.backups_list.next_link }).traced_as("BackupsClientListByVaultResponse"))
 }
 
 /// BackupsClientGetOptions: the optional parameters of BackupsClient.get.
@@ -113,12 +113,15 @@ fn (c: BackupsClient) get_create_request(resource_group_name: Str, account_name:
 
 /// Get the specified Backup under Backup Vault.
 pub fn (c: BackupsClient) get(resource_group_name: Str, account_name: Str, backup_vault_name: Str, backup_name: Str, options: BackupsClientGetOptions = BackupsClientGetOptions{}) -> BackupsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, backup_vault_name, backup_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, backup_vault_name, backup_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  backups_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = backups_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BackupsClientBeginCreateOptions: the optional parameters of BackupsClient.begin_create.
@@ -169,14 +172,16 @@ fn (c: BackupsClient) create_create_request(resource_group_name: Str, account_na
 /// Create a backup under the Backup Vault
 pub fn (c: BackupsClient[fx]) begin_create(resource_group_name: Str, account_name: Str, backup_vault_name: Str, backup_name: Str, body: Backup, options: BackupsClientBeginCreateOptions = BackupsClientBeginCreateOptions{}) -> runtime.Poller[BackupsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientCreateResponse", fn(r: http.Response) -> BackupsClientCreateResponse ! Str { backups_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientCreateResponse", fn(r: http.Response) -> BackupsClientCreateResponse ! Str { backups_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, backup_vault_name, backup_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, backup_vault_name, backup_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientCreateResponse", fn(r: http.Response) -> BackupsClientCreateResponse ! Str { backups_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientCreateResponse", fn(r: http.Response) -> BackupsClientCreateResponse ! Str { backups_create_handle(r) }, traced: true)
 }
 
 /// BackupsClientBeginUpdateOptions: the optional parameters of BackupsClient.begin_update.
@@ -227,14 +232,16 @@ fn (c: BackupsClient) update_create_request(resource_group_name: Str, account_na
 /// Patch a Backup under the Backup Vault
 pub fn (c: BackupsClient[fx]) begin_update(resource_group_name: Str, account_name: Str, backup_vault_name: Str, backup_name: Str, body: BackupPatch, options: BackupsClientBeginUpdateOptions = BackupsClientBeginUpdateOptions{}) -> runtime.Poller[BackupsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientUpdateResponse", fn(r: http.Response) -> BackupsClientUpdateResponse ! Str { backups_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientUpdateResponse", fn(r: http.Response) -> BackupsClientUpdateResponse ! Str { backups_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, backup_vault_name, backup_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, backup_vault_name, backup_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientUpdateResponse", fn(r: http.Response) -> BackupsClientUpdateResponse ! Str { backups_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientUpdateResponse", fn(r: http.Response) -> BackupsClientUpdateResponse ! Str { backups_update_handle(r) }, traced: true)
 }
 
 /// BackupsClientBeginDeleteOptions: the optional parameters of BackupsClient.begin_delete.
@@ -281,14 +288,16 @@ fn (c: BackupsClient) delete_create_request(resource_group_name: Str, account_na
 /// Delete a Backup under the Backup Vault
 pub fn (c: BackupsClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, backup_vault_name: Str, backup_name: Str, options: BackupsClientBeginDeleteOptions = BackupsClientBeginDeleteOptions{}) -> runtime.Poller[BackupsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientDeleteResponse", fn(r: http.Response) -> BackupsClientDeleteResponse ! Str { backups_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BackupsClientDeleteResponse", fn(r: http.Response) -> BackupsClientDeleteResponse ! Str { backups_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, backup_vault_name, backup_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, backup_vault_name, backup_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientDeleteResponse", fn(r: http.Response) -> BackupsClientDeleteResponse ! Str { backups_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BackupsClientDeleteResponse", fn(r: http.Response) -> BackupsClientDeleteResponse ! Str { backups_delete_handle(r) }, traced: true)
 }
 
 /// BackupsClientGetLatestStatusOptions: the optional parameters of BackupsClient.get_latest_status.
@@ -334,12 +343,15 @@ fn (c: BackupsClient) get_latest_status_create_request(resource_group_name: Str,
 
 /// Get the latest status of the backup for a volume
 pub fn (c: BackupsClient) get_latest_status(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, options: BackupsClientGetLatestStatusOptions = BackupsClientGetLatestStatusOptions{}) -> BackupsClientGetLatestStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_latest_status_create_request(resource_group_name, account_name, pool_name, volume_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.GetLatestStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_latest_status_create_request(resource_group_name, account_name, pool_name, volume_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  backups_get_latest_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = backups_get_latest_status_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BackupsClientGetVolumeLatestRestoreStatusOptions: the optional parameters of BackupsClient.get_volume_latest_restore_status.
@@ -385,10 +397,13 @@ fn (c: BackupsClient) get_volume_latest_restore_status_create_request(resource_g
 
 /// Get the latest status of the restore for a volume
 pub fn (c: BackupsClient) get_volume_latest_restore_status(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, options: BackupsClientGetVolumeLatestRestoreStatusOptions = BackupsClientGetVolumeLatestRestoreStatusOptions{}) -> BackupsClientGetVolumeLatestRestoreStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_volume_latest_restore_status_create_request(resource_group_name, account_name, pool_name, volume_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupsClient.GetVolumeLatestRestoreStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_volume_latest_restore_status_create_request(resource_group_name, account_name, pool_name, volume_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  backups_get_volume_latest_restore_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = backups_get_volume_latest_restore_status_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

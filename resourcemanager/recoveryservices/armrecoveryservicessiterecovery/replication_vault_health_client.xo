@@ -56,12 +56,15 @@ fn (c: ReplicationVaultHealthClient) get_create_request(resource_group_name: Str
 
 /// Gets the health details of the vault.
 pub fn (c: ReplicationVaultHealthClient) get(resource_group_name: Str, resource_name: Str, options: ReplicationVaultHealthClientGetOptions = ReplicationVaultHealthClientGetOptions{}) -> ReplicationVaultHealthClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationVaultHealthClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, resource_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  replication_vault_health_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = replication_vault_health_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReplicationVaultHealthClientBeginRefreshOptions: the optional parameters of ReplicationVaultHealthClient.begin_refresh.
@@ -103,12 +106,14 @@ fn (c: ReplicationVaultHealthClient) refresh_create_request(resource_group_name:
 /// Refreshes health summary of the vault.
 pub fn (c: ReplicationVaultHealthClient[fx]) begin_refresh(resource_group_name: Str, resource_name: Str, options: ReplicationVaultHealthClientBeginRefreshOptions = ReplicationVaultHealthClientBeginRefreshOptions{}) -> runtime.Poller[ReplicationVaultHealthClientRefreshResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationVaultHealthClientRefreshResponse", fn(r: http.Response) -> ReplicationVaultHealthClientRefreshResponse ! Str { replication_vault_health_refresh_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationVaultHealthClientRefreshResponse", fn(r: http.Response) -> ReplicationVaultHealthClientRefreshResponse ! Str { replication_vault_health_refresh_handle(r) }, traced: true)
   }
-  let req = c.refresh_create_request(resource_group_name, resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationVaultHealthClient.BeginRefresh", c.setup.pipeline.tracer)
+  let req = c.refresh_create_request(resource_group_name, resource_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationVaultHealthClientRefreshResponse", fn(r: http.Response) -> ReplicationVaultHealthClientRefreshResponse ! Str { replication_vault_health_refresh_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationVaultHealthClientRefreshResponse", fn(r: http.Response) -> ReplicationVaultHealthClientRefreshResponse ! Str { replication_vault_health_refresh_handle(r) }, traced: true)
 }

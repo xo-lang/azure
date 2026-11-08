@@ -55,7 +55,7 @@ fn (c: SpacecraftsClient) list_by_subscription_create_request(options: Spacecraf
 /// Returns list of spacecrafts by subscription.
 pub fn (c: SpacecraftsClient[fx]) new_list_by_subscription_pager(options: SpacecraftsClientListBySubscriptionOptions = SpacecraftsClientListBySubscriptionOptions{}) -> runtime.Pager[SpacecraftsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SpacecraftsClientListBySubscriptionResponse ! Str { spacecrafts_list_by_subscription_handle(r) }, fn(r: SpacecraftsClientListBySubscriptionResponse) -> Str? { r.spacecraft_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SpacecraftsClientListBySubscriptionResponse ! Str { spacecrafts_list_by_subscription_handle(r) }, fn(r: SpacecraftsClientListBySubscriptionResponse) -> Str? { r.spacecraft_list_result.next_link }).traced_as("SpacecraftsClientListBySubscriptionResponse"))
 }
 
 /// SpacecraftsClientListOptions: the optional parameters of SpacecraftsClient.new_list_pager.
@@ -96,7 +96,7 @@ fn (c: SpacecraftsClient) list_create_request(resource_group_name: Str, options:
 /// Returns list of spacecrafts by resource group.
 pub fn (c: SpacecraftsClient[fx]) new_list_pager(resource_group_name: Str, options: SpacecraftsClientListOptions = SpacecraftsClientListOptions{}) -> runtime.Pager[SpacecraftsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SpacecraftsClientListResponse ! Str { spacecrafts_list_handle(r) }, fn(r: SpacecraftsClientListResponse) -> Str? { r.spacecraft_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SpacecraftsClientListResponse ! Str { spacecrafts_list_handle(r) }, fn(r: SpacecraftsClientListResponse) -> Str? { r.spacecraft_list_result.next_link }).traced_as("SpacecraftsClientListResponse"))
 }
 
 /// SpacecraftsClientGetOptions: the optional parameters of SpacecraftsClient.get.
@@ -134,12 +134,15 @@ fn (c: SpacecraftsClient) get_create_request(resource_group_name: Str, spacecraf
 
 /// Gets the specified spacecraft in a specified resource group.
 pub fn (c: SpacecraftsClient) get(resource_group_name: Str, spacecraft_name: Str, options: SpacecraftsClientGetOptions = SpacecraftsClientGetOptions{}) -> SpacecraftsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, spacecraft_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SpacecraftsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, spacecraft_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  spacecrafts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = spacecrafts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SpacecraftsClientBeginCreateOrUpdateOptions: the optional parameters of SpacecraftsClient.begin_create_or_update.
@@ -182,14 +185,16 @@ fn (c: SpacecraftsClient) create_or_update_create_request(resource_group_name: S
 /// Creates or updates a spacecraft resource.
 pub fn (c: SpacecraftsClient[fx]) begin_create_or_update(resource_group_name: Str, spacecraft_name: Str, parameters: Spacecraft, options: SpacecraftsClientBeginCreateOrUpdateOptions = SpacecraftsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[SpacecraftsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientCreateOrUpdateResponse", fn(r: http.Response) -> SpacecraftsClientCreateOrUpdateResponse ! Str { spacecrafts_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientCreateOrUpdateResponse", fn(r: http.Response) -> SpacecraftsClientCreateOrUpdateResponse ! Str { spacecrafts_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, spacecraft_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SpacecraftsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, spacecraft_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "SpacecraftsClientCreateOrUpdateResponse", fn(r: http.Response) -> SpacecraftsClientCreateOrUpdateResponse ! Str { spacecrafts_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "SpacecraftsClientCreateOrUpdateResponse", fn(r: http.Response) -> SpacecraftsClientCreateOrUpdateResponse ! Str { spacecrafts_create_or_update_handle(r) }, traced: true)
 }
 
 /// SpacecraftsClientBeginDeleteOptions: the optional parameters of SpacecraftsClient.begin_delete.
@@ -228,14 +233,16 @@ fn (c: SpacecraftsClient) delete_create_request(resource_group_name: Str, spacec
 /// Deletes a specified spacecraft resource.
 pub fn (c: SpacecraftsClient[fx]) begin_delete(resource_group_name: Str, spacecraft_name: Str, options: SpacecraftsClientBeginDeleteOptions = SpacecraftsClientBeginDeleteOptions{}) -> runtime.Poller[SpacecraftsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientDeleteResponse", fn(r: http.Response) -> SpacecraftsClientDeleteResponse ! Str { spacecrafts_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientDeleteResponse", fn(r: http.Response) -> SpacecraftsClientDeleteResponse ! Str { spacecrafts_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, spacecraft_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SpacecraftsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, spacecraft_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SpacecraftsClientDeleteResponse", fn(r: http.Response) -> SpacecraftsClientDeleteResponse ! Str { spacecrafts_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SpacecraftsClientDeleteResponse", fn(r: http.Response) -> SpacecraftsClientDeleteResponse ! Str { spacecrafts_delete_handle(r) }, traced: true)
 }
 
 /// SpacecraftsClientBeginUpdateTagsOptions: the optional parameters of SpacecraftsClient.begin_update_tags.
@@ -278,14 +285,16 @@ fn (c: SpacecraftsClient) update_tags_create_request(resource_group_name: Str, s
 /// Updates the specified spacecraft tags.
 pub fn (c: SpacecraftsClient[fx]) begin_update_tags(resource_group_name: Str, spacecraft_name: Str, parameters: TagsObject, options: SpacecraftsClientBeginUpdateTagsOptions = SpacecraftsClientBeginUpdateTagsOptions{}) -> runtime.Poller[SpacecraftsClientUpdateTagsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientUpdateTagsResponse", fn(r: http.Response) -> SpacecraftsClientUpdateTagsResponse ! Str { spacecrafts_update_tags_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SpacecraftsClientUpdateTagsResponse", fn(r: http.Response) -> SpacecraftsClientUpdateTagsResponse ! Str { spacecrafts_update_tags_handle(r) }, traced: true)
   }
-  let req = c.update_tags_create_request(resource_group_name, spacecraft_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SpacecraftsClient.BeginUpdateTags", c.setup.pipeline.tracer)
+  let req = c.update_tags_create_request(resource_group_name, spacecraft_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SpacecraftsClientUpdateTagsResponse", fn(r: http.Response) -> SpacecraftsClientUpdateTagsResponse ! Str { spacecrafts_update_tags_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SpacecraftsClientUpdateTagsResponse", fn(r: http.Response) -> SpacecraftsClientUpdateTagsResponse ! Str { spacecrafts_update_tags_handle(r) }, traced: true)
 }
 
 /// SpacecraftsClientBeginListAvailableContactsOptions: the optional parameters of SpacecraftsClient.begin_list_available_contacts.
@@ -327,14 +336,19 @@ fn (c: SpacecraftsClient) list_available_contacts_create_request(resource_group_
 
 /// Returns list of available contacts. A contact is available if the spacecraft is visible from the ground station for more than the minimum viable contact duration provided in the contact profile.
 pub fn (c: SpacecraftsClient[fx]) begin_list_available_contacts(resource_group_name: Str, spacecraft_name: Str, parameters: ContactParameters, options: SpacecraftsClientBeginListAvailableContactsOptions = SpacecraftsClientBeginListAvailableContactsOptions{}) -> runtime.Poller[runtime.Pager[SpacecraftsClientListAvailableContactsResponse, fx], fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
-  let req = c.list_available_contacts_create_request(resource_group_name, spacecraft_name, parameters, options)?
+  let made = c.list_available_contacts_create_request(resource_group_name, spacecraft_name, parameters, options)
   let pipeline = c.setup.pipeline
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "*Pager[github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/orbital/armorbital/v2.SpacecraftsClientListAvailableContactsResponse]", fn(r: http.Response) -> runtime.Pager[SpacecraftsClientListAvailableContactsResponse, fx] ! Str { Ok(runtime.new_pager(pipeline, req, fn(r: http.Response) -> SpacecraftsClientListAvailableContactsResponse ! Str { spacecrafts_list_available_contacts_handle(r) }, fn(r: SpacecraftsClientListAvailableContactsResponse) -> Str? { r.available_contacts_list_result.next_link }).starting_with(spacecrafts_list_available_contacts_handle(r)?)) })
+    let first = made?
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "*Pager[github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/orbital/armorbital/v2.SpacecraftsClientListAvailableContactsResponse]", fn(r: http.Response) -> runtime.Pager[SpacecraftsClientListAvailableContactsResponse, fx] ! Str { Ok(runtime.new_pager(pipeline, first, fn(r: http.Response) -> SpacecraftsClientListAvailableContactsResponse ! Str { spacecrafts_list_available_contacts_handle(r) }, fn(r: SpacecraftsClientListAvailableContactsResponse) -> Str? { r.available_contacts_list_result.next_link }).traced_as("SpacecraftsClientListAvailableContactsResponse").starting_with(spacecrafts_list_available_contacts_handle(r)?)) }, traced: true)
   }
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SpacecraftsClient.BeginListAvailableContacts", c.setup.pipeline.tracer)
+  let req = made ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "*Pager[github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/orbital/armorbital/v2.SpacecraftsClientListAvailableContactsResponse]", fn(r: http.Response) -> runtime.Pager[SpacecraftsClientListAvailableContactsResponse, fx] ! Str { Ok(runtime.new_pager(pipeline, req, fn(r: http.Response) -> SpacecraftsClientListAvailableContactsResponse ! Str { spacecrafts_list_available_contacts_handle(r) }, fn(r: SpacecraftsClientListAvailableContactsResponse) -> Str? { r.available_contacts_list_result.next_link }).starting_with(spacecrafts_list_available_contacts_handle(r)?)) })
+  sp.end()
+  let first = req
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "*Pager[github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/orbital/armorbital/v2.SpacecraftsClientListAvailableContactsResponse]", fn(r: http.Response) -> runtime.Pager[SpacecraftsClientListAvailableContactsResponse, fx] ! Str { Ok(runtime.new_pager(pipeline, first, fn(r: http.Response) -> SpacecraftsClientListAvailableContactsResponse ! Str { spacecrafts_list_available_contacts_handle(r) }, fn(r: SpacecraftsClientListAvailableContactsResponse) -> Str? { r.available_contacts_list_result.next_link }).traced_as("SpacecraftsClientListAvailableContactsResponse").starting_with(spacecrafts_list_available_contacts_handle(r)?)) }, traced: true)
 }

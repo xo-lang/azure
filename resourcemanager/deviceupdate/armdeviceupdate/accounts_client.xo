@@ -49,7 +49,7 @@ fn (c: AccountsClient) list_by_subscription_create_request(options: AccountsClie
 /// Returns list of Accounts.
 pub fn (c: AccountsClient[fx]) new_list_by_subscription_pager(options: AccountsClientListBySubscriptionOptions = AccountsClientListBySubscriptionOptions{}) -> runtime.Pager[AccountsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListBySubscriptionResponse ! Str { accounts_list_by_subscription_handle(r) }, fn(r: AccountsClientListBySubscriptionResponse) -> Str? { r.account_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListBySubscriptionResponse ! Str { accounts_list_by_subscription_handle(r) }, fn(r: AccountsClientListBySubscriptionResponse) -> Str? { r.account_list.next_link }).traced_as("AccountsClientListBySubscriptionResponse"))
 }
 
 /// AccountsClientListByResourceGroupOptions: the optional parameters of AccountsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: AccountsClient) list_by_resource_group_create_request(resource_group_name
 /// Returns list of Accounts.
 pub fn (c: AccountsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AccountsClientListByResourceGroupOptions = AccountsClientListByResourceGroupOptions{}) -> runtime.Pager[AccountsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListByResourceGroupResponse ! Str { accounts_list_by_resource_group_handle(r) }, fn(r: AccountsClientListByResourceGroupResponse) -> Str? { r.account_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListByResourceGroupResponse ! Str { accounts_list_by_resource_group_handle(r) }, fn(r: AccountsClientListByResourceGroupResponse) -> Str? { r.account_list.next_link }).traced_as("AccountsClientListByResourceGroupResponse"))
 }
 
 /// AccountsClientGetOptions: the optional parameters of AccountsClient.get.
@@ -122,12 +122,15 @@ fn (c: AccountsClient) get_create_request(resource_group_name: Str, account_name
 
 /// Returns account details for the given account name.
 pub fn (c: AccountsClient) get(resource_group_name: Str, account_name: Str, options: AccountsClientGetOptions = AccountsClientGetOptions{}) -> AccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountsClientHeadOptions: the optional parameters of AccountsClient.head.
@@ -165,12 +168,15 @@ fn (c: AccountsClient) head_create_request(resource_group_name: Str, account_nam
 
 /// Checks whether account exists.
 pub fn (c: AccountsClient) head(resource_group_name: Str, account_name: Str, options: AccountsClientHeadOptions = AccountsClientHeadOptions{}) -> AccountsClientHeadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.head_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.Head", c.setup.pipeline.tracer)
+  let req = sp.on(c.head_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_head_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_head_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountsClientBeginCreateOptions: the optional parameters of AccountsClient.begin_create.
@@ -213,14 +219,16 @@ fn (c: AccountsClient) create_create_request(resource_group_name: Str, account_n
 /// Creates or updates Account.
 pub fn (c: AccountsClient[fx]) begin_create(resource_group_name: Str, account_name: Str, account: Account, options: AccountsClientBeginCreateOptions = AccountsClientBeginCreateOptions{}) -> runtime.Poller[AccountsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, account, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, account, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) }, traced: true)
 }
 
 /// AccountsClientBeginDeleteOptions: the optional parameters of AccountsClient.begin_delete.
@@ -259,14 +267,16 @@ fn (c: AccountsClient) delete_create_request(resource_group_name: Str, account_n
 /// Deletes account.
 pub fn (c: AccountsClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, options: AccountsClientBeginDeleteOptions = AccountsClientBeginDeleteOptions{}) -> runtime.Poller[AccountsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) }, traced: true)
 }
 
 /// AccountsClientBeginUpdateOptions: the optional parameters of AccountsClient.begin_update.
@@ -309,12 +319,14 @@ fn (c: AccountsClient) update_create_request(resource_group_name: Str, account_n
 /// Updates account's patchable properties
 pub fn (c: AccountsClient[fx]) begin_update(resource_group_name: Str, account_name: Str, account_update_payload: AccountUpdate, options: AccountsClientBeginUpdateOptions = AccountsClientBeginUpdateOptions{}) -> runtime.Poller[AccountsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, account_update_payload, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, account_update_payload, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
 }

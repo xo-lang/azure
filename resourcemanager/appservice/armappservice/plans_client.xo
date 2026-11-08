@@ -55,7 +55,7 @@ fn (c: PlansClient) list_create_request(options: PlansClientListOptions) -> poli
 /// Description for Get all App Service plans for a subscription.
 pub fn (c: PlansClient[fx]) new_list_pager(options: PlansClientListOptions = PlansClientListOptions{}) -> runtime.Pager[PlansClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListResponse ! Str { plans_list_handle(r) }, c.setup.endpoint, fn(r: PlansClientListResponse) -> Str? { r.plan_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListResponse ! Str { plans_list_handle(r) }, c.setup.endpoint, fn(r: PlansClientListResponse) -> Str? { r.plan_collection.next_link }).traced_as("PlansClientListResponse"))
 }
 
 /// PlansClientListByResourceGroupOptions: the optional parameters of PlansClient.new_list_by_resource_group_pager.
@@ -90,7 +90,7 @@ fn (c: PlansClient) list_by_resource_group_create_request(resource_group_name: S
 /// Description for Get all App Service plans in a resource group.
 pub fn (c: PlansClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: PlansClientListByResourceGroupOptions = PlansClientListByResourceGroupOptions{}) -> runtime.Pager[PlansClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListByResourceGroupResponse ! Str { plans_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PlansClientListByResourceGroupResponse) -> Str? { r.plan_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListByResourceGroupResponse ! Str { plans_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PlansClientListByResourceGroupResponse) -> Str? { r.plan_collection.next_link }).traced_as("PlansClientListByResourceGroupResponse"))
 }
 
 /// PlansClientGetOptions: the optional parameters of PlansClient.get.
@@ -128,12 +128,15 @@ fn (c: PlansClient) get_create_request(resource_group_name: Str, name: Str, opti
 
 /// Description for Get an App Service plan.
 pub fn (c: PlansClient) get(resource_group_name: Str, name: Str, options: PlansClientGetOptions = PlansClientGetOptions{}) -> PlansClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientBeginCreateOrUpdateOptions: the optional parameters of PlansClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: PlansClient) create_or_update_create_request(resource_group_name: Str, na
 /// Description for Creates or updates an App Service Plan.
 pub fn (c: PlansClient[fx]) begin_create_or_update(resource_group_name: Str, name: Str, app_service_plan: Plan, options: PlansClientBeginCreateOrUpdateOptions = PlansClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[PlansClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PlansClientCreateOrUpdateResponse", fn(r: http.Response) -> PlansClientCreateOrUpdateResponse ! Str { plans_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PlansClientCreateOrUpdateResponse", fn(r: http.Response) -> PlansClientCreateOrUpdateResponse ! Str { plans_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, name, app_service_plan, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, name, app_service_plan, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PlansClientCreateOrUpdateResponse", fn(r: http.Response) -> PlansClientCreateOrUpdateResponse ! Str { plans_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PlansClientCreateOrUpdateResponse", fn(r: http.Response) -> PlansClientCreateOrUpdateResponse ! Str { plans_create_or_update_handle(r) }, traced: true)
 }
 
 /// PlansClientUpdateOptions: the optional parameters of PlansClient.update.
@@ -222,12 +227,15 @@ fn (c: PlansClient) update_create_request(resource_group_name: Str, name: Str, a
 
 /// Description for Creates or updates an App Service Plan.
 pub fn (c: PlansClient) update(resource_group_name: Str, name: Str, app_service_plan: PlanPatchResource, options: PlansClientUpdateOptions = PlansClientUpdateOptions{}) -> PlansClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, name, app_service_plan, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, name, app_service_plan, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientDeleteOptions: the optional parameters of PlansClient.delete.
@@ -262,12 +270,15 @@ fn (c: PlansClient) delete_create_request(resource_group_name: Str, name: Str, o
 
 /// Description for Delete an App Service plan.
 pub fn (c: PlansClient) delete(resource_group_name: Str, name: Str, options: PlansClientDeleteOptions = PlansClientDeleteOptions{}) -> PlansClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListCapabilitiesOptions: the optional parameters of PlansClient.list_capabilities.
@@ -305,12 +316,15 @@ fn (c: PlansClient) list_capabilities_create_request(resource_group_name: Str, n
 
 /// Description for List all capabilities of an App Service plan.
 pub fn (c: PlansClient) list_capabilities(resource_group_name: Str, name: Str, options: PlansClientListCapabilitiesOptions = PlansClientListCapabilitiesOptions{}) -> PlansClientListCapabilitiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_capabilities_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.ListCapabilities", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_capabilities_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_list_capabilities_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_list_capabilities_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientGetServerFarmRdpPasswordOptions: the optional parameters of PlansClient.get_server_farm_rdp_password.
@@ -348,12 +362,15 @@ fn (c: PlansClient) get_server_farm_rdp_password_create_request(resource_group_n
 
 /// Description for Get the RDP password for an IsCustomMode ServerFarm.
 pub fn (c: PlansClient) get_server_farm_rdp_password(resource_group_name: Str, name: Str, options: PlansClientGetServerFarmRdpPasswordOptions = PlansClientGetServerFarmRdpPasswordOptions{}) -> PlansClientGetServerFarmRdpPasswordResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_server_farm_rdp_password_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetServerFarmRdpPassword", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_server_farm_rdp_password_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_server_farm_rdp_password_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_server_farm_rdp_password_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientGetHybridConnectionOptions: the optional parameters of PlansClient.get_hybrid_connection.
@@ -399,12 +416,15 @@ fn (c: PlansClient) get_hybrid_connection_create_request(resource_group_name: St
 
 /// Description for Retrieve a Hybrid Connection in use in an App Service plan.
 pub fn (c: PlansClient) get_hybrid_connection(resource_group_name: Str, name: Str, namespace_name: Str, relay_name: Str, options: PlansClientGetHybridConnectionOptions = PlansClientGetHybridConnectionOptions{}) -> PlansClientGetHybridConnectionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_hybrid_connection_create_request(resource_group_name, name, namespace_name, relay_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetHybridConnection", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_hybrid_connection_create_request(resource_group_name, name, namespace_name, relay_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_hybrid_connection_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_hybrid_connection_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientDeleteHybridConnectionOptions: the optional parameters of PlansClient.delete_hybrid_connection.
@@ -447,12 +467,15 @@ fn (c: PlansClient) delete_hybrid_connection_create_request(resource_group_name:
 
 /// Description for Delete a Hybrid Connection in use in an App Service plan.
 pub fn (c: PlansClient) delete_hybrid_connection(resource_group_name: Str, name: Str, namespace_name: Str, relay_name: Str, options: PlansClientDeleteHybridConnectionOptions = PlansClientDeleteHybridConnectionOptions{}) -> PlansClientDeleteHybridConnectionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_hybrid_connection_create_request(resource_group_name, name, namespace_name, relay_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.DeleteHybridConnection", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_hybrid_connection_create_request(resource_group_name, name, namespace_name, relay_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_delete_hybrid_connection_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_delete_hybrid_connection_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListHybridConnectionKeysOptions: the optional parameters of PlansClient.list_hybrid_connection_keys.
@@ -498,12 +521,15 @@ fn (c: PlansClient) list_hybrid_connection_keys_create_request(resource_group_na
 
 /// Description for Get the send key name and value of a Hybrid Connection.
 pub fn (c: PlansClient) list_hybrid_connection_keys(resource_group_name: Str, name: Str, namespace_name: Str, relay_name: Str, options: PlansClientListHybridConnectionKeysOptions = PlansClientListHybridConnectionKeysOptions{}) -> PlansClientListHybridConnectionKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_hybrid_connection_keys_create_request(resource_group_name, name, namespace_name, relay_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.ListHybridConnectionKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_hybrid_connection_keys_create_request(resource_group_name, name, namespace_name, relay_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_list_hybrid_connection_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_list_hybrid_connection_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListWebAppsByHybridConnectionOptions: the optional parameters of PlansClient.new_list_web_apps_by_hybrid_connection_pager.
@@ -550,7 +576,7 @@ fn (c: PlansClient) list_web_apps_by_hybrid_connection_create_request(resource_g
 /// Description for Get all apps that use a Hybrid Connection in an App Service Plan.
 pub fn (c: PlansClient[fx]) new_list_web_apps_by_hybrid_connection_pager(resource_group_name: Str, name: Str, namespace_name: Str, relay_name: Str, options: PlansClientListWebAppsByHybridConnectionOptions = PlansClientListWebAppsByHybridConnectionOptions{}) -> runtime.Pager[PlansClientListWebAppsByHybridConnectionResponse, fx] ! azcore.CallErr {
   let req = c.list_web_apps_by_hybrid_connection_create_request(resource_group_name, name, namespace_name, relay_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListWebAppsByHybridConnectionResponse ! Str { plans_list_web_apps_by_hybrid_connection_handle(r) }, c.setup.endpoint, fn(r: PlansClientListWebAppsByHybridConnectionResponse) -> Str? { r.resource_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListWebAppsByHybridConnectionResponse ! Str { plans_list_web_apps_by_hybrid_connection_handle(r) }, c.setup.endpoint, fn(r: PlansClientListWebAppsByHybridConnectionResponse) -> Str? { r.resource_collection.next_link }).traced_as("PlansClientListWebAppsByHybridConnectionResponse"))
 }
 
 /// PlansClientGetHybridConnectionPlanLimitOptions: the optional parameters of PlansClient.get_hybrid_connection_plan_limit.
@@ -588,12 +614,15 @@ fn (c: PlansClient) get_hybrid_connection_plan_limit_create_request(resource_gro
 
 /// Description for Get the maximum number of Hybrid Connections allowed in an App Service plan.
 pub fn (c: PlansClient) get_hybrid_connection_plan_limit(resource_group_name: Str, name: Str, options: PlansClientGetHybridConnectionPlanLimitOptions = PlansClientGetHybridConnectionPlanLimitOptions{}) -> PlansClientGetHybridConnectionPlanLimitResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_hybrid_connection_plan_limit_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetHybridConnectionPlanLimit", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_hybrid_connection_plan_limit_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_hybrid_connection_plan_limit_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_hybrid_connection_plan_limit_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListHybridConnectionsOptions: the optional parameters of PlansClient.new_list_hybrid_connections_pager.
@@ -632,7 +661,7 @@ fn (c: PlansClient) list_hybrid_connections_create_request(resource_group_name: 
 /// Description for Retrieve all Hybrid Connections in use in an App Service plan.
 pub fn (c: PlansClient[fx]) new_list_hybrid_connections_pager(resource_group_name: Str, name: Str, options: PlansClientListHybridConnectionsOptions = PlansClientListHybridConnectionsOptions{}) -> runtime.Pager[PlansClientListHybridConnectionsResponse, fx] ! azcore.CallErr {
   let req = c.list_hybrid_connections_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListHybridConnectionsResponse ! Str { plans_list_hybrid_connections_handle(r) }, c.setup.endpoint, fn(r: PlansClientListHybridConnectionsResponse) -> Str? { r.hybrid_connection_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListHybridConnectionsResponse ! Str { plans_list_hybrid_connections_handle(r) }, c.setup.endpoint, fn(r: PlansClientListHybridConnectionsResponse) -> Str? { r.hybrid_connection_collection.next_link }).traced_as("PlansClientListHybridConnectionsResponse"))
 }
 
 /// PlansClientGetServerFarmInstanceDetailsOptions: the optional parameters of PlansClient.get_server_farm_instance_details.
@@ -670,12 +699,15 @@ fn (c: PlansClient) get_server_farm_instance_details_create_request(resource_gro
 
 /// Description for Get the instance details for an app service plan.
 pub fn (c: PlansClient) get_server_farm_instance_details(resource_group_name: Str, name: Str, options: PlansClientGetServerFarmInstanceDetailsOptions = PlansClientGetServerFarmInstanceDetailsOptions{}) -> PlansClientGetServerFarmInstanceDetailsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_server_farm_instance_details_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetServerFarmInstanceDetails", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_server_farm_instance_details_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_server_farm_instance_details_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_server_farm_instance_details_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientRestartWebAppsOptions: the optional parameters of PlansClient.restart_web_apps.
@@ -716,12 +748,15 @@ fn (c: PlansClient) restart_web_apps_create_request(resource_group_name: Str, na
 
 /// Description for Restart all apps in an App Service plan.
 pub fn (c: PlansClient) restart_web_apps(resource_group_name: Str, name: Str, options: PlansClientRestartWebAppsOptions = PlansClientRestartWebAppsOptions{}) -> PlansClientRestartWebAppsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.restart_web_apps_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.RestartWebApps", c.setup.pipeline.tracer)
+  let req = sp.on(c.restart_web_apps_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_restart_web_apps_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_restart_web_apps_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListWebAppsOptions: the optional parameters of PlansClient.new_list_web_apps_pager.
@@ -776,7 +811,7 @@ fn (c: PlansClient) list_web_apps_create_request(resource_group_name: Str, name:
 /// Description for Get all apps associated with an App Service plan.
 pub fn (c: PlansClient[fx]) new_list_web_apps_pager(resource_group_name: Str, name: Str, options: PlansClientListWebAppsOptions = PlansClientListWebAppsOptions{}) -> runtime.Pager[PlansClientListWebAppsResponse, fx] ! azcore.CallErr {
   let req = c.list_web_apps_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListWebAppsResponse ! Str { plans_list_web_apps_handle(r) }, c.setup.endpoint, fn(r: PlansClientListWebAppsResponse) -> Str? { r.web_app_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListWebAppsResponse ! Str { plans_list_web_apps_handle(r) }, c.setup.endpoint, fn(r: PlansClientListWebAppsResponse) -> Str? { r.web_app_collection.next_link }).traced_as("PlansClientListWebAppsResponse"))
 }
 
 /// PlansClientGetServerFarmSKUsOptions: the optional parameters of PlansClient.get_server_farm_skus.
@@ -814,12 +849,15 @@ fn (c: PlansClient) get_server_farm_skus_create_request(resource_group_name: Str
 
 /// Description for Gets all selectable SKUs for a given App Service Plan
 pub fn (c: PlansClient) get_server_farm_skus(resource_group_name: Str, name: Str, options: PlansClientGetServerFarmSKUsOptions = PlansClientGetServerFarmSKUsOptions{}) -> PlansClientGetServerFarmSKUsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_server_farm_skus_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetServerFarmSKUs", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_server_farm_skus_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_server_farm_skus_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_server_farm_skus_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListUsagesOptions: the optional parameters of PlansClient.new_list_usages_pager.
@@ -864,7 +902,7 @@ fn (c: PlansClient) list_usages_create_request(resource_group_name: Str, name: S
 /// Description for Gets server farm usage information
 pub fn (c: PlansClient[fx]) new_list_usages_pager(resource_group_name: Str, name: Str, options: PlansClientListUsagesOptions = PlansClientListUsagesOptions{}) -> runtime.Pager[PlansClientListUsagesResponse, fx] ! azcore.CallErr {
   let req = c.list_usages_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListUsagesResponse ! Str { plans_list_usages_handle(r) }, c.setup.endpoint, fn(r: PlansClientListUsagesResponse) -> Str? { r.csm_usage_quota_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PlansClientListUsagesResponse ! Str { plans_list_usages_handle(r) }, c.setup.endpoint, fn(r: PlansClientListUsagesResponse) -> Str? { r.csm_usage_quota_collection.next_link }).traced_as("PlansClientListUsagesResponse"))
 }
 
 /// PlansClientListVnetsOptions: the optional parameters of PlansClient.list_vnets.
@@ -902,12 +940,15 @@ fn (c: PlansClient) list_vnets_create_request(resource_group_name: Str, name: St
 
 /// Description for Get all Virtual Networks associated with an App Service plan.
 pub fn (c: PlansClient) list_vnets(resource_group_name: Str, name: Str, options: PlansClientListVnetsOptions = PlansClientListVnetsOptions{}) -> PlansClientListVnetsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_vnets_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.ListVnets", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_vnets_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_list_vnets_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_list_vnets_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientGetVnetFromServerFarmOptions: the optional parameters of PlansClient.get_vnet_from_server_farm.
@@ -949,12 +990,15 @@ fn (c: PlansClient) get_vnet_from_server_farm_create_request(resource_group_name
 
 /// Description for Get a Virtual Network associated with an App Service plan.
 pub fn (c: PlansClient) get_vnet_from_server_farm(resource_group_name: Str, name: Str, vnet_name: Str, options: PlansClientGetVnetFromServerFarmOptions = PlansClientGetVnetFromServerFarmOptions{}) -> PlansClientGetVnetFromServerFarmResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_vnet_from_server_farm_create_request(resource_group_name, name, vnet_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetVnetFromServerFarm", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_vnet_from_server_farm_create_request(resource_group_name, name, vnet_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_vnet_from_server_farm_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_vnet_from_server_farm_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientGetVnetGatewayOptions: the optional parameters of PlansClient.get_vnet_gateway.
@@ -1000,12 +1044,15 @@ fn (c: PlansClient) get_vnet_gateway_create_request(resource_group_name: Str, na
 
 /// Description for Get a Virtual Network gateway.
 pub fn (c: PlansClient) get_vnet_gateway(resource_group_name: Str, name: Str, vnet_name: Str, gateway_name: Str, options: PlansClientGetVnetGatewayOptions = PlansClientGetVnetGatewayOptions{}) -> PlansClientGetVnetGatewayResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_vnet_gateway_create_request(resource_group_name, name, vnet_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetVnetGateway", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_vnet_gateway_create_request(resource_group_name, name, vnet_name, gateway_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_vnet_gateway_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_vnet_gateway_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientUpdateVnetGatewayOptions: the optional parameters of PlansClient.update_vnet_gateway.
@@ -1052,12 +1099,15 @@ fn (c: PlansClient) update_vnet_gateway_create_request(resource_group_name: Str,
 
 /// Description for Update a Virtual Network gateway.
 pub fn (c: PlansClient) update_vnet_gateway(resource_group_name: Str, name: Str, vnet_name: Str, gateway_name: Str, connection_envelope: VnetGateway, options: PlansClientUpdateVnetGatewayOptions = PlansClientUpdateVnetGatewayOptions{}) -> PlansClientUpdateVnetGatewayResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_vnet_gateway_create_request(resource_group_name, name, vnet_name, gateway_name, connection_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.UpdateVnetGateway", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_vnet_gateway_create_request(resource_group_name, name, vnet_name, gateway_name, connection_envelope, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_update_vnet_gateway_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_update_vnet_gateway_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientListRoutesForVnetOptions: the optional parameters of PlansClient.list_routes_for_vnet.
@@ -1099,12 +1149,15 @@ fn (c: PlansClient) list_routes_for_vnet_create_request(resource_group_name: Str
 
 /// Description for Get all routes that are associated with a Virtual Network in an App Service plan.
 pub fn (c: PlansClient) list_routes_for_vnet(resource_group_name: Str, name: Str, vnet_name: Str, options: PlansClientListRoutesForVnetOptions = PlansClientListRoutesForVnetOptions{}) -> PlansClientListRoutesForVnetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_routes_for_vnet_create_request(resource_group_name, name, vnet_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.ListRoutesForVnet", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_routes_for_vnet_create_request(resource_group_name, name, vnet_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_list_routes_for_vnet_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_list_routes_for_vnet_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientGetRouteForVnetOptions: the optional parameters of PlansClient.get_route_for_vnet.
@@ -1150,12 +1203,15 @@ fn (c: PlansClient) get_route_for_vnet_create_request(resource_group_name: Str, 
 
 /// Description for Get a Virtual Network route in an App Service plan.
 pub fn (c: PlansClient) get_route_for_vnet(resource_group_name: Str, name: Str, vnet_name: Str, route_name: Str, options: PlansClientGetRouteForVnetOptions = PlansClientGetRouteForVnetOptions{}) -> PlansClientGetRouteForVnetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_route_for_vnet_create_request(resource_group_name, name, vnet_name, route_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.GetRouteForVnet", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_route_for_vnet_create_request(resource_group_name, name, vnet_name, route_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_get_route_for_vnet_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_get_route_for_vnet_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientCreateOrUpdateVnetRouteOptions: the optional parameters of PlansClient.create_or_update_vnet_route.
@@ -1202,12 +1258,15 @@ fn (c: PlansClient) create_or_update_vnet_route_create_request(resource_group_na
 
 /// Description for Create or update a Virtual Network route in an App Service plan.
 pub fn (c: PlansClient) create_or_update_vnet_route(resource_group_name: Str, name: Str, vnet_name: Str, route_name: Str, route: VnetRoute, options: PlansClientCreateOrUpdateVnetRouteOptions = PlansClientCreateOrUpdateVnetRouteOptions{}) -> PlansClientCreateOrUpdateVnetRouteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_or_update_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, route, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.CreateOrUpdateVnetRoute", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_or_update_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, route, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_create_or_update_vnet_route_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_create_or_update_vnet_route_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientUpdateVnetRouteOptions: the optional parameters of PlansClient.update_vnet_route.
@@ -1254,12 +1313,15 @@ fn (c: PlansClient) update_vnet_route_create_request(resource_group_name: Str, n
 
 /// Description for Create or update a Virtual Network route in an App Service plan.
 pub fn (c: PlansClient) update_vnet_route(resource_group_name: Str, name: Str, vnet_name: Str, route_name: Str, route: VnetRoute, options: PlansClientUpdateVnetRouteOptions = PlansClientUpdateVnetRouteOptions{}) -> PlansClientUpdateVnetRouteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, route, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.UpdateVnetRoute", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, route, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_update_vnet_route_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_update_vnet_route_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientDeleteVnetRouteOptions: the optional parameters of PlansClient.delete_vnet_route.
@@ -1302,12 +1364,15 @@ fn (c: PlansClient) delete_vnet_route_create_request(resource_group_name: Str, n
 
 /// Description for Delete a Virtual Network route in an App Service plan.
 pub fn (c: PlansClient) delete_vnet_route(resource_group_name: Str, name: Str, vnet_name: Str, route_name: Str, options: PlansClientDeleteVnetRouteOptions = PlansClientDeleteVnetRouteOptions{}) -> PlansClientDeleteVnetRouteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.DeleteVnetRoute", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_vnet_route_create_request(resource_group_name, name, vnet_name, route_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_delete_vnet_route_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_delete_vnet_route_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientRebootWorkerOptions: the optional parameters of PlansClient.reboot_worker.
@@ -1346,12 +1411,15 @@ fn (c: PlansClient) reboot_worker_create_request(resource_group_name: Str, name:
 
 /// Description for Reboot a worker machine in an App Service plan.
 pub fn (c: PlansClient) reboot_worker(resource_group_name: Str, name: Str, worker_name: Str, options: PlansClientRebootWorkerOptions = PlansClientRebootWorkerOptions{}) -> PlansClientRebootWorkerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.reboot_worker_create_request(resource_group_name, name, worker_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.RebootWorker", c.setup.pipeline.tracer)
+  let req = sp.on(c.reboot_worker_create_request(resource_group_name, name, worker_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_reboot_worker_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_reboot_worker_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PlansClientRecycleManagedInstanceWorkerOptions: the optional parameters of PlansClient.recycle_managed_instance_worker.
@@ -1393,10 +1461,13 @@ fn (c: PlansClient) recycle_managed_instance_worker_create_request(resource_grou
 
 /// Description for Recycles a managed instance worker machine.
 pub fn (c: PlansClient) recycle_managed_instance_worker(resource_group_name: Str, name: Str, worker_name: Str, options: PlansClientRecycleManagedInstanceWorkerOptions = PlansClientRecycleManagedInstanceWorkerOptions{}) -> PlansClientRecycleManagedInstanceWorkerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.recycle_managed_instance_worker_create_request(resource_group_name, name, worker_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PlansClient.RecycleManagedInstanceWorker", c.setup.pipeline.tracer)
+  let req = sp.on(c.recycle_managed_instance_worker_create_request(resource_group_name, name, worker_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  plans_recycle_managed_instance_worker_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = plans_recycle_managed_instance_worker_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

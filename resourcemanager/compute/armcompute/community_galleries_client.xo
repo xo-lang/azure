@@ -56,10 +56,13 @@ fn (c: CommunityGalleriesClient) get_create_request(location: Str, public_galler
 
 /// Get a community gallery by gallery public name.
 pub fn (c: CommunityGalleriesClient) get(location: Str, public_gallery_name: Str, options: CommunityGalleriesClientGetOptions = CommunityGalleriesClientGetOptions{}) -> CommunityGalleriesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, public_gallery_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CommunityGalleriesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, public_gallery_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  community_galleries_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = community_galleries_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

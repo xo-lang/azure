@@ -49,7 +49,7 @@ fn (c: BotsClient) list_create_request(options: BotsClientListOptions) -> policy
 /// Returns all the resources of a particular type belonging to a subscription.
 pub fn (c: BotsClient[fx]) new_list_pager(options: BotsClientListOptions = BotsClientListOptions{}) -> runtime.Pager[BotsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BotsClientListResponse ! Str { bots_list_handle(r) }, c.setup.endpoint, fn(r: BotsClientListResponse) -> Str? { r.bot_response_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BotsClientListResponse ! Str { bots_list_handle(r) }, c.setup.endpoint, fn(r: BotsClientListResponse) -> Str? { r.bot_response_list.next_link }).traced_as("BotsClientListResponse"))
 }
 
 /// BotsClientListByResourceGroupOptions: the optional parameters of BotsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: BotsClient) list_by_resource_group_create_request(resource_group_name: St
 /// Returns all the resources of a particular type belonging to a resource group
 pub fn (c: BotsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: BotsClientListByResourceGroupOptions = BotsClientListByResourceGroupOptions{}) -> runtime.Pager[BotsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BotsClientListByResourceGroupResponse ! Str { bots_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: BotsClientListByResourceGroupResponse) -> Str? { r.bot_response_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BotsClientListByResourceGroupResponse ! Str { bots_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: BotsClientListByResourceGroupResponse) -> Str? { r.bot_response_list.next_link }).traced_as("BotsClientListByResourceGroupResponse"))
 }
 
 /// BotsClientGetOptions: the optional parameters of BotsClient.get.
@@ -122,12 +122,15 @@ fn (c: BotsClient) get_create_request(resource_group_name: Str, bot_name: Str, o
 
 /// Get a HealthBot.
 pub fn (c: BotsClient) get(resource_group_name: Str, bot_name: Str, options: BotsClientGetOptions = BotsClientGetOptions{}) -> BotsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, bot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, bot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  bots_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = bots_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BotsClientBeginCreateOptions: the optional parameters of BotsClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: BotsClient) create_create_request(resource_group_name: Str, bot_name: Str
 /// Create a new Azure Health Bot.
 pub fn (c: BotsClient[fx]) begin_create(resource_group_name: Str, bot_name: Str, parameters: HealthBot, options: BotsClientBeginCreateOptions = BotsClientBeginCreateOptions{}) -> runtime.Poller[BotsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientCreateResponse", fn(r: http.Response) -> BotsClientCreateResponse ! Str { bots_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientCreateResponse", fn(r: http.Response) -> BotsClientCreateResponse ! Str { bots_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, bot_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, bot_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientCreateResponse", fn(r: http.Response) -> BotsClientCreateResponse ! Str { bots_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientCreateResponse", fn(r: http.Response) -> BotsClientCreateResponse ! Str { bots_create_handle(r) }, traced: true)
 }
 
 /// BotsClientBeginUpdateOptions: the optional parameters of BotsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: BotsClient) update_create_request(resource_group_name: Str, bot_name: Str
 /// Patch a HealthBot.
 pub fn (c: BotsClient[fx]) begin_update(resource_group_name: Str, bot_name: Str, parameters: UpdateParameters, options: BotsClientBeginUpdateOptions = BotsClientBeginUpdateOptions{}) -> runtime.Poller[BotsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientUpdateResponse", fn(r: http.Response) -> BotsClientUpdateResponse ! Str { bots_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientUpdateResponse", fn(r: http.Response) -> BotsClientUpdateResponse ! Str { bots_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, bot_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, bot_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientUpdateResponse", fn(r: http.Response) -> BotsClientUpdateResponse ! Str { bots_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientUpdateResponse", fn(r: http.Response) -> BotsClientUpdateResponse ! Str { bots_update_handle(r) }, traced: true)
 }
 
 /// BotsClientBeginDeleteOptions: the optional parameters of BotsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: BotsClient) delete_create_request(resource_group_name: Str, bot_name: Str
 /// Delete a HealthBot.
 pub fn (c: BotsClient[fx]) begin_delete(resource_group_name: Str, bot_name: Str, options: BotsClientBeginDeleteOptions = BotsClientBeginDeleteOptions{}) -> runtime.Poller[BotsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientDeleteResponse", fn(r: http.Response) -> BotsClientDeleteResponse ! Str { bots_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BotsClientDeleteResponse", fn(r: http.Response) -> BotsClientDeleteResponse ! Str { bots_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, bot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, bot_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientDeleteResponse", fn(r: http.Response) -> BotsClientDeleteResponse ! Str { bots_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BotsClientDeleteResponse", fn(r: http.Response) -> BotsClientDeleteResponse ! Str { bots_delete_handle(r) }, traced: true)
 }
 
 /// BotsClientListSecretsOptions: the optional parameters of BotsClient.list_secrets.
@@ -311,12 +320,15 @@ fn (c: BotsClient) list_secrets_create_request(resource_group_name: Str, bot_nam
 
 /// List all secrets of a HealthBot.
 pub fn (c: BotsClient) list_secrets(resource_group_name: Str, bot_name: Str, options: BotsClientListSecretsOptions = BotsClientListSecretsOptions{}) -> BotsClientListSecretsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_secrets_create_request(resource_group_name, bot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.ListSecrets", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_secrets_create_request(resource_group_name, bot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  bots_list_secrets_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = bots_list_secrets_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BotsClientRegenerateAPIJwtSecretOptions: the optional parameters of BotsClient.regenerate_api_jwt_secret.
@@ -354,10 +366,13 @@ fn (c: BotsClient) regenerate_api_jwt_secret_create_request(resource_group_name:
 
 /// Regenerate the API JWT Secret of a HealthBot.
 pub fn (c: BotsClient) regenerate_api_jwt_secret(resource_group_name: Str, bot_name: Str, options: BotsClientRegenerateAPIJwtSecretOptions = BotsClientRegenerateAPIJwtSecretOptions{}) -> BotsClientRegenerateAPIJwtSecretResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.regenerate_api_jwt_secret_create_request(resource_group_name, bot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BotsClient.RegenerateAPIJwtSecret", c.setup.pipeline.tracer)
+  let req = sp.on(c.regenerate_api_jwt_secret_create_request(resource_group_name, bot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  bots_regenerate_api_jwt_secret_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = bots_regenerate_api_jwt_secret_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

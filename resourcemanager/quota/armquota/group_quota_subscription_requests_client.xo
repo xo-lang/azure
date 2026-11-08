@@ -52,7 +52,7 @@ fn (c: GroupQuotaSubscriptionRequestsClient) list_create_request(management_grou
 /// List API to check the status of a subscriptionId requests by requestId. Request history is maintained for 1 year.
 pub fn (c: GroupQuotaSubscriptionRequestsClient[fx]) new_list_pager(management_group_id: Str, group_quota_name: Str, options: GroupQuotaSubscriptionRequestsClientListOptions = GroupQuotaSubscriptionRequestsClientListOptions{}) -> runtime.Pager[GroupQuotaSubscriptionRequestsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(management_group_id, group_quota_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupQuotaSubscriptionRequestsClientListResponse ! Str { group_quota_subscription_requests_list_handle(r) }, c.setup.endpoint, fn(r: GroupQuotaSubscriptionRequestsClientListResponse) -> Str? { r.group_quota_subscription_request_status_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupQuotaSubscriptionRequestsClientListResponse ! Str { group_quota_subscription_requests_list_handle(r) }, c.setup.endpoint, fn(r: GroupQuotaSubscriptionRequestsClientListResponse) -> Str? { r.group_quota_subscription_request_status_list.next_link }).traced_as("GroupQuotaSubscriptionRequestsClientListResponse"))
 }
 
 /// GroupQuotaSubscriptionRequestsClientGetOptions: the optional parameters of GroupQuotaSubscriptionRequestsClient.get.
@@ -90,10 +90,13 @@ fn (c: GroupQuotaSubscriptionRequestsClient) get_create_request(management_group
 
 /// Get API to check the status of a subscriptionIds request by requestId.  Use the polling API - OperationsStatus URI specified in Azure-AsyncOperation header field, with retry-after duration in seconds to check the intermediate status. This API provides the finals status with the request details and status.
 pub fn (c: GroupQuotaSubscriptionRequestsClient) get(management_group_id: Str, group_quota_name: Str, request_id: Str, options: GroupQuotaSubscriptionRequestsClientGetOptions = GroupQuotaSubscriptionRequestsClientGetOptions{}) -> GroupQuotaSubscriptionRequestsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(management_group_id, group_quota_name, request_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GroupQuotaSubscriptionRequestsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(management_group_id, group_quota_name, request_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  group_quota_subscription_requests_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = group_quota_subscription_requests_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

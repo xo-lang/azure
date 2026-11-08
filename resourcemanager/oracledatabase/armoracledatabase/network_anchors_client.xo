@@ -49,7 +49,7 @@ fn (c: NetworkAnchorsClient) list_by_subscription_create_request(options: Networ
 /// List NetworkAnchor resources by subscription ID
 pub fn (c: NetworkAnchorsClient[fx]) new_list_by_subscription_pager(options: NetworkAnchorsClientListBySubscriptionOptions = NetworkAnchorsClientListBySubscriptionOptions{}) -> runtime.Pager[NetworkAnchorsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkAnchorsClientListBySubscriptionResponse ! Str { network_anchors_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: NetworkAnchorsClientListBySubscriptionResponse) -> Str? { r.network_anchor_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkAnchorsClientListBySubscriptionResponse ! Str { network_anchors_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: NetworkAnchorsClientListBySubscriptionResponse) -> Str? { r.network_anchor_list_result.next_link }).traced_as("NetworkAnchorsClientListBySubscriptionResponse"))
 }
 
 /// NetworkAnchorsClientListByResourceGroupOptions: the optional parameters of NetworkAnchorsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: NetworkAnchorsClient) list_by_resource_group_create_request(resource_grou
 /// List NetworkAnchor resources by resource group
 pub fn (c: NetworkAnchorsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: NetworkAnchorsClientListByResourceGroupOptions = NetworkAnchorsClientListByResourceGroupOptions{}) -> runtime.Pager[NetworkAnchorsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkAnchorsClientListByResourceGroupResponse ! Str { network_anchors_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkAnchorsClientListByResourceGroupResponse) -> Str? { r.network_anchor_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkAnchorsClientListByResourceGroupResponse ! Str { network_anchors_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkAnchorsClientListByResourceGroupResponse) -> Str? { r.network_anchor_list_result.next_link }).traced_as("NetworkAnchorsClientListByResourceGroupResponse"))
 }
 
 /// NetworkAnchorsClientGetOptions: the optional parameters of NetworkAnchorsClient.get.
@@ -122,12 +122,15 @@ fn (c: NetworkAnchorsClient) get_create_request(resource_group_name: Str, networ
 
 /// Get a NetworkAnchor
 pub fn (c: NetworkAnchorsClient) get(resource_group_name: Str, network_anchor_name: Str, options: NetworkAnchorsClientGetOptions = NetworkAnchorsClientGetOptions{}) -> NetworkAnchorsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_anchor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkAnchorsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_anchor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  network_anchors_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = network_anchors_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NetworkAnchorsClientBeginCreateOrUpdateOptions: the optional parameters of NetworkAnchorsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: NetworkAnchorsClient) create_or_update_create_request(resource_group_name
 /// Create a NetworkAnchor
 pub fn (c: NetworkAnchorsClient[fx]) begin_create_or_update(resource_group_name: Str, network_anchor_name: Str, resource: NetworkAnchor, options: NetworkAnchorsClientBeginCreateOrUpdateOptions = NetworkAnchorsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[NetworkAnchorsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientCreateOrUpdateResponse ! Str { network_anchors_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientCreateOrUpdateResponse ! Str { network_anchors_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, network_anchor_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkAnchorsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, network_anchor_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientCreateOrUpdateResponse ! Str { network_anchors_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientCreateOrUpdateResponse ! Str { network_anchors_create_or_update_handle(r) }, traced: true)
 }
 
 /// NetworkAnchorsClientBeginUpdateOptions: the optional parameters of NetworkAnchorsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: NetworkAnchorsClient) update_create_request(resource_group_name: Str, net
 /// Update a NetworkAnchor
 pub fn (c: NetworkAnchorsClient[fx]) begin_update(resource_group_name: Str, network_anchor_name: Str, properties: NetworkAnchorUpdate, options: NetworkAnchorsClientBeginUpdateOptions = NetworkAnchorsClientBeginUpdateOptions{}) -> runtime.Poller[NetworkAnchorsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientUpdateResponse ! Str { network_anchors_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientUpdateResponse ! Str { network_anchors_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, network_anchor_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkAnchorsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, network_anchor_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientUpdateResponse ! Str { network_anchors_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientUpdateResponse", fn(r: http.Response) -> NetworkAnchorsClientUpdateResponse ! Str { network_anchors_update_handle(r) }, traced: true)
 }
 
 /// NetworkAnchorsClientBeginDeleteOptions: the optional parameters of NetworkAnchorsClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: NetworkAnchorsClient) delete_create_request(resource_group_name: Str, net
 /// Delete a NetworkAnchor
 pub fn (c: NetworkAnchorsClient[fx]) begin_delete(resource_group_name: Str, network_anchor_name: Str, options: NetworkAnchorsClientBeginDeleteOptions = NetworkAnchorsClientBeginDeleteOptions{}) -> runtime.Poller[NetworkAnchorsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientDeleteResponse", fn(r: http.Response) -> NetworkAnchorsClientDeleteResponse ! Str { network_anchors_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkAnchorsClientDeleteResponse", fn(r: http.Response) -> NetworkAnchorsClientDeleteResponse ! Str { network_anchors_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_anchor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkAnchorsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_anchor_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientDeleteResponse", fn(r: http.Response) -> NetworkAnchorsClientDeleteResponse ! Str { network_anchors_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkAnchorsClientDeleteResponse", fn(r: http.Response) -> NetworkAnchorsClientDeleteResponse ! Str { network_anchors_delete_handle(r) }, traced: true)
 }

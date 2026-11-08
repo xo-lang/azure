@@ -105,7 +105,7 @@ fn (c: AccountsClient) list_create_request(options: AccountsClientListOptions) -
 /// Lists the billing accounts that a user has access to.
 pub fn (c: AccountsClient[fx]) new_list_pager(options: AccountsClientListOptions = AccountsClientListOptions{}) -> runtime.Pager[AccountsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListResponse ! Str { accounts_list_handle(r) }, c.setup.endpoint, fn(r: AccountsClientListResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListResponse ! Str { accounts_list_handle(r) }, c.setup.endpoint, fn(r: AccountsClientListResponse) -> Str? { r.account_list_result.next_link }).traced_as("AccountsClientListResponse"))
 }
 
 /// AccountsClientGetOptions: the optional parameters of AccountsClient.get.
@@ -135,12 +135,15 @@ fn (c: AccountsClient) get_create_request(billing_account_name: Str, options: Ac
 
 /// Gets a billing account by its ID.
 pub fn (c: AccountsClient) get(billing_account_name: Str, options: AccountsClientGetOptions = AccountsClientGetOptions{}) -> AccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(billing_account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(billing_account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountsClientBeginUpdateOptions: the optional parameters of AccountsClient.begin_update.
@@ -175,14 +178,16 @@ fn (c: AccountsClient) update_create_request(billing_account_name: Str, paramete
 /// Updates the properties of a billing account. Currently, displayName and address can be updated for billing accounts with agreement type Microsoft Customer Agreement. Currently address and notification email address can be updated for billing accounts with agreement type Microsoft Online Services Agreement. Currently, purchase order number can be edited for billing accounts with agreement type Enterprise Agreement.
 pub fn (c: AccountsClient[fx]) begin_update(billing_account_name: Str, parameters: AccountPatch, options: AccountsClientBeginUpdateOptions = AccountsClientBeginUpdateOptions{}) -> runtime.Poller[AccountsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(billing_account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(billing_account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
 }
 
 /// AccountsClientBeginAddPaymentTermsOptions: the optional parameters of AccountsClient.begin_add_payment_terms.
@@ -217,14 +222,16 @@ fn (c: AccountsClient) add_payment_terms_create_request(billing_account_name: St
 /// Adds payment terms to all the billing profiles under the billing account. Currently, payment terms can be added only on billing accounts that have Agreement Type as 'Microsoft Customer Agreement' and AccountType as 'Enterprise'. This action needs pre-authorization and only Field Sellers are authorized to add the payment terms and is not a self-serve action.
 pub fn (c: AccountsClient[fx]) begin_add_payment_terms(billing_account_name: Str, parameters: List[PaymentTerm], options: AccountsClientBeginAddPaymentTermsOptions = AccountsClientBeginAddPaymentTermsOptions{}) -> runtime.Poller[AccountsClientAddPaymentTermsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientAddPaymentTermsResponse", fn(r: http.Response) -> AccountsClientAddPaymentTermsResponse ! Str { accounts_add_payment_terms_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientAddPaymentTermsResponse", fn(r: http.Response) -> AccountsClientAddPaymentTermsResponse ! Str { accounts_add_payment_terms_handle(r) }, traced: true)
   }
-  let req = c.add_payment_terms_create_request(billing_account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginAddPaymentTerms", c.setup.pipeline.tracer)
+  let req = c.add_payment_terms_create_request(billing_account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientAddPaymentTermsResponse", fn(r: http.Response) -> AccountsClientAddPaymentTermsResponse ! Str { accounts_add_payment_terms_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientAddPaymentTermsResponse", fn(r: http.Response) -> AccountsClientAddPaymentTermsResponse ! Str { accounts_add_payment_terms_handle(r) }, traced: true)
 }
 
 /// AccountsClientBeginCancelPaymentTermsOptions: the optional parameters of AccountsClient.begin_cancel_payment_terms.
@@ -259,14 +266,16 @@ fn (c: AccountsClient) cancel_payment_terms_create_request(billing_account_name:
 /// Cancels all the payment terms on billing account that falls after the cancellation date in the request. Currently, cancel payment terms is only served by admin actions and is not a self-serve action.
 pub fn (c: AccountsClient[fx]) begin_cancel_payment_terms(billing_account_name: Str, parameters: azcore.DateTime, options: AccountsClientBeginCancelPaymentTermsOptions = AccountsClientBeginCancelPaymentTermsOptions{}) -> runtime.Poller[AccountsClientCancelPaymentTermsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCancelPaymentTermsResponse", fn(r: http.Response) -> AccountsClientCancelPaymentTermsResponse ! Str { accounts_cancel_payment_terms_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCancelPaymentTermsResponse", fn(r: http.Response) -> AccountsClientCancelPaymentTermsResponse ! Str { accounts_cancel_payment_terms_handle(r) }, traced: true)
   }
-  let req = c.cancel_payment_terms_create_request(billing_account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginCancelPaymentTerms", c.setup.pipeline.tracer)
+  let req = c.cancel_payment_terms_create_request(billing_account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientCancelPaymentTermsResponse", fn(r: http.Response) -> AccountsClientCancelPaymentTermsResponse ! Str { accounts_cancel_payment_terms_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientCancelPaymentTermsResponse", fn(r: http.Response) -> AccountsClientCancelPaymentTermsResponse ! Str { accounts_cancel_payment_terms_handle(r) }, traced: true)
 }
 
 /// AccountsClientConfirmTransitionOptions: the optional parameters of AccountsClient.confirm_transition.
@@ -296,12 +305,15 @@ fn (c: AccountsClient) confirm_transition_create_request(billing_account_name: S
 
 /// Gets the transition details for a billing account that has transitioned from agreement type Microsoft Online Services Program to agreement type Microsoft Customer Agreement.
 pub fn (c: AccountsClient) confirm_transition(billing_account_name: Str, options: AccountsClientConfirmTransitionOptions = AccountsClientConfirmTransitionOptions{}) -> AccountsClientConfirmTransitionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.confirm_transition_create_request(billing_account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.ConfirmTransition", c.setup.pipeline.tracer)
+  let req = sp.on(c.confirm_transition_create_request(billing_account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_confirm_transition_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_confirm_transition_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionOptions: the optional parameters of AccountsClient.new_list_invoice_sections_by_create_subscription_permission_pager.
@@ -338,7 +350,7 @@ fn (c: AccountsClient) list_invoice_sections_by_create_subscription_permission_c
 /// Lists the invoice sections for which the user has permission to create Azure subscriptions. The operation is supported only for billing accounts with agreement type Microsoft Customer Agreement.
 pub fn (c: AccountsClient[fx]) new_list_invoice_sections_by_create_subscription_permission_pager(billing_account_name: Str, options: AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionOptions = AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionOptions{}) -> runtime.Pager[AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse, fx] ! azcore.CallErr {
   let req = c.list_invoice_sections_by_create_subscription_permission_create_request(billing_account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse ! Str { accounts_list_invoice_sections_by_create_subscription_permission_handle(r) }, c.setup.endpoint, fn(r: AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse) -> Str? { r.invoice_section_with_create_sub_permission_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse ! Str { accounts_list_invoice_sections_by_create_subscription_permission_handle(r) }, c.setup.endpoint, fn(r: AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse) -> Str? { r.invoice_section_with_create_sub_permission_list_result.next_link }).traced_as("AccountsClientListInvoiceSectionsByCreateSubscriptionPermissionResponse"))
 }
 
 /// AccountsClientValidatePaymentTermsOptions: the optional parameters of AccountsClient.validate_payment_terms.
@@ -369,10 +381,13 @@ fn (c: AccountsClient) validate_payment_terms_create_request(billing_account_nam
 
 /// Validates payment terms on a billing account with agreement type 'Microsoft Customer Agreement' and account type 'Enterprise'.
 pub fn (c: AccountsClient) validate_payment_terms(billing_account_name: Str, parameters: List[PaymentTerm], options: AccountsClientValidatePaymentTermsOptions = AccountsClientValidatePaymentTermsOptions{}) -> AccountsClientValidatePaymentTermsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.validate_payment_terms_create_request(billing_account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.ValidatePaymentTerms", c.setup.pipeline.tracer)
+  let req = sp.on(c.validate_payment_terms_create_request(billing_account_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_validate_payment_terms_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_validate_payment_terms_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

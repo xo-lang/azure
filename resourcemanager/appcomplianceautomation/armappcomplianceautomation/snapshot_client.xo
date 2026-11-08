@@ -84,7 +84,7 @@ fn (c: SnapshotClient) list_create_request(report_name: Str, options: SnapshotCl
 /// Get the AppComplianceAutomation snapshot list.
 pub fn (c: SnapshotClient[fx]) new_list_pager(report_name: Str, options: SnapshotClientListOptions = SnapshotClientListOptions{}) -> runtime.Pager[SnapshotClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(report_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotClientListResponse ! Str { snapshot_list_handle(r) }, fn(r: SnapshotClientListResponse) -> Str? { r.snapshot_resource_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotClientListResponse ! Str { snapshot_list_handle(r) }, fn(r: SnapshotClientListResponse) -> Str? { r.snapshot_resource_list_result.next_link }).traced_as("SnapshotClientListResponse"))
 }
 
 /// SnapshotClientGetOptions: the optional parameters of SnapshotClient.get.
@@ -118,12 +118,15 @@ fn (c: SnapshotClient) get_create_request(report_name: Str, snapshot_name: Str, 
 
 /// Get the AppComplianceAutomation snapshot and its properties.
 pub fn (c: SnapshotClient) get(report_name: Str, snapshot_name: Str, options: SnapshotClientGetOptions = SnapshotClientGetOptions{}) -> SnapshotClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(report_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(report_name, snapshot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  snapshot_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = snapshot_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SnapshotClientBeginDownloadOptions: the optional parameters of SnapshotClient.begin_download.
@@ -162,12 +165,14 @@ fn (c: SnapshotClient) download_create_request(report_name: Str, snapshot_name: 
 /// Download compliance needs from snapshot, like: Compliance Report, Resource List.
 pub fn (c: SnapshotClient[fx]) begin_download(report_name: Str, snapshot_name: Str, body: SnapshotDownloadRequest, options: SnapshotClientBeginDownloadOptions = SnapshotClientBeginDownloadOptions{}) -> runtime.Poller[SnapshotClientDownloadResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotClientDownloadResponse", fn(r: http.Response) -> SnapshotClientDownloadResponse ! Str { snapshot_download_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotClientDownloadResponse", fn(r: http.Response) -> SnapshotClientDownloadResponse ! Str { snapshot_download_handle(r) }, traced: true)
   }
-  let req = c.download_create_request(report_name, snapshot_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotClient.BeginDownload", c.setup.pipeline.tracer)
+  let req = c.download_create_request(report_name, snapshot_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SnapshotClientDownloadResponse", fn(r: http.Response) -> SnapshotClientDownloadResponse ! Str { snapshot_download_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "SnapshotClientDownloadResponse", fn(r: http.Response) -> SnapshotClientDownloadResponse ! Str { snapshot_download_handle(r) }, traced: true)
 }

@@ -57,7 +57,7 @@ fn (c: LogFilesClient) list_create_request(resource_group_name: Str, cluster_nam
 /// Lists captured log files for a HorizonDB cluster.
 pub fn (c: LogFilesClient[fx]) new_list_pager(resource_group_name: Str, cluster_name: Str, options: LogFilesClientListOptions = LogFilesClientListOptions{}) -> runtime.Pager[LogFilesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LogFilesClientListResponse ! Str { log_files_list_handle(r) }, c.setup.endpoint, fn(r: LogFilesClientListResponse) -> Str? { r.log_file_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LogFilesClientListResponse ! Str { log_files_list_handle(r) }, c.setup.endpoint, fn(r: LogFilesClientListResponse) -> Str? { r.log_file_list_result.next_link }).traced_as("LogFilesClientListResponse"))
 }
 
 /// LogFilesClientGetOptions: the optional parameters of LogFilesClient.get.
@@ -99,12 +99,15 @@ fn (c: LogFilesClient) get_create_request(resource_group_name: Str, cluster_name
 
 /// Gets metadata for a captured HorizonDB log file.
 pub fn (c: LogFilesClient) get(resource_group_name: Str, cluster_name: Str, log_file_name: Str, options: LogFilesClientGetOptions = LogFilesClientGetOptions{}) -> LogFilesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, log_file_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LogFilesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, log_file_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  log_files_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = log_files_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LogFilesClientListDownloadUrlsOptions: the optional parameters of LogFilesClient.list_download_urls.
@@ -146,10 +149,13 @@ fn (c: LogFilesClient) list_download_urls_create_request(resource_group_name: St
 
 /// Gets a short-lived signed URL for downloading a captured log file. The signed URL is returned only by this action so routine resource GET and LIST responses do not expose bearer credentials.
 pub fn (c: LogFilesClient) list_download_urls(resource_group_name: Str, cluster_name: Str, log_file_name: Str, options: LogFilesClientListDownloadUrlsOptions = LogFilesClientListDownloadUrlsOptions{}) -> LogFilesClientListDownloadUrlsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_download_urls_create_request(resource_group_name, cluster_name, log_file_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LogFilesClient.ListDownloadUrls", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_download_urls_create_request(resource_group_name, cluster_name, log_file_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  log_files_list_download_urls_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = log_files_list_download_urls_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

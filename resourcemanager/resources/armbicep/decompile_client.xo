@@ -49,10 +49,13 @@ fn (c: DecompileClient) bicep_create_request(decompile_operation_request: Decomp
 
 /// Decompiles an ARM json template into a Bicep template
 pub fn (c: DecompileClient) bicep(decompile_operation_request: DecompileOperationRequest, options: DecompileClientBicepOptions = DecompileClientBicepOptions{}) -> DecompileClientBicepResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.bicep_create_request(decompile_operation_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DecompileClient.Bicep", c.setup.pipeline.tracer)
+  let req = sp.on(c.bicep_create_request(decompile_operation_request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  decompile_bicep_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = decompile_bicep_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -53,12 +53,15 @@ fn (c: QuotasClient) update_create_request(location: Str, parameters: QuotaUpdat
 
 /// Update quota for each VM family in workspace.
 pub fn (c: QuotasClient) update(location: Str, parameters: QuotaUpdateParameters, options: QuotasClientUpdateOptions = QuotasClientUpdateOptions{}) -> QuotasClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(location, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "QuotasClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(location, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  quotas_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = quotas_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// QuotasClientListOptions: the optional parameters of QuotasClient.new_list_pager.
@@ -93,5 +96,5 @@ fn (c: QuotasClient) list_create_request(location: Str, options: QuotasClientLis
 /// Gets the currently assigned Workspace Quotas based on VMFamily.
 pub fn (c: QuotasClient[fx]) new_list_pager(location: Str, options: QuotasClientListOptions = QuotasClientListOptions{}) -> runtime.Pager[QuotasClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> QuotasClientListResponse ! Str { quotas_list_handle(r) }, fn(r: QuotasClientListResponse) -> Str? { r.list_workspace_quotas.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> QuotasClientListResponse ! Str { quotas_list_handle(r) }, fn(r: QuotasClientListResponse) -> Str? { r.list_workspace_quotas.next_link }).traced_as("QuotasClientListResponse"))
 }

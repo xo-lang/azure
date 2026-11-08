@@ -63,7 +63,7 @@ fn (c: ComputeClient) list_create_request(resource_group_name: Str, workspace_na
 /// Gets computes in specified workspace.
 pub fn (c: ComputeClient[fx]) new_list_pager(resource_group_name: Str, workspace_name: Str, options: ComputeClientListOptions = ComputeClientListOptions{}) -> runtime.Pager[ComputeClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, workspace_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComputeClientListResponse ! Str { compute_list_handle(r) }, fn(r: ComputeClientListResponse) -> Str? { r.paginated_compute_resources_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComputeClientListResponse ! Str { compute_list_handle(r) }, fn(r: ComputeClientListResponse) -> Str? { r.paginated_compute_resources_list.next_link }).traced_as("ComputeClientListResponse"))
 }
 
 /// ComputeClientGetOptions: the optional parameters of ComputeClient.get.
@@ -105,12 +105,15 @@ fn (c: ComputeClient) get_create_request(resource_group_name: Str, workspace_nam
 
 /// Gets compute definition by its name. Any secrets (storage keys, service credentials, etc) are not returned - use 'keys' nested resource to get them.
 pub fn (c: ComputeClient) get(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientGetOptions = ComputeClientGetOptions{}) -> ComputeClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, workspace_name, compute_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, workspace_name, compute_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  compute_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = compute_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ComputeClientBeginCreateOrUpdateOptions: the optional parameters of ComputeClient.begin_create_or_update.
@@ -157,14 +160,16 @@ fn (c: ComputeClient) create_or_update_create_request(resource_group_name: Str, 
 /// Creates or updates compute. This call will overwrite a compute if it exists. This is a nonrecoverable operation. If your intent is to create a new compute, do a GET first to verify that it does not exist yet.
 pub fn (c: ComputeClient[fx]) begin_create_or_update(resource_group_name: Str, workspace_name: Str, compute_name: Str, parameters: ComputeResource, options: ComputeClientBeginCreateOrUpdateOptions = ComputeClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ComputeClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientCreateOrUpdateResponse", fn(r: http.Response) -> ComputeClientCreateOrUpdateResponse ! Str { compute_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientCreateOrUpdateResponse", fn(r: http.Response) -> ComputeClientCreateOrUpdateResponse ! Str { compute_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, workspace_name, compute_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, workspace_name, compute_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientCreateOrUpdateResponse", fn(r: http.Response) -> ComputeClientCreateOrUpdateResponse ! Str { compute_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientCreateOrUpdateResponse", fn(r: http.Response) -> ComputeClientCreateOrUpdateResponse ! Str { compute_create_or_update_handle(r) }, traced: true)
 }
 
 /// ComputeClientBeginUpdateOptions: the optional parameters of ComputeClient.begin_update.
@@ -211,14 +216,16 @@ fn (c: ComputeClient) update_create_request(resource_group_name: Str, workspace_
 /// Updates properties of a compute. This call will overwrite a compute if it exists. This is a nonrecoverable operation.
 pub fn (c: ComputeClient[fx]) begin_update(resource_group_name: Str, workspace_name: Str, compute_name: Str, parameters: ClusterUpdateParameters, options: ComputeClientBeginUpdateOptions = ComputeClientBeginUpdateOptions{}) -> runtime.Poller[ComputeClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientUpdateResponse", fn(r: http.Response) -> ComputeClientUpdateResponse ! Str { compute_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientUpdateResponse", fn(r: http.Response) -> ComputeClientUpdateResponse ! Str { compute_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, workspace_name, compute_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, workspace_name, compute_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientUpdateResponse", fn(r: http.Response) -> ComputeClientUpdateResponse ! Str { compute_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientUpdateResponse", fn(r: http.Response) -> ComputeClientUpdateResponse ! Str { compute_update_handle(r) }, traced: true)
 }
 
 /// ComputeClientBeginDeleteOptions: the optional parameters of ComputeClient.begin_delete.
@@ -262,14 +269,16 @@ fn (c: ComputeClient) delete_create_request(resource_group_name: Str, workspace_
 /// Deletes specified Machine Learning compute.
 pub fn (c: ComputeClient[fx]) begin_delete(resource_group_name: Str, workspace_name: Str, compute_name: Str, underlying_resource_action: UnderlyingResourceAction, options: ComputeClientBeginDeleteOptions = ComputeClientBeginDeleteOptions{}) -> runtime.Poller[ComputeClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientDeleteResponse", fn(r: http.Response) -> ComputeClientDeleteResponse ! Str { compute_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientDeleteResponse", fn(r: http.Response) -> ComputeClientDeleteResponse ! Str { compute_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, workspace_name, compute_name, underlying_resource_action, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, workspace_name, compute_name, underlying_resource_action, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientDeleteResponse", fn(r: http.Response) -> ComputeClientDeleteResponse ! Str { compute_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientDeleteResponse", fn(r: http.Response) -> ComputeClientDeleteResponse ! Str { compute_delete_handle(r) }, traced: true)
 }
 
 /// ComputeClientListNodesOptions: the optional parameters of ComputeClient.new_list_nodes_pager.
@@ -312,7 +321,7 @@ fn (c: ComputeClient) list_nodes_create_request(resource_group_name: Str, worksp
 /// Get the details (e.g IP address, port etc) of all the compute nodes in the compute.
 pub fn (c: ComputeClient[fx]) new_list_nodes_pager(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientListNodesOptions = ComputeClientListNodesOptions{}) -> runtime.Pager[ComputeClientListNodesResponse, fx] ! azcore.CallErr {
   let req = c.list_nodes_create_request(resource_group_name, workspace_name, compute_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComputeClientListNodesResponse ! Str { compute_list_nodes_handle(r) }, fn(r: ComputeClientListNodesResponse) -> Str? { r.aml_compute_nodes_information.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComputeClientListNodesResponse ! Str { compute_list_nodes_handle(r) }, fn(r: ComputeClientListNodesResponse) -> Str? { r.aml_compute_nodes_information.next_link }).traced_as("ComputeClientListNodesResponse"))
 }
 
 /// ComputeClientListKeysOptions: the optional parameters of ComputeClient.list_keys.
@@ -357,12 +366,15 @@ fn (c: ComputeClient) list_keys_create_request(resource_group_name: Str, workspa
 
 /// Gets secrets related to Machine Learning compute (storage keys, service credentials, etc).
 pub fn (c: ComputeClient) list_keys(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientListKeysOptions = ComputeClientListKeysOptions{}) -> ComputeClientListKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_keys_create_request(resource_group_name, workspace_name, compute_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.ListKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_keys_create_request(resource_group_name, workspace_name, compute_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  compute_list_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = compute_list_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ComputeClientBeginStartOptions: the optional parameters of ComputeClient.begin_start.
@@ -405,14 +417,16 @@ fn (c: ComputeClient) start_create_request(resource_group_name: Str, workspace_n
 /// Posts a start action to a compute instance
 pub fn (c: ComputeClient[fx]) begin_start(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientBeginStartOptions = ComputeClientBeginStartOptions{}) -> runtime.Poller[ComputeClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientStartResponse", fn(r: http.Response) -> ComputeClientStartResponse ! Str { compute_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientStartResponse", fn(r: http.Response) -> ComputeClientStartResponse ! Str { compute_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, workspace_name, compute_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, workspace_name, compute_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientStartResponse", fn(r: http.Response) -> ComputeClientStartResponse ! Str { compute_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientStartResponse", fn(r: http.Response) -> ComputeClientStartResponse ! Str { compute_start_handle(r) }, traced: true)
 }
 
 /// ComputeClientBeginStopOptions: the optional parameters of ComputeClient.begin_stop.
@@ -455,14 +469,16 @@ fn (c: ComputeClient) stop_create_request(resource_group_name: Str, workspace_na
 /// Posts a stop action to a compute instance
 pub fn (c: ComputeClient[fx]) begin_stop(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientBeginStopOptions = ComputeClientBeginStopOptions{}) -> runtime.Poller[ComputeClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientStopResponse", fn(r: http.Response) -> ComputeClientStopResponse ! Str { compute_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientStopResponse", fn(r: http.Response) -> ComputeClientStopResponse ! Str { compute_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, workspace_name, compute_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, workspace_name, compute_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientStopResponse", fn(r: http.Response) -> ComputeClientStopResponse ! Str { compute_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientStopResponse", fn(r: http.Response) -> ComputeClientStopResponse ! Str { compute_stop_handle(r) }, traced: true)
 }
 
 /// ComputeClientBeginRestartOptions: the optional parameters of ComputeClient.begin_restart.
@@ -505,12 +521,14 @@ fn (c: ComputeClient) restart_create_request(resource_group_name: Str, workspace
 /// Posts a restart action to a compute instance
 pub fn (c: ComputeClient[fx]) begin_restart(resource_group_name: Str, workspace_name: Str, compute_name: Str, options: ComputeClientBeginRestartOptions = ComputeClientBeginRestartOptions{}) -> runtime.Poller[ComputeClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientRestartResponse", fn(r: http.Response) -> ComputeClientRestartResponse ! Str { compute_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ComputeClientRestartResponse", fn(r: http.Response) -> ComputeClientRestartResponse ! Str { compute_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, workspace_name, compute_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComputeClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, workspace_name, compute_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientRestartResponse", fn(r: http.Response) -> ComputeClientRestartResponse ! Str { compute_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ComputeClientRestartResponse", fn(r: http.Response) -> ComputeClientRestartResponse ! Str { compute_restart_handle(r) }, traced: true)
 }

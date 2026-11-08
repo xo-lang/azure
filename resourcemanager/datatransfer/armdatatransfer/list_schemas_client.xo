@@ -57,10 +57,13 @@ fn (c: ListSchemasClient) list_create_request(resource_group_name: Str, pipeline
 
 /// Lists the schemas associated with a specific connection in the Pipeline. This operation has reached end of life support starting version 2025-05-30-preview. For schema support please create and use a FlowProfile resource.
 pub fn (c: ListSchemasClient) list(resource_group_name: Str, pipeline_name: Str, schema: Schema, options: ListSchemasClientListOptions = ListSchemasClientListOptions{}) -> ListSchemasClientListResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_create_request(resource_group_name, pipeline_name, schema, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ListSchemasClient.List", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_create_request(resource_group_name, pipeline_name, schema, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  list_schemas_list_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = list_schemas_list_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

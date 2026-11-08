@@ -49,7 +49,7 @@ fn (c: SolutionsClient) list_create_request(options: SolutionsClientListOptions)
 /// Gets a list of Security Solutions for the subscription.
 pub fn (c: SolutionsClient[fx]) new_list_pager(options: SolutionsClientListOptions = SolutionsClientListOptions{}) -> runtime.Pager[SolutionsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SolutionsClientListResponse ! Str { solutions_list_handle(r) }, c.setup.endpoint, fn(r: SolutionsClientListResponse) -> Str? { r.solution_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SolutionsClientListResponse ! Str { solutions_list_handle(r) }, c.setup.endpoint, fn(r: SolutionsClientListResponse) -> Str? { r.solution_list.next_link }).traced_as("SolutionsClientListResponse"))
 }
 
 /// SolutionsClientGetOptions: the optional parameters of SolutionsClient.get.
@@ -91,10 +91,13 @@ fn (c: SolutionsClient) get_create_request(resource_group_name: Str, asc_locatio
 
 /// Gets a specific Security Solution.
 pub fn (c: SolutionsClient) get(resource_group_name: Str, asc_location: Str, security_solution_name: Str, options: SolutionsClientGetOptions = SolutionsClientGetOptions{}) -> SolutionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, asc_location, security_solution_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SolutionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, asc_location, security_solution_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  solutions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = solutions_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

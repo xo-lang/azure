@@ -53,7 +53,7 @@ fn (c: SubscriptionUsagesClient) list_by_location_create_request(location_name: 
 /// Gets all subscription usage metrics in a given location.
 pub fn (c: SubscriptionUsagesClient[fx]) new_list_by_location_pager(location_name: Str, options: SubscriptionUsagesClientListByLocationOptions = SubscriptionUsagesClientListByLocationOptions{}) -> runtime.Pager[SubscriptionUsagesClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SubscriptionUsagesClientListByLocationResponse ! Str { subscription_usages_list_by_location_handle(r) }, fn(r: SubscriptionUsagesClientListByLocationResponse) -> Str? { r.subscription_usage_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SubscriptionUsagesClientListByLocationResponse ! Str { subscription_usages_list_by_location_handle(r) }, fn(r: SubscriptionUsagesClientListByLocationResponse) -> Str? { r.subscription_usage_list_result.next_link }).traced_as("SubscriptionUsagesClientListByLocationResponse"))
 }
 
 /// SubscriptionUsagesClientGetOptions: the optional parameters of SubscriptionUsagesClient.get.
@@ -91,10 +91,13 @@ fn (c: SubscriptionUsagesClient) get_create_request(location_name: Str, usage_na
 
 /// Gets a subscription usage metric.
 pub fn (c: SubscriptionUsagesClient) get(location_name: Str, usage_name: Str, options: SubscriptionUsagesClientGetOptions = SubscriptionUsagesClientGetOptions{}) -> SubscriptionUsagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location_name, usage_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SubscriptionUsagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location_name, usage_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  subscription_usages_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = subscription_usages_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

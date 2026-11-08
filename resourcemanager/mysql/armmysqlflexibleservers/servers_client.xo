@@ -49,7 +49,7 @@ fn (c: ServersClient) list_create_request(options: ServersClientListOptions) -> 
 /// List all the servers in a given subscription.
 pub fn (c: ServersClient[fx]) new_list_pager(options: ServersClientListOptions = ServersClientListOptions{}) -> runtime.Pager[ServersClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServersClientListResponse ! Str { servers_list_handle(r) }, c.setup.endpoint, fn(r: ServersClientListResponse) -> Str? { r.server_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServersClientListResponse ! Str { servers_list_handle(r) }, c.setup.endpoint, fn(r: ServersClientListResponse) -> Str? { r.server_list_result.next_link }).traced_as("ServersClientListResponse"))
 }
 
 /// ServersClientListByResourceGroupOptions: the optional parameters of ServersClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ServersClient) list_by_resource_group_create_request(resource_group_name:
 /// List all the servers in a given resource group.
 pub fn (c: ServersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ServersClientListByResourceGroupOptions = ServersClientListByResourceGroupOptions{}) -> runtime.Pager[ServersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServersClientListByResourceGroupResponse ! Str { servers_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ServersClientListByResourceGroupResponse) -> Str? { r.server_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServersClientListByResourceGroupResponse ! Str { servers_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ServersClientListByResourceGroupResponse) -> Str? { r.server_list_result.next_link }).traced_as("ServersClientListByResourceGroupResponse"))
 }
 
 /// ServersClientGetOptions: the optional parameters of ServersClient.get.
@@ -122,12 +122,15 @@ fn (c: ServersClient) get_create_request(resource_group_name: Str, server_name: 
 
 /// Gets information about a server.
 pub fn (c: ServersClient) get(resource_group_name: Str, server_name: Str, options: ServersClientGetOptions = ServersClientGetOptions{}) -> ServersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  servers_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = servers_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServersClientBeginCreateOptions: the optional parameters of ServersClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: ServersClient) create_create_request(resource_group_name: Str, server_nam
 /// Creates a new server or updates an existing server. The update action will overwrite the existing server.
 pub fn (c: ServersClient[fx]) begin_create(resource_group_name: Str, server_name: Str, parameters: Server, options: ServersClientBeginCreateOptions = ServersClientBeginCreateOptions{}) -> runtime.Poller[ServersClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientCreateResponse", fn(r: http.Response) -> ServersClientCreateResponse ! Str { servers_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientCreateResponse", fn(r: http.Response) -> ServersClientCreateResponse ! Str { servers_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "ServersClientCreateResponse", fn(r: http.Response) -> ServersClientCreateResponse ! Str { servers_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "ServersClientCreateResponse", fn(r: http.Response) -> ServersClientCreateResponse ! Str { servers_create_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginUpdateOptions: the optional parameters of ServersClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ServersClient) update_create_request(resource_group_name: Str, server_nam
 /// Updates an existing server. The request body can contain one to many of the properties present in the normal server definition.
 pub fn (c: ServersClient[fx]) begin_update(resource_group_name: Str, server_name: Str, parameters: ServerForUpdate, options: ServersClientBeginUpdateOptions = ServersClientBeginUpdateOptions{}) -> runtime.Poller[ServersClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientUpdateResponse", fn(r: http.Response) -> ServersClientUpdateResponse ! Str { servers_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientUpdateResponse", fn(r: http.Response) -> ServersClientUpdateResponse ! Str { servers_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "ServersClientUpdateResponse", fn(r: http.Response) -> ServersClientUpdateResponse ! Str { servers_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "ServersClientUpdateResponse", fn(r: http.Response) -> ServersClientUpdateResponse ! Str { servers_update_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginDeleteOptions: the optional parameters of ServersClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: ServersClient) delete_create_request(resource_group_name: Str, server_nam
 /// Deletes a server.
 pub fn (c: ServersClient[fx]) begin_delete(resource_group_name: Str, server_name: Str, options: ServersClientBeginDeleteOptions = ServersClientBeginDeleteOptions{}) -> runtime.Poller[ServersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientDeleteResponse", fn(r: http.Response) -> ServersClientDeleteResponse ! Str { servers_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientDeleteResponse", fn(r: http.Response) -> ServersClientDeleteResponse ! Str { servers_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, server_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, server_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientDeleteResponse", fn(r: http.Response) -> ServersClientDeleteResponse ! Str { servers_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientDeleteResponse", fn(r: http.Response) -> ServersClientDeleteResponse ! Str { servers_delete_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginDetachVNetOptions: the optional parameters of ServersClient.begin_detach_v_net.
@@ -316,14 +325,16 @@ fn (c: ServersClient) detach_v_net_create_request(resource_group_name: Str, serv
 /// Detach VNet on a server.
 pub fn (c: ServersClient[fx]) begin_detach_v_net(resource_group_name: Str, server_name: Str, parameters: ServerDetachVNetParameter, options: ServersClientBeginDetachVNetOptions = ServersClientBeginDetachVNetOptions{}) -> runtime.Poller[ServersClientDetachVNetResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientDetachVNetResponse", fn(r: http.Response) -> ServersClientDetachVNetResponse ! Str { servers_detach_v_net_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientDetachVNetResponse", fn(r: http.Response) -> ServersClientDetachVNetResponse ! Str { servers_detach_v_net_handle(r) }, traced: true)
   }
-  let req = c.detach_v_net_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginDetachVNet", c.setup.pipeline.tracer)
+  let req = c.detach_v_net_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ServersClientDetachVNetResponse", fn(r: http.Response) -> ServersClientDetachVNetResponse ! Str { servers_detach_v_net_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ServersClientDetachVNetResponse", fn(r: http.Response) -> ServersClientDetachVNetResponse ! Str { servers_detach_v_net_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginFailoverOptions: the optional parameters of ServersClient.begin_failover.
@@ -362,14 +373,16 @@ fn (c: ServersClient) failover_create_request(resource_group_name: Str, server_n
 /// Manual failover a server.
 pub fn (c: ServersClient[fx]) begin_failover(resource_group_name: Str, server_name: Str, options: ServersClientBeginFailoverOptions = ServersClientBeginFailoverOptions{}) -> runtime.Poller[ServersClientFailoverResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientFailoverResponse", fn(r: http.Response) -> ServersClientFailoverResponse ! Str { servers_failover_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientFailoverResponse", fn(r: http.Response) -> ServersClientFailoverResponse ! Str { servers_failover_handle(r) }, traced: true)
   }
-  let req = c.failover_create_request(resource_group_name, server_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginFailover", c.setup.pipeline.tracer)
+  let req = c.failover_create_request(resource_group_name, server_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientFailoverResponse", fn(r: http.Response) -> ServersClientFailoverResponse ! Str { servers_failover_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientFailoverResponse", fn(r: http.Response) -> ServersClientFailoverResponse ! Str { servers_failover_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginResetGtidOptions: the optional parameters of ServersClient.begin_reset_gtid.
@@ -409,14 +422,16 @@ fn (c: ServersClient) reset_gtid_create_request(resource_group_name: Str, server
 /// Resets GTID on a server.
 pub fn (c: ServersClient[fx]) begin_reset_gtid(resource_group_name: Str, server_name: Str, parameters: ServerGtidSetParameter, options: ServersClientBeginResetGtidOptions = ServersClientBeginResetGtidOptions{}) -> runtime.Poller[ServersClientResetGtidResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientResetGtidResponse", fn(r: http.Response) -> ServersClientResetGtidResponse ! Str { servers_reset_gtid_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientResetGtidResponse", fn(r: http.Response) -> ServersClientResetGtidResponse ! Str { servers_reset_gtid_handle(r) }, traced: true)
   }
-  let req = c.reset_gtid_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginResetGtid", c.setup.pipeline.tracer)
+  let req = c.reset_gtid_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ServersClientResetGtidResponse", fn(r: http.Response) -> ServersClientResetGtidResponse ! Str { servers_reset_gtid_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ServersClientResetGtidResponse", fn(r: http.Response) -> ServersClientResetGtidResponse ! Str { servers_reset_gtid_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginRestartOptions: the optional parameters of ServersClient.begin_restart.
@@ -456,14 +471,16 @@ fn (c: ServersClient) restart_create_request(resource_group_name: Str, server_na
 /// Restarts a server.
 pub fn (c: ServersClient[fx]) begin_restart(resource_group_name: Str, server_name: Str, parameters: ServerRestartParameter, options: ServersClientBeginRestartOptions = ServersClientBeginRestartOptions{}) -> runtime.Poller[ServersClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientRestartResponse", fn(r: http.Response) -> ServersClientRestartResponse ! Str { servers_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientRestartResponse", fn(r: http.Response) -> ServersClientRestartResponse ! Str { servers_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientRestartResponse", fn(r: http.Response) -> ServersClientRestartResponse ! Str { servers_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientRestartResponse", fn(r: http.Response) -> ServersClientRestartResponse ! Str { servers_restart_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginStartOptions: the optional parameters of ServersClient.begin_start.
@@ -502,14 +519,16 @@ fn (c: ServersClient) start_create_request(resource_group_name: Str, server_name
 /// Starts a server.
 pub fn (c: ServersClient[fx]) begin_start(resource_group_name: Str, server_name: Str, options: ServersClientBeginStartOptions = ServersClientBeginStartOptions{}) -> runtime.Poller[ServersClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientStartResponse", fn(r: http.Response) -> ServersClientStartResponse ! Str { servers_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientStartResponse", fn(r: http.Response) -> ServersClientStartResponse ! Str { servers_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, server_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, server_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientStartResponse", fn(r: http.Response) -> ServersClientStartResponse ! Str { servers_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientStartResponse", fn(r: http.Response) -> ServersClientStartResponse ! Str { servers_start_handle(r) }, traced: true)
 }
 
 /// ServersClientBeginStopOptions: the optional parameters of ServersClient.begin_stop.
@@ -548,14 +567,16 @@ fn (c: ServersClient) stop_create_request(resource_group_name: Str, server_name:
 /// Stops a server.
 pub fn (c: ServersClient[fx]) begin_stop(resource_group_name: Str, server_name: Str, options: ServersClientBeginStopOptions = ServersClientBeginStopOptions{}) -> runtime.Poller[ServersClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientStopResponse", fn(r: http.Response) -> ServersClientStopResponse ! Str { servers_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServersClientStopResponse", fn(r: http.Response) -> ServersClientStopResponse ! Str { servers_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, server_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, server_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientStopResponse", fn(r: http.Response) -> ServersClientStopResponse ! Str { servers_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServersClientStopResponse", fn(r: http.Response) -> ServersClientStopResponse ! Str { servers_stop_handle(r) }, traced: true)
 }
 
 /// ServersClientValidateEstimateHighAvailabilityOptions: the optional parameters of ServersClient.validate_estimate_high_availability.
@@ -594,10 +615,13 @@ fn (c: ServersClient) validate_estimate_high_availability_create_request(resourc
 
 /// Validate a deployment of high availability.
 pub fn (c: ServersClient) validate_estimate_high_availability(resource_group_name: Str, server_name: Str, parameters: HighAvailabilityValidationEstimation, options: ServersClientValidateEstimateHighAvailabilityOptions = ServersClientValidateEstimateHighAvailabilityOptions{}) -> ServersClientValidateEstimateHighAvailabilityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.validate_estimate_high_availability_create_request(resource_group_name, server_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServersClient.ValidateEstimateHighAvailability", c.setup.pipeline.tracer)
+  let req = sp.on(c.validate_estimate_high_availability_create_request(resource_group_name, server_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  servers_validate_estimate_high_availability_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = servers_validate_estimate_high_availability_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

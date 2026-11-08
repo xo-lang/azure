@@ -57,7 +57,7 @@ fn (c: CommunityGalleryImagesClient) list_create_request(location: Str, public_g
 /// List community gallery images inside a gallery.
 pub fn (c: CommunityGalleryImagesClient[fx]) new_list_pager(location: Str, public_gallery_name: Str, options: CommunityGalleryImagesClientListOptions = CommunityGalleryImagesClientListOptions{}) -> runtime.Pager[CommunityGalleryImagesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, public_gallery_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CommunityGalleryImagesClientListResponse ! Str { community_gallery_images_list_handle(r) }, c.setup.endpoint, fn(r: CommunityGalleryImagesClientListResponse) -> Str? { r.community_gallery_image_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CommunityGalleryImagesClientListResponse ! Str { community_gallery_images_list_handle(r) }, c.setup.endpoint, fn(r: CommunityGalleryImagesClientListResponse) -> Str? { r.community_gallery_image_list.next_link }).traced_as("CommunityGalleryImagesClientListResponse"))
 }
 
 /// CommunityGalleryImagesClientGetOptions: the optional parameters of CommunityGalleryImagesClient.get.
@@ -99,10 +99,13 @@ fn (c: CommunityGalleryImagesClient) get_create_request(location: Str, public_ga
 
 /// Get a community gallery image.
 pub fn (c: CommunityGalleryImagesClient) get(location: Str, public_gallery_name: Str, gallery_image_name: Str, options: CommunityGalleryImagesClientGetOptions = CommunityGalleryImagesClientGetOptions{}) -> CommunityGalleryImagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, public_gallery_name, gallery_image_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CommunityGalleryImagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, public_gallery_name, gallery_image_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  community_gallery_images_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = community_gallery_images_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

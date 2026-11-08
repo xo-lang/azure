@@ -55,7 +55,7 @@ fn (c: LabPlansClient) list_by_subscription_create_request(options: LabPlansClie
 /// Returns a list of all lab plans within a subscription
 pub fn (c: LabPlansClient[fx]) new_list_by_subscription_pager(options: LabPlansClientListBySubscriptionOptions = LabPlansClientListBySubscriptionOptions{}) -> runtime.Pager[LabPlansClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabPlansClientListBySubscriptionResponse ! Str { lab_plans_list_by_subscription_handle(r) }, fn(r: LabPlansClientListBySubscriptionResponse) -> Str? { r.paged_lab_plans.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabPlansClientListBySubscriptionResponse ! Str { lab_plans_list_by_subscription_handle(r) }, fn(r: LabPlansClientListBySubscriptionResponse) -> Str? { r.paged_lab_plans.next_link }).traced_as("LabPlansClientListBySubscriptionResponse"))
 }
 
 /// LabPlansClientListByResourceGroupOptions: the optional parameters of LabPlansClient.new_list_by_resource_group_pager.
@@ -90,7 +90,7 @@ fn (c: LabPlansClient) list_by_resource_group_create_request(resource_group_name
 /// Returns a list of all lab plans for a subscription and resource group.
 pub fn (c: LabPlansClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: LabPlansClientListByResourceGroupOptions = LabPlansClientListByResourceGroupOptions{}) -> runtime.Pager[LabPlansClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabPlansClientListByResourceGroupResponse ! Str { lab_plans_list_by_resource_group_handle(r) }, fn(r: LabPlansClientListByResourceGroupResponse) -> Str? { r.paged_lab_plans.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabPlansClientListByResourceGroupResponse ! Str { lab_plans_list_by_resource_group_handle(r) }, fn(r: LabPlansClientListByResourceGroupResponse) -> Str? { r.paged_lab_plans.next_link }).traced_as("LabPlansClientListByResourceGroupResponse"))
 }
 
 /// LabPlansClientGetOptions: the optional parameters of LabPlansClient.get.
@@ -128,12 +128,15 @@ fn (c: LabPlansClient) get_create_request(resource_group_name: Str, lab_plan_nam
 
 /// Retrieves the properties of a Lab Plan.
 pub fn (c: LabPlansClient) get(resource_group_name: Str, lab_plan_name: Str, options: LabPlansClientGetOptions = LabPlansClientGetOptions{}) -> LabPlansClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, lab_plan_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabPlansClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, lab_plan_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  lab_plans_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = lab_plans_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LabPlansClientBeginCreateOrUpdateOptions: the optional parameters of LabPlansClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: LabPlansClient) create_or_update_create_request(resource_group_name: Str,
 /// Operation to create or update a Lab Plan resource.
 pub fn (c: LabPlansClient[fx]) begin_create_or_update(resource_group_name: Str, lab_plan_name: Str, body: LabPlan, options: LabPlansClientBeginCreateOrUpdateOptions = LabPlansClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LabPlansClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientCreateOrUpdateResponse", fn(r: http.Response) -> LabPlansClientCreateOrUpdateResponse ! Str { lab_plans_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientCreateOrUpdateResponse", fn(r: http.Response) -> LabPlansClientCreateOrUpdateResponse ! Str { lab_plans_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, lab_plan_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabPlansClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, lab_plan_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "LabPlansClientCreateOrUpdateResponse", fn(r: http.Response) -> LabPlansClientCreateOrUpdateResponse ! Str { lab_plans_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "LabPlansClientCreateOrUpdateResponse", fn(r: http.Response) -> LabPlansClientCreateOrUpdateResponse ! Str { lab_plans_create_or_update_handle(r) }, traced: true)
 }
 
 /// LabPlansClientBeginUpdateOptions: the optional parameters of LabPlansClient.begin_update.
@@ -226,14 +231,16 @@ fn (c: LabPlansClient) update_create_request(resource_group_name: Str, lab_plan_
 /// Operation to update a Lab Plan resource.
 pub fn (c: LabPlansClient[fx]) begin_update(resource_group_name: Str, lab_plan_name: Str, body: LabPlanUpdate, options: LabPlansClientBeginUpdateOptions = LabPlansClientBeginUpdateOptions{}) -> runtime.Poller[LabPlansClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientUpdateResponse", fn(r: http.Response) -> LabPlansClientUpdateResponse ! Str { lab_plans_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientUpdateResponse", fn(r: http.Response) -> LabPlansClientUpdateResponse ! Str { lab_plans_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, lab_plan_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabPlansClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, lab_plan_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientUpdateResponse", fn(r: http.Response) -> LabPlansClientUpdateResponse ! Str { lab_plans_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientUpdateResponse", fn(r: http.Response) -> LabPlansClientUpdateResponse ! Str { lab_plans_update_handle(r) }, traced: true)
 }
 
 /// LabPlansClientBeginDeleteOptions: the optional parameters of LabPlansClient.begin_delete.
@@ -272,14 +279,16 @@ fn (c: LabPlansClient) delete_create_request(resource_group_name: Str, lab_plan_
 /// Operation to delete a Lab Plan resource. Deleting a lab plan does not delete labs associated with a lab plan, nor does it delete shared images added to a gallery via the lab plan permission container.
 pub fn (c: LabPlansClient[fx]) begin_delete(resource_group_name: Str, lab_plan_name: Str, options: LabPlansClientBeginDeleteOptions = LabPlansClientBeginDeleteOptions{}) -> runtime.Poller[LabPlansClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientDeleteResponse", fn(r: http.Response) -> LabPlansClientDeleteResponse ! Str { lab_plans_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientDeleteResponse", fn(r: http.Response) -> LabPlansClientDeleteResponse ! Str { lab_plans_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, lab_plan_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabPlansClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, lab_plan_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientDeleteResponse", fn(r: http.Response) -> LabPlansClientDeleteResponse ! Str { lab_plans_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientDeleteResponse", fn(r: http.Response) -> LabPlansClientDeleteResponse ! Str { lab_plans_delete_handle(r) }, traced: true)
 }
 
 /// LabPlansClientBeginSaveImageOptions: the optional parameters of LabPlansClient.begin_save_image.
@@ -319,12 +328,14 @@ fn (c: LabPlansClient) save_image_create_request(resource_group_name: Str, lab_p
 /// Saves an image from a lab VM to the attached shared image gallery.
 pub fn (c: LabPlansClient[fx]) begin_save_image(resource_group_name: Str, lab_plan_name: Str, body: SaveImageBody, options: LabPlansClientBeginSaveImageOptions = LabPlansClientBeginSaveImageOptions{}) -> runtime.Poller[LabPlansClientSaveImageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientSaveImageResponse", fn(r: http.Response) -> LabPlansClientSaveImageResponse ! Str { lab_plans_save_image_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabPlansClientSaveImageResponse", fn(r: http.Response) -> LabPlansClientSaveImageResponse ! Str { lab_plans_save_image_handle(r) }, traced: true)
   }
-  let req = c.save_image_create_request(resource_group_name, lab_plan_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabPlansClient.BeginSaveImage", c.setup.pipeline.tracer)
+  let req = c.save_image_create_request(resource_group_name, lab_plan_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientSaveImageResponse", fn(r: http.Response) -> LabPlansClientSaveImageResponse ! Str { lab_plans_save_image_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LabPlansClientSaveImageResponse", fn(r: http.Response) -> LabPlansClientSaveImageResponse ! Str { lab_plans_save_image_handle(r) }, traced: true)
 }

@@ -69,6 +69,11 @@ pub struct Package {
   /// header's words (`ocp-batch-file-isdirectory` is
   /// `ocp_batch_file_is_directory`, Go's OCPBatchFileIsDirectory).
   pub header_names: Map[Str, Str] = {}
+  /// Which errors a method's span records, as Go's module does
+  /// (codegen/gorows' `span_errors` row; decision 0013): "" opens no
+  /// spans (Go's module has none), "all" every error, "send" only a
+  /// request's create and send errors.
+  pub span_errors: Str = ""
 }
 
 /// A string literal's contents.
@@ -742,7 +747,8 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       _ => "fn(r: ${rn}) -> Str? { None }"
     }
     let verb = if op.next_verb != "GET" { ", verb: \"${op.next_verb}\"" } else { "" }
-    s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}${verb}))\n}\n" } else if p.raw_next_link { "  Ok(runtime.new_raw_link_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next}))\n}\n" })
+    let named = if p.span_errors != "" { ".traced_as(\"${rn}\")" } else { "" }
+    s = s + (if p.tsp_arm { "  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, ${handler}, c.setup.endpoint, ${next}${verb})${named})\n}\n" } else if p.raw_next_link { "  Ok(runtime.new_raw_link_pager(c.setup.pipeline, req, ${handler}, ${next})${named})\n}\n" } else { "  Ok(runtime.new_pager(c.setup.pipeline, req, ${handler}, ${next})${named})\n}\n" })
   } else if op.lro && op.paged_lro {
     // Go's Poller[*Pager[T]]: the final response is the first page, and
     // the pager GETs each page's nextLink after it.
@@ -751,30 +757,63 @@ fn emit_op(p: Package, api: Api, op: Op, has_sub: Bool) -> Str {
       (Some(nl), Some(t)) => if is_model(api, t) { "fn(r: ${rn}) -> Str? { r.${body_field(api, op)}.${snake(nl)} }" } else { "fn(r: ${rn}) -> Str? { None }" }
       _ => "fn(r: ${rn}) -> Str? { None }"
     }
-    let paged = "fn(r: http.Response) -> runtime.Pager[${rn}, fx] ! Str { Ok(runtime.new_pager(pipeline, req, ${handler}, ${next}).starting_with(${hname}(r)?)) }"
+    let traced = if p.span_errors != "" { ", traced: true" } else { "" }
+    let named = if p.span_errors != "" { ".traced_as(\"${rn}\")" } else { "" }
+    let paged = "fn(r: http.Response) -> runtime.Pager[${rn}, fx] ! Str { Ok(runtime.new_pager(pipeline, first, ${handler}, ${next})${named}.starting_with(${hname}(r)?)) }"
     s = s + "pub fn (c: ${cn}[fx]) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> runtime.Poller[runtime.Pager[${rn}, fx], fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {\n"
-    s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n  let pipeline = c.setup.pipeline\n"
-    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_poller(c.setup.pipeline, options.resume_token, \"*Pager[${p.go_package}.${rn}]\", ${paged})\n  }\n"
-    s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
-    s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  runtime.new_poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"*Pager[${p.go_package}.${rn}]\", ${paged})\n}\n"
+    s = s + "  let made = c.${snake_op}_create_request(${call_args}${sep}options)\n  let pipeline = c.setup.pipeline\n"
+    s = s + "  if options.resume_token != \"\" {\n    let first = made?\n    return runtime.resume_poller(c.setup.pipeline, options.resume_token, \"*Pager[${p.go_package}.${rn}]\", ${paged}${traced})\n  }\n"
+    s = s + lro_send(p, cn, op, ok, "made")
+    s = s + "  let first = req\n  runtime.new_poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"*Pager[${p.go_package}.${rn}]\", ${paged}${traced})\n}\n"
   } else if op.lro {
     let fsv = if op.final_state != "" { op.final_state } else { "" }
     s = s + "pub fn (c: ${cn}[fx]) ${method_name(op)}(${args}${sep}options: ${on} = ${on}{}) -> runtime.Poller[${rn}, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {\n"
     let kind = if op.status_poller { "status_" } else { "" }
-    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_${kind}poller(c.setup.pipeline, options.resume_token, \"${rn}\", ${handler})\n  }\n"
-    s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
-    s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
-    s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  runtime.new_${kind}poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${rn}\", ${handler})\n}\n"
+    let traced = if p.span_errors != "" { ", traced: true" } else { "" }
+    s = s + "  if options.resume_token != \"\" {\n    return runtime.resume_${kind}poller(c.setup.pipeline, options.resume_token, \"${rn}\", ${handler}${traced})\n  }\n"
+    s = s + lro_send(p, cn, op, ok, "c.${snake_op}_create_request(${call_args}${sep}options)")
+    s = s + "  runtime.new_${kind}poller(c.setup.pipeline, req, resp, \"${esc(fsv)}\", \"${rn}\", ${handler}${traced})\n}\n"
   } else {
     s = s + "${vis}fn (c: ${cn}) ${mname}(${args}${sep}options: ${on} = ${on}{}) -> ${rn} ! azcore.CallErr uses (net.dial, clock, rand) {\n"
-    s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
-    s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
-    s = s + "  if !${ok_list}.contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
-    s = s + "  ${hname}(resp) ?? e => Err(azcore.CallErr.Decode(e))\n}\n"
+    if p.span_errors != "" {
+      // Go's `<Client>.<Method>` span (runtime.StartSpan) around the call
+      let f = if p.span_errors == "all" { "fail" } else { "close" }
+      s = s + "  let sp = runtime.start_span({}, \"${go_span_name(cn, op)}\", c.setup.pipeline.tracer)\n"
+      s = s + "  let req = sp.on(c.${snake_op}_create_request(${call_args}${sep}options) ?? e => return Err(sp.fail(e)))\n"
+      s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))\n"
+      s = s + "  if !${ok_list}.contains(resp.status) {\n    return Err(sp.${f}(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))\n  }\n"
+      s = s + "  let out = ${hname}(resp) ?? e => return Err(sp.${f}(azcore.CallErr.Decode(e)))\n  sp.end()\n  Ok(out)\n}\n"
+    } else {
+      s = s + "  let req = c.${snake_op}_create_request(${call_args}${sep}options)?\n"
+      s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
+      s = s + "  if !${ok_list}.contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
+      s = s + "  ${hname}(resp) ?? e => Err(azcore.CallErr.Decode(e))\n}\n"
+    }
   }
   s
+}
+
+/// Go's span name of `op` (`<Client>.<Method>`, BeginX for a
+/// long-running one).
+fn go_span_name(cn: Str, op: Op) -> Str {
+  "${cn}.${if op.lro { "Begin" } else { "" }}${part(op.name)}"
+}
+
+/// A long-running operation's first request (`made`, a
+/// Result[policy.Request, azcore.CallErr] expression) and its send:
+/// `req` and `resp`, in Go's method span when the module has spans.
+fn lro_send(p: Package, cn: Str, op: Op, ok: Str, made: Str) -> Str {
+  if p.span_errors == "" {
+    var s = "  let req = ${made}?\n"
+    s = s + "  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))\n"
+    return s + "  if ![${ok}].contains(resp.status) {\n    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))\n  }\n"
+  }
+  let f = if p.span_errors == "all" { "fail" } else { "close" }
+  var s = "  let sp = runtime.start_span({}, \"${go_span_name(cn, op)}\", c.setup.pipeline.tracer)\n"
+  s = s + "  let req = ${made} ?? e => return Err(sp.fail(e))\n"
+  s = s + "  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))\n"
+  s = s + "  if ![${ok}].contains(resp.status) {\n    return Err(sp.${f}(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))\n  }\n"
+  s + "  sp.end()\n"
 }
 
 pub fn emit_clients(p: Package, api: Api) -> List[File] {

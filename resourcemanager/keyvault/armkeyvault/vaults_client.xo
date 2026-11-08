@@ -49,12 +49,15 @@ fn (c: VaultsClient) check_name_availability_create_request(vault_name: VaultChe
 
 /// Checks that the vault name is valid and is not already in use.
 pub fn (c: VaultsClient) check_name_availability(vault_name: VaultCheckNameAvailabilityParameters, options: VaultsClientCheckNameAvailabilityOptions = VaultsClientCheckNameAvailabilityOptions{}) -> VaultsClientCheckNameAvailabilityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_name_availability_create_request(vault_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.CheckNameAvailability", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_name_availability_create_request(vault_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_check_name_availability_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_check_name_availability_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientListDeletedOptions: the optional parameters of VaultsClient.new_list_deleted_pager.
@@ -85,7 +88,7 @@ fn (c: VaultsClient) list_deleted_create_request(options: VaultsClientListDelete
 /// Gets information about the deleted vaults in a subscription.
 pub fn (c: VaultsClient[fx]) new_list_deleted_pager(options: VaultsClientListDeletedOptions = VaultsClientListDeletedOptions{}) -> runtime.Pager[VaultsClientListDeletedResponse, fx] ! azcore.CallErr {
   let req = c.list_deleted_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListDeletedResponse ! Str { vaults_list_deleted_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListDeletedResponse) -> Str? { r.deleted_vault_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListDeletedResponse ! Str { vaults_list_deleted_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListDeletedResponse) -> Str? { r.deleted_vault_list_result.next_link }).traced_as("VaultsClientListDeletedResponse"))
 }
 
 /// VaultsClientGetDeletedOptions: the optional parameters of VaultsClient.get_deleted.
@@ -123,12 +126,15 @@ fn (c: VaultsClient) get_deleted_create_request(vault_name: Str, location: Str, 
 
 /// Gets the deleted Azure key vault.
 pub fn (c: VaultsClient) get_deleted(vault_name: Str, location: Str, options: VaultsClientGetDeletedOptions = VaultsClientGetDeletedOptions{}) -> VaultsClientGetDeletedResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_deleted_create_request(vault_name, location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.GetDeleted", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_deleted_create_request(vault_name, location, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_get_deleted_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_get_deleted_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientBeginPurgeDeletedOptions: the optional parameters of VaultsClient.begin_purge_deleted.
@@ -167,14 +173,16 @@ fn (c: VaultsClient) purge_deleted_create_request(vault_name: Str, location: Str
 /// Permanently deletes the specified vault. aka Purges the deleted Azure key vault.
 pub fn (c: VaultsClient[fx]) begin_purge_deleted(vault_name: Str, location: Str, options: VaultsClientBeginPurgeDeletedOptions = VaultsClientBeginPurgeDeletedOptions{}) -> runtime.Poller[VaultsClientPurgeDeletedResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientPurgeDeletedResponse", fn(r: http.Response) -> VaultsClientPurgeDeletedResponse ! Str { vaults_purge_deleted_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientPurgeDeletedResponse", fn(r: http.Response) -> VaultsClientPurgeDeletedResponse ! Str { vaults_purge_deleted_handle(r) }, traced: true)
   }
-  let req = c.purge_deleted_create_request(vault_name, location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.BeginPurgeDeleted", c.setup.pipeline.tracer)
+  let req = c.purge_deleted_create_request(vault_name, location, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientPurgeDeletedResponse", fn(r: http.Response) -> VaultsClientPurgeDeletedResponse ! Str { vaults_purge_deleted_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientPurgeDeletedResponse", fn(r: http.Response) -> VaultsClientPurgeDeletedResponse ! Str { vaults_purge_deleted_handle(r) }, traced: true)
 }
 
 /// VaultsClientListBySubscriptionOptions: the optional parameters of VaultsClient.new_list_by_subscription_pager.
@@ -211,7 +219,7 @@ fn (c: VaultsClient) list_by_subscription_create_request(options: VaultsClientLi
 /// The List operation gets information about the vaults associated with the subscription.
 pub fn (c: VaultsClient[fx]) new_list_by_subscription_pager(options: VaultsClientListBySubscriptionOptions = VaultsClientListBySubscriptionOptions{}) -> runtime.Pager[VaultsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListBySubscriptionResponse ! Str { vaults_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListBySubscriptionResponse) -> Str? { r.vault_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListBySubscriptionResponse ! Str { vaults_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListBySubscriptionResponse) -> Str? { r.vault_list_result.next_link }).traced_as("VaultsClientListBySubscriptionResponse"))
 }
 
 /// VaultsClientListByResourceGroupOptions: the optional parameters of VaultsClient.new_list_by_resource_group_pager.
@@ -252,7 +260,7 @@ fn (c: VaultsClient) list_by_resource_group_create_request(resource_group_name: 
 /// The List operation gets information about the vaults associated with the subscription and within the specified resource group.
 pub fn (c: VaultsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VaultsClientListByResourceGroupOptions = VaultsClientListByResourceGroupOptions{}) -> runtime.Pager[VaultsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListByResourceGroupResponse ! Str { vaults_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListByResourceGroupResponse) -> Str? { r.vault_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListByResourceGroupResponse ! Str { vaults_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListByResourceGroupResponse) -> Str? { r.vault_list_result.next_link }).traced_as("VaultsClientListByResourceGroupResponse"))
 }
 
 /// VaultsClientGetOptions: the optional parameters of VaultsClient.get.
@@ -290,12 +298,15 @@ fn (c: VaultsClient) get_create_request(resource_group_name: Str, vault_name: St
 
 /// Gets the specified Azure key vault.
 pub fn (c: VaultsClient) get(resource_group_name: Str, vault_name: Str, options: VaultsClientGetOptions = VaultsClientGetOptions{}) -> VaultsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vault_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vault_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientBeginCreateOrUpdateOptions: the optional parameters of VaultsClient.begin_create_or_update.
@@ -338,14 +349,16 @@ fn (c: VaultsClient) create_or_update_create_request(resource_group_name: Str, v
 /// Create or update a key vault in the specified subscription.
 pub fn (c: VaultsClient[fx]) begin_create_or_update(resource_group_name: Str, vault_name: Str, parameters: VaultCreateOrUpdateParameters, options: VaultsClientBeginCreateOrUpdateOptions = VaultsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VaultsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, vault_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, vault_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) }, traced: true)
 }
 
 /// VaultsClientUpdateOptions: the optional parameters of VaultsClient.update.
@@ -384,12 +397,15 @@ fn (c: VaultsClient) update_create_request(resource_group_name: Str, vault_name:
 
 /// Update a key vault in the specified subscription.
 pub fn (c: VaultsClient) update(resource_group_name: Str, vault_name: Str, parameters: VaultPatchParameters, options: VaultsClientUpdateOptions = VaultsClientUpdateOptions{}) -> VaultsClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, vault_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, vault_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientDeleteOptions: the optional parameters of VaultsClient.delete.
@@ -424,12 +440,15 @@ fn (c: VaultsClient) delete_create_request(resource_group_name: Str, vault_name:
 
 /// Deletes the specified Azure key vault.
 pub fn (c: VaultsClient) delete(resource_group_name: Str, vault_name: Str, options: VaultsClientDeleteOptions = VaultsClientDeleteOptions{}) -> VaultsClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, vault_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, vault_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_delete_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientUpdateAccessPolicyOptions: the optional parameters of VaultsClient.update_access_policy.
@@ -472,12 +491,15 @@ fn (c: VaultsClient) update_access_policy_create_request(resource_group_name: St
 
 /// Update access policies in a key vault in the specified subscription.
 pub fn (c: VaultsClient) update_access_policy(resource_group_name: Str, vault_name: Str, operation_kind: AccessPolicyUpdateKind, parameters: VaultAccessPolicyParameters, options: VaultsClientUpdateAccessPolicyOptions = VaultsClientUpdateAccessPolicyOptions{}) -> VaultsClientUpdateAccessPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_access_policy_create_request(resource_group_name, vault_name, operation_kind, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.UpdateAccessPolicy", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_access_policy_create_request(resource_group_name, vault_name, operation_kind, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_update_access_policy_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_update_access_policy_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientListOptions: the optional parameters of VaultsClient.new_list_pager.
@@ -515,5 +537,5 @@ fn (c: VaultsClient) list_create_request(options: VaultsClientListOptions) -> po
 /// The List operation gets information about the vaults associated with the subscription.
 pub fn (c: VaultsClient[fx]) new_list_pager(options: VaultsClientListOptions = VaultsClientListOptions{}) -> runtime.Pager[VaultsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListResponse ! Str { vaults_list_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListResponse) -> Str? { r.resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListResponse ! Str { vaults_list_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListResponse) -> Str? { r.resource_list_result.next_link }).traced_as("VaultsClientListResponse"))
 }

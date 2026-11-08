@@ -73,7 +73,7 @@ fn (c: VirtualMachineScaleSetVMsClient) list_create_request(resource_group_name:
 /// Gets a list of all virtual machines in a VM scale sets.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) new_list_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, options: VirtualMachineScaleSetVMsClientListOptions = VirtualMachineScaleSetVMsClientListOptions{}) -> runtime.Pager[VirtualMachineScaleSetVMsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, virtual_machine_scale_set_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachineScaleSetVMsClientListResponse ! Str { virtual_machine_scale_set_vms_list_handle(r) }, c.setup.endpoint, fn(r: VirtualMachineScaleSetVMsClientListResponse) -> Str? { r.virtual_machine_scale_set_vm_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachineScaleSetVMsClientListResponse ! Str { virtual_machine_scale_set_vms_list_handle(r) }, c.setup.endpoint, fn(r: VirtualMachineScaleSetVMsClientListResponse) -> Str? { r.virtual_machine_scale_set_vm_list_result.next_link }).traced_as("VirtualMachineScaleSetVMsClientListResponse"))
 }
 
 /// VirtualMachineScaleSetVMsClientGetOptions: the optional parameters of VirtualMachineScaleSetVMsClient.get.
@@ -121,12 +121,15 @@ fn (c: VirtualMachineScaleSetVMsClient) get_create_request(resource_group_name: 
 
 /// Gets a virtual machine from a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient) get(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientGetOptions = VirtualMachineScaleSetVMsClientGetOptions{}) -> VirtualMachineScaleSetVMsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machine_scale_set_vms_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machine_scale_set_vms_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginUpdateOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_update.
@@ -183,14 +186,16 @@ fn (c: VirtualMachineScaleSetVMsClient) update_create_request(resource_group_nam
 /// Updates a virtual machine of a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_update(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, parameters: VirtualMachineScaleSetVM, options: VirtualMachineScaleSetVMsClientBeginUpdateOptions = VirtualMachineScaleSetVMsClientBeginUpdateOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientUpdateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientUpdateResponse ! Str { virtual_machine_scale_set_vms_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientUpdateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientUpdateResponse ! Str { virtual_machine_scale_set_vms_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientUpdateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientUpdateResponse ! Str { virtual_machine_scale_set_vms_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientUpdateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientUpdateResponse ! Str { virtual_machine_scale_set_vms_update_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginDeleteOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_delete.
@@ -238,14 +243,16 @@ fn (c: VirtualMachineScaleSetVMsClient) delete_create_request(resource_group_nam
 /// Deletes a virtual machine from a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_delete(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginDeleteOptions = VirtualMachineScaleSetVMsClientBeginDeleteOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientDeleteResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeleteResponse ! Str { virtual_machine_scale_set_vms_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientDeleteResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeleteResponse ! Str { virtual_machine_scale_set_vms_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientDeleteResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeleteResponse ! Str { virtual_machine_scale_set_vms_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientDeleteResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeleteResponse ! Str { virtual_machine_scale_set_vms_delete_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginApproveRollingUpgradeOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_approve_rolling_upgrade.
@@ -288,14 +295,16 @@ fn (c: VirtualMachineScaleSetVMsClient) approve_rolling_upgrade_create_request(r
 /// Approve upgrade on deferred rolling upgrade for OS disk on a VM scale set instance.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_approve_rolling_upgrade(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginApproveRollingUpgradeOptions = VirtualMachineScaleSetVMsClientBeginApproveRollingUpgradeOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse ! Str { virtual_machine_scale_set_vms_approve_rolling_upgrade_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse ! Str { virtual_machine_scale_set_vms_approve_rolling_upgrade_handle(r) }, traced: true)
   }
-  let req = c.approve_rolling_upgrade_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginApproveRollingUpgrade", c.setup.pipeline.tracer)
+  let req = c.approve_rolling_upgrade_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse ! Str { virtual_machine_scale_set_vms_approve_rolling_upgrade_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientApproveRollingUpgradeResponse ! Str { virtual_machine_scale_set_vms_approve_rolling_upgrade_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginAttachDetachDataDisksOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_attach_detach_data_disks.
@@ -342,14 +351,16 @@ fn (c: VirtualMachineScaleSetVMsClient) attach_detach_data_disks_create_request(
 /// Attach and detach data disks to/from a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_attach_detach_data_disks(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, parameters: AttachDetachDataDisksRequest, options: VirtualMachineScaleSetVMsClientBeginAttachDetachDataDisksOptions = VirtualMachineScaleSetVMsClientBeginAttachDetachDataDisksOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse ! Str { virtual_machine_scale_set_vms_attach_detach_data_disks_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse ! Str { virtual_machine_scale_set_vms_attach_detach_data_disks_handle(r) }, traced: true)
   }
-  let req = c.attach_detach_data_disks_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginAttachDetachDataDisks", c.setup.pipeline.tracer)
+  let req = c.attach_detach_data_disks_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse ! Str { virtual_machine_scale_set_vms_attach_detach_data_disks_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientAttachDetachDataDisksResponse ! Str { virtual_machine_scale_set_vms_attach_detach_data_disks_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginDeallocateOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_deallocate.
@@ -392,14 +403,16 @@ fn (c: VirtualMachineScaleSetVMsClient) deallocate_create_request(resource_group
 /// Deallocates a specific virtual machine in a VM scale set. Shuts down the virtual machine and releases the compute resources it uses. You are not billed for the compute resources of this virtual machine once it is deallocated.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_deallocate(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginDeallocateOptions = VirtualMachineScaleSetVMsClientBeginDeallocateOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientDeallocateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientDeallocateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeallocateResponse ! Str { virtual_machine_scale_set_vms_deallocate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientDeallocateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeallocateResponse ! Str { virtual_machine_scale_set_vms_deallocate_handle(r) }, traced: true)
   }
-  let req = c.deallocate_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginDeallocate", c.setup.pipeline.tracer)
+  let req = c.deallocate_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientDeallocateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeallocateResponse ! Str { virtual_machine_scale_set_vms_deallocate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientDeallocateResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientDeallocateResponse ! Str { virtual_machine_scale_set_vms_deallocate_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientGetInstanceViewOptions: the optional parameters of VirtualMachineScaleSetVMsClient.get_instance_view.
@@ -441,12 +454,15 @@ fn (c: VirtualMachineScaleSetVMsClient) get_instance_view_create_request(resourc
 
 /// Gets the status of a virtual machine from a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient) get_instance_view(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientGetInstanceViewOptions = VirtualMachineScaleSetVMsClientGetInstanceViewOptions{}) -> VirtualMachineScaleSetVMsClientGetInstanceViewResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_instance_view_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.GetInstanceView", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_instance_view_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machine_scale_set_vms_get_instance_view_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machine_scale_set_vms_get_instance_view_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginPerformMaintenanceOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_perform_maintenance.
@@ -489,14 +505,16 @@ fn (c: VirtualMachineScaleSetVMsClient) perform_maintenance_create_request(resou
 /// Performs maintenance on a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_perform_maintenance(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginPerformMaintenanceOptions = VirtualMachineScaleSetVMsClientBeginPerformMaintenanceOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientPerformMaintenanceResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientPerformMaintenanceResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPerformMaintenanceResponse ! Str { virtual_machine_scale_set_vms_perform_maintenance_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientPerformMaintenanceResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPerformMaintenanceResponse ! Str { virtual_machine_scale_set_vms_perform_maintenance_handle(r) }, traced: true)
   }
-  let req = c.perform_maintenance_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginPerformMaintenance", c.setup.pipeline.tracer)
+  let req = c.perform_maintenance_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientPerformMaintenanceResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPerformMaintenanceResponse ! Str { virtual_machine_scale_set_vms_perform_maintenance_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientPerformMaintenanceResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPerformMaintenanceResponse ! Str { virtual_machine_scale_set_vms_perform_maintenance_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginPowerOffOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_power_off.
@@ -544,14 +562,16 @@ fn (c: VirtualMachineScaleSetVMsClient) power_off_create_request(resource_group_
 /// Power off (stop) a virtual machine in a VM scale set. Note that resources are still attached and you are getting charged for the resources. Instead, use deallocate to release resources and avoid charges.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_power_off(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginPowerOffOptions = VirtualMachineScaleSetVMsClientBeginPowerOffOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientPowerOffResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientPowerOffResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPowerOffResponse ! Str { virtual_machine_scale_set_vms_power_off_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientPowerOffResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPowerOffResponse ! Str { virtual_machine_scale_set_vms_power_off_handle(r) }, traced: true)
   }
-  let req = c.power_off_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginPowerOff", c.setup.pipeline.tracer)
+  let req = c.power_off_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientPowerOffResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPowerOffResponse ! Str { virtual_machine_scale_set_vms_power_off_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientPowerOffResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientPowerOffResponse ! Str { virtual_machine_scale_set_vms_power_off_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginRedeployOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_redeploy.
@@ -594,14 +614,16 @@ fn (c: VirtualMachineScaleSetVMsClient) redeploy_create_request(resource_group_n
 /// Shuts down the virtual machine in the virtual machine scale set, moves it to a new node, and powers it back on.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_redeploy(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginRedeployOptions = VirtualMachineScaleSetVMsClientBeginRedeployOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientRedeployResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRedeployResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRedeployResponse ! Str { virtual_machine_scale_set_vms_redeploy_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRedeployResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRedeployResponse ! Str { virtual_machine_scale_set_vms_redeploy_handle(r) }, traced: true)
   }
-  let req = c.redeploy_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginRedeploy", c.setup.pipeline.tracer)
+  let req = c.redeploy_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRedeployResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRedeployResponse ! Str { virtual_machine_scale_set_vms_redeploy_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRedeployResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRedeployResponse ! Str { virtual_machine_scale_set_vms_redeploy_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginReimageOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_reimage.
@@ -651,14 +673,16 @@ fn (c: VirtualMachineScaleSetVMsClient) reimage_create_request(resource_group_na
 /// Reimages (upgrade the operating system) a specific virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_reimage(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginReimageOptions = VirtualMachineScaleSetVMsClientBeginReimageOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientReimageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientReimageResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageResponse ! Str { virtual_machine_scale_set_vms_reimage_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientReimageResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageResponse ! Str { virtual_machine_scale_set_vms_reimage_handle(r) }, traced: true)
   }
-  let req = c.reimage_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginReimage", c.setup.pipeline.tracer)
+  let req = c.reimage_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientReimageResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageResponse ! Str { virtual_machine_scale_set_vms_reimage_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientReimageResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageResponse ! Str { virtual_machine_scale_set_vms_reimage_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginReimageAllOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_reimage_all.
@@ -701,14 +725,16 @@ fn (c: VirtualMachineScaleSetVMsClient) reimage_all_create_request(resource_grou
 /// Allows you to re-image all the disks ( including data disks ) in the a VM scale set instance. This operation is only supported for managed disks.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_reimage_all(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginReimageAllOptions = VirtualMachineScaleSetVMsClientBeginReimageAllOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientReimageAllResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientReimageAllResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageAllResponse ! Str { virtual_machine_scale_set_vms_reimage_all_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientReimageAllResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageAllResponse ! Str { virtual_machine_scale_set_vms_reimage_all_handle(r) }, traced: true)
   }
-  let req = c.reimage_all_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginReimageAll", c.setup.pipeline.tracer)
+  let req = c.reimage_all_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientReimageAllResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageAllResponse ! Str { virtual_machine_scale_set_vms_reimage_all_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientReimageAllResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientReimageAllResponse ! Str { virtual_machine_scale_set_vms_reimage_all_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginRestartOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_restart.
@@ -751,14 +777,16 @@ fn (c: VirtualMachineScaleSetVMsClient) restart_create_request(resource_group_na
 /// Restarts a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_restart(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginRestartOptions = VirtualMachineScaleSetVMsClientBeginRestartOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRestartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRestartResponse ! Str { virtual_machine_scale_set_vms_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRestartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRestartResponse ! Str { virtual_machine_scale_set_vms_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRestartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRestartResponse ! Str { virtual_machine_scale_set_vms_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRestartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRestartResponse ! Str { virtual_machine_scale_set_vms_restart_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientRetrieveBootDiagnosticsDataOptions: the optional parameters of VirtualMachineScaleSetVMsClient.retrieve_boot_diagnostics_data.
@@ -806,12 +834,15 @@ fn (c: VirtualMachineScaleSetVMsClient) retrieve_boot_diagnostics_data_create_re
 
 /// The operation to retrieve SAS URIs of boot diagnostic logs for a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient) retrieve_boot_diagnostics_data(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientRetrieveBootDiagnosticsDataOptions = VirtualMachineScaleSetVMsClientRetrieveBootDiagnosticsDataOptions{}) -> VirtualMachineScaleSetVMsClientRetrieveBootDiagnosticsDataResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.retrieve_boot_diagnostics_data_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.RetrieveBootDiagnosticsData", c.setup.pipeline.tracer)
+  let req = sp.on(c.retrieve_boot_diagnostics_data_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machine_scale_set_vms_retrieve_boot_diagnostics_data_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machine_scale_set_vms_retrieve_boot_diagnostics_data_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginRunCommandOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_run_command.
@@ -858,14 +889,16 @@ fn (c: VirtualMachineScaleSetVMsClient) run_command_create_request(resource_grou
 /// Run command on a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_run_command(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, parameters: RunCommandInput, options: VirtualMachineScaleSetVMsClientBeginRunCommandOptions = VirtualMachineScaleSetVMsClientBeginRunCommandOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientRunCommandResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRunCommandResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRunCommandResponse ! Str { virtual_machine_scale_set_vms_run_command_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientRunCommandResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRunCommandResponse ! Str { virtual_machine_scale_set_vms_run_command_handle(r) }, traced: true)
   }
-  let req = c.run_command_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginRunCommand", c.setup.pipeline.tracer)
+  let req = c.run_command_create_request(resource_group_name, vm_scale_set_name, instance_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRunCommandResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRunCommandResponse ! Str { virtual_machine_scale_set_vms_run_command_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientRunCommandResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientRunCommandResponse ! Str { virtual_machine_scale_set_vms_run_command_handle(r) }, traced: true)
 }
 
 /// VirtualMachineScaleSetVMsClientSimulateEvictionOptions: the optional parameters of VirtualMachineScaleSetVMsClient.simulate_eviction.
@@ -904,12 +937,15 @@ fn (c: VirtualMachineScaleSetVMsClient) simulate_eviction_create_request(resourc
 
 /// The operation to simulate the eviction of spot virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient) simulate_eviction(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientSimulateEvictionOptions = VirtualMachineScaleSetVMsClientSimulateEvictionOptions{}) -> VirtualMachineScaleSetVMsClientSimulateEvictionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.simulate_eviction_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.SimulateEviction", c.setup.pipeline.tracer)
+  let req = sp.on(c.simulate_eviction_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machine_scale_set_vms_simulate_eviction_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machine_scale_set_vms_simulate_eviction_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachineScaleSetVMsClientBeginStartOptions: the optional parameters of VirtualMachineScaleSetVMsClient.begin_start.
@@ -952,12 +988,14 @@ fn (c: VirtualMachineScaleSetVMsClient) start_create_request(resource_group_name
 /// Starts a virtual machine in a VM scale set.
 pub fn (c: VirtualMachineScaleSetVMsClient[fx]) begin_start(resource_group_name: Str, vm_scale_set_name: Str, instance_id: Str, options: VirtualMachineScaleSetVMsClientBeginStartOptions = VirtualMachineScaleSetVMsClientBeginStartOptions{}) -> runtime.Poller[VirtualMachineScaleSetVMsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientStartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientStartResponse ! Str { virtual_machine_scale_set_vms_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachineScaleSetVMsClientStartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientStartResponse ! Str { virtual_machine_scale_set_vms_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, vm_scale_set_name, instance_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineScaleSetVMsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, vm_scale_set_name, instance_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientStartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientStartResponse ! Str { virtual_machine_scale_set_vms_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachineScaleSetVMsClientStartResponse", fn(r: http.Response) -> VirtualMachineScaleSetVMsClientStartResponse ! Str { virtual_machine_scale_set_vms_start_handle(r) }, traced: true)
 }

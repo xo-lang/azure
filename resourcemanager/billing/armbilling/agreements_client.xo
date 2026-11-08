@@ -54,7 +54,7 @@ fn (c: AgreementsClient) list_by_billing_account_create_request(billing_account_
 /// Lists the agreements for a billing account.
 pub fn (c: AgreementsClient[fx]) new_list_by_billing_account_pager(billing_account_name: Str, options: AgreementsClientListByBillingAccountOptions = AgreementsClientListByBillingAccountOptions{}) -> runtime.Pager[AgreementsClientListByBillingAccountResponse, fx] ! azcore.CallErr {
   let req = c.list_by_billing_account_create_request(billing_account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AgreementsClientListByBillingAccountResponse ! Str { agreements_list_by_billing_account_handle(r) }, c.setup.endpoint, fn(r: AgreementsClientListByBillingAccountResponse) -> Str? { r.agreement_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AgreementsClientListByBillingAccountResponse ! Str { agreements_list_by_billing_account_handle(r) }, c.setup.endpoint, fn(r: AgreementsClientListByBillingAccountResponse) -> Str? { r.agreement_list_result.next_link }).traced_as("AgreementsClientListByBillingAccountResponse"))
 }
 
 /// AgreementsClientGetOptions: the optional parameters of AgreementsClient.get.
@@ -88,10 +88,13 @@ fn (c: AgreementsClient) get_create_request(billing_account_name: Str, agreement
 
 /// Gets an agreement by ID.
 pub fn (c: AgreementsClient) get(billing_account_name: Str, agreement_name: Str, options: AgreementsClientGetOptions = AgreementsClientGetOptions{}) -> AgreementsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(billing_account_name, agreement_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AgreementsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(billing_account_name, agreement_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  agreements_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = agreements_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

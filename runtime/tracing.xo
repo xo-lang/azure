@@ -1,0 +1,321 @@
+// azcore's tracing in the pipeline (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), decision 0013 step 1: `start_span` opens a
+// client method's span (runtime.StartSpan), the HTTP trace policy a
+// span per try (httpTracePolicy), and the sanitizer redacts the query
+// values a span would show (internal/sanitizer).
+//
+// Go carries the tracer and the span in progress in the request's
+// context. Here a request's `values` carry them: TRACED says a span of
+// an enabled tracer is open (Go's CtxWithTracingTracer), ACTIVE_KIND the
+// kind of the SDK span in progress (ctxActiveSpan), and the tracer's own
+// keys find its span (tracing.Context).
+
+use std/http
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/tracing
+
+/// Set in a request's values while a span of an enabled tracer is open.
+pub const TRACED: Str = "az.tracing.traced"
+/// The kind (Go's number) of the SDK span in progress.
+pub const ACTIVE_KIND: Str = "az.tracing.active_kind"
+/// The sanitizer's URL state of the span in progress.
+const URL_STATE: Str = "az.tracing.url_state"
+/// The resource provider attribute (Go's TracingNamespaceAttrName).
+pub const NAMESPACE_ATTR: Str = "az.namespace"
+/// What a redacted value becomes.
+pub const REDACTED: Str = "REDACTED"
+
+/// The span a client method opened, and the values its requests carry.
+pub struct ActiveSpan {
+  /// Merge into each request the method sends (`on`).
+  pub values: Map[Str, Str] = {}
+  span: tracing.Span? = None
+}
+
+/// Opens span `name` (`<Client>.<Method>`) of `tracer`, from the values
+/// in progress (Go's runtime.StartSpan): nothing when the tracer is
+/// disabled; no new span inside a client or internal SDK span (its HTTP
+/// spans are children of that span), as the Azure SDK guidelines say.
+pub fn start_span(values: Map[Str, Str], name: Str, tracer: tracing.Tracer, kind: tracing.SpanKind = tracing.SpanKind.Internal, attributes: List[tracing.Attribute] = []) -> ActiveSpan {
+  if !tracer.enabled() {
+    return ActiveSpan{values: values}
+  }
+  var vs = values
+  vs.put(TRACED, "1")
+  if let Some(k) = vs.get(ACTIVE_KIND) {
+    if k == "${tracing.SpanKind.Client.code()}" || k == "${tracing.SpanKind.Internal.code()}" {
+      return ActiveSpan{values: vs}
+    }
+  }
+  let (ctx, span) = tracer.start(tracing.Context{values: vs}, name, tracing.SpanOptions{kind: kind, attributes: attributes})
+  var out = ctx.values
+  out.put(ACTIVE_KIND, "${kind.code()}")
+  ActiveSpan{values: out, span: Some(span)}
+}
+
+/// `req` carrying the span's values.
+pub fn (a: ActiveSpan) on(req: policy.Request) -> policy.Request {
+  var vs = req.values
+  for (k, v) in a.values {
+    vs.put(k, v)
+  }
+  req with {values: vs}
+}
+
+/// Ends the span; `err`, Go's error as `%T:\n%s` would print it (see
+/// `error_desc`), sets its status to error.
+pub fn (a: ActiveSpan) end(err: Str? = None) {
+  let span = a.span ?? return
+  if let Some(e) = err {
+    span.set_status(tracing.SpanStatus.Error, e)
+  }
+  span.end()
+}
+
+/// Ends the span with `r`'s error, if any.
+pub fn (a: ActiveSpan) end_with[T](r: Result[T, azcore.CallErr]) {
+  match r {
+    Ok(_) => a.end()
+    Err(e) => a.end(Some(error_desc(e)))
+  }
+}
+
+/// Ends the span with `e` as its error status; returns `e` (a method's
+/// `err` set before it returns, in Go's deferred endSpan(err)).
+pub fn (a: ActiveSpan) fail(e: azcore.CallErr) -> azcore.CallErr {
+  a.end(Some(error_desc(e)))
+  e
+}
+
+/// Ends the span with no status; returns `e` (an error a method returns
+/// without setting its `err`, as Go's older generated code does).
+pub fn (a: ActiveSpan) close(e: azcore.CallErr) -> azcore.CallErr {
+  a.end()
+  e
+}
+
+/// Go's span status of a method's error: `<type>:\n<message>`, the type
+/// as Go's `%T` names the error the method returns (`*exported.` read as
+/// `*azcore.`).
+pub fn error_desc(e: azcore.CallErr) -> Str {
+  "${go_error_type(e)}:\n${e.display()}"
+}
+
+/// The Go type of the error a method returns for `e`.
+fn go_error_type(e: azcore.CallErr) -> Str {
+  match e {
+    Response(_) => "*azcore.ResponseError"
+    Send(_) => "*url.Error"
+    _ => "*errors.errorString"
+  }
+}
+
+/// Redacts query values in what a span shows (Go's sanitizer): every
+/// value of a parameter not allowed becomes REDACTED. `api-version` is
+/// always allowed.
+pub struct Sanitizer {
+  allowed: List[Str]
+  urls: Mutex[Map[Str, Str]]
+  next_id: Mutex[Int]
+}
+
+/// A sanitizer allowing `allowed_query_params` besides `api-version`
+/// (Go's ClientOptions.Logging.AllowedQueryParams).
+pub fn new_sanitizer(allowed_query_params: List[Str] = []) -> Sanitizer {
+  var allowed = ["api-version"]
+  for p in allowed_query_params {
+    allowed.push(p.to_lower())
+  }
+  Sanitizer{allowed: allowed, urls: Mutex.new({}), next_id: Mutex.new(0)}
+}
+
+/// `u` with each query value not allowed redacted, the query encoded
+/// again sorted (Go's GetSanitizedURL: `u.Query()`, `Set`, `Encode`).
+pub fn (s: Sanitizer) sanitized_url(u: Str) -> Str {
+  let (rest, fragment) = match u.find("#") {
+    Some(i) => (u[0..i], u[i..u.len()])
+    None => (u, "")
+  }
+  let (base, raw) = rest.cut("?") ?? (rest, "")
+  let q = go_query(raw)
+  var out = url.values()
+  for k in q.keys() {
+    let vs = q.all(k)
+    if s.allowed.contains(k.to_lower()) {
+      for v in vs {
+        out.add(k, v)
+      }
+    } else {
+      out.add(k, REDACTED)
+    }
+  }
+  let enc = out.encode()
+  if enc == "" {
+    return "${base}${fragment}"
+  }
+  "${base}?${enc}${fragment}"
+}
+
+/// `str` with `u` (any case) replaced by its sanitized form, when `u` has
+/// a query (Go's GetSanitizedURLString).
+pub fn (s: Sanitizer) sanitized_url_string(str: Str, u: Str) -> Str {
+  let (rest, _) = u.cut("#") ?? (u, "")
+  if !rest.contains("?") || rest.ends_with("?") {
+    return str
+  }
+  let i = str.to_lower().find(u.to_lower()) ?? return str
+  "${str[0..i]}${s.sanitized_url(u)}${str[i + u.len()..str.len()]}"
+}
+
+/// Records `u` as the URL of the span in progress in `values`, so its
+/// status redacts it (Go's RecordURL).
+fn (s: Sanitizer) record_url(values: Map[Str, Str], u: Str) {
+  let id = values.get(URL_STATE) ?? return
+  s.urls.with(fn(var m: Map[Str, Str]) {
+    m.put(id, u)
+  })
+}
+
+/// `t` with spans whose status description has the URL last sent
+/// redacted (Go's sanitizer.WrapTracer); a disabled tracer as it is.
+pub fn sanitized_tracer(t: tracing.Tracer, s: Sanitizer) -> tracing.Tracer {
+  if !t.enabled() {
+    return t
+  }
+  tracing.wrap_tracer(t, fn(inner: tracing.Tracer) -> tracing.Tracer {
+    tracing.new_tracer(fn(ctx: tracing.Context, name: Str, opts: tracing.SpanOptions) -> (tracing.Context, tracing.Span) {
+      let id = match ctx.values.get(URL_STATE) {
+        Some(v) => v
+        None => s.next_id.with(fn(var n: Int) -> Str {
+          n += 1
+          "${n}"
+        })
+      }
+      let (c, span) = inner.start(ctx, name, opts)
+      var vs = c.values
+      vs.put(URL_STATE, id)
+      (tracing.Context{values: vs}, s.wrap_span(span, id))
+    }, span_from_context: Some(fn(ctx: tracing.Context) -> tracing.Span {
+      let span = inner.span_from_context(ctx)
+      match ctx.values.get(URL_STATE) {
+        Some(id) => s.wrap_span(span, id)
+        None => span
+      }
+    }))
+  })
+}
+
+fn (s: Sanitizer) wrap_span(span: tracing.Span, id: Str) -> tracing.Span {
+  tracing.new_span(tracing.SpanImpl{
+    end: Some(fn() { span.end() }),
+    set_attributes: Some(fn(a: List[tracing.Attribute]) { span.set_attributes(a) }),
+    add_event: Some(fn(n: Str, a: List[tracing.Attribute]) { span.add_event(n, a) }),
+    set_status: Some(fn(code: tracing.SpanStatus, desc: Str) {
+      let u = s.urls.with(fn(var m: Map[Str, Str]) -> Str? { m.get(id) })
+      let d = match u {
+        Some(x) => s.sanitized_url_string(desc, x)
+        None => desc
+      }
+      span.set_status(code, d)
+    }),
+  })
+}
+
+/// A span per try (Go's httpTracePolicy), when a span of an enabled
+/// tracer is open: `HTTP <method>`, a client span with the method, the
+/// sanitized URL, the host, the User-Agent and the client request id;
+/// then the status code, error status at 400 and above, and the service
+/// request id; a transport error as its status.
+pub struct HttpTracePolicy {
+  pub tracer: tracing.Tracer
+  pub sanitizer: Sanitizer
+}
+
+fn (p: HttpTracePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if req.values.get(TRACED).is_none() || !p.tracer.enabled() {
+    p.sanitizer.record_url(req.values, req.url)
+    return next.send(req)
+  }
+  var attrs = [
+    tracing.str_attr("http.method", req.method),
+    tracing.str_attr("http.url", p.sanitizer.sanitized_url(req.url)),
+    tracing.str_attr("net.peer.name", host_of(req.url)),
+  ]
+  if let Some(ua) = req.header("User-Agent") {
+    if ua != "" {
+      attrs.push(tracing.str_attr("http.user_agent", ua))
+    }
+  }
+  if let Some(id) = req.header("x-ms-client-request-id") {
+    if id != "" {
+      attrs.push(tracing.str_attr("az.client_request_id", id))
+    }
+  }
+  let (ctx, span) = p.tracer.start(tracing.Context{values: req.values}, "HTTP ${req.method}", tracing.SpanOptions{kind: tracing.SpanKind.Client, attributes: attrs})
+  let traced = req with {values: ctx.values}
+  p.sanitizer.record_url(traced.values, traced.url)
+  let r = next.send(traced)
+  match r {
+    Ok(resp) => {
+      span.set_attributes([tracing.int_attr("http.status_code", resp.status)])
+      if resp.status > 399 {
+        span.set_status(tracing.SpanStatus.Error, "${resp.status} ${http.status_text(resp.status)}")
+      }
+      if let Some(id) = header_value(resp, "x-ms-request-id") {
+        span.set_attributes([tracing.str_attr("az.service_request_id", id)])
+      }
+    }
+    Err(e) => span.set_status(tracing.SpanStatus.Error, p.sanitizer.sanitized_url_string(e.display(), req.url))
+  }
+  span.end()
+  r
+}
+
+/// The host of `u` (Go's URL.Host: with its port).
+fn host_of(u: Str) -> Str {
+  let (_, rest) = u.cut("://") ?? return ""
+  var end = rest.len()
+  for c in ["/", "?", "#"] {
+    if let Some(i) = rest.find(c) {
+      if i < end {
+        end = i
+      }
+    }
+  }
+  let h = rest[0..end]
+  match h.find("@") {
+    Some(i) => h[i + 1..h.len()]
+    None => h
+  }
+}
+
+/// Sets `az.namespace` on the span in progress from the request's path
+/// when it names a resource type (ARM's httpTraceNamespacePolicy).
+pub struct NamespacePolicy {
+  pub tracer: tracing.Tracer
+  pub namespace_of_path: fn(Str) -> Str?
+}
+
+fn (p: NamespacePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  if req.values.get(TRACED).is_some() && p.tracer.enabled() {
+    if let Some(ns) = (p.namespace_of_path)(path_of(req.url)) {
+      p.tracer.span_from_context(tracing.Context{values: req.values}).set_attributes([tracing.str_attr(NAMESPACE_ATTR, ns)])
+    }
+  }
+  next.send(req)
+}
+
+/// The unescaped path of `u` (Go's URL.Path).
+pub fn path_of(u: Str) -> Str {
+  let (_, rest) = u.cut("://") ?? ("", u)
+  let start = rest.find("/") ?? return ""
+  var p = rest[start..rest.len()]
+  for c in ["?", "#"] {
+    if let Some(i) = p.find(c) {
+      p = p[0..i]
+    }
+  }
+  url.path_unescape(p) ?? _ => p
+}

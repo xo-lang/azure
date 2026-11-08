@@ -68,7 +68,7 @@ fn (c: AgentPoolsClient) list_by_kubernetes_cluster_create_request(resource_grou
 /// Get a list of agent pools for the provided Kubernetes cluster.
 pub fn (c: AgentPoolsClient[fx]) new_list_by_kubernetes_cluster_pager(resource_group_name: Str, kubernetes_cluster_name: Str, options: AgentPoolsClientListByKubernetesClusterOptions = AgentPoolsClientListByKubernetesClusterOptions{}) -> runtime.Pager[AgentPoolsClientListByKubernetesClusterResponse, fx] ! azcore.CallErr {
   let req = c.list_by_kubernetes_cluster_create_request(resource_group_name, kubernetes_cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AgentPoolsClientListByKubernetesClusterResponse ! Str { agent_pools_list_by_kubernetes_cluster_handle(r) }, c.setup.endpoint, fn(r: AgentPoolsClientListByKubernetesClusterResponse) -> Str? { r.agent_pool_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AgentPoolsClientListByKubernetesClusterResponse ! Str { agent_pools_list_by_kubernetes_cluster_handle(r) }, c.setup.endpoint, fn(r: AgentPoolsClientListByKubernetesClusterResponse) -> Str? { r.agent_pool_list.next_link }).traced_as("AgentPoolsClientListByKubernetesClusterResponse"))
 }
 
 /// AgentPoolsClientGetOptions: the optional parameters of AgentPoolsClient.get.
@@ -110,12 +110,15 @@ fn (c: AgentPoolsClient) get_create_request(resource_group_name: Str, kubernetes
 
 /// Get properties of the provided Kubernetes cluster agent pool.
 pub fn (c: AgentPoolsClient) get(resource_group_name: Str, kubernetes_cluster_name: Str, agent_pool_name: Str, options: AgentPoolsClientGetOptions = AgentPoolsClientGetOptions{}) -> AgentPoolsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AgentPoolsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  agent_pools_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = agent_pools_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AgentPoolsClientBeginCreateOrUpdateOptions: the optional parameters of AgentPoolsClient.begin_create_or_update.
@@ -172,14 +175,16 @@ fn (c: AgentPoolsClient) create_or_update_create_request(resource_group_name: St
 /// Create a new Kubernetes cluster agent pool or update the properties of the existing one.
 pub fn (c: AgentPoolsClient[fx]) begin_create_or_update(resource_group_name: Str, kubernetes_cluster_name: Str, agent_pool_name: Str, agent_pool_parameters: AgentPool, options: AgentPoolsClientBeginCreateOrUpdateOptions = AgentPoolsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[AgentPoolsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientCreateOrUpdateResponse", fn(r: http.Response) -> AgentPoolsClientCreateOrUpdateResponse ! Str { agent_pools_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientCreateOrUpdateResponse", fn(r: http.Response) -> AgentPoolsClientCreateOrUpdateResponse ! Str { agent_pools_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, agent_pool_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AgentPoolsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, agent_pool_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientCreateOrUpdateResponse", fn(r: http.Response) -> AgentPoolsClientCreateOrUpdateResponse ! Str { agent_pools_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientCreateOrUpdateResponse", fn(r: http.Response) -> AgentPoolsClientCreateOrUpdateResponse ! Str { agent_pools_create_or_update_handle(r) }, traced: true)
 }
 
 /// AgentPoolsClientBeginUpdateOptions: the optional parameters of AgentPoolsClient.begin_update.
@@ -236,14 +241,16 @@ fn (c: AgentPoolsClient) update_create_request(resource_group_name: Str, kuberne
 /// Patch the properties of the provided Kubernetes cluster agent pool, or update the tags associated with the Kubernetes cluster agent pool. Properties and tag updates can be done independently.
 pub fn (c: AgentPoolsClient[fx]) begin_update(resource_group_name: Str, kubernetes_cluster_name: Str, agent_pool_name: Str, agent_pool_update_parameters: AgentPoolPatchParameters, options: AgentPoolsClientBeginUpdateOptions = AgentPoolsClientBeginUpdateOptions{}) -> runtime.Poller[AgentPoolsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientUpdateResponse", fn(r: http.Response) -> AgentPoolsClientUpdateResponse ! Str { agent_pools_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientUpdateResponse", fn(r: http.Response) -> AgentPoolsClientUpdateResponse ! Str { agent_pools_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, agent_pool_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AgentPoolsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, agent_pool_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientUpdateResponse", fn(r: http.Response) -> AgentPoolsClientUpdateResponse ! Str { agent_pools_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientUpdateResponse", fn(r: http.Response) -> AgentPoolsClientUpdateResponse ! Str { agent_pools_update_handle(r) }, traced: true)
 }
 
 /// AgentPoolsClientBeginDeleteOptions: the optional parameters of AgentPoolsClient.begin_delete.
@@ -299,12 +306,14 @@ fn (c: AgentPoolsClient) delete_create_request(resource_group_name: Str, kuberne
 /// Delete the provided Kubernetes cluster agent pool.
 pub fn (c: AgentPoolsClient[fx]) begin_delete(resource_group_name: Str, kubernetes_cluster_name: Str, agent_pool_name: Str, options: AgentPoolsClientBeginDeleteOptions = AgentPoolsClientBeginDeleteOptions{}) -> runtime.Poller[AgentPoolsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientDeleteResponse", fn(r: http.Response) -> AgentPoolsClientDeleteResponse ! Str { agent_pools_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AgentPoolsClientDeleteResponse", fn(r: http.Response) -> AgentPoolsClientDeleteResponse ! Str { agent_pools_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AgentPoolsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, kubernetes_cluster_name, agent_pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientDeleteResponse", fn(r: http.Response) -> AgentPoolsClientDeleteResponse ! Str { agent_pools_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AgentPoolsClientDeleteResponse", fn(r: http.Response) -> AgentPoolsClientDeleteResponse ! Str { agent_pools_delete_handle(r) }, traced: true)
 }

@@ -49,7 +49,7 @@ fn (c: RoutePoliciesClient) list_by_subscription_create_request(options: RoutePo
 /// Implements RoutePolicies list by subscription GET method.
 pub fn (c: RoutePoliciesClient[fx]) new_list_by_subscription_pager(options: RoutePoliciesClientListBySubscriptionOptions = RoutePoliciesClientListBySubscriptionOptions{}) -> runtime.Pager[RoutePoliciesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RoutePoliciesClientListBySubscriptionResponse ! Str { route_policies_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RoutePoliciesClientListBySubscriptionResponse) -> Str? { r.route_policies_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RoutePoliciesClientListBySubscriptionResponse ! Str { route_policies_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RoutePoliciesClientListBySubscriptionResponse) -> Str? { r.route_policies_list_result.next_link }).traced_as("RoutePoliciesClientListBySubscriptionResponse"))
 }
 
 /// RoutePoliciesClientListByResourceGroupOptions: the optional parameters of RoutePoliciesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: RoutePoliciesClient) list_by_resource_group_create_request(resource_group
 /// Implements RoutePolicies list by resource group GET method.
 pub fn (c: RoutePoliciesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: RoutePoliciesClientListByResourceGroupOptions = RoutePoliciesClientListByResourceGroupOptions{}) -> runtime.Pager[RoutePoliciesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RoutePoliciesClientListByResourceGroupResponse ! Str { route_policies_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: RoutePoliciesClientListByResourceGroupResponse) -> Str? { r.route_policies_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RoutePoliciesClientListByResourceGroupResponse ! Str { route_policies_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: RoutePoliciesClientListByResourceGroupResponse) -> Str? { r.route_policies_list_result.next_link }).traced_as("RoutePoliciesClientListByResourceGroupResponse"))
 }
 
 /// RoutePoliciesClientGetOptions: the optional parameters of RoutePoliciesClient.get.
@@ -122,12 +122,15 @@ fn (c: RoutePoliciesClient) get_create_request(resource_group_name: Str, route_p
 
 /// Implements Route Policy GET method.
 pub fn (c: RoutePoliciesClient) get(resource_group_name: Str, route_policy_name: Str, options: RoutePoliciesClientGetOptions = RoutePoliciesClientGetOptions{}) -> RoutePoliciesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, route_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, route_policy_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  route_policies_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = route_policies_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// RoutePoliciesClientBeginCreateOptions: the optional parameters of RoutePoliciesClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: RoutePoliciesClient) create_create_request(resource_group_name: Str, rout
 /// Implements Route Policy PUT method.
 pub fn (c: RoutePoliciesClient[fx]) begin_create(resource_group_name: Str, route_policy_name: Str, body: RoutePolicy, options: RoutePoliciesClientBeginCreateOptions = RoutePoliciesClientBeginCreateOptions{}) -> runtime.Poller[RoutePoliciesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientCreateResponse", fn(r: http.Response) -> RoutePoliciesClientCreateResponse ! Str { route_policies_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientCreateResponse", fn(r: http.Response) -> RoutePoliciesClientCreateResponse ! Str { route_policies_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, route_policy_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, route_policy_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientCreateResponse", fn(r: http.Response) -> RoutePoliciesClientCreateResponse ! Str { route_policies_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientCreateResponse", fn(r: http.Response) -> RoutePoliciesClientCreateResponse ! Str { route_policies_create_handle(r) }, traced: true)
 }
 
 /// RoutePoliciesClientBeginUpdateOptions: the optional parameters of RoutePoliciesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: RoutePoliciesClient) update_create_request(resource_group_name: Str, rout
 /// API to update certain properties of the Route Policy resource.
 pub fn (c: RoutePoliciesClient[fx]) begin_update(resource_group_name: Str, route_policy_name: Str, body: RoutePolicyPatch, options: RoutePoliciesClientBeginUpdateOptions = RoutePoliciesClientBeginUpdateOptions{}) -> runtime.Poller[RoutePoliciesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientUpdateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateResponse ! Str { route_policies_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientUpdateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateResponse ! Str { route_policies_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, route_policy_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, route_policy_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientUpdateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateResponse ! Str { route_policies_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientUpdateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateResponse ! Str { route_policies_update_handle(r) }, traced: true)
 }
 
 /// RoutePoliciesClientBeginDeleteOptions: the optional parameters of RoutePoliciesClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: RoutePoliciesClient) delete_create_request(resource_group_name: Str, rout
 /// Implements Route Policy DELETE method.
 pub fn (c: RoutePoliciesClient[fx]) begin_delete(resource_group_name: Str, route_policy_name: Str, options: RoutePoliciesClientBeginDeleteOptions = RoutePoliciesClientBeginDeleteOptions{}) -> runtime.Poller[RoutePoliciesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientDeleteResponse", fn(r: http.Response) -> RoutePoliciesClientDeleteResponse ! Str { route_policies_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientDeleteResponse", fn(r: http.Response) -> RoutePoliciesClientDeleteResponse ! Str { route_policies_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, route_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, route_policy_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientDeleteResponse", fn(r: http.Response) -> RoutePoliciesClientDeleteResponse ! Str { route_policies_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientDeleteResponse", fn(r: http.Response) -> RoutePoliciesClientDeleteResponse ! Str { route_policies_delete_handle(r) }, traced: true)
 }
 
 /// RoutePoliciesClientBeginCommitConfigurationOptions: the optional parameters of RoutePoliciesClient.begin_commit_configuration.
@@ -315,14 +324,16 @@ fn (c: RoutePoliciesClient) commit_configuration_create_request(resource_group_n
 /// Commits the configuration of the given resources.
 pub fn (c: RoutePoliciesClient[fx]) begin_commit_configuration(resource_group_name: Str, route_policy_name: Str, options: RoutePoliciesClientBeginCommitConfigurationOptions = RoutePoliciesClientBeginCommitConfigurationOptions{}) -> runtime.Poller[RoutePoliciesClientCommitConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientCommitConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientCommitConfigurationResponse ! Str { route_policies_commit_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientCommitConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientCommitConfigurationResponse ! Str { route_policies_commit_configuration_handle(r) }, traced: true)
   }
-  let req = c.commit_configuration_create_request(resource_group_name, route_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginCommitConfiguration", c.setup.pipeline.tracer)
+  let req = c.commit_configuration_create_request(resource_group_name, route_policy_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientCommitConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientCommitConfigurationResponse ! Str { route_policies_commit_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientCommitConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientCommitConfigurationResponse ! Str { route_policies_commit_configuration_handle(r) }, traced: true)
 }
 
 /// RoutePoliciesClientBeginUpdateAdministrativeStateOptions: the optional parameters of RoutePoliciesClient.begin_update_administrative_state.
@@ -365,14 +376,16 @@ fn (c: RoutePoliciesClient) update_administrative_state_create_request(resource_
 /// Updated the admin state for this Route Policy.
 pub fn (c: RoutePoliciesClient[fx]) begin_update_administrative_state(resource_group_name: Str, route_policy_name: Str, body: UpdateAdministrativeState, options: RoutePoliciesClientBeginUpdateAdministrativeStateOptions = RoutePoliciesClientBeginUpdateAdministrativeStateOptions{}) -> runtime.Poller[RoutePoliciesClientUpdateAdministrativeStateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientUpdateAdministrativeStateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateAdministrativeStateResponse ! Str { route_policies_update_administrative_state_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientUpdateAdministrativeStateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateAdministrativeStateResponse ! Str { route_policies_update_administrative_state_handle(r) }, traced: true)
   }
-  let req = c.update_administrative_state_create_request(resource_group_name, route_policy_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginUpdateAdministrativeState", c.setup.pipeline.tracer)
+  let req = c.update_administrative_state_create_request(resource_group_name, route_policy_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientUpdateAdministrativeStateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateAdministrativeStateResponse ! Str { route_policies_update_administrative_state_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientUpdateAdministrativeStateResponse", fn(r: http.Response) -> RoutePoliciesClientUpdateAdministrativeStateResponse ! Str { route_policies_update_administrative_state_handle(r) }, traced: true)
 }
 
 /// RoutePoliciesClientBeginValidateConfigurationOptions: the optional parameters of RoutePoliciesClient.begin_validate_configuration.
@@ -414,12 +427,14 @@ fn (c: RoutePoliciesClient) validate_configuration_create_request(resource_group
 /// Validates the configuration of the resources.
 pub fn (c: RoutePoliciesClient[fx]) begin_validate_configuration(resource_group_name: Str, route_policy_name: Str, options: RoutePoliciesClientBeginValidateConfigurationOptions = RoutePoliciesClientBeginValidateConfigurationOptions{}) -> runtime.Poller[RoutePoliciesClientValidateConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientValidateConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientValidateConfigurationResponse ! Str { route_policies_validate_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RoutePoliciesClientValidateConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientValidateConfigurationResponse ! Str { route_policies_validate_configuration_handle(r) }, traced: true)
   }
-  let req = c.validate_configuration_create_request(resource_group_name, route_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RoutePoliciesClient.BeginValidateConfiguration", c.setup.pipeline.tracer)
+  let req = c.validate_configuration_create_request(resource_group_name, route_policy_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientValidateConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientValidateConfigurationResponse ! Str { route_policies_validate_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RoutePoliciesClientValidateConfigurationResponse", fn(r: http.Response) -> RoutePoliciesClientValidateConfigurationResponse ! Str { route_policies_validate_configuration_handle(r) }, traced: true)
 }

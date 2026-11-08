@@ -57,10 +57,13 @@ fn (c: NamespacesClient) check_name_availability_create_request(resource_group_n
 
 /// Checks if resource name is available.
 pub fn (c: NamespacesClient) check_name_availability(resource_group_name: Str, environment_name: Str, check_name_availability_request: CheckNameAvailabilityRequest, options: NamespacesClientCheckNameAvailabilityOptions = NamespacesClientCheckNameAvailabilityOptions{}) -> NamespacesClientCheckNameAvailabilityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_name_availability_create_request(resource_group_name, environment_name, check_name_availability_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NamespacesClient.CheckNameAvailability", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_name_availability_create_request(resource_group_name, environment_name, check_name_availability_request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  namespaces_check_name_availability_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = namespaces_check_name_availability_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -48,12 +48,15 @@ fn (c: DatabaseAccountsClient) check_name_exists_create_request(account_name: St
 
 /// Checks that the Azure Cosmos DB account name already exists. A valid account name may contain only lowercase letters, numbers, and the '-' character, and must be between 3 and 50 characters.
 pub fn (c: DatabaseAccountsClient) check_name_exists(account_name: Str, options: DatabaseAccountsClientCheckNameExistsOptions = DatabaseAccountsClientCheckNameExistsOptions{}) -> DatabaseAccountsClientCheckNameExistsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_name_exists_create_request(account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.CheckNameExists", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_name_exists_create_request(account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_check_name_exists_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_check_name_exists_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientListOptions: the optional parameters of DatabaseAccountsClient.new_list_pager.
@@ -84,7 +87,7 @@ fn (c: DatabaseAccountsClient) list_create_request(options: DatabaseAccountsClie
 /// Lists all the Azure Cosmos DB database accounts available under the subscription.
 pub fn (c: DatabaseAccountsClient[fx]) new_list_pager(options: DatabaseAccountsClientListOptions = DatabaseAccountsClientListOptions{}) -> runtime.Pager[DatabaseAccountsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListResponse ! Str { database_accounts_list_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListResponse) -> Str? { r.database_accounts_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListResponse ! Str { database_accounts_list_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListResponse) -> Str? { r.database_accounts_list_result.next_link }).traced_as("DatabaseAccountsClientListResponse"))
 }
 
 /// DatabaseAccountsClientListByResourceGroupOptions: the optional parameters of DatabaseAccountsClient.new_list_by_resource_group_pager.
@@ -119,7 +122,7 @@ fn (c: DatabaseAccountsClient) list_by_resource_group_create_request(resource_gr
 /// Lists all the Azure Cosmos DB database accounts available under the given resource group.
 pub fn (c: DatabaseAccountsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: DatabaseAccountsClientListByResourceGroupOptions = DatabaseAccountsClientListByResourceGroupOptions{}) -> runtime.Pager[DatabaseAccountsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListByResourceGroupResponse ! Str { database_accounts_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListByResourceGroupResponse) -> Str? { r.database_accounts_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListByResourceGroupResponse ! Str { database_accounts_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListByResourceGroupResponse) -> Str? { r.database_accounts_list_result.next_link }).traced_as("DatabaseAccountsClientListByResourceGroupResponse"))
 }
 
 /// DatabaseAccountsClientGetOptions: the optional parameters of DatabaseAccountsClient.get.
@@ -157,12 +160,15 @@ fn (c: DatabaseAccountsClient) get_create_request(resource_group_name: Str, acco
 
 /// Retrieves the properties of an existing Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient) get(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientGetOptions = DatabaseAccountsClientGetOptions{}) -> DatabaseAccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientBeginCreateOrUpdateOptions: the optional parameters of DatabaseAccountsClient.begin_create_or_update.
@@ -205,14 +211,16 @@ fn (c: DatabaseAccountsClient) create_or_update_create_request(resource_group_na
 /// Creates or updates an Azure Cosmos DB database account. The "Update" method is preferred when performing updates on an account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_create_or_update(resource_group_name: Str, account_name: Str, create_update_parameters: DatabaseAccountCreateUpdateParameters, options: DatabaseAccountsClientBeginCreateOrUpdateOptions = DatabaseAccountsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DatabaseAccountsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientCreateOrUpdateResponse ! Str { database_accounts_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientCreateOrUpdateResponse ! Str { database_accounts_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, account_name, create_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, account_name, create_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientCreateOrUpdateResponse ! Str { database_accounts_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientCreateOrUpdateResponse ! Str { database_accounts_create_or_update_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientBeginUpdateOptions: the optional parameters of DatabaseAccountsClient.begin_update.
@@ -255,14 +263,16 @@ fn (c: DatabaseAccountsClient) update_create_request(resource_group_name: Str, a
 /// Updates the properties of an existing Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_update(resource_group_name: Str, account_name: Str, update_parameters: DatabaseAccountUpdateParameters, options: DatabaseAccountsClientBeginUpdateOptions = DatabaseAccountsClientBeginUpdateOptions{}) -> runtime.Poller[DatabaseAccountsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientUpdateResponse ! Str { database_accounts_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientUpdateResponse ! Str { database_accounts_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientUpdateResponse ! Str { database_accounts_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientUpdateResponse", fn(r: http.Response) -> DatabaseAccountsClientUpdateResponse ! Str { database_accounts_update_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientBeginDeleteOptions: the optional parameters of DatabaseAccountsClient.begin_delete.
@@ -301,14 +311,16 @@ fn (c: DatabaseAccountsClient) delete_create_request(resource_group_name: Str, a
 /// Deletes an existing Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientBeginDeleteOptions = DatabaseAccountsClientBeginDeleteOptions{}) -> runtime.Poller[DatabaseAccountsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientDeleteResponse", fn(r: http.Response) -> DatabaseAccountsClientDeleteResponse ! Str { database_accounts_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientDeleteResponse", fn(r: http.Response) -> DatabaseAccountsClientDeleteResponse ! Str { database_accounts_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientDeleteResponse", fn(r: http.Response) -> DatabaseAccountsClientDeleteResponse ! Str { database_accounts_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientDeleteResponse", fn(r: http.Response) -> DatabaseAccountsClientDeleteResponse ! Str { database_accounts_delete_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientBeginFailoverPriorityChangeOptions: the optional parameters of DatabaseAccountsClient.begin_failover_priority_change.
@@ -348,14 +360,16 @@ fn (c: DatabaseAccountsClient) failover_priority_change_create_request(resource_
 /// Changes the failover priority for the Azure Cosmos DB database account. A failover priority of 0 indicates a write region. The maximum value for a failover priority = (total number of regions - 1). Failover priority values must be unique for each of the regions in which the database account exists.
 pub fn (c: DatabaseAccountsClient[fx]) begin_failover_priority_change(resource_group_name: Str, account_name: Str, failover_parameters: FailoverPolicies, options: DatabaseAccountsClientBeginFailoverPriorityChangeOptions = DatabaseAccountsClientBeginFailoverPriorityChangeOptions{}) -> runtime.Poller[DatabaseAccountsClientFailoverPriorityChangeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientFailoverPriorityChangeResponse", fn(r: http.Response) -> DatabaseAccountsClientFailoverPriorityChangeResponse ! Str { database_accounts_failover_priority_change_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientFailoverPriorityChangeResponse", fn(r: http.Response) -> DatabaseAccountsClientFailoverPriorityChangeResponse ! Str { database_accounts_failover_priority_change_handle(r) }, traced: true)
   }
-  let req = c.failover_priority_change_create_request(resource_group_name, account_name, failover_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginFailoverPriorityChange", c.setup.pipeline.tracer)
+  let req = c.failover_priority_change_create_request(resource_group_name, account_name, failover_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientFailoverPriorityChangeResponse", fn(r: http.Response) -> DatabaseAccountsClientFailoverPriorityChangeResponse ! Str { database_accounts_failover_priority_change_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientFailoverPriorityChangeResponse", fn(r: http.Response) -> DatabaseAccountsClientFailoverPriorityChangeResponse ! Str { database_accounts_failover_priority_change_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientListConnectionStringsOptions: the optional parameters of DatabaseAccountsClient.list_connection_strings.
@@ -393,12 +407,15 @@ fn (c: DatabaseAccountsClient) list_connection_strings_create_request(resource_g
 
 /// Lists the connection strings for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient) list_connection_strings(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientListConnectionStringsOptions = DatabaseAccountsClientListConnectionStringsOptions{}) -> DatabaseAccountsClientListConnectionStringsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_connection_strings_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.ListConnectionStrings", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_connection_strings_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_list_connection_strings_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_list_connection_strings_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientListKeysOptions: the optional parameters of DatabaseAccountsClient.list_keys.
@@ -436,12 +453,15 @@ fn (c: DatabaseAccountsClient) list_keys_create_request(resource_group_name: Str
 
 /// Lists the access keys for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient) list_keys(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientListKeysOptions = DatabaseAccountsClientListKeysOptions{}) -> DatabaseAccountsClientListKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_keys_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.ListKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_keys_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_list_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_list_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientListMetricDefinitionsOptions: the optional parameters of DatabaseAccountsClient.new_list_metric_definitions_pager.
@@ -480,7 +500,7 @@ fn (c: DatabaseAccountsClient) list_metric_definitions_create_request(resource_g
 /// Retrieves metric definitions for the given database account.
 pub fn (c: DatabaseAccountsClient[fx]) new_list_metric_definitions_pager(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientListMetricDefinitionsOptions = DatabaseAccountsClientListMetricDefinitionsOptions{}) -> runtime.Pager[DatabaseAccountsClientListMetricDefinitionsResponse, fx] ! azcore.CallErr {
   let req = c.list_metric_definitions_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListMetricDefinitionsResponse ! Str { database_accounts_list_metric_definitions_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListMetricDefinitionsResponse) -> Str? { r.metric_definitions_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListMetricDefinitionsResponse ! Str { database_accounts_list_metric_definitions_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListMetricDefinitionsResponse) -> Str? { r.metric_definitions_list_result.next_link }).traced_as("DatabaseAccountsClientListMetricDefinitionsResponse"))
 }
 
 /// DatabaseAccountsClientListMetricsOptions: the optional parameters of DatabaseAccountsClient.new_list_metrics_pager.
@@ -520,7 +540,7 @@ fn (c: DatabaseAccountsClient) list_metrics_create_request(resource_group_name: 
 /// Retrieves the metrics determined by the given filter for the given database account.
 pub fn (c: DatabaseAccountsClient[fx]) new_list_metrics_pager(resource_group_name: Str, account_name: Str, filter: Str, options: DatabaseAccountsClientListMetricsOptions = DatabaseAccountsClientListMetricsOptions{}) -> runtime.Pager[DatabaseAccountsClientListMetricsResponse, fx] ! azcore.CallErr {
   let req = c.list_metrics_create_request(resource_group_name, account_name, filter, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListMetricsResponse ! Str { database_accounts_list_metrics_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListMetricsResponse) -> Str? { r.metric_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListMetricsResponse ! Str { database_accounts_list_metrics_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListMetricsResponse) -> Str? { r.metric_list_result.next_link }).traced_as("DatabaseAccountsClientListMetricsResponse"))
 }
 
 /// DatabaseAccountsClientBeginOfflineRegionOptions: the optional parameters of DatabaseAccountsClient.begin_offline_region.
@@ -560,14 +580,16 @@ fn (c: DatabaseAccountsClient) offline_region_create_request(resource_group_name
 /// Offline the specified region for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_offline_region(resource_group_name: Str, account_name: Str, region_parameter_for_offline: RegionForOnlineOffline, options: DatabaseAccountsClientBeginOfflineRegionOptions = DatabaseAccountsClientBeginOfflineRegionOptions{}) -> runtime.Poller[DatabaseAccountsClientOfflineRegionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientOfflineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOfflineRegionResponse ! Str { database_accounts_offline_region_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientOfflineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOfflineRegionResponse ! Str { database_accounts_offline_region_handle(r) }, traced: true)
   }
-  let req = c.offline_region_create_request(resource_group_name, account_name, region_parameter_for_offline, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginOfflineRegion", c.setup.pipeline.tracer)
+  let req = c.offline_region_create_request(resource_group_name, account_name, region_parameter_for_offline, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientOfflineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOfflineRegionResponse ! Str { database_accounts_offline_region_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientOfflineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOfflineRegionResponse ! Str { database_accounts_offline_region_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientBeginOnlineRegionOptions: the optional parameters of DatabaseAccountsClient.begin_online_region.
@@ -607,14 +629,16 @@ fn (c: DatabaseAccountsClient) online_region_create_request(resource_group_name:
 /// Online the specified region for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_online_region(resource_group_name: Str, account_name: Str, region_parameter_for_online: RegionForOnlineOffline, options: DatabaseAccountsClientBeginOnlineRegionOptions = DatabaseAccountsClientBeginOnlineRegionOptions{}) -> runtime.Poller[DatabaseAccountsClientOnlineRegionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientOnlineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOnlineRegionResponse ! Str { database_accounts_online_region_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientOnlineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOnlineRegionResponse ! Str { database_accounts_online_region_handle(r) }, traced: true)
   }
-  let req = c.online_region_create_request(resource_group_name, account_name, region_parameter_for_online, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginOnlineRegion", c.setup.pipeline.tracer)
+  let req = c.online_region_create_request(resource_group_name, account_name, region_parameter_for_online, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientOnlineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOnlineRegionResponse ! Str { database_accounts_online_region_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientOnlineRegionResponse", fn(r: http.Response) -> DatabaseAccountsClientOnlineRegionResponse ! Str { database_accounts_online_region_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientGetReadOnlyKeysOptions: the optional parameters of DatabaseAccountsClient.get_read_only_keys.
@@ -652,12 +676,15 @@ fn (c: DatabaseAccountsClient) get_read_only_keys_create_request(resource_group_
 
 /// Lists the read-only access keys for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient) get_read_only_keys(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientGetReadOnlyKeysOptions = DatabaseAccountsClientGetReadOnlyKeysOptions{}) -> DatabaseAccountsClientGetReadOnlyKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_read_only_keys_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.GetReadOnlyKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_read_only_keys_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_get_read_only_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_get_read_only_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientListReadOnlyKeysOptions: the optional parameters of DatabaseAccountsClient.list_read_only_keys.
@@ -695,12 +722,15 @@ fn (c: DatabaseAccountsClient) list_read_only_keys_create_request(resource_group
 
 /// Lists the read-only access keys for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient) list_read_only_keys(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientListReadOnlyKeysOptions = DatabaseAccountsClientListReadOnlyKeysOptions{}) -> DatabaseAccountsClientListReadOnlyKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_read_only_keys_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.ListReadOnlyKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_read_only_keys_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_accounts_list_read_only_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_accounts_list_read_only_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabaseAccountsClientBeginRegenerateKeyOptions: the optional parameters of DatabaseAccountsClient.begin_regenerate_key.
@@ -740,14 +770,16 @@ fn (c: DatabaseAccountsClient) regenerate_key_create_request(resource_group_name
 /// Regenerates an access key for the specified Azure Cosmos DB database account.
 pub fn (c: DatabaseAccountsClient[fx]) begin_regenerate_key(resource_group_name: Str, account_name: Str, key_to_regenerate: DatabaseAccountRegenerateKeyParameters, options: DatabaseAccountsClientBeginRegenerateKeyOptions = DatabaseAccountsClientBeginRegenerateKeyOptions{}) -> runtime.Poller[DatabaseAccountsClientRegenerateKeyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientRegenerateKeyResponse", fn(r: http.Response) -> DatabaseAccountsClientRegenerateKeyResponse ! Str { database_accounts_regenerate_key_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabaseAccountsClientRegenerateKeyResponse", fn(r: http.Response) -> DatabaseAccountsClientRegenerateKeyResponse ! Str { database_accounts_regenerate_key_handle(r) }, traced: true)
   }
-  let req = c.regenerate_key_create_request(resource_group_name, account_name, key_to_regenerate, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseAccountsClient.BeginRegenerateKey", c.setup.pipeline.tracer)
+  let req = c.regenerate_key_create_request(resource_group_name, account_name, key_to_regenerate, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientRegenerateKeyResponse", fn(r: http.Response) -> DatabaseAccountsClientRegenerateKeyResponse ! Str { database_accounts_regenerate_key_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabaseAccountsClientRegenerateKeyResponse", fn(r: http.Response) -> DatabaseAccountsClientRegenerateKeyResponse ! Str { database_accounts_regenerate_key_handle(r) }, traced: true)
 }
 
 /// DatabaseAccountsClientListUsagesOptions: the optional parameters of DatabaseAccountsClient.new_list_usages_pager.
@@ -792,5 +824,5 @@ fn (c: DatabaseAccountsClient) list_usages_create_request(resource_group_name: S
 /// Retrieves the usages (most recent data) for the given database account.
 pub fn (c: DatabaseAccountsClient[fx]) new_list_usages_pager(resource_group_name: Str, account_name: Str, options: DatabaseAccountsClientListUsagesOptions = DatabaseAccountsClientListUsagesOptions{}) -> runtime.Pager[DatabaseAccountsClientListUsagesResponse, fx] ! azcore.CallErr {
   let req = c.list_usages_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListUsagesResponse ! Str { database_accounts_list_usages_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListUsagesResponse) -> Str? { r.usages_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseAccountsClientListUsagesResponse ! Str { database_accounts_list_usages_handle(r) }, c.setup.endpoint, fn(r: DatabaseAccountsClientListUsagesResponse) -> Str? { r.usages_result.next_link }).traced_as("DatabaseAccountsClientListUsagesResponse"))
 }

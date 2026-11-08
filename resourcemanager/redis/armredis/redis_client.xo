@@ -46,12 +46,15 @@ fn (c: Client) check_name_availability_create_request(parameters: CheckNameAvail
 
 /// Checks that the redis cache name is valid and is not already in use.
 pub fn (c: Client) check_name_availability(parameters: CheckNameAvailabilityParameters, options: ClientCheckNameAvailabilityOptions = ClientCheckNameAvailabilityOptions{}) -> ClientCheckNameAvailabilityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_name_availability_create_request(parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.CheckNameAvailability", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_name_availability_create_request(parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  redis_check_name_availability_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = redis_check_name_availability_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClientListBySubscriptionOptions: the optional parameters of Client.new_list_by_subscription_pager.
@@ -82,7 +85,7 @@ fn (c: Client) list_by_subscription_create_request(options: ClientListBySubscrip
 /// Gets all Redis caches in the specified subscription.
 pub fn (c: Client[fx]) new_list_by_subscription_pager(options: ClientListBySubscriptionOptions = ClientListBySubscriptionOptions{}) -> runtime.Pager[ClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListBySubscriptionResponse ! Str { redis_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClientListBySubscriptionResponse) -> Str? { r.list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListBySubscriptionResponse ! Str { redis_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClientListBySubscriptionResponse) -> Str? { r.list_result.next_link }).traced_as("ClientListBySubscriptionResponse"))
 }
 
 /// ClientListByResourceGroupOptions: the optional parameters of Client.new_list_by_resource_group_pager.
@@ -117,7 +120,7 @@ fn (c: Client) list_by_resource_group_create_request(resource_group_name: Str, o
 /// Lists all Redis caches in a resource group.
 pub fn (c: Client[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ClientListByResourceGroupOptions = ClientListByResourceGroupOptions{}) -> runtime.Pager[ClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListByResourceGroupResponse ! Str { redis_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClientListByResourceGroupResponse) -> Str? { r.list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListByResourceGroupResponse ! Str { redis_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClientListByResourceGroupResponse) -> Str? { r.list_result.next_link }).traced_as("ClientListByResourceGroupResponse"))
 }
 
 /// ClientGetOptions: the optional parameters of Client.get.
@@ -155,12 +158,15 @@ fn (c: Client) get_create_request(resource_group_name: Str, name: Str, options: 
 
 /// Gets a Redis cache (resource description).
 pub fn (c: Client) get(resource_group_name: Str, name: Str, options: ClientGetOptions = ClientGetOptions{}) -> ClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  redis_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = redis_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClientBeginCreateOptions: the optional parameters of Client.begin_create.
@@ -203,14 +209,16 @@ fn (c: Client) create_create_request(resource_group_name: Str, name: Str, parame
 /// Create or replace (overwrite/recreate, with potential downtime) an existing Redis cache.
 pub fn (c: Client[fx]) begin_create(resource_group_name: Str, name: Str, parameters: CreateParameters, options: ClientBeginCreateOptions = ClientBeginCreateOptions{}) -> runtime.Poller[ClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientCreateResponse", fn(r: http.Response) -> ClientCreateResponse ! Str { redis_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientCreateResponse", fn(r: http.Response) -> ClientCreateResponse ! Str { redis_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientCreateResponse", fn(r: http.Response) -> ClientCreateResponse ! Str { redis_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientCreateResponse", fn(r: http.Response) -> ClientCreateResponse ! Str { redis_create_handle(r) }, traced: true)
 }
 
 /// ClientBeginUpdateOptions: the optional parameters of Client.begin_update.
@@ -253,14 +261,16 @@ fn (c: Client) update_create_request(resource_group_name: Str, name: Str, parame
 /// Update an existing Redis cache.
 pub fn (c: Client[fx]) begin_update(resource_group_name: Str, name: Str, parameters: UpdateParameters, options: ClientBeginUpdateOptions = ClientBeginUpdateOptions{}) -> runtime.Poller[ClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientUpdateResponse", fn(r: http.Response) -> ClientUpdateResponse ! Str { redis_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientUpdateResponse", fn(r: http.Response) -> ClientUpdateResponse ! Str { redis_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientUpdateResponse", fn(r: http.Response) -> ClientUpdateResponse ! Str { redis_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientUpdateResponse", fn(r: http.Response) -> ClientUpdateResponse ! Str { redis_update_handle(r) }, traced: true)
 }
 
 /// ClientBeginDeleteOptions: the optional parameters of Client.begin_delete.
@@ -299,14 +309,16 @@ fn (c: Client) delete_create_request(resource_group_name: Str, name: Str, option
 /// Deletes a Redis cache.
 pub fn (c: Client[fx]) begin_delete(resource_group_name: Str, name: Str, options: ClientBeginDeleteOptions = ClientBeginDeleteOptions{}) -> runtime.Poller[ClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientDeleteResponse", fn(r: http.Response) -> ClientDeleteResponse ! Str { redis_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientDeleteResponse", fn(r: http.Response) -> ClientDeleteResponse ! Str { redis_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientDeleteResponse", fn(r: http.Response) -> ClientDeleteResponse ! Str { redis_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientDeleteResponse", fn(r: http.Response) -> ClientDeleteResponse ! Str { redis_delete_handle(r) }, traced: true)
 }
 
 /// ClientBeginExportDataOptions: the optional parameters of Client.begin_export_data.
@@ -346,14 +358,16 @@ fn (c: Client) export_data_create_request(resource_group_name: Str, name: Str, p
 /// Export data from the redis cache to blobs in a container.
 pub fn (c: Client[fx]) begin_export_data(resource_group_name: Str, name: Str, parameters: ExportRDBParameters, options: ClientBeginExportDataOptions = ClientBeginExportDataOptions{}) -> runtime.Poller[ClientExportDataResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientExportDataResponse", fn(r: http.Response) -> ClientExportDataResponse ! Str { redis_export_data_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientExportDataResponse", fn(r: http.Response) -> ClientExportDataResponse ! Str { redis_export_data_handle(r) }, traced: true)
   }
-  let req = c.export_data_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginExportData", c.setup.pipeline.tracer)
+  let req = c.export_data_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientExportDataResponse", fn(r: http.Response) -> ClientExportDataResponse ! Str { redis_export_data_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientExportDataResponse", fn(r: http.Response) -> ClientExportDataResponse ! Str { redis_export_data_handle(r) }, traced: true)
 }
 
 /// ClientBeginFlushCacheOptions: the optional parameters of Client.begin_flush_cache.
@@ -395,14 +409,16 @@ fn (c: Client) flush_cache_create_request(resource_group_name: Str, cache_name: 
 /// Deletes all of the keys in a cache.
 pub fn (c: Client[fx]) begin_flush_cache(resource_group_name: Str, cache_name: Str, options: ClientBeginFlushCacheOptions = ClientBeginFlushCacheOptions{}) -> runtime.Poller[ClientFlushCacheResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientFlushCacheResponse", fn(r: http.Response) -> ClientFlushCacheResponse ! Str { redis_flush_cache_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientFlushCacheResponse", fn(r: http.Response) -> ClientFlushCacheResponse ! Str { redis_flush_cache_handle(r) }, traced: true)
   }
-  let req = c.flush_cache_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginFlushCache", c.setup.pipeline.tracer)
+  let req = c.flush_cache_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientFlushCacheResponse", fn(r: http.Response) -> ClientFlushCacheResponse ! Str { redis_flush_cache_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientFlushCacheResponse", fn(r: http.Response) -> ClientFlushCacheResponse ! Str { redis_flush_cache_handle(r) }, traced: true)
 }
 
 /// ClientForceRebootOptions: the optional parameters of Client.force_reboot.
@@ -441,12 +457,15 @@ fn (c: Client) force_reboot_create_request(resource_group_name: Str, name: Str, 
 
 /// Reboot specified Redis node(s). This operation requires write permission to the cache resource. There can be potential data loss.
 pub fn (c: Client) force_reboot(resource_group_name: Str, name: Str, parameters: RebootParameters, options: ClientForceRebootOptions = ClientForceRebootOptions{}) -> ClientForceRebootResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.force_reboot_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.ForceReboot", c.setup.pipeline.tracer)
+  let req = sp.on(c.force_reboot_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  redis_force_reboot_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = redis_force_reboot_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClientBeginImportDataOptions: the optional parameters of Client.begin_import_data.
@@ -486,14 +505,16 @@ fn (c: Client) import_data_create_request(resource_group_name: Str, name: Str, p
 /// Import data into Redis cache.
 pub fn (c: Client[fx]) begin_import_data(resource_group_name: Str, name: Str, parameters: ImportRDBParameters, options: ClientBeginImportDataOptions = ClientBeginImportDataOptions{}) -> runtime.Poller[ClientImportDataResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientImportDataResponse", fn(r: http.Response) -> ClientImportDataResponse ! Str { redis_import_data_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClientImportDataResponse", fn(r: http.Response) -> ClientImportDataResponse ! Str { redis_import_data_handle(r) }, traced: true)
   }
-  let req = c.import_data_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.BeginImportData", c.setup.pipeline.tracer)
+  let req = c.import_data_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientImportDataResponse", fn(r: http.Response) -> ClientImportDataResponse ! Str { redis_import_data_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClientImportDataResponse", fn(r: http.Response) -> ClientImportDataResponse ! Str { redis_import_data_handle(r) }, traced: true)
 }
 
 /// ClientListKeysOptions: the optional parameters of Client.list_keys.
@@ -531,12 +552,15 @@ fn (c: Client) list_keys_create_request(resource_group_name: Str, name: Str, opt
 
 /// Retrieve a Redis cache's access keys. This operation requires write permission to the cache resource.
 pub fn (c: Client) list_keys(resource_group_name: Str, name: Str, options: ClientListKeysOptions = ClientListKeysOptions{}) -> ClientListKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_keys_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.ListKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_keys_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  redis_list_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = redis_list_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClientListUpgradeNotificationsOptions: the optional parameters of Client.new_list_upgrade_notifications_pager.
@@ -576,7 +600,7 @@ fn (c: Client) list_upgrade_notifications_create_request(resource_group_name: St
 /// [Deprecated] Gets any upgrade notifications for a Redis cache.
 pub fn (c: Client[fx]) new_list_upgrade_notifications_pager(resource_group_name: Str, name: Str, history: Float, options: ClientListUpgradeNotificationsOptions = ClientListUpgradeNotificationsOptions{}) -> runtime.Pager[ClientListUpgradeNotificationsResponse, fx] ! azcore.CallErr {
   let req = c.list_upgrade_notifications_create_request(resource_group_name, name, history, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListUpgradeNotificationsResponse ! Str { redis_list_upgrade_notifications_handle(r) }, c.setup.endpoint, fn(r: ClientListUpgradeNotificationsResponse) -> Str? { r.notification_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClientListUpgradeNotificationsResponse ! Str { redis_list_upgrade_notifications_handle(r) }, c.setup.endpoint, fn(r: ClientListUpgradeNotificationsResponse) -> Str? { r.notification_list_response.next_link }).traced_as("ClientListUpgradeNotificationsResponse"))
 }
 
 /// ClientRegenerateKeyOptions: the optional parameters of Client.regenerate_key.
@@ -615,10 +639,13 @@ fn (c: Client) regenerate_key_create_request(resource_group_name: Str, name: Str
 
 /// Regenerate Redis cache's access keys. This operation requires write permission to the cache resource.
 pub fn (c: Client) regenerate_key(resource_group_name: Str, name: Str, parameters: RegenerateKeyParameters, options: ClientRegenerateKeyOptions = ClientRegenerateKeyOptions{}) -> ClientRegenerateKeyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.regenerate_key_create_request(resource_group_name, name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "Client.RegenerateKey", c.setup.pipeline.tracer)
+  let req = sp.on(c.regenerate_key_create_request(resource_group_name, name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  redis_regenerate_key_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = redis_regenerate_key_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -49,7 +49,7 @@ fn (c: MonitorsClient) list_by_subscription_create_request(options: MonitorsClie
 /// Lists all New Relic monitor resources either within a specific subscription
 pub fn (c: MonitorsClient[fx]) new_list_by_subscription_pager(options: MonitorsClientListBySubscriptionOptions = MonitorsClientListBySubscriptionOptions{}) -> runtime.Pager[MonitorsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListBySubscriptionResponse ! Str { monitors_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListBySubscriptionResponse) -> Str? { r.new_relic_monitor_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListBySubscriptionResponse ! Str { monitors_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListBySubscriptionResponse) -> Str? { r.new_relic_monitor_resource_list_result.next_link }).traced_as("MonitorsClientListBySubscriptionResponse"))
 }
 
 /// MonitorsClientListByResourceGroupOptions: the optional parameters of MonitorsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: MonitorsClient) list_by_resource_group_create_request(resource_group_name
 /// Retrieves a list of all New Relic monitor resources either a specific resource group
 pub fn (c: MonitorsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: MonitorsClientListByResourceGroupOptions = MonitorsClientListByResourceGroupOptions{}) -> runtime.Pager[MonitorsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListByResourceGroupResponse ! Str { monitors_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListByResourceGroupResponse) -> Str? { r.new_relic_monitor_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListByResourceGroupResponse ! Str { monitors_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListByResourceGroupResponse) -> Str? { r.new_relic_monitor_resource_list_result.next_link }).traced_as("MonitorsClientListByResourceGroupResponse"))
 }
 
 /// MonitorsClientGetOptions: the optional parameters of MonitorsClient.get.
@@ -122,12 +122,15 @@ fn (c: MonitorsClient) get_create_request(resource_group_name: Str, monitor_name
 
 /// Retrieves the properties and configuration details of a specific New Relic monitor resource, providing insight into its setup and status
 pub fn (c: MonitorsClient) get(resource_group_name: Str, monitor_name: Str, options: MonitorsClientGetOptions = MonitorsClientGetOptions{}) -> MonitorsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientBeginCreateOrUpdateOptions: the optional parameters of MonitorsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: MonitorsClient) create_or_update_create_request(resource_group_name: Str,
 /// Creates a new or updates an existing New Relic monitor resource in your Azure subscription. This sets up the integration between Azure and your New Relic account, enabling observability and monitoring of your Azure resources through New Relic
 pub fn (c: MonitorsClient[fx]) begin_create_or_update(resource_group_name: Str, monitor_name: Str, resource: NewRelicMonitorResource, options: MonitorsClientBeginCreateOrUpdateOptions = MonitorsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[MonitorsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientCreateOrUpdateResponse", fn(r: http.Response) -> MonitorsClientCreateOrUpdateResponse ! Str { monitors_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientCreateOrUpdateResponse", fn(r: http.Response) -> MonitorsClientCreateOrUpdateResponse ! Str { monitors_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, monitor_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, monitor_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientCreateOrUpdateResponse", fn(r: http.Response) -> MonitorsClientCreateOrUpdateResponse ! Str { monitors_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientCreateOrUpdateResponse", fn(r: http.Response) -> MonitorsClientCreateOrUpdateResponse ! Str { monitors_create_or_update_handle(r) }, traced: true)
 }
 
 /// MonitorsClientBeginUpdateOptions: the optional parameters of MonitorsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: MonitorsClient) update_create_request(resource_group_name: Str, monitor_n
 /// Updates an existing New Relic monitor resource from your Azure subscription
 pub fn (c: MonitorsClient[fx]) begin_update(resource_group_name: Str, monitor_name: Str, properties: NewRelicMonitorResourceUpdate, options: MonitorsClientBeginUpdateOptions = MonitorsClientBeginUpdateOptions{}) -> runtime.Poller[MonitorsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientUpdateResponse", fn(r: http.Response) -> MonitorsClientUpdateResponse ! Str { monitors_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientUpdateResponse", fn(r: http.Response) -> MonitorsClientUpdateResponse ! Str { monitors_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, monitor_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, monitor_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientUpdateResponse", fn(r: http.Response) -> MonitorsClientUpdateResponse ! Str { monitors_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientUpdateResponse", fn(r: http.Response) -> MonitorsClientUpdateResponse ! Str { monitors_update_handle(r) }, traced: true)
 }
 
 /// MonitorsClientBeginDeleteOptions: the optional parameters of MonitorsClient.begin_delete.
@@ -267,14 +274,16 @@ fn (c: MonitorsClient) delete_create_request(resource_group_name: Str, user_emai
 /// Deletes an existing New Relic monitor resource from your Azure subscription, removing the integration and stopping the observability of your Azure resources through New Relic
 pub fn (c: MonitorsClient[fx]) begin_delete(resource_group_name: Str, user_email: Str, monitor_name: Str, options: MonitorsClientBeginDeleteOptions = MonitorsClientBeginDeleteOptions{}) -> runtime.Poller[MonitorsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientDeleteResponse", fn(r: http.Response) -> MonitorsClientDeleteResponse ! Str { monitors_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientDeleteResponse", fn(r: http.Response) -> MonitorsClientDeleteResponse ! Str { monitors_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, user_email, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, user_email, monitor_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientDeleteResponse", fn(r: http.Response) -> MonitorsClientDeleteResponse ! Str { monitors_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientDeleteResponse", fn(r: http.Response) -> MonitorsClientDeleteResponse ! Str { monitors_delete_handle(r) }, traced: true)
 }
 
 /// MonitorsClientGetMetricRulesOptions: the optional parameters of MonitorsClient.get_metric_rules.
@@ -313,12 +322,15 @@ fn (c: MonitorsClient) get_metric_rules_create_request(resource_group_name: Str,
 
 /// Retrieves the metric rules that are configured in the New Relic monitor resource
 pub fn (c: MonitorsClient) get_metric_rules(resource_group_name: Str, monitor_name: Str, request: MetricsRequest, options: MonitorsClientGetMetricRulesOptions = MonitorsClientGetMetricRulesOptions{}) -> MonitorsClientGetMetricRulesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_metric_rules_create_request(resource_group_name, monitor_name, request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.GetMetricRules", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_metric_rules_create_request(resource_group_name, monitor_name, request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_get_metric_rules_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_get_metric_rules_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientGetMetricStatusOptions: the optional parameters of MonitorsClient.get_metric_status.
@@ -357,12 +369,15 @@ fn (c: MonitorsClient) get_metric_status_create_request(resource_group_name: Str
 
 /// Retrieves the metric status that are configured in the New Relic monitor resource
 pub fn (c: MonitorsClient) get_metric_status(resource_group_name: Str, monitor_name: Str, request: MetricsStatusRequest, options: MonitorsClientGetMetricStatusOptions = MonitorsClientGetMetricStatusOptions{}) -> MonitorsClientGetMetricStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_metric_status_create_request(resource_group_name, monitor_name, request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.GetMetricStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_metric_status_create_request(resource_group_name, monitor_name, request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_get_metric_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_get_metric_status_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientLatestLinkedSaaSOptions: the optional parameters of MonitorsClient.latest_linked_saa_s.
@@ -400,12 +415,15 @@ fn (c: MonitorsClient) latest_linked_saa_s_create_request(resource_group_name: S
 
 /// Returns the latest SaaS linked to the newrelic organization of the underlying monitor.
 pub fn (c: MonitorsClient) latest_linked_saa_s(resource_group_name: Str, monitor_name: Str, options: MonitorsClientLatestLinkedSaaSOptions = MonitorsClientLatestLinkedSaaSOptions{}) -> MonitorsClientLatestLinkedSaaSResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.latest_linked_saa_s_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.LatestLinkedSaaS", c.setup.pipeline.tracer)
+  let req = sp.on(c.latest_linked_saa_s_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_latest_linked_saa_s_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_latest_linked_saa_s_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientBeginLinkSaaSOptions: the optional parameters of MonitorsClient.begin_link_saa_s.
@@ -448,14 +466,16 @@ fn (c: MonitorsClient) link_saa_s_create_request(resource_group_name: Str, monit
 /// Links a new SaaS to the newrelic organization of the underlying monitor.
 pub fn (c: MonitorsClient[fx]) begin_link_saa_s(resource_group_name: Str, monitor_name: Str, body: SaaSData, options: MonitorsClientBeginLinkSaaSOptions = MonitorsClientBeginLinkSaaSOptions{}) -> runtime.Poller[MonitorsClientLinkSaaSResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientLinkSaaSResponse", fn(r: http.Response) -> MonitorsClientLinkSaaSResponse ! Str { monitors_link_saa_s_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientLinkSaaSResponse", fn(r: http.Response) -> MonitorsClientLinkSaaSResponse ! Str { monitors_link_saa_s_handle(r) }, traced: true)
   }
-  let req = c.link_saa_s_create_request(resource_group_name, monitor_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.BeginLinkSaaS", c.setup.pipeline.tracer)
+  let req = c.link_saa_s_create_request(resource_group_name, monitor_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientLinkSaaSResponse", fn(r: http.Response) -> MonitorsClientLinkSaaSResponse ! Str { monitors_link_saa_s_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientLinkSaaSResponse", fn(r: http.Response) -> MonitorsClientLinkSaaSResponse ! Str { monitors_link_saa_s_handle(r) }, traced: true)
 }
 
 /// MonitorsClientListAppServicesOptions: the optional parameters of MonitorsClient.new_list_app_services_pager.
@@ -495,7 +515,7 @@ fn (c: MonitorsClient) list_app_services_create_request(resource_group_name: Str
 /// Lists the app service resources currently being monitored by the New Relic resource, helping you understand which app services are under monitoring
 pub fn (c: MonitorsClient[fx]) new_list_app_services_pager(resource_group_name: Str, monitor_name: Str, request: AppServicesGetRequest, options: MonitorsClientListAppServicesOptions = MonitorsClientListAppServicesOptions{}) -> runtime.Pager[MonitorsClientListAppServicesResponse, fx] ! azcore.CallErr {
   let req = c.list_app_services_create_request(resource_group_name, monitor_name, request, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListAppServicesResponse ! Str { monitors_list_app_services_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListAppServicesResponse) -> Str? { r.app_services_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListAppServicesResponse ! Str { monitors_list_app_services_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListAppServicesResponse) -> Str? { r.app_services_list_response.next_link }).traced_as("MonitorsClientListAppServicesResponse"))
 }
 
 /// MonitorsClientListHostsOptions: the optional parameters of MonitorsClient.new_list_hosts_pager.
@@ -535,7 +555,7 @@ fn (c: MonitorsClient) list_hosts_create_request(resource_group_name: Str, monit
 /// Lists all VM resources currently being monitored by the New Relic monitor resource, helping you manage observability
 pub fn (c: MonitorsClient[fx]) new_list_hosts_pager(resource_group_name: Str, monitor_name: Str, request: HostsGetRequest, options: MonitorsClientListHostsOptions = MonitorsClientListHostsOptions{}) -> runtime.Pager[MonitorsClientListHostsResponse, fx] ! azcore.CallErr {
   let req = c.list_hosts_create_request(resource_group_name, monitor_name, request, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListHostsResponse ! Str { monitors_list_hosts_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListHostsResponse) -> Str? { r.vm_hosts_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListHostsResponse ! Str { monitors_list_hosts_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListHostsResponse) -> Str? { r.vm_hosts_list_response.next_link }).traced_as("MonitorsClientListHostsResponse"))
 }
 
 /// MonitorsClientListLinkedResourcesOptions: the optional parameters of MonitorsClient.new_list_linked_resources_pager.
@@ -574,7 +594,7 @@ fn (c: MonitorsClient) list_linked_resources_create_request(resource_group_name:
 /// Lists all Azure resources that are linked to the same New Relic organization as the specified monitor resource, helping you understand the scope of integration
 pub fn (c: MonitorsClient[fx]) new_list_linked_resources_pager(resource_group_name: Str, monitor_name: Str, options: MonitorsClientListLinkedResourcesOptions = MonitorsClientListLinkedResourcesOptions{}) -> runtime.Pager[MonitorsClientListLinkedResourcesResponse, fx] ! azcore.CallErr {
   let req = c.list_linked_resources_create_request(resource_group_name, monitor_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListLinkedResourcesResponse ! Str { monitors_list_linked_resources_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListLinkedResourcesResponse) -> Str? { r.linked_resource_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListLinkedResourcesResponse ! Str { monitors_list_linked_resources_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListLinkedResourcesResponse) -> Str? { r.linked_resource_list_response.next_link }).traced_as("MonitorsClientListLinkedResourcesResponse"))
 }
 
 /// MonitorsClientListMonitoredResourcesOptions: the optional parameters of MonitorsClient.new_list_monitored_resources_pager.
@@ -613,7 +633,7 @@ fn (c: MonitorsClient) list_monitored_resources_create_request(resource_group_na
 /// Lists all Azure resources that are currently being monitored by the specified New Relic monitor resource, providing insight into the coverage of your observability setup
 pub fn (c: MonitorsClient[fx]) new_list_monitored_resources_pager(resource_group_name: Str, monitor_name: Str, options: MonitorsClientListMonitoredResourcesOptions = MonitorsClientListMonitoredResourcesOptions{}) -> runtime.Pager[MonitorsClientListMonitoredResourcesResponse, fx] ! azcore.CallErr {
   let req = c.list_monitored_resources_create_request(resource_group_name, monitor_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListMonitoredResourcesResponse ! Str { monitors_list_monitored_resources_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListMonitoredResourcesResponse) -> Str? { r.monitored_resource_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MonitorsClientListMonitoredResourcesResponse ! Str { monitors_list_monitored_resources_handle(r) }, c.setup.endpoint, fn(r: MonitorsClientListMonitoredResourcesResponse) -> Str? { r.monitored_resource_list_response.next_link }).traced_as("MonitorsClientListMonitoredResourcesResponse"))
 }
 
 /// MonitorsClientRefreshIngestionKeyOptions: the optional parameters of MonitorsClient.refresh_ingestion_key.
@@ -648,12 +668,15 @@ fn (c: MonitorsClient) refresh_ingestion_key_create_request(resource_group_name:
 
 /// Refreshes the ingestion key for all monitors linked to the same account associated to the underlying monitor.
 pub fn (c: MonitorsClient) refresh_ingestion_key(resource_group_name: Str, monitor_name: Str, options: MonitorsClientRefreshIngestionKeyOptions = MonitorsClientRefreshIngestionKeyOptions{}) -> MonitorsClientRefreshIngestionKeyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.refresh_ingestion_key_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.RefreshIngestionKey", c.setup.pipeline.tracer)
+  let req = sp.on(c.refresh_ingestion_key_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_refresh_ingestion_key_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_refresh_ingestion_key_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientBeginResubscribeOptions: the optional parameters of MonitorsClient.begin_resubscribe.
@@ -702,14 +725,16 @@ fn (c: MonitorsClient) resubscribe_create_request(resource_group_name: Str, moni
 /// A long-running resource action.
 pub fn (c: MonitorsClient[fx]) begin_resubscribe(resource_group_name: Str, monitor_name: Str, options: MonitorsClientBeginResubscribeOptions = MonitorsClientBeginResubscribeOptions{}) -> runtime.Poller[MonitorsClientResubscribeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientResubscribeResponse", fn(r: http.Response) -> MonitorsClientResubscribeResponse ! Str { monitors_resubscribe_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MonitorsClientResubscribeResponse", fn(r: http.Response) -> MonitorsClientResubscribeResponse ! Str { monitors_resubscribe_handle(r) }, traced: true)
   }
-  let req = c.resubscribe_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.BeginResubscribe", c.setup.pipeline.tracer)
+  let req = c.resubscribe_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientResubscribeResponse", fn(r: http.Response) -> MonitorsClientResubscribeResponse ! Str { monitors_resubscribe_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "MonitorsClientResubscribeResponse", fn(r: http.Response) -> MonitorsClientResubscribeResponse ! Str { monitors_resubscribe_handle(r) }, traced: true)
 }
 
 /// MonitorsClientSwitchBillingOptions: the optional parameters of MonitorsClient.switch_billing.
@@ -754,12 +779,15 @@ fn (c: MonitorsClient) switch_billing_create_request(resource_group_name: Str, m
 
 /// Switches the billing for the New Relic Monitor resource to be billed by Azure Marketplace
 pub fn (c: MonitorsClient) switch_billing(resource_group_name: Str, monitor_name: Str, request: SwitchBillingRequest, options: MonitorsClientSwitchBillingOptions = MonitorsClientSwitchBillingOptions{}) -> MonitorsClientSwitchBillingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.switch_billing_create_request(resource_group_name, monitor_name, request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.SwitchBilling", c.setup.pipeline.tracer)
+  let req = sp.on(c.switch_billing_create_request(resource_group_name, monitor_name, request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_switch_billing_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_switch_billing_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MonitorsClientVMHostPayloadOptions: the optional parameters of MonitorsClient.vm_host_payload.
@@ -797,10 +825,13 @@ fn (c: MonitorsClient) vm_host_payload_create_request(resource_group_name: Str, 
 
 /// Returns the payload that needs to be passed in the request body for installing the New Relic agent on a VM, providing the necessary configuration details
 pub fn (c: MonitorsClient) vm_host_payload(resource_group_name: Str, monitor_name: Str, options: MonitorsClientVMHostPayloadOptions = MonitorsClientVMHostPayloadOptions{}) -> MonitorsClientVMHostPayloadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.vm_host_payload_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MonitorsClient.VMHostPayload", c.setup.pipeline.tracer)
+  let req = sp.on(c.vm_host_payload_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  monitors_vm_host_payload_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = monitors_vm_host_payload_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

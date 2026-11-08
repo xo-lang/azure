@@ -67,7 +67,7 @@ fn (c: SharedGalleryImageVersionsClient) list_create_request(location: Str, gall
 /// List shared gallery image versions by subscription id or tenant id.
 pub fn (c: SharedGalleryImageVersionsClient[fx]) new_list_pager(location: Str, gallery_unique_name: Str, gallery_image_name: Str, options: SharedGalleryImageVersionsClientListOptions = SharedGalleryImageVersionsClientListOptions{}) -> runtime.Pager[SharedGalleryImageVersionsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, gallery_unique_name, gallery_image_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharedGalleryImageVersionsClientListResponse ! Str { shared_gallery_image_versions_list_handle(r) }, c.setup.endpoint, fn(r: SharedGalleryImageVersionsClientListResponse) -> Str? { r.shared_gallery_image_version_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharedGalleryImageVersionsClientListResponse ! Str { shared_gallery_image_versions_list_handle(r) }, c.setup.endpoint, fn(r: SharedGalleryImageVersionsClientListResponse) -> Str? { r.shared_gallery_image_version_list.next_link }).traced_as("SharedGalleryImageVersionsClientListResponse"))
 }
 
 /// SharedGalleryImageVersionsClientGetOptions: the optional parameters of SharedGalleryImageVersionsClient.get.
@@ -113,10 +113,13 @@ fn (c: SharedGalleryImageVersionsClient) get_create_request(location: Str, galle
 
 /// Get a shared gallery image version by subscription id or tenant id.
 pub fn (c: SharedGalleryImageVersionsClient) get(location: Str, gallery_unique_name: Str, gallery_image_name: Str, gallery_image_version_name: Str, options: SharedGalleryImageVersionsClientGetOptions = SharedGalleryImageVersionsClientGetOptions{}) -> SharedGalleryImageVersionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, gallery_unique_name, gallery_image_name, gallery_image_version_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SharedGalleryImageVersionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, gallery_unique_name, gallery_image_name, gallery_image_version_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  shared_gallery_image_versions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = shared_gallery_image_versions_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

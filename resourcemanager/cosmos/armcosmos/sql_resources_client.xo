@@ -57,7 +57,7 @@ fn (c: SQLResourcesClient) list_sql_databases_create_request(resource_group_name
 /// Lists the SQL databases under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_databases_pager(resource_group_name: Str, account_name: Str, options: SQLResourcesClientListSQLDatabasesOptions = SQLResourcesClientListSQLDatabasesOptions{}) -> runtime.Pager[SQLResourcesClientListSQLDatabasesResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_databases_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLDatabasesResponse ! Str { sql_resources_list_sql_databases_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLDatabasesResponse) -> Str? { r.sql_database_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLDatabasesResponse ! Str { sql_resources_list_sql_databases_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLDatabasesResponse) -> Str? { r.sql_database_list_result.next_link }).traced_as("SQLResourcesClientListSQLDatabasesResponse"))
 }
 
 /// SQLResourcesClientGetSQLDatabaseOptions: the optional parameters of SQLResourcesClient.get_sql_database.
@@ -99,12 +99,15 @@ fn (c: SQLResourcesClient) get_sql_database_create_request(resource_group_name: 
 
 /// Gets the SQL database under an existing Azure Cosmos DB database account with the provided name.
 pub fn (c: SQLResourcesClient) get_sql_database(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientGetSQLDatabaseOptions = SQLResourcesClientGetSQLDatabaseOptions{}) -> SQLResourcesClientGetSQLDatabaseResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_database_create_request(resource_group_name, account_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLDatabase", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_database_create_request(resource_group_name, account_name, database_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_database_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_database_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLDatabaseOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_database.
@@ -151,14 +154,16 @@ fn (c: SQLResourcesClient) create_update_sql_database_create_request(resource_gr
 /// Create or update an Azure Cosmos DB SQL database
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_database(resource_group_name: Str, account_name: Str, database_name: Str, create_update_sql_database_parameters: SQLDatabaseCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLDatabaseOptions = SQLResourcesClientBeginCreateUpdateSQLDatabaseOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLDatabaseResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLDatabaseResponse ! Str { sql_resources_create_update_sql_database_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLDatabaseResponse ! Str { sql_resources_create_update_sql_database_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_database_create_request(resource_group_name, account_name, database_name, create_update_sql_database_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLDatabase", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_database_create_request(resource_group_name, account_name, database_name, create_update_sql_database_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLDatabaseResponse ! Str { sql_resources_create_update_sql_database_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLDatabaseResponse ! Str { sql_resources_create_update_sql_database_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLDatabaseOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_database.
@@ -201,14 +206,16 @@ fn (c: SQLResourcesClient) delete_sql_database_create_request(resource_group_nam
 /// Deletes an existing Azure Cosmos DB SQL database.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_database(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientBeginDeleteSQLDatabaseOptions = SQLResourcesClientBeginDeleteSQLDatabaseOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLDatabaseResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLDatabaseResponse ! Str { sql_resources_delete_sql_database_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLDatabaseResponse ! Str { sql_resources_delete_sql_database_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_database_create_request(resource_group_name, account_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLDatabase", c.setup.pipeline.tracer)
+  let req = c.delete_sql_database_create_request(resource_group_name, account_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLDatabaseResponse ! Str { sql_resources_delete_sql_database_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLDatabaseResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLDatabaseResponse ! Str { sql_resources_delete_sql_database_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListClientEncryptionKeysOptions: the optional parameters of SQLResourcesClient.new_list_client_encryption_keys_pager.
@@ -251,7 +258,7 @@ fn (c: SQLResourcesClient) list_client_encryption_keys_create_request(resource_g
 /// Lists the ClientEncryptionKeys under an existing Azure Cosmos DB SQL database.
 pub fn (c: SQLResourcesClient[fx]) new_list_client_encryption_keys_pager(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientListClientEncryptionKeysOptions = SQLResourcesClientListClientEncryptionKeysOptions{}) -> runtime.Pager[SQLResourcesClientListClientEncryptionKeysResponse, fx] ! azcore.CallErr {
   let req = c.list_client_encryption_keys_create_request(resource_group_name, account_name, database_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListClientEncryptionKeysResponse ! Str { sql_resources_list_client_encryption_keys_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListClientEncryptionKeysResponse) -> Str? { r.client_encryption_keys_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListClientEncryptionKeysResponse ! Str { sql_resources_list_client_encryption_keys_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListClientEncryptionKeysResponse) -> Str? { r.client_encryption_keys_list_result.next_link }).traced_as("SQLResourcesClientListClientEncryptionKeysResponse"))
 }
 
 /// SQLResourcesClientGetClientEncryptionKeyOptions: the optional parameters of SQLResourcesClient.get_client_encryption_key.
@@ -297,12 +304,15 @@ fn (c: SQLResourcesClient) get_client_encryption_key_create_request(resource_gro
 
 /// Gets the ClientEncryptionKey under an existing Azure Cosmos DB SQL database.
 pub fn (c: SQLResourcesClient) get_client_encryption_key(resource_group_name: Str, account_name: Str, database_name: Str, client_encryption_key_name: Str, options: SQLResourcesClientGetClientEncryptionKeyOptions = SQLResourcesClientGetClientEncryptionKeyOptions{}) -> SQLResourcesClientGetClientEncryptionKeyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_client_encryption_key_create_request(resource_group_name, account_name, database_name, client_encryption_key_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetClientEncryptionKey", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_client_encryption_key_create_request(resource_group_name, account_name, database_name, client_encryption_key_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_client_encryption_key_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_client_encryption_key_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateClientEncryptionKeyOptions: the optional parameters of SQLResourcesClient.begin_create_update_client_encryption_key.
@@ -353,14 +363,16 @@ fn (c: SQLResourcesClient) create_update_client_encryption_key_create_request(re
 /// Create or update a ClientEncryptionKey. This API is meant to be invoked via tools such as the Azure Powershell (instead of directly).
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_client_encryption_key(resource_group_name: Str, account_name: Str, database_name: Str, client_encryption_key_name: Str, create_update_client_encryption_key_parameters: ClientEncryptionKeyCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateClientEncryptionKeyOptions = SQLResourcesClientBeginCreateUpdateClientEncryptionKeyOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateClientEncryptionKeyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateClientEncryptionKeyResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateClientEncryptionKeyResponse ! Str { sql_resources_create_update_client_encryption_key_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateClientEncryptionKeyResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateClientEncryptionKeyResponse ! Str { sql_resources_create_update_client_encryption_key_handle(r) }, traced: true)
   }
-  let req = c.create_update_client_encryption_key_create_request(resource_group_name, account_name, database_name, client_encryption_key_name, create_update_client_encryption_key_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateClientEncryptionKey", c.setup.pipeline.tracer)
+  let req = c.create_update_client_encryption_key_create_request(resource_group_name, account_name, database_name, client_encryption_key_name, create_update_client_encryption_key_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateClientEncryptionKeyResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateClientEncryptionKeyResponse ! Str { sql_resources_create_update_client_encryption_key_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateClientEncryptionKeyResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateClientEncryptionKeyResponse ! Str { sql_resources_create_update_client_encryption_key_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLContainersOptions: the optional parameters of SQLResourcesClient.new_list_sql_containers_pager.
@@ -403,7 +415,7 @@ fn (c: SQLResourcesClient) list_sql_containers_create_request(resource_group_nam
 /// Lists the SQL container under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_containers_pager(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientListSQLContainersOptions = SQLResourcesClientListSQLContainersOptions{}) -> runtime.Pager[SQLResourcesClientListSQLContainersResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_containers_create_request(resource_group_name, account_name, database_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLContainersResponse ! Str { sql_resources_list_sql_containers_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLContainersResponse) -> Str? { r.sql_container_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLContainersResponse ! Str { sql_resources_list_sql_containers_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLContainersResponse) -> Str? { r.sql_container_list_result.next_link }).traced_as("SQLResourcesClientListSQLContainersResponse"))
 }
 
 /// SQLResourcesClientGetSQLContainerOptions: the optional parameters of SQLResourcesClient.get_sql_container.
@@ -449,12 +461,15 @@ fn (c: SQLResourcesClient) get_sql_container_create_request(resource_group_name:
 
 /// Gets the SQL container under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient) get_sql_container(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientGetSQLContainerOptions = SQLResourcesClientGetSQLContainerOptions{}) -> SQLResourcesClientGetSQLContainerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_container_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLContainer", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_container_create_request(resource_group_name, account_name, database_name, container_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_container_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_container_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLContainerOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_container.
@@ -505,14 +520,16 @@ fn (c: SQLResourcesClient) create_update_sql_container_create_request(resource_g
 /// Create or update an Azure Cosmos DB SQL container
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_container(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, create_update_sql_container_parameters: SQLContainerCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLContainerOptions = SQLResourcesClientBeginCreateUpdateSQLContainerOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLContainerResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLContainerResponse ! Str { sql_resources_create_update_sql_container_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLContainerResponse ! Str { sql_resources_create_update_sql_container_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_container_create_request(resource_group_name, account_name, database_name, container_name, create_update_sql_container_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLContainer", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_container_create_request(resource_group_name, account_name, database_name, container_name, create_update_sql_container_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLContainerResponse ! Str { sql_resources_create_update_sql_container_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLContainerResponse ! Str { sql_resources_create_update_sql_container_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLContainerOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_container.
@@ -559,14 +576,16 @@ fn (c: SQLResourcesClient) delete_sql_container_create_request(resource_group_na
 /// Deletes an existing Azure Cosmos DB SQL container.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_container(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientBeginDeleteSQLContainerOptions = SQLResourcesClientBeginDeleteSQLContainerOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLContainerResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLContainerResponse ! Str { sql_resources_delete_sql_container_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLContainerResponse ! Str { sql_resources_delete_sql_container_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_container_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLContainer", c.setup.pipeline.tracer)
+  let req = c.delete_sql_container_create_request(resource_group_name, account_name, database_name, container_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLContainerResponse ! Str { sql_resources_delete_sql_container_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLContainerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLContainerResponse ! Str { sql_resources_delete_sql_container_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginRetrieveContinuousBackupInformationOptions: the optional parameters of SQLResourcesClient.begin_retrieve_continuous_backup_information.
@@ -617,14 +636,16 @@ fn (c: SQLResourcesClient) retrieve_continuous_backup_information_create_request
 /// Retrieves continuous backup information for a container resource.
 pub fn (c: SQLResourcesClient[fx]) begin_retrieve_continuous_backup_information(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, location: ContinuousBackupRestoreLocation, options: SQLResourcesClientBeginRetrieveContinuousBackupInformationOptions = SQLResourcesClientBeginRetrieveContinuousBackupInformationOptions{}) -> runtime.Poller[SQLResourcesClientRetrieveContinuousBackupInformationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientRetrieveContinuousBackupInformationResponse", fn(r: http.Response) -> SQLResourcesClientRetrieveContinuousBackupInformationResponse ! Str { sql_resources_retrieve_continuous_backup_information_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientRetrieveContinuousBackupInformationResponse", fn(r: http.Response) -> SQLResourcesClientRetrieveContinuousBackupInformationResponse ! Str { sql_resources_retrieve_continuous_backup_information_handle(r) }, traced: true)
   }
-  let req = c.retrieve_continuous_backup_information_create_request(resource_group_name, account_name, database_name, container_name, location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginRetrieveContinuousBackupInformation", c.setup.pipeline.tracer)
+  let req = c.retrieve_continuous_backup_information_create_request(resource_group_name, account_name, database_name, container_name, location, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientRetrieveContinuousBackupInformationResponse", fn(r: http.Response) -> SQLResourcesClientRetrieveContinuousBackupInformationResponse ! Str { sql_resources_retrieve_continuous_backup_information_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientRetrieveContinuousBackupInformationResponse", fn(r: http.Response) -> SQLResourcesClientRetrieveContinuousBackupInformationResponse ! Str { sql_resources_retrieve_continuous_backup_information_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLStoredProceduresOptions: the optional parameters of SQLResourcesClient.new_list_sql_stored_procedures_pager.
@@ -671,7 +692,7 @@ fn (c: SQLResourcesClient) list_sql_stored_procedures_create_request(resource_gr
 /// Lists the SQL storedProcedure under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_stored_procedures_pager(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientListSQLStoredProceduresOptions = SQLResourcesClientListSQLStoredProceduresOptions{}) -> runtime.Pager[SQLResourcesClientListSQLStoredProceduresResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_stored_procedures_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLStoredProceduresResponse ! Str { sql_resources_list_sql_stored_procedures_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLStoredProceduresResponse) -> Str? { r.sql_stored_procedure_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLStoredProceduresResponse ! Str { sql_resources_list_sql_stored_procedures_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLStoredProceduresResponse) -> Str? { r.sql_stored_procedure_list_result.next_link }).traced_as("SQLResourcesClientListSQLStoredProceduresResponse"))
 }
 
 /// SQLResourcesClientGetSQLStoredProcedureOptions: the optional parameters of SQLResourcesClient.get_sql_stored_procedure.
@@ -721,12 +742,15 @@ fn (c: SQLResourcesClient) get_sql_stored_procedure_create_request(resource_grou
 
 /// Gets the SQL storedProcedure under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient) get_sql_stored_procedure(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, stored_procedure_name: Str, options: SQLResourcesClientGetSQLStoredProcedureOptions = SQLResourcesClientGetSQLStoredProcedureOptions{}) -> SQLResourcesClientGetSQLStoredProcedureResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLStoredProcedure", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_stored_procedure_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_stored_procedure_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLStoredProcedureOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_stored_procedure.
@@ -781,14 +805,16 @@ fn (c: SQLResourcesClient) create_update_sql_stored_procedure_create_request(res
 /// Create or update an Azure Cosmos DB SQL storedProcedure
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_stored_procedure(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, stored_procedure_name: Str, create_update_sql_stored_procedure_parameters: SQLStoredProcedureCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLStoredProcedureOptions = SQLResourcesClientBeginCreateUpdateSQLStoredProcedureOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLStoredProcedureResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLStoredProcedureResponse ! Str { sql_resources_create_update_sql_stored_procedure_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLStoredProcedureResponse ! Str { sql_resources_create_update_sql_stored_procedure_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, create_update_sql_stored_procedure_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLStoredProcedure", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, create_update_sql_stored_procedure_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLStoredProcedureResponse ! Str { sql_resources_create_update_sql_stored_procedure_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLStoredProcedureResponse ! Str { sql_resources_create_update_sql_stored_procedure_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLStoredProcedureOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_stored_procedure.
@@ -839,14 +865,16 @@ fn (c: SQLResourcesClient) delete_sql_stored_procedure_create_request(resource_g
 /// Deletes an existing Azure Cosmos DB SQL storedProcedure.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_stored_procedure(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, stored_procedure_name: Str, options: SQLResourcesClientBeginDeleteSQLStoredProcedureOptions = SQLResourcesClientBeginDeleteSQLStoredProcedureOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLStoredProcedureResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLStoredProcedureResponse ! Str { sql_resources_delete_sql_stored_procedure_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLStoredProcedureResponse ! Str { sql_resources_delete_sql_stored_procedure_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLStoredProcedure", c.setup.pipeline.tracer)
+  let req = c.delete_sql_stored_procedure_create_request(resource_group_name, account_name, database_name, container_name, stored_procedure_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLStoredProcedureResponse ! Str { sql_resources_delete_sql_stored_procedure_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLStoredProcedureResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLStoredProcedureResponse ! Str { sql_resources_delete_sql_stored_procedure_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientGetSQLContainerThroughputOptions: the optional parameters of SQLResourcesClient.get_sql_container_throughput.
@@ -892,12 +920,15 @@ fn (c: SQLResourcesClient) get_sql_container_throughput_create_request(resource_
 
 /// Gets the RUs per second of the SQL container under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient) get_sql_container_throughput(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientGetSQLContainerThroughputOptions = SQLResourcesClientGetSQLContainerThroughputOptions{}) -> SQLResourcesClientGetSQLContainerThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_container_throughput_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLContainerThroughput", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_container_throughput_create_request(resource_group_name, account_name, database_name, container_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_container_throughput_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_container_throughput_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginUpdateSQLContainerThroughputOptions: the optional parameters of SQLResourcesClient.begin_update_sql_container_throughput.
@@ -948,14 +979,16 @@ fn (c: SQLResourcesClient) update_sql_container_throughput_create_request(resour
 /// Update RUs per second of an Azure Cosmos DB SQL container
 pub fn (c: SQLResourcesClient[fx]) begin_update_sql_container_throughput(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, update_throughput_parameters: ThroughputSettingsUpdateParameters, options: SQLResourcesClientBeginUpdateSQLContainerThroughputOptions = SQLResourcesClientBeginUpdateSQLContainerThroughputOptions{}) -> runtime.Poller[SQLResourcesClientUpdateSQLContainerThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientUpdateSQLContainerThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLContainerThroughputResponse ! Str { sql_resources_update_sql_container_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientUpdateSQLContainerThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLContainerThroughputResponse ! Str { sql_resources_update_sql_container_throughput_handle(r) }, traced: true)
   }
-  let req = c.update_sql_container_throughput_create_request(resource_group_name, account_name, database_name, container_name, update_throughput_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginUpdateSQLContainerThroughput", c.setup.pipeline.tracer)
+  let req = c.update_sql_container_throughput_create_request(resource_group_name, account_name, database_name, container_name, update_throughput_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientUpdateSQLContainerThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLContainerThroughputResponse ! Str { sql_resources_update_sql_container_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientUpdateSQLContainerThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLContainerThroughputResponse ! Str { sql_resources_update_sql_container_throughput_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginMigrateSQLContainerToAutoscaleOptions: the optional parameters of SQLResourcesClient.begin_migrate_sql_container_to_autoscale.
@@ -1005,14 +1038,16 @@ fn (c: SQLResourcesClient) migrate_sql_container_to_autoscale_create_request(res
 /// Migrate an Azure Cosmos DB SQL container from manual throughput to autoscale
 pub fn (c: SQLResourcesClient[fx]) begin_migrate_sql_container_to_autoscale(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientBeginMigrateSQLContainerToAutoscaleOptions = SQLResourcesClientBeginMigrateSQLContainerToAutoscaleOptions{}) -> runtime.Poller[SQLResourcesClientMigrateSQLContainerToAutoscaleResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLContainerToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToAutoscaleResponse ! Str { sql_resources_migrate_sql_container_to_autoscale_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLContainerToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToAutoscaleResponse ! Str { sql_resources_migrate_sql_container_to_autoscale_handle(r) }, traced: true)
   }
-  let req = c.migrate_sql_container_to_autoscale_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginMigrateSQLContainerToAutoscale", c.setup.pipeline.tracer)
+  let req = c.migrate_sql_container_to_autoscale_create_request(resource_group_name, account_name, database_name, container_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLContainerToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToAutoscaleResponse ! Str { sql_resources_migrate_sql_container_to_autoscale_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLContainerToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToAutoscaleResponse ! Str { sql_resources_migrate_sql_container_to_autoscale_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginMigrateSQLContainerToManualThroughputOptions: the optional parameters of SQLResourcesClient.begin_migrate_sql_container_to_manual_throughput.
@@ -1062,14 +1097,16 @@ fn (c: SQLResourcesClient) migrate_sql_container_to_manual_throughput_create_req
 /// Migrate an Azure Cosmos DB SQL container from autoscale to manual throughput
 pub fn (c: SQLResourcesClient[fx]) begin_migrate_sql_container_to_manual_throughput(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientBeginMigrateSQLContainerToManualThroughputOptions = SQLResourcesClientBeginMigrateSQLContainerToManualThroughputOptions{}) -> runtime.Poller[SQLResourcesClientMigrateSQLContainerToManualThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLContainerToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToManualThroughputResponse ! Str { sql_resources_migrate_sql_container_to_manual_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLContainerToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToManualThroughputResponse ! Str { sql_resources_migrate_sql_container_to_manual_throughput_handle(r) }, traced: true)
   }
-  let req = c.migrate_sql_container_to_manual_throughput_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginMigrateSQLContainerToManualThroughput", c.setup.pipeline.tracer)
+  let req = c.migrate_sql_container_to_manual_throughput_create_request(resource_group_name, account_name, database_name, container_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLContainerToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToManualThroughputResponse ! Str { sql_resources_migrate_sql_container_to_manual_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLContainerToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLContainerToManualThroughputResponse ! Str { sql_resources_migrate_sql_container_to_manual_throughput_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLTriggersOptions: the optional parameters of SQLResourcesClient.new_list_sql_triggers_pager.
@@ -1116,7 +1153,7 @@ fn (c: SQLResourcesClient) list_sql_triggers_create_request(resource_group_name:
 /// Lists the SQL trigger under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_triggers_pager(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientListSQLTriggersOptions = SQLResourcesClientListSQLTriggersOptions{}) -> runtime.Pager[SQLResourcesClientListSQLTriggersResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_triggers_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLTriggersResponse ! Str { sql_resources_list_sql_triggers_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLTriggersResponse) -> Str? { r.sql_trigger_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLTriggersResponse ! Str { sql_resources_list_sql_triggers_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLTriggersResponse) -> Str? { r.sql_trigger_list_result.next_link }).traced_as("SQLResourcesClientListSQLTriggersResponse"))
 }
 
 /// SQLResourcesClientGetSQLTriggerOptions: the optional parameters of SQLResourcesClient.get_sql_trigger.
@@ -1166,12 +1203,15 @@ fn (c: SQLResourcesClient) get_sql_trigger_create_request(resource_group_name: S
 
 /// Gets the SQL trigger under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient) get_sql_trigger(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, trigger_name: Str, options: SQLResourcesClientGetSQLTriggerOptions = SQLResourcesClientGetSQLTriggerOptions{}) -> SQLResourcesClientGetSQLTriggerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLTrigger", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_trigger_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_trigger_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLTriggerOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_trigger.
@@ -1226,14 +1266,16 @@ fn (c: SQLResourcesClient) create_update_sql_trigger_create_request(resource_gro
 /// Create or update an Azure Cosmos DB SQL trigger
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_trigger(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, trigger_name: Str, create_update_sql_trigger_parameters: SQLTriggerCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLTriggerOptions = SQLResourcesClientBeginCreateUpdateSQLTriggerOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLTriggerResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLTriggerResponse ! Str { sql_resources_create_update_sql_trigger_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLTriggerResponse ! Str { sql_resources_create_update_sql_trigger_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, create_update_sql_trigger_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLTrigger", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, create_update_sql_trigger_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLTriggerResponse ! Str { sql_resources_create_update_sql_trigger_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLTriggerResponse ! Str { sql_resources_create_update_sql_trigger_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLTriggerOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_trigger.
@@ -1284,14 +1326,16 @@ fn (c: SQLResourcesClient) delete_sql_trigger_create_request(resource_group_name
 /// Deletes an existing Azure Cosmos DB SQL trigger.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_trigger(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, trigger_name: Str, options: SQLResourcesClientBeginDeleteSQLTriggerOptions = SQLResourcesClientBeginDeleteSQLTriggerOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLTriggerResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLTriggerResponse ! Str { sql_resources_delete_sql_trigger_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLTriggerResponse ! Str { sql_resources_delete_sql_trigger_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLTrigger", c.setup.pipeline.tracer)
+  let req = c.delete_sql_trigger_create_request(resource_group_name, account_name, database_name, container_name, trigger_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLTriggerResponse ! Str { sql_resources_delete_sql_trigger_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLTriggerResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLTriggerResponse ! Str { sql_resources_delete_sql_trigger_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLUserDefinedFunctionsOptions: the optional parameters of SQLResourcesClient.new_list_sql_user_defined_functions_pager.
@@ -1338,7 +1382,7 @@ fn (c: SQLResourcesClient) list_sql_user_defined_functions_create_request(resour
 /// Lists the SQL userDefinedFunction under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_user_defined_functions_pager(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, options: SQLResourcesClientListSQLUserDefinedFunctionsOptions = SQLResourcesClientListSQLUserDefinedFunctionsOptions{}) -> runtime.Pager[SQLResourcesClientListSQLUserDefinedFunctionsResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_user_defined_functions_create_request(resource_group_name, account_name, database_name, container_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLUserDefinedFunctionsResponse ! Str { sql_resources_list_sql_user_defined_functions_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLUserDefinedFunctionsResponse) -> Str? { r.sql_user_defined_function_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLUserDefinedFunctionsResponse ! Str { sql_resources_list_sql_user_defined_functions_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLUserDefinedFunctionsResponse) -> Str? { r.sql_user_defined_function_list_result.next_link }).traced_as("SQLResourcesClientListSQLUserDefinedFunctionsResponse"))
 }
 
 /// SQLResourcesClientGetSQLUserDefinedFunctionOptions: the optional parameters of SQLResourcesClient.get_sql_user_defined_function.
@@ -1388,12 +1432,15 @@ fn (c: SQLResourcesClient) get_sql_user_defined_function_create_request(resource
 
 /// Gets the SQL userDefinedFunction under an existing Azure Cosmos DB database account.
 pub fn (c: SQLResourcesClient) get_sql_user_defined_function(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, user_defined_function_name: Str, options: SQLResourcesClientGetSQLUserDefinedFunctionOptions = SQLResourcesClientGetSQLUserDefinedFunctionOptions{}) -> SQLResourcesClientGetSQLUserDefinedFunctionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLUserDefinedFunction", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_user_defined_function_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_user_defined_function_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLUserDefinedFunctionOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_user_defined_function.
@@ -1448,14 +1495,16 @@ fn (c: SQLResourcesClient) create_update_sql_user_defined_function_create_reques
 /// Create or update an Azure Cosmos DB SQL userDefinedFunction
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_user_defined_function(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, user_defined_function_name: Str, create_update_sql_user_defined_function_parameters: SQLUserDefinedFunctionCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLUserDefinedFunctionOptions = SQLResourcesClientBeginCreateUpdateSQLUserDefinedFunctionOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse ! Str { sql_resources_create_update_sql_user_defined_function_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse ! Str { sql_resources_create_update_sql_user_defined_function_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, create_update_sql_user_defined_function_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLUserDefinedFunction", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, create_update_sql_user_defined_function_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse ! Str { sql_resources_create_update_sql_user_defined_function_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLUserDefinedFunctionResponse ! Str { sql_resources_create_update_sql_user_defined_function_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLUserDefinedFunctionOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_user_defined_function.
@@ -1506,14 +1555,16 @@ fn (c: SQLResourcesClient) delete_sql_user_defined_function_create_request(resou
 /// Deletes an existing Azure Cosmos DB SQL userDefinedFunction.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_user_defined_function(resource_group_name: Str, account_name: Str, database_name: Str, container_name: Str, user_defined_function_name: Str, options: SQLResourcesClientBeginDeleteSQLUserDefinedFunctionOptions = SQLResourcesClientBeginDeleteSQLUserDefinedFunctionOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLUserDefinedFunctionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLUserDefinedFunctionResponse ! Str { sql_resources_delete_sql_user_defined_function_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLUserDefinedFunctionResponse ! Str { sql_resources_delete_sql_user_defined_function_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLUserDefinedFunction", c.setup.pipeline.tracer)
+  let req = c.delete_sql_user_defined_function_create_request(resource_group_name, account_name, database_name, container_name, user_defined_function_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLUserDefinedFunctionResponse ! Str { sql_resources_delete_sql_user_defined_function_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLUserDefinedFunctionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLUserDefinedFunctionResponse ! Str { sql_resources_delete_sql_user_defined_function_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientGetSQLDatabaseThroughputOptions: the optional parameters of SQLResourcesClient.get_sql_database_throughput.
@@ -1555,12 +1606,15 @@ fn (c: SQLResourcesClient) get_sql_database_throughput_create_request(resource_g
 
 /// Gets the RUs per second of the SQL database under an existing Azure Cosmos DB database account with the provided name.
 pub fn (c: SQLResourcesClient) get_sql_database_throughput(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientGetSQLDatabaseThroughputOptions = SQLResourcesClientGetSQLDatabaseThroughputOptions{}) -> SQLResourcesClientGetSQLDatabaseThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_database_throughput_create_request(resource_group_name, account_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLDatabaseThroughput", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_database_throughput_create_request(resource_group_name, account_name, database_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_database_throughput_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_database_throughput_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginUpdateSQLDatabaseThroughputOptions: the optional parameters of SQLResourcesClient.begin_update_sql_database_throughput.
@@ -1607,14 +1661,16 @@ fn (c: SQLResourcesClient) update_sql_database_throughput_create_request(resourc
 /// Update RUs per second of an Azure Cosmos DB SQL database
 pub fn (c: SQLResourcesClient[fx]) begin_update_sql_database_throughput(resource_group_name: Str, account_name: Str, database_name: Str, update_throughput_parameters: ThroughputSettingsUpdateParameters, options: SQLResourcesClientBeginUpdateSQLDatabaseThroughputOptions = SQLResourcesClientBeginUpdateSQLDatabaseThroughputOptions{}) -> runtime.Poller[SQLResourcesClientUpdateSQLDatabaseThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientUpdateSQLDatabaseThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLDatabaseThroughputResponse ! Str { sql_resources_update_sql_database_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientUpdateSQLDatabaseThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLDatabaseThroughputResponse ! Str { sql_resources_update_sql_database_throughput_handle(r) }, traced: true)
   }
-  let req = c.update_sql_database_throughput_create_request(resource_group_name, account_name, database_name, update_throughput_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginUpdateSQLDatabaseThroughput", c.setup.pipeline.tracer)
+  let req = c.update_sql_database_throughput_create_request(resource_group_name, account_name, database_name, update_throughput_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientUpdateSQLDatabaseThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLDatabaseThroughputResponse ! Str { sql_resources_update_sql_database_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientUpdateSQLDatabaseThroughputResponse", fn(r: http.Response) -> SQLResourcesClientUpdateSQLDatabaseThroughputResponse ! Str { sql_resources_update_sql_database_throughput_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginMigrateSQLDatabaseToAutoscaleOptions: the optional parameters of SQLResourcesClient.begin_migrate_sql_database_to_autoscale.
@@ -1660,14 +1716,16 @@ fn (c: SQLResourcesClient) migrate_sql_database_to_autoscale_create_request(reso
 /// Migrate an Azure Cosmos DB SQL database from manual throughput to autoscale
 pub fn (c: SQLResourcesClient[fx]) begin_migrate_sql_database_to_autoscale(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientBeginMigrateSQLDatabaseToAutoscaleOptions = SQLResourcesClientBeginMigrateSQLDatabaseToAutoscaleOptions{}) -> runtime.Poller[SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse ! Str { sql_resources_migrate_sql_database_to_autoscale_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse ! Str { sql_resources_migrate_sql_database_to_autoscale_handle(r) }, traced: true)
   }
-  let req = c.migrate_sql_database_to_autoscale_create_request(resource_group_name, account_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginMigrateSQLDatabaseToAutoscale", c.setup.pipeline.tracer)
+  let req = c.migrate_sql_database_to_autoscale_create_request(resource_group_name, account_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse ! Str { sql_resources_migrate_sql_database_to_autoscale_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToAutoscaleResponse ! Str { sql_resources_migrate_sql_database_to_autoscale_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginMigrateSQLDatabaseToManualThroughputOptions: the optional parameters of SQLResourcesClient.begin_migrate_sql_database_to_manual_throughput.
@@ -1713,14 +1771,16 @@ fn (c: SQLResourcesClient) migrate_sql_database_to_manual_throughput_create_requ
 /// Migrate an Azure Cosmos DB SQL database from autoscale to manual throughput
 pub fn (c: SQLResourcesClient[fx]) begin_migrate_sql_database_to_manual_throughput(resource_group_name: Str, account_name: Str, database_name: Str, options: SQLResourcesClientBeginMigrateSQLDatabaseToManualThroughputOptions = SQLResourcesClientBeginMigrateSQLDatabaseToManualThroughputOptions{}) -> runtime.Poller[SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse ! Str { sql_resources_migrate_sql_database_to_manual_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse ! Str { sql_resources_migrate_sql_database_to_manual_throughput_handle(r) }, traced: true)
   }
-  let req = c.migrate_sql_database_to_manual_throughput_create_request(resource_group_name, account_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginMigrateSQLDatabaseToManualThroughput", c.setup.pipeline.tracer)
+  let req = c.migrate_sql_database_to_manual_throughput_create_request(resource_group_name, account_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse ! Str { sql_resources_migrate_sql_database_to_manual_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse", fn(r: http.Response) -> SQLResourcesClientMigrateSQLDatabaseToManualThroughputResponse ! Str { sql_resources_migrate_sql_database_to_manual_throughput_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLRoleAssignmentsOptions: the optional parameters of SQLResourcesClient.new_list_sql_role_assignments_pager.
@@ -1759,7 +1819,7 @@ fn (c: SQLResourcesClient) list_sql_role_assignments_create_request(resource_gro
 /// Retrieves the list of all Azure Cosmos DB SQL Role Assignments.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_role_assignments_pager(resource_group_name: Str, account_name: Str, options: SQLResourcesClientListSQLRoleAssignmentsOptions = SQLResourcesClientListSQLRoleAssignmentsOptions{}) -> runtime.Pager[SQLResourcesClientListSQLRoleAssignmentsResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_role_assignments_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLRoleAssignmentsResponse ! Str { sql_resources_list_sql_role_assignments_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLRoleAssignmentsResponse) -> Str? { r.sql_role_assignment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLRoleAssignmentsResponse ! Str { sql_resources_list_sql_role_assignments_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLRoleAssignmentsResponse) -> Str? { r.sql_role_assignment_list_result.next_link }).traced_as("SQLResourcesClientListSQLRoleAssignmentsResponse"))
 }
 
 /// SQLResourcesClientGetSQLRoleAssignmentOptions: the optional parameters of SQLResourcesClient.get_sql_role_assignment.
@@ -1801,12 +1861,15 @@ fn (c: SQLResourcesClient) get_sql_role_assignment_create_request(role_assignmen
 
 /// Retrieves the properties of an existing Azure Cosmos DB SQL Role Assignment with the given Id.
 pub fn (c: SQLResourcesClient) get_sql_role_assignment(role_assignment_id: Str, resource_group_name: Str, account_name: Str, options: SQLResourcesClientGetSQLRoleAssignmentOptions = SQLResourcesClientGetSQLRoleAssignmentOptions{}) -> SQLResourcesClientGetSQLRoleAssignmentResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLRoleAssignment", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_role_assignment_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_role_assignment_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLRoleAssignmentOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_role_assignment.
@@ -1853,14 +1916,16 @@ fn (c: SQLResourcesClient) create_update_sql_role_assignment_create_request(role
 /// Creates or updates an Azure Cosmos DB SQL Role Assignment.
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_role_assignment(role_assignment_id: Str, resource_group_name: Str, account_name: Str, create_update_sql_role_assignment_parameters: SQLRoleAssignmentCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLRoleAssignmentOptions = SQLResourcesClientBeginCreateUpdateSQLRoleAssignmentOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse ! Str { sql_resources_create_update_sql_role_assignment_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse ! Str { sql_resources_create_update_sql_role_assignment_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, create_update_sql_role_assignment_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLRoleAssignment", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, create_update_sql_role_assignment_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse ! Str { sql_resources_create_update_sql_role_assignment_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleAssignmentResponse ! Str { sql_resources_create_update_sql_role_assignment_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLRoleAssignmentOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_role_assignment.
@@ -1903,14 +1968,16 @@ fn (c: SQLResourcesClient) delete_sql_role_assignment_create_request(role_assign
 /// Deletes an existing Azure Cosmos DB SQL Role Assignment.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_role_assignment(role_assignment_id: Str, resource_group_name: Str, account_name: Str, options: SQLResourcesClientBeginDeleteSQLRoleAssignmentOptions = SQLResourcesClientBeginDeleteSQLRoleAssignmentOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLRoleAssignmentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleAssignmentResponse ! Str { sql_resources_delete_sql_role_assignment_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleAssignmentResponse ! Str { sql_resources_delete_sql_role_assignment_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLRoleAssignment", c.setup.pipeline.tracer)
+  let req = c.delete_sql_role_assignment_create_request(role_assignment_id, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleAssignmentResponse ! Str { sql_resources_delete_sql_role_assignment_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLRoleAssignmentResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleAssignmentResponse ! Str { sql_resources_delete_sql_role_assignment_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientListSQLRoleDefinitionsOptions: the optional parameters of SQLResourcesClient.new_list_sql_role_definitions_pager.
@@ -1949,7 +2016,7 @@ fn (c: SQLResourcesClient) list_sql_role_definitions_create_request(resource_gro
 /// Retrieves the list of all Azure Cosmos DB SQL Role Definitions.
 pub fn (c: SQLResourcesClient[fx]) new_list_sql_role_definitions_pager(resource_group_name: Str, account_name: Str, options: SQLResourcesClientListSQLRoleDefinitionsOptions = SQLResourcesClientListSQLRoleDefinitionsOptions{}) -> runtime.Pager[SQLResourcesClientListSQLRoleDefinitionsResponse, fx] ! azcore.CallErr {
   let req = c.list_sql_role_definitions_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLRoleDefinitionsResponse ! Str { sql_resources_list_sql_role_definitions_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLRoleDefinitionsResponse) -> Str? { r.sql_role_definition_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SQLResourcesClientListSQLRoleDefinitionsResponse ! Str { sql_resources_list_sql_role_definitions_handle(r) }, c.setup.endpoint, fn(r: SQLResourcesClientListSQLRoleDefinitionsResponse) -> Str? { r.sql_role_definition_list_result.next_link }).traced_as("SQLResourcesClientListSQLRoleDefinitionsResponse"))
 }
 
 /// SQLResourcesClientGetSQLRoleDefinitionOptions: the optional parameters of SQLResourcesClient.get_sql_role_definition.
@@ -1991,12 +2058,15 @@ fn (c: SQLResourcesClient) get_sql_role_definition_create_request(role_definitio
 
 /// Retrieves the properties of an existing Azure Cosmos DB SQL Role Definition with the given Id.
 pub fn (c: SQLResourcesClient) get_sql_role_definition(role_definition_id: Str, resource_group_name: Str, account_name: Str, options: SQLResourcesClientGetSQLRoleDefinitionOptions = SQLResourcesClientGetSQLRoleDefinitionOptions{}) -> SQLResourcesClientGetSQLRoleDefinitionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.GetSQLRoleDefinition", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  sql_resources_get_sql_role_definition_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = sql_resources_get_sql_role_definition_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SQLResourcesClientBeginCreateUpdateSQLRoleDefinitionOptions: the optional parameters of SQLResourcesClient.begin_create_update_sql_role_definition.
@@ -2043,14 +2113,16 @@ fn (c: SQLResourcesClient) create_update_sql_role_definition_create_request(role
 /// Creates or updates an Azure Cosmos DB SQL Role Definition.
 pub fn (c: SQLResourcesClient[fx]) begin_create_update_sql_role_definition(role_definition_id: Str, resource_group_name: Str, account_name: Str, create_update_sql_role_definition_parameters: SQLRoleDefinitionCreateUpdateParameters, options: SQLResourcesClientBeginCreateUpdateSQLRoleDefinitionOptions = SQLResourcesClientBeginCreateUpdateSQLRoleDefinitionOptions{}) -> runtime.Poller[SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse ! Str { sql_resources_create_update_sql_role_definition_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse ! Str { sql_resources_create_update_sql_role_definition_handle(r) }, traced: true)
   }
-  let req = c.create_update_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, create_update_sql_role_definition_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginCreateUpdateSQLRoleDefinition", c.setup.pipeline.tracer)
+  let req = c.create_update_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, create_update_sql_role_definition_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse ! Str { sql_resources_create_update_sql_role_definition_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientCreateUpdateSQLRoleDefinitionResponse ! Str { sql_resources_create_update_sql_role_definition_handle(r) }, traced: true)
 }
 
 /// SQLResourcesClientBeginDeleteSQLRoleDefinitionOptions: the optional parameters of SQLResourcesClient.begin_delete_sql_role_definition.
@@ -2093,12 +2165,14 @@ fn (c: SQLResourcesClient) delete_sql_role_definition_create_request(role_defini
 /// Deletes an existing Azure Cosmos DB SQL Role Definition.
 pub fn (c: SQLResourcesClient[fx]) begin_delete_sql_role_definition(role_definition_id: Str, resource_group_name: Str, account_name: Str, options: SQLResourcesClientBeginDeleteSQLRoleDefinitionOptions = SQLResourcesClientBeginDeleteSQLRoleDefinitionOptions{}) -> runtime.Poller[SQLResourcesClientDeleteSQLRoleDefinitionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleDefinitionResponse ! Str { sql_resources_delete_sql_role_definition_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SQLResourcesClientDeleteSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleDefinitionResponse ! Str { sql_resources_delete_sql_role_definition_handle(r) }, traced: true)
   }
-  let req = c.delete_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SQLResourcesClient.BeginDeleteSQLRoleDefinition", c.setup.pipeline.tracer)
+  let req = c.delete_sql_role_definition_create_request(role_definition_id, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleDefinitionResponse ! Str { sql_resources_delete_sql_role_definition_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SQLResourcesClientDeleteSQLRoleDefinitionResponse", fn(r: http.Response) -> SQLResourcesClientDeleteSQLRoleDefinitionResponse ! Str { sql_resources_delete_sql_role_definition_handle(r) }, traced: true)
 }

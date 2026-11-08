@@ -49,7 +49,7 @@ fn (c: GroupsClient) list_create_request(options: GroupsClientListOptions) -> po
 /// Gets all SQL virtual machine groups in a subscription.
 pub fn (c: GroupsClient[fx]) new_list_pager(options: GroupsClientListOptions = GroupsClientListOptions{}) -> runtime.Pager[GroupsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupsClientListResponse ! Str { groups_list_handle(r) }, c.setup.endpoint, fn(r: GroupsClientListResponse) -> Str? { r.group_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupsClientListResponse ! Str { groups_list_handle(r) }, c.setup.endpoint, fn(r: GroupsClientListResponse) -> Str? { r.group_list_result.next_link }).traced_as("GroupsClientListResponse"))
 }
 
 /// GroupsClientListByResourceGroupOptions: the optional parameters of GroupsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: GroupsClient) list_by_resource_group_create_request(resource_group_name: 
 /// Gets all SQL virtual machine groups in a resource group.
 pub fn (c: GroupsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: GroupsClientListByResourceGroupOptions = GroupsClientListByResourceGroupOptions{}) -> runtime.Pager[GroupsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupsClientListByResourceGroupResponse ! Str { groups_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GroupsClientListByResourceGroupResponse) -> Str? { r.group_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GroupsClientListByResourceGroupResponse ! Str { groups_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GroupsClientListByResourceGroupResponse) -> Str? { r.group_list_result.next_link }).traced_as("GroupsClientListByResourceGroupResponse"))
 }
 
 /// GroupsClientGetOptions: the optional parameters of GroupsClient.get.
@@ -122,12 +122,15 @@ fn (c: GroupsClient) get_create_request(resource_group_name: Str, sql_virtual_ma
 
 /// Gets a SQL virtual machine group.
 pub fn (c: GroupsClient) get(resource_group_name: Str, sql_virtual_machine_group_name: Str, options: GroupsClientGetOptions = GroupsClientGetOptions{}) -> GroupsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, sql_virtual_machine_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GroupsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, sql_virtual_machine_group_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  groups_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = groups_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// GroupsClientBeginCreateOrUpdateOptions: the optional parameters of GroupsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: GroupsClient) create_or_update_create_request(resource_group_name: Str, s
 /// Creates or updates a SQL virtual machine group.
 pub fn (c: GroupsClient[fx]) begin_create_or_update(resource_group_name: Str, sql_virtual_machine_group_name: Str, parameters: Group, options: GroupsClientBeginCreateOrUpdateOptions = GroupsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[GroupsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> GroupsClientCreateOrUpdateResponse ! Str { groups_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> GroupsClientCreateOrUpdateResponse ! Str { groups_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, sql_virtual_machine_group_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GroupsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, sql_virtual_machine_group_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> GroupsClientCreateOrUpdateResponse ! Str { groups_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> GroupsClientCreateOrUpdateResponse ! Str { groups_create_or_update_handle(r) }, traced: true)
 }
 
 /// GroupsClientBeginUpdateOptions: the optional parameters of GroupsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: GroupsClient) update_create_request(resource_group_name: Str, sql_virtual
 /// Updates SQL virtual machine group tags.
 pub fn (c: GroupsClient[fx]) begin_update(resource_group_name: Str, sql_virtual_machine_group_name: Str, parameters: GroupUpdate, options: GroupsClientBeginUpdateOptions = GroupsClientBeginUpdateOptions{}) -> runtime.Poller[GroupsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientUpdateResponse", fn(r: http.Response) -> GroupsClientUpdateResponse ! Str { groups_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientUpdateResponse", fn(r: http.Response) -> GroupsClientUpdateResponse ! Str { groups_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, sql_virtual_machine_group_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GroupsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, sql_virtual_machine_group_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientUpdateResponse", fn(r: http.Response) -> GroupsClientUpdateResponse ! Str { groups_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientUpdateResponse", fn(r: http.Response) -> GroupsClientUpdateResponse ! Str { groups_update_handle(r) }, traced: true)
 }
 
 /// GroupsClientBeginDeleteOptions: the optional parameters of GroupsClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: GroupsClient) delete_create_request(resource_group_name: Str, sql_virtual
 /// Deletes a SQL virtual machine group.
 pub fn (c: GroupsClient[fx]) begin_delete(resource_group_name: Str, sql_virtual_machine_group_name: Str, options: GroupsClientBeginDeleteOptions = GroupsClientBeginDeleteOptions{}) -> runtime.Poller[GroupsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientDeleteResponse", fn(r: http.Response) -> GroupsClientDeleteResponse ! Str { groups_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GroupsClientDeleteResponse", fn(r: http.Response) -> GroupsClientDeleteResponse ! Str { groups_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, sql_virtual_machine_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GroupsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, sql_virtual_machine_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientDeleteResponse", fn(r: http.Response) -> GroupsClientDeleteResponse ! Str { groups_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GroupsClientDeleteResponse", fn(r: http.Response) -> GroupsClientDeleteResponse ! Str { groups_delete_handle(r) }, traced: true)
 }

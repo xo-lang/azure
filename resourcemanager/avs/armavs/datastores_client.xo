@@ -61,7 +61,7 @@ fn (c: DatastoresClient) list_create_request(resource_group_name: Str, private_c
 /// List Datastore resources by Cluster
 pub fn (c: DatastoresClient[fx]) new_list_pager(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, options: DatastoresClientListOptions = DatastoresClientListOptions{}) -> runtime.Pager[DatastoresClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, private_cloud_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatastoresClientListResponse ! Str { datastores_list_handle(r) }, c.setup.endpoint, fn(r: DatastoresClientListResponse) -> Str? { r.datastore_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatastoresClientListResponse ! Str { datastores_list_handle(r) }, c.setup.endpoint, fn(r: DatastoresClientListResponse) -> Str? { r.datastore_list.next_link }).traced_as("DatastoresClientListResponse"))
 }
 
 /// DatastoresClientGetOptions: the optional parameters of DatastoresClient.get.
@@ -107,12 +107,15 @@ fn (c: DatastoresClient) get_create_request(resource_group_name: Str, private_cl
 
 /// Get a Datastore
 pub fn (c: DatastoresClient) get(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, datastore_name: Str, options: DatastoresClientGetOptions = DatastoresClientGetOptions{}) -> DatastoresClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatastoresClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  datastores_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = datastores_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatastoresClientBeginCreateOrUpdateOptions: the optional parameters of DatastoresClient.begin_create_or_update.
@@ -163,14 +166,16 @@ fn (c: DatastoresClient) create_or_update_create_request(resource_group_name: St
 /// Create a Datastore
 pub fn (c: DatastoresClient[fx]) begin_create_or_update(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, datastore_name: Str, datastore: Datastore, options: DatastoresClientBeginCreateOrUpdateOptions = DatastoresClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DatastoresClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatastoresClientCreateOrUpdateResponse", fn(r: http.Response) -> DatastoresClientCreateOrUpdateResponse ! Str { datastores_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatastoresClientCreateOrUpdateResponse", fn(r: http.Response) -> DatastoresClientCreateOrUpdateResponse ! Str { datastores_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, datastore, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatastoresClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, datastore, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatastoresClientCreateOrUpdateResponse", fn(r: http.Response) -> DatastoresClientCreateOrUpdateResponse ! Str { datastores_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatastoresClientCreateOrUpdateResponse", fn(r: http.Response) -> DatastoresClientCreateOrUpdateResponse ! Str { datastores_create_or_update_handle(r) }, traced: true)
 }
 
 /// DatastoresClientBeginDeleteOptions: the optional parameters of DatastoresClient.begin_delete.
@@ -217,12 +222,14 @@ fn (c: DatastoresClient) delete_create_request(resource_group_name: Str, private
 /// Delete a Datastore
 pub fn (c: DatastoresClient[fx]) begin_delete(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, datastore_name: Str, options: DatastoresClientBeginDeleteOptions = DatastoresClientBeginDeleteOptions{}) -> runtime.Poller[DatastoresClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatastoresClientDeleteResponse", fn(r: http.Response) -> DatastoresClientDeleteResponse ! Str { datastores_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatastoresClientDeleteResponse", fn(r: http.Response) -> DatastoresClientDeleteResponse ! Str { datastores_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatastoresClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, private_cloud_name, cluster_name, datastore_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatastoresClientDeleteResponse", fn(r: http.Response) -> DatastoresClientDeleteResponse ! Str { datastores_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatastoresClientDeleteResponse", fn(r: http.Response) -> DatastoresClientDeleteResponse ! Str { datastores_delete_handle(r) }, traced: true)
 }

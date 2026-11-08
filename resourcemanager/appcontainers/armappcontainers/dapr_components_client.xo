@@ -57,7 +57,7 @@ fn (c: DaprComponentsClient) list_create_request(resource_group_name: Str, envir
 /// Get the Dapr Components for a managed environment.
 pub fn (c: DaprComponentsClient[fx]) new_list_pager(resource_group_name: Str, environment_name: Str, options: DaprComponentsClientListOptions = DaprComponentsClientListOptions{}) -> runtime.Pager[DaprComponentsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, environment_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DaprComponentsClientListResponse ! Str { dapr_components_list_handle(r) }, c.setup.endpoint, fn(r: DaprComponentsClientListResponse) -> Str? { r.dapr_components_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DaprComponentsClientListResponse ! Str { dapr_components_list_handle(r) }, c.setup.endpoint, fn(r: DaprComponentsClientListResponse) -> Str? { r.dapr_components_collection.next_link }).traced_as("DaprComponentsClientListResponse"))
 }
 
 /// DaprComponentsClientGetOptions: the optional parameters of DaprComponentsClient.get.
@@ -99,12 +99,15 @@ fn (c: DaprComponentsClient) get_create_request(resource_group_name: Str, enviro
 
 /// Get a dapr component.
 pub fn (c: DaprComponentsClient) get(resource_group_name: Str, environment_name: Str, component_name: Str, options: DaprComponentsClientGetOptions = DaprComponentsClientGetOptions{}) -> DaprComponentsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, environment_name, component_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DaprComponentsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, environment_name, component_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dapr_components_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dapr_components_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DaprComponentsClientCreateOrUpdateOptions: the optional parameters of DaprComponentsClient.create_or_update.
@@ -147,12 +150,15 @@ fn (c: DaprComponentsClient) create_or_update_create_request(resource_group_name
 
 /// Creates or updates a Dapr Component in a Managed Environment.
 pub fn (c: DaprComponentsClient) create_or_update(resource_group_name: Str, environment_name: Str, component_name: Str, dapr_component_envelope: DaprComponent, options: DaprComponentsClientCreateOrUpdateOptions = DaprComponentsClientCreateOrUpdateOptions{}) -> DaprComponentsClientCreateOrUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_or_update_create_request(resource_group_name, environment_name, component_name, dapr_component_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DaprComponentsClient.CreateOrUpdate", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_or_update_create_request(resource_group_name, environment_name, component_name, dapr_component_envelope, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dapr_components_create_or_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dapr_components_create_or_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DaprComponentsClientDeleteOptions: the optional parameters of DaprComponentsClient.delete.
@@ -191,12 +197,15 @@ fn (c: DaprComponentsClient) delete_create_request(resource_group_name: Str, env
 
 /// Delete a Dapr Component from a Managed Environment.
 pub fn (c: DaprComponentsClient) delete(resource_group_name: Str, environment_name: Str, component_name: Str, options: DaprComponentsClientDeleteOptions = DaprComponentsClientDeleteOptions{}) -> DaprComponentsClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, environment_name, component_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DaprComponentsClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, environment_name, component_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dapr_components_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dapr_components_delete_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DaprComponentsClientListSecretsOptions: the optional parameters of DaprComponentsClient.list_secrets.
@@ -238,10 +247,13 @@ fn (c: DaprComponentsClient) list_secrets_create_request(resource_group_name: St
 
 /// List secrets for a dapr component
 pub fn (c: DaprComponentsClient) list_secrets(resource_group_name: Str, environment_name: Str, component_name: Str, options: DaprComponentsClientListSecretsOptions = DaprComponentsClientListSecretsOptions{}) -> DaprComponentsClientListSecretsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_secrets_create_request(resource_group_name, environment_name, component_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DaprComponentsClient.ListSecrets", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_secrets_create_request(resource_group_name, environment_name, component_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dapr_components_list_secrets_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dapr_components_list_secrets_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

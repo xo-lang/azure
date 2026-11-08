@@ -53,10 +53,13 @@ fn (c: ManagementClient) mitigate_create_request(job_name: Str, resource_group_n
 
 /// Request to mitigate for a given job
 pub fn (c: ManagementClient) mitigate(job_name: Str, resource_group_name: Str, mitigate_job_request: MitigateJobRequest, options: ManagementClientMitigateOptions = ManagementClientMitigateOptions{}) -> ManagementClientMitigateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.mitigate_create_request(job_name, resource_group_name, mitigate_job_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagementClient.Mitigate", c.setup.pipeline.tracer)
+  let req = sp.on(c.mitigate_create_request(job_name, resource_group_name, mitigate_job_request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  management_mitigate_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = management_mitigate_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

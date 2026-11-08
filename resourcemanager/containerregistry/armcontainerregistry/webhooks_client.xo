@@ -57,7 +57,7 @@ fn (c: WebhooksClient) list_create_request(resource_group_name: Str, registry_na
 /// Lists all the webhooks for the specified container registry.
 pub fn (c: WebhooksClient[fx]) new_list_pager(resource_group_name: Str, registry_name: Str, options: WebhooksClientListOptions = WebhooksClientListOptions{}) -> runtime.Pager[WebhooksClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, registry_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> WebhooksClientListResponse ! Str { webhooks_list_handle(r) }, c.setup.endpoint, fn(r: WebhooksClientListResponse) -> Str? { r.webhook_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> WebhooksClientListResponse ! Str { webhooks_list_handle(r) }, c.setup.endpoint, fn(r: WebhooksClientListResponse) -> Str? { r.webhook_list_result.next_link }).traced_as("WebhooksClientListResponse"))
 }
 
 /// WebhooksClientGetOptions: the optional parameters of WebhooksClient.get.
@@ -99,12 +99,15 @@ fn (c: WebhooksClient) get_create_request(resource_group_name: Str, registry_nam
 
 /// Gets the properties of the specified webhook.
 pub fn (c: WebhooksClient) get(resource_group_name: Str, registry_name: Str, webhook_name: Str, options: WebhooksClientGetOptions = WebhooksClientGetOptions{}) -> WebhooksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, registry_name, webhook_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, registry_name, webhook_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  webhooks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = webhooks_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// WebhooksClientBeginCreateOptions: the optional parameters of WebhooksClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: WebhooksClient) create_create_request(resource_group_name: Str, registry_
 /// Creates a webhook for a container registry with the specified parameters.
 pub fn (c: WebhooksClient[fx]) begin_create(resource_group_name: Str, registry_name: Str, webhook_name: Str, webhook_create_parameters: WebhookCreateParameters, options: WebhooksClientBeginCreateOptions = WebhooksClientBeginCreateOptions{}) -> runtime.Poller[WebhooksClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientCreateResponse", fn(r: http.Response) -> WebhooksClientCreateResponse ! Str { webhooks_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientCreateResponse", fn(r: http.Response) -> WebhooksClientCreateResponse ! Str { webhooks_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, registry_name, webhook_name, webhook_create_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, registry_name, webhook_name, webhook_create_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientCreateResponse", fn(r: http.Response) -> WebhooksClientCreateResponse ! Str { webhooks_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientCreateResponse", fn(r: http.Response) -> WebhooksClientCreateResponse ! Str { webhooks_create_handle(r) }, traced: true)
 }
 
 /// WebhooksClientBeginUpdateOptions: the optional parameters of WebhooksClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: WebhooksClient) update_create_request(resource_group_name: Str, registry_
 /// Updates a webhook with the specified parameters.
 pub fn (c: WebhooksClient[fx]) begin_update(resource_group_name: Str, registry_name: Str, webhook_name: Str, webhook_update_parameters: WebhookUpdateParameters, options: WebhooksClientBeginUpdateOptions = WebhooksClientBeginUpdateOptions{}) -> runtime.Poller[WebhooksClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientUpdateResponse", fn(r: http.Response) -> WebhooksClientUpdateResponse ! Str { webhooks_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientUpdateResponse", fn(r: http.Response) -> WebhooksClientUpdateResponse ! Str { webhooks_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, registry_name, webhook_name, webhook_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, registry_name, webhook_name, webhook_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientUpdateResponse", fn(r: http.Response) -> WebhooksClientUpdateResponse ! Str { webhooks_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientUpdateResponse", fn(r: http.Response) -> WebhooksClientUpdateResponse ! Str { webhooks_update_handle(r) }, traced: true)
 }
 
 /// WebhooksClientBeginDeleteOptions: the optional parameters of WebhooksClient.begin_delete.
@@ -255,14 +262,16 @@ fn (c: WebhooksClient) delete_create_request(resource_group_name: Str, registry_
 /// Deletes a webhook from a container registry.
 pub fn (c: WebhooksClient[fx]) begin_delete(resource_group_name: Str, registry_name: Str, webhook_name: Str, options: WebhooksClientBeginDeleteOptions = WebhooksClientBeginDeleteOptions{}) -> runtime.Poller[WebhooksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientDeleteResponse", fn(r: http.Response) -> WebhooksClientDeleteResponse ! Str { webhooks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "WebhooksClientDeleteResponse", fn(r: http.Response) -> WebhooksClientDeleteResponse ! Str { webhooks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, registry_name, webhook_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, registry_name, webhook_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientDeleteResponse", fn(r: http.Response) -> WebhooksClientDeleteResponse ! Str { webhooks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "WebhooksClientDeleteResponse", fn(r: http.Response) -> WebhooksClientDeleteResponse ! Str { webhooks_delete_handle(r) }, traced: true)
 }
 
 /// WebhooksClientGetCallbackConfigOptions: the optional parameters of WebhooksClient.get_callback_config.
@@ -304,12 +313,15 @@ fn (c: WebhooksClient) get_callback_config_create_request(resource_group_name: S
 
 /// Gets the configuration of service URI and custom headers for the webhook.
 pub fn (c: WebhooksClient) get_callback_config(resource_group_name: Str, registry_name: Str, webhook_name: Str, options: WebhooksClientGetCallbackConfigOptions = WebhooksClientGetCallbackConfigOptions{}) -> WebhooksClientGetCallbackConfigResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_callback_config_create_request(resource_group_name, registry_name, webhook_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.GetCallbackConfig", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_callback_config_create_request(resource_group_name, registry_name, webhook_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  webhooks_get_callback_config_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = webhooks_get_callback_config_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// WebhooksClientListEventsOptions: the optional parameters of WebhooksClient.new_list_events_pager.
@@ -352,7 +364,7 @@ fn (c: WebhooksClient) list_events_create_request(resource_group_name: Str, regi
 /// Lists recent events for the specified webhook.
 pub fn (c: WebhooksClient[fx]) new_list_events_pager(resource_group_name: Str, registry_name: Str, webhook_name: Str, options: WebhooksClientListEventsOptions = WebhooksClientListEventsOptions{}) -> runtime.Pager[WebhooksClientListEventsResponse, fx] ! azcore.CallErr {
   let req = c.list_events_create_request(resource_group_name, registry_name, webhook_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> WebhooksClientListEventsResponse ! Str { webhooks_list_events_handle(r) }, c.setup.endpoint, fn(r: WebhooksClientListEventsResponse) -> Str? { r.event_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> WebhooksClientListEventsResponse ! Str { webhooks_list_events_handle(r) }, c.setup.endpoint, fn(r: WebhooksClientListEventsResponse) -> Str? { r.event_list_result.next_link }).traced_as("WebhooksClientListEventsResponse"))
 }
 
 /// WebhooksClientPingOptions: the optional parameters of WebhooksClient.ping.
@@ -394,10 +406,13 @@ fn (c: WebhooksClient) ping_create_request(resource_group_name: Str, registry_na
 
 /// Triggers a ping event to be sent to the webhook.
 pub fn (c: WebhooksClient) ping(resource_group_name: Str, registry_name: Str, webhook_name: Str, options: WebhooksClientPingOptions = WebhooksClientPingOptions{}) -> WebhooksClientPingResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.ping_create_request(resource_group_name, registry_name, webhook_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WebhooksClient.Ping", c.setup.pipeline.tracer)
+  let req = sp.on(c.ping_create_request(resource_group_name, registry_name, webhook_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  webhooks_ping_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = webhooks_ping_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

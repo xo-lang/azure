@@ -49,7 +49,7 @@ fn (c: SnapshotsClient) list_create_request(options: SnapshotsClientListOptions)
 /// Lists snapshots under a subscription.
 pub fn (c: SnapshotsClient[fx]) new_list_pager(options: SnapshotsClientListOptions = SnapshotsClientListOptions{}) -> runtime.Pager[SnapshotsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotsClientListResponse ! Str { snapshots_list_handle(r) }, c.setup.endpoint, fn(r: SnapshotsClientListResponse) -> Str? { r.snapshot_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotsClientListResponse ! Str { snapshots_list_handle(r) }, c.setup.endpoint, fn(r: SnapshotsClientListResponse) -> Str? { r.snapshot_list.next_link }).traced_as("SnapshotsClientListResponse"))
 }
 
 /// SnapshotsClientListByResourceGroupOptions: the optional parameters of SnapshotsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: SnapshotsClient) list_by_resource_group_create_request(resource_group_nam
 /// Lists snapshots under a resource group.
 pub fn (c: SnapshotsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: SnapshotsClientListByResourceGroupOptions = SnapshotsClientListByResourceGroupOptions{}) -> runtime.Pager[SnapshotsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotsClientListByResourceGroupResponse ! Str { snapshots_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: SnapshotsClientListByResourceGroupResponse) -> Str? { r.snapshot_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotsClientListByResourceGroupResponse ! Str { snapshots_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: SnapshotsClientListByResourceGroupResponse) -> Str? { r.snapshot_list.next_link }).traced_as("SnapshotsClientListByResourceGroupResponse"))
 }
 
 /// SnapshotsClientGetOptions: the optional parameters of SnapshotsClient.get.
@@ -122,12 +122,15 @@ fn (c: SnapshotsClient) get_create_request(resource_group_name: Str, snapshot_na
 
 /// Gets information about a snapshot.
 pub fn (c: SnapshotsClient) get(resource_group_name: Str, snapshot_name: Str, options: SnapshotsClientGetOptions = SnapshotsClientGetOptions{}) -> SnapshotsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, snapshot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  snapshots_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = snapshots_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SnapshotsClientBeginCreateOrUpdateOptions: the optional parameters of SnapshotsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: SnapshotsClient) create_or_update_create_request(resource_group_name: Str
 /// Creates or updates a snapshot.
 pub fn (c: SnapshotsClient[fx]) begin_create_or_update(resource_group_name: Str, snapshot_name: Str, snapshot: Snapshot, options: SnapshotsClientBeginCreateOrUpdateOptions = SnapshotsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[SnapshotsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientCreateOrUpdateResponse", fn(r: http.Response) -> SnapshotsClientCreateOrUpdateResponse ! Str { snapshots_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientCreateOrUpdateResponse", fn(r: http.Response) -> SnapshotsClientCreateOrUpdateResponse ! Str { snapshots_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, snapshot_name, snapshot, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, snapshot_name, snapshot, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientCreateOrUpdateResponse", fn(r: http.Response) -> SnapshotsClientCreateOrUpdateResponse ! Str { snapshots_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientCreateOrUpdateResponse", fn(r: http.Response) -> SnapshotsClientCreateOrUpdateResponse ! Str { snapshots_create_or_update_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginUpdateOptions: the optional parameters of SnapshotsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: SnapshotsClient) update_create_request(resource_group_name: Str, snapshot
 /// Updates (patches) a snapshot.
 pub fn (c: SnapshotsClient[fx]) begin_update(resource_group_name: Str, snapshot_name: Str, snapshot: SnapshotUpdate, options: SnapshotsClientBeginUpdateOptions = SnapshotsClientBeginUpdateOptions{}) -> runtime.Poller[SnapshotsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateResponse", fn(r: http.Response) -> SnapshotsClientUpdateResponse ! Str { snapshots_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateResponse", fn(r: http.Response) -> SnapshotsClientUpdateResponse ! Str { snapshots_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, snapshot_name, snapshot, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, snapshot_name, snapshot, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateResponse", fn(r: http.Response) -> SnapshotsClientUpdateResponse ! Str { snapshots_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateResponse", fn(r: http.Response) -> SnapshotsClientUpdateResponse ! Str { snapshots_update_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginDeleteOptions: the optional parameters of SnapshotsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: SnapshotsClient) delete_create_request(resource_group_name: Str, snapshot
 /// Deletes a snapshot.
 pub fn (c: SnapshotsClient[fx]) begin_delete(resource_group_name: Str, snapshot_name: Str, options: SnapshotsClientBeginDeleteOptions = SnapshotsClientBeginDeleteOptions{}) -> runtime.Poller[SnapshotsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientDeleteResponse", fn(r: http.Response) -> SnapshotsClientDeleteResponse ! Str { snapshots_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientDeleteResponse", fn(r: http.Response) -> SnapshotsClientDeleteResponse ! Str { snapshots_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, snapshot_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientDeleteResponse", fn(r: http.Response) -> SnapshotsClientDeleteResponse ! Str { snapshots_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientDeleteResponse", fn(r: http.Response) -> SnapshotsClientDeleteResponse ! Str { snapshots_delete_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginGrantAccessOptions: the optional parameters of SnapshotsClient.begin_grant_access.
@@ -316,14 +325,16 @@ fn (c: SnapshotsClient) grant_access_create_request(resource_group_name: Str, sn
 /// Grants access to a snapshot.
 pub fn (c: SnapshotsClient[fx]) begin_grant_access(resource_group_name: Str, snapshot_name: Str, grant_access_data: GrantAccessData, options: SnapshotsClientBeginGrantAccessOptions = SnapshotsClientBeginGrantAccessOptions{}) -> runtime.Poller[SnapshotsClientGrantAccessResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientGrantAccessResponse", fn(r: http.Response) -> SnapshotsClientGrantAccessResponse ! Str { snapshots_grant_access_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientGrantAccessResponse", fn(r: http.Response) -> SnapshotsClientGrantAccessResponse ! Str { snapshots_grant_access_handle(r) }, traced: true)
   }
-  let req = c.grant_access_create_request(resource_group_name, snapshot_name, grant_access_data, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginGrantAccess", c.setup.pipeline.tracer)
+  let req = c.grant_access_create_request(resource_group_name, snapshot_name, grant_access_data, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientGrantAccessResponse", fn(r: http.Response) -> SnapshotsClientGrantAccessResponse ! Str { snapshots_grant_access_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientGrantAccessResponse", fn(r: http.Response) -> SnapshotsClientGrantAccessResponse ! Str { snapshots_grant_access_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginRevokeAccessOptions: the optional parameters of SnapshotsClient.begin_revoke_access.
@@ -362,14 +373,16 @@ fn (c: SnapshotsClient) revoke_access_create_request(resource_group_name: Str, s
 /// Revokes access to a snapshot.
 pub fn (c: SnapshotsClient[fx]) begin_revoke_access(resource_group_name: Str, snapshot_name: Str, options: SnapshotsClientBeginRevokeAccessOptions = SnapshotsClientBeginRevokeAccessOptions{}) -> runtime.Poller[SnapshotsClientRevokeAccessResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientRevokeAccessResponse", fn(r: http.Response) -> SnapshotsClientRevokeAccessResponse ! Str { snapshots_revoke_access_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientRevokeAccessResponse", fn(r: http.Response) -> SnapshotsClientRevokeAccessResponse ! Str { snapshots_revoke_access_handle(r) }, traced: true)
   }
-  let req = c.revoke_access_create_request(resource_group_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginRevokeAccess", c.setup.pipeline.tracer)
+  let req = c.revoke_access_create_request(resource_group_name, snapshot_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientRevokeAccessResponse", fn(r: http.Response) -> SnapshotsClientRevokeAccessResponse ! Str { snapshots_revoke_access_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientRevokeAccessResponse", fn(r: http.Response) -> SnapshotsClientRevokeAccessResponse ! Str { snapshots_revoke_access_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginUpdateImmutabilityPolicyOptions: the optional parameters of SnapshotsClient.begin_update_immutability_policy.
@@ -412,14 +425,16 @@ fn (c: SnapshotsClient) update_immutability_policy_create_request(resource_group
 /// Updates the immutability policy of a snapshot. Sets or extends an unlocked immutability policy with the specified duration and type. If the snapshot already has a locked policy, the request will be rejected. Use updateImmutabilityPolicyLock to lock an immutability policy.
 pub fn (c: SnapshotsClient[fx]) begin_update_immutability_policy(resource_group_name: Str, snapshot_name: Str, immutability_policy_data: ImmutabilityPolicyData, options: SnapshotsClientBeginUpdateImmutabilityPolicyOptions = SnapshotsClientBeginUpdateImmutabilityPolicyOptions{}) -> runtime.Poller[SnapshotsClientUpdateImmutabilityPolicyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateImmutabilityPolicyResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyResponse ! Str { snapshots_update_immutability_policy_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateImmutabilityPolicyResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyResponse ! Str { snapshots_update_immutability_policy_handle(r) }, traced: true)
   }
-  let req = c.update_immutability_policy_create_request(resource_group_name, snapshot_name, immutability_policy_data, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginUpdateImmutabilityPolicy", c.setup.pipeline.tracer)
+  let req = c.update_immutability_policy_create_request(resource_group_name, snapshot_name, immutability_policy_data, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateImmutabilityPolicyResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyResponse ! Str { snapshots_update_immutability_policy_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateImmutabilityPolicyResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyResponse ! Str { snapshots_update_immutability_policy_handle(r) }, traced: true)
 }
 
 /// SnapshotsClientBeginUpdateImmutabilityPolicyLockOptions: the optional parameters of SnapshotsClient.begin_update_immutability_policy_lock.
@@ -462,12 +477,14 @@ fn (c: SnapshotsClient) update_immutability_policy_lock_create_request(resource_
 /// Locks the immutability policy of a snapshot. Once locked, the policy cannot be reduced or removed until the lock period expires.
 pub fn (c: SnapshotsClient[fx]) begin_update_immutability_policy_lock(resource_group_name: Str, snapshot_name: Str, immutability_policy_data: ImmutabilityPolicyLockData, options: SnapshotsClientBeginUpdateImmutabilityPolicyLockOptions = SnapshotsClientBeginUpdateImmutabilityPolicyLockOptions{}) -> runtime.Poller[SnapshotsClientUpdateImmutabilityPolicyLockResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateImmutabilityPolicyLockResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyLockResponse ! Str { snapshots_update_immutability_policy_lock_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotsClientUpdateImmutabilityPolicyLockResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyLockResponse ! Str { snapshots_update_immutability_policy_lock_handle(r) }, traced: true)
   }
-  let req = c.update_immutability_policy_lock_create_request(resource_group_name, snapshot_name, immutability_policy_data, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotsClient.BeginUpdateImmutabilityPolicyLock", c.setup.pipeline.tracer)
+  let req = c.update_immutability_policy_lock_create_request(resource_group_name, snapshot_name, immutability_policy_data, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateImmutabilityPolicyLockResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyLockResponse ! Str { snapshots_update_immutability_policy_lock_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotsClientUpdateImmutabilityPolicyLockResponse", fn(r: http.Response) -> SnapshotsClientUpdateImmutabilityPolicyLockResponse ! Str { snapshots_update_immutability_policy_lock_handle(r) }, traced: true)
 }

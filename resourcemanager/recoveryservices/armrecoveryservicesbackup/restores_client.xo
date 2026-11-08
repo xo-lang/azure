@@ -77,12 +77,14 @@ fn (c: RestoresClient) trigger_create_request(vault_name: Str, resource_group_na
 /// Restores the specified backed up data. This is an asynchronous operation. To know the status of this API call, use GetProtectedItemOperationResult API.
 pub fn (c: RestoresClient[fx]) begin_trigger(vault_name: Str, resource_group_name: Str, fabric_name: Str, container_name: Str, protected_item_name: Str, recovery_point_id: Str, parameters: RestoreRequestResource, options: RestoresClientBeginTriggerOptions = RestoresClientBeginTriggerOptions{}) -> runtime.Poller[RestoresClientTriggerResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RestoresClientTriggerResponse", fn(r: http.Response) -> RestoresClientTriggerResponse ! Str { restores_trigger_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RestoresClientTriggerResponse", fn(r: http.Response) -> RestoresClientTriggerResponse ! Str { restores_trigger_handle(r) }, traced: true)
   }
-  let req = c.trigger_create_request(vault_name, resource_group_name, fabric_name, container_name, protected_item_name, recovery_point_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RestoresClient.BeginTrigger", c.setup.pipeline.tracer)
+  let req = c.trigger_create_request(vault_name, resource_group_name, fabric_name, container_name, protected_item_name, recovery_point_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RestoresClientTriggerResponse", fn(r: http.Response) -> RestoresClientTriggerResponse ! Str { restores_trigger_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RestoresClientTriggerResponse", fn(r: http.Response) -> RestoresClientTriggerResponse ! Str { restores_trigger_handle(r) }, traced: true)
 }

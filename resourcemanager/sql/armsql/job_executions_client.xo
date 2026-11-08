@@ -97,7 +97,7 @@ fn (c: JobExecutionsClient) list_by_agent_create_request(resource_group_name: St
 /// Lists all executions in a job agent.
 pub fn (c: JobExecutionsClient[fx]) new_list_by_agent_pager(resource_group_name: Str, server_name: Str, job_agent_name: Str, options: JobExecutionsClientListByAgentOptions = JobExecutionsClientListByAgentOptions{}) -> runtime.Pager[JobExecutionsClientListByAgentResponse, fx] ! azcore.CallErr {
   let req = c.list_by_agent_create_request(resource_group_name, server_name, job_agent_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobExecutionsClientListByAgentResponse ! Str { job_executions_list_by_agent_handle(r) }, fn(r: JobExecutionsClientListByAgentResponse) -> Str? { r.job_execution_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobExecutionsClientListByAgentResponse ! Str { job_executions_list_by_agent_handle(r) }, fn(r: JobExecutionsClientListByAgentResponse) -> Str? { r.job_execution_list_result.next_link }).traced_as("JobExecutionsClientListByAgentResponse"))
 }
 
 /// JobExecutionsClientCancelOptions: the optional parameters of JobExecutionsClient.cancel.
@@ -144,12 +144,15 @@ fn (c: JobExecutionsClient) cancel_create_request(resource_group_name: Str, serv
 
 /// Requests cancellation of a job execution.
 pub fn (c: JobExecutionsClient) cancel(resource_group_name: Str, server_name: Str, job_agent_name: Str, job_name: Str, job_execution_id: Str, options: JobExecutionsClientCancelOptions = JobExecutionsClientCancelOptions{}) -> JobExecutionsClientCancelResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobExecutionsClient.Cancel", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  job_executions_cancel_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = job_executions_cancel_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobExecutionsClientBeginCreateOptions: the optional parameters of JobExecutionsClient.begin_create.
@@ -199,14 +202,16 @@ fn (c: JobExecutionsClient) create_create_request(resource_group_name: Str, serv
 /// Starts an elastic job execution.
 pub fn (c: JobExecutionsClient[fx]) begin_create(resource_group_name: Str, server_name: Str, job_agent_name: Str, job_name: Str, options: JobExecutionsClientBeginCreateOptions = JobExecutionsClientBeginCreateOptions{}) -> runtime.Poller[JobExecutionsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobExecutionsClientCreateResponse", fn(r: http.Response) -> JobExecutionsClientCreateResponse ! Str { job_executions_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobExecutionsClientCreateResponse", fn(r: http.Response) -> JobExecutionsClientCreateResponse ! Str { job_executions_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, server_name, job_agent_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobExecutionsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, server_name, job_agent_name, job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobExecutionsClientCreateResponse", fn(r: http.Response) -> JobExecutionsClientCreateResponse ! Str { job_executions_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobExecutionsClientCreateResponse", fn(r: http.Response) -> JobExecutionsClientCreateResponse ! Str { job_executions_create_handle(r) }, traced: true)
 }
 
 /// JobExecutionsClientListByJobOptions: the optional parameters of JobExecutionsClient.new_list_by_job_pager.
@@ -289,7 +294,7 @@ fn (c: JobExecutionsClient) list_by_job_create_request(resource_group_name: Str,
 /// Lists a job's executions.
 pub fn (c: JobExecutionsClient[fx]) new_list_by_job_pager(resource_group_name: Str, server_name: Str, job_agent_name: Str, job_name: Str, options: JobExecutionsClientListByJobOptions = JobExecutionsClientListByJobOptions{}) -> runtime.Pager[JobExecutionsClientListByJobResponse, fx] ! azcore.CallErr {
   let req = c.list_by_job_create_request(resource_group_name, server_name, job_agent_name, job_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobExecutionsClientListByJobResponse ! Str { job_executions_list_by_job_handle(r) }, fn(r: JobExecutionsClientListByJobResponse) -> Str? { r.job_execution_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobExecutionsClientListByJobResponse ! Str { job_executions_list_by_job_handle(r) }, fn(r: JobExecutionsClientListByJobResponse) -> Str? { r.job_execution_list_result.next_link }).traced_as("JobExecutionsClientListByJobResponse"))
 }
 
 /// JobExecutionsClientGetOptions: the optional parameters of JobExecutionsClient.get.
@@ -339,12 +344,15 @@ fn (c: JobExecutionsClient) get_create_request(resource_group_name: Str, server_
 
 /// Gets a job execution.
 pub fn (c: JobExecutionsClient) get(resource_group_name: Str, server_name: Str, job_agent_name: Str, job_name: Str, job_execution_id: Str, options: JobExecutionsClientGetOptions = JobExecutionsClientGetOptions{}) -> JobExecutionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobExecutionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  job_executions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = job_executions_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobExecutionsClientBeginCreateOrUpdateOptions: the optional parameters of JobExecutionsClient.begin_create_or_update.
@@ -398,12 +406,14 @@ fn (c: JobExecutionsClient) create_or_update_create_request(resource_group_name:
 /// Creates or updates a job execution.
 pub fn (c: JobExecutionsClient[fx]) begin_create_or_update(resource_group_name: Str, server_name: Str, job_agent_name: Str, job_name: Str, job_execution_id: Str, options: JobExecutionsClientBeginCreateOrUpdateOptions = JobExecutionsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[JobExecutionsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobExecutionsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobExecutionsClientCreateOrUpdateResponse ! Str { job_executions_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobExecutionsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobExecutionsClientCreateOrUpdateResponse ! Str { job_executions_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobExecutionsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, server_name, job_agent_name, job_name, job_execution_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobExecutionsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobExecutionsClientCreateOrUpdateResponse ! Str { job_executions_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "JobExecutionsClientCreateOrUpdateResponse", fn(r: http.Response) -> JobExecutionsClientCreateOrUpdateResponse ! Str { job_executions_create_or_update_handle(r) }, traced: true)
 }

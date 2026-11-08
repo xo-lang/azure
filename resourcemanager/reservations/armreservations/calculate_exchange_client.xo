@@ -48,12 +48,14 @@ fn (c: CalculateExchangeClient) post_create_request(body: CalculateExchangeReque
 /// Calculates price for exchanging `Reservations` if there are no policy errors.
 pub fn (c: CalculateExchangeClient[fx]) begin_post(body: CalculateExchangeRequest, options: CalculateExchangeClientBeginPostOptions = CalculateExchangeClientBeginPostOptions{}) -> runtime.Poller[CalculateExchangeClientPostResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CalculateExchangeClientPostResponse", fn(r: http.Response) -> CalculateExchangeClientPostResponse ! Str { calculate_exchange_post_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CalculateExchangeClientPostResponse", fn(r: http.Response) -> CalculateExchangeClientPostResponse ! Str { calculate_exchange_post_handle(r) }, traced: true)
   }
-  let req = c.post_create_request(body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CalculateExchangeClient.BeginPost", c.setup.pipeline.tracer)
+  let req = c.post_create_request(body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CalculateExchangeClientPostResponse", fn(r: http.Response) -> CalculateExchangeClientPostResponse ! Str { calculate_exchange_post_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CalculateExchangeClientPostResponse", fn(r: http.Response) -> CalculateExchangeClientPostResponse ! Str { calculate_exchange_post_handle(r) }, traced: true)
 }

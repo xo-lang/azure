@@ -61,7 +61,7 @@ fn (c: VirtualMachinesClient) list_create_request(resource_group_name: Str, priv
 /// List VirtualMachine resources by Cluster
 pub fn (c: VirtualMachinesClient[fx]) new_list_pager(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, options: VirtualMachinesClientListOptions = VirtualMachinesClientListOptions{}) -> runtime.Pager[VirtualMachinesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, private_cloud_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListResponse ! Str { virtual_machines_list_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListResponse) -> Str? { r.virtual_machines_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListResponse ! Str { virtual_machines_list_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListResponse) -> Str? { r.virtual_machines_list.next_link }).traced_as("VirtualMachinesClientListResponse"))
 }
 
 /// VirtualMachinesClientGetOptions: the optional parameters of VirtualMachinesClient.get.
@@ -107,12 +107,15 @@ fn (c: VirtualMachinesClient) get_create_request(resource_group_name: Str, priva
 
 /// Get a VirtualMachine
 pub fn (c: VirtualMachinesClient) get(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, virtual_machine_id: Str, options: VirtualMachinesClientGetOptions = VirtualMachinesClientGetOptions{}) -> VirtualMachinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_cloud_name, cluster_name, virtual_machine_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_cloud_name, cluster_name, virtual_machine_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machines_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachinesClientBeginRestrictMovementOptions: the optional parameters of VirtualMachinesClient.begin_restrict_movement.
@@ -160,12 +163,14 @@ fn (c: VirtualMachinesClient) restrict_movement_create_request(resource_group_na
 /// Enable or disable DRS-driven VM movement restriction
 pub fn (c: VirtualMachinesClient[fx]) begin_restrict_movement(resource_group_name: Str, private_cloud_name: Str, cluster_name: Str, virtual_machine_id: Str, restrict_movement: VirtualMachineRestrictMovement, options: VirtualMachinesClientBeginRestrictMovementOptions = VirtualMachinesClientBeginRestrictMovementOptions{}) -> runtime.Poller[VirtualMachinesClientRestrictMovementResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientRestrictMovementResponse", fn(r: http.Response) -> VirtualMachinesClientRestrictMovementResponse ! Str { virtual_machines_restrict_movement_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientRestrictMovementResponse", fn(r: http.Response) -> VirtualMachinesClientRestrictMovementResponse ! Str { virtual_machines_restrict_movement_handle(r) }, traced: true)
   }
-  let req = c.restrict_movement_create_request(resource_group_name, private_cloud_name, cluster_name, virtual_machine_id, restrict_movement, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginRestrictMovement", c.setup.pipeline.tracer)
+  let req = c.restrict_movement_create_request(resource_group_name, private_cloud_name, cluster_name, virtual_machine_id, restrict_movement, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientRestrictMovementResponse", fn(r: http.Response) -> VirtualMachinesClientRestrictMovementResponse ! Str { virtual_machines_restrict_movement_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientRestrictMovementResponse", fn(r: http.Response) -> VirtualMachinesClientRestrictMovementResponse ! Str { virtual_machines_restrict_movement_handle(r) }, traced: true)
 }

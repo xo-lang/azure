@@ -45,7 +45,7 @@ fn (c: LoadBalancersClient) list_create_request(resource_uri: Str, options: Load
 /// List LoadBalancer resources by parent
 pub fn (c: LoadBalancersClient[fx]) new_list_pager(resource_uri: Str, options: LoadBalancersClientListOptions = LoadBalancersClientListOptions{}) -> runtime.Pager[LoadBalancersClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_uri, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListResponse ! Str { load_balancers_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListResponse) -> Str? { r.load_balancer_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListResponse ! Str { load_balancers_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListResponse) -> Str? { r.load_balancer_list_result.next_link }).traced_as("LoadBalancersClientListResponse"))
 }
 
 /// LoadBalancersClientGetOptions: the optional parameters of LoadBalancersClient.get.
@@ -76,12 +76,15 @@ fn (c: LoadBalancersClient) get_create_request(resource_uri: Str, load_balancer_
 
 /// Get a LoadBalancer
 pub fn (c: LoadBalancersClient) get(resource_uri: Str, load_balancer_name: Str, options: LoadBalancersClientGetOptions = LoadBalancersClientGetOptions{}) -> LoadBalancersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_uri, load_balancer_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_uri, load_balancer_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancers_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancers_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LoadBalancersClientBeginCreateOrUpdateOptions: the optional parameters of LoadBalancersClient.begin_create_or_update.
@@ -117,14 +120,16 @@ fn (c: LoadBalancersClient) create_or_update_create_request(resource_uri: Str, l
 /// Create a LoadBalancer
 pub fn (c: LoadBalancersClient[fx]) begin_create_or_update(resource_uri: Str, load_balancer_name: Str, resource: LoadBalancer, options: LoadBalancersClientBeginCreateOrUpdateOptions = LoadBalancersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LoadBalancersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_uri, load_balancer_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_uri, load_balancer_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) }, traced: true)
 }
 
 /// LoadBalancersClientDeleteOptions: the optional parameters of LoadBalancersClient.delete.
@@ -152,10 +157,13 @@ fn (c: LoadBalancersClient) delete_create_request(resource_uri: Str, load_balanc
 
 /// Delete a LoadBalancer
 pub fn (c: LoadBalancersClient) delete(resource_uri: Str, load_balancer_name: Str, options: LoadBalancersClientDeleteOptions = LoadBalancersClientDeleteOptions{}) -> LoadBalancersClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_uri, load_balancer_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_uri, load_balancer_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancers_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancers_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

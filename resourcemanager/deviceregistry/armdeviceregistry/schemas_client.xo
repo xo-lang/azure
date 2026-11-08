@@ -57,7 +57,7 @@ fn (c: SchemasClient) list_by_schema_registry_create_request(resource_group_name
 /// List Schema resources by SchemaRegistry
 pub fn (c: SchemasClient[fx]) new_list_by_schema_registry_pager(resource_group_name: Str, schema_registry_name: Str, options: SchemasClientListBySchemaRegistryOptions = SchemasClientListBySchemaRegistryOptions{}) -> runtime.Pager[SchemasClientListBySchemaRegistryResponse, fx] ! azcore.CallErr {
   let req = c.list_by_schema_registry_create_request(resource_group_name, schema_registry_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SchemasClientListBySchemaRegistryResponse ! Str { schemas_list_by_schema_registry_handle(r) }, c.setup.endpoint, fn(r: SchemasClientListBySchemaRegistryResponse) -> Str? { r.schema_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SchemasClientListBySchemaRegistryResponse ! Str { schemas_list_by_schema_registry_handle(r) }, c.setup.endpoint, fn(r: SchemasClientListBySchemaRegistryResponse) -> Str? { r.schema_list_result.next_link }).traced_as("SchemasClientListBySchemaRegistryResponse"))
 }
 
 /// SchemasClientGetOptions: the optional parameters of SchemasClient.get.
@@ -99,12 +99,15 @@ fn (c: SchemasClient) get_create_request(resource_group_name: Str, schema_regist
 
 /// Get a Schema
 pub fn (c: SchemasClient) get(resource_group_name: Str, schema_registry_name: Str, schema_name: Str, options: SchemasClientGetOptions = SchemasClientGetOptions{}) -> SchemasClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, schema_registry_name, schema_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SchemasClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, schema_registry_name, schema_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  schemas_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = schemas_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SchemasClientCreateOrReplaceOptions: the optional parameters of SchemasClient.create_or_replace.
@@ -147,12 +150,15 @@ fn (c: SchemasClient) create_or_replace_create_request(resource_group_name: Str,
 
 /// Create a Schema
 pub fn (c: SchemasClient) create_or_replace(resource_group_name: Str, schema_registry_name: Str, schema_name: Str, resource: Schema, options: SchemasClientCreateOrReplaceOptions = SchemasClientCreateOrReplaceOptions{}) -> SchemasClientCreateOrReplaceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_or_replace_create_request(resource_group_name, schema_registry_name, schema_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SchemasClient.CreateOrReplace", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_or_replace_create_request(resource_group_name, schema_registry_name, schema_name, resource, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  schemas_create_or_replace_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = schemas_create_or_replace_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SchemasClientBeginDeleteOptions: the optional parameters of SchemasClient.begin_delete.
@@ -195,12 +201,14 @@ fn (c: SchemasClient) delete_create_request(resource_group_name: Str, schema_reg
 /// Delete a Schema
 pub fn (c: SchemasClient[fx]) begin_delete(resource_group_name: Str, schema_registry_name: Str, schema_name: Str, options: SchemasClientBeginDeleteOptions = SchemasClientBeginDeleteOptions{}) -> runtime.Poller[SchemasClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SchemasClientDeleteResponse", fn(r: http.Response) -> SchemasClientDeleteResponse ! Str { schemas_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SchemasClientDeleteResponse", fn(r: http.Response) -> SchemasClientDeleteResponse ! Str { schemas_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, schema_registry_name, schema_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SchemasClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, schema_registry_name, schema_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SchemasClientDeleteResponse", fn(r: http.Response) -> SchemasClientDeleteResponse ! Str { schemas_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SchemasClientDeleteResponse", fn(r: http.Response) -> SchemasClientDeleteResponse ! Str { schemas_delete_handle(r) }, traced: true)
 }

@@ -53,7 +53,7 @@ fn (c: ResourceUsagesClient) list_create_request(location: Str, options: Resourc
 /// Get current subscription usages
 pub fn (c: ResourceUsagesClient[fx]) new_list_pager(location: Str, options: ResourceUsagesClientListOptions = ResourceUsagesClientListOptions{}) -> runtime.Pager[ResourceUsagesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourceUsagesClientListResponse ! Str { resource_usages_list_handle(r) }, c.setup.endpoint, fn(r: ResourceUsagesClientListResponse) -> Str? { r.usages_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourceUsagesClientListResponse ! Str { resource_usages_list_handle(r) }, c.setup.endpoint, fn(r: ResourceUsagesClientListResponse) -> Str? { r.usages_list_result.next_link }).traced_as("ResourceUsagesClientListResponse"))
 }
 
 /// ResourceUsagesClientGetOptions: the optional parameters of ResourceUsagesClient.get.
@@ -91,10 +91,13 @@ fn (c: ResourceUsagesClient) get_create_request(location: Str, usage_type: Str, 
 
 /// Get current subscription usage of the specific type
 pub fn (c: ResourceUsagesClient) get(location: Str, usage_type: Str, options: ResourceUsagesClientGetOptions = ResourceUsagesClientGetOptions{}) -> ResourceUsagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, usage_type, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourceUsagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, usage_type, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  resource_usages_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = resource_usages_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

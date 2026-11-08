@@ -44,6 +44,7 @@ var (
 	reTag     = regexp.MustCompile(`(?m)^tag: (\S+)`)
 	reFlag    = regexp.MustCompile(`(?m)^(package-[\w-]+): true`)
 	reKey     = regexp.MustCompile(`(?m)^([\w-]+):`)
+	reSpanAll = regexp.MustCompile(`\berr = runtime\.NewResponseError\(httpResp\)|resp, err := client\.\w+HandleResponse\(httpResp`)
 	reUTC     = regexp.MustCompile(`populate\w*(?:\[[^\]]*\])?\(objectMap, "[^"]*", [\w.]+, true\)`)
 	reOptBody = regexp.MustCompile(`MarshalAs\w*\(req, \*options\.\w+\)`)
 )
@@ -52,6 +53,7 @@ type row struct {
 	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion                  string
 	OpenAPIMore                                                                 []string
 	UTC, Seal, AcceptAll, QueryPlus, PutBodyInOptions, RawNextLink, StructOrder bool
+	SpanErrors                                                                  string
 }
 
 var specs string
@@ -128,6 +130,17 @@ func derive(modPath, version, dir string) row {
 	// autorest.go before models_serde.go wrote no MarshalJSON: a model's
 	// JSON is encoding/json's, in struct order (armworkloadmonitor 0.5.1)
 	r.StructOrder = strings.HasPrefix(rel, "resourcemanager/") && s != "" && !strings.Contains(s, "MarshalJSON")
+	// which errors a method's span records (decision 0013): none
+	// without spans; "all" when the generated code assigns a status or
+	// decode error to the deferred span's err (autorest.go and
+	// typespec-go since about 2024); else "send", only a request's
+	// create and send errors (armstorage 4.3.0 returns the others)
+	if strings.Contains(s, "runtime.StartSpan(") {
+		r.SpanErrors = "send"
+		if reSpanAll.MatchString(s) {
+			r.SpanErrors = "all"
+		}
+	}
 	// autorest.go before about December 2023 kept a PUT's or PATCH's
 	// optional body in the options (armdatadog 1.3.0); later ones, and
 	// typespec-go, take it as a parameter (armconnectedvmware 1.1.1)
@@ -540,6 +553,9 @@ func format(r row) string {
 	}
 	if r.StructOrder {
 		out = append(out, "struct_order_json = true")
+	}
+	if r.SpanErrors != "" {
+		out = append(out, q("span_errors", r.SpanErrors))
 	}
 	return strings.Join(out, "\n")
 }

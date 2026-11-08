@@ -57,7 +57,7 @@ fn (c: ReplicationFabricsClient) list_create_request(resource_group_name: Str, r
 /// Gets a list of the Azure Site Recovery fabrics in the vault.
 pub fn (c: ReplicationFabricsClient[fx]) new_list_pager(resource_group_name: Str, resource_name: Str, options: ReplicationFabricsClientListOptions = ReplicationFabricsClientListOptions{}) -> runtime.Pager[ReplicationFabricsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, resource_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationFabricsClientListResponse ! Str { replication_fabrics_list_handle(r) }, c.setup.endpoint, fn(r: ReplicationFabricsClientListResponse) -> Str? { r.fabric_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationFabricsClientListResponse ! Str { replication_fabrics_list_handle(r) }, c.setup.endpoint, fn(r: ReplicationFabricsClientListResponse) -> Str? { r.fabric_collection.next_link }).traced_as("ReplicationFabricsClientListResponse"))
 }
 
 /// ReplicationFabricsClientGetOptions: the optional parameters of ReplicationFabricsClient.get.
@@ -105,12 +105,15 @@ fn (c: ReplicationFabricsClient) get_create_request(resource_group_name: Str, re
 
 /// Gets the details of an Azure Site Recovery fabric.
 pub fn (c: ReplicationFabricsClient) get(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientGetOptions = ReplicationFabricsClientGetOptions{}) -> ReplicationFabricsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  replication_fabrics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = replication_fabrics_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReplicationFabricsClientBeginCreateOptions: the optional parameters of ReplicationFabricsClient.begin_create.
@@ -157,14 +160,16 @@ fn (c: ReplicationFabricsClient) create_create_request(resource_group_name: Str,
 /// The operation to create an Azure Site Recovery fabric (for e.g. Hyper-V site).
 pub fn (c: ReplicationFabricsClient[fx]) begin_create(resource_group_name: Str, resource_name: Str, fabric_name: Str, input: FabricCreationInput, options: ReplicationFabricsClientBeginCreateOptions = ReplicationFabricsClientBeginCreateOptions{}) -> runtime.Poller[ReplicationFabricsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientCreateResponse", fn(r: http.Response) -> ReplicationFabricsClientCreateResponse ! Str { replication_fabrics_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientCreateResponse", fn(r: http.Response) -> ReplicationFabricsClientCreateResponse ! Str { replication_fabrics_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, resource_name, fabric_name, input, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, resource_name, fabric_name, input, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientCreateResponse", fn(r: http.Response) -> ReplicationFabricsClientCreateResponse ! Str { replication_fabrics_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientCreateResponse", fn(r: http.Response) -> ReplicationFabricsClientCreateResponse ! Str { replication_fabrics_create_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginPurgeOptions: the optional parameters of ReplicationFabricsClient.begin_purge.
@@ -207,14 +212,16 @@ fn (c: ReplicationFabricsClient) purge_create_request(resource_group_name: Str, 
 /// The operation to purge(force delete) an Azure Site Recovery fabric.
 pub fn (c: ReplicationFabricsClient[fx]) begin_purge(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientBeginPurgeOptions = ReplicationFabricsClientBeginPurgeOptions{}) -> runtime.Poller[ReplicationFabricsClientPurgeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientPurgeResponse", fn(r: http.Response) -> ReplicationFabricsClientPurgeResponse ! Str { replication_fabrics_purge_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientPurgeResponse", fn(r: http.Response) -> ReplicationFabricsClientPurgeResponse ! Str { replication_fabrics_purge_handle(r) }, traced: true)
   }
-  let req = c.purge_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginPurge", c.setup.pipeline.tracer)
+  let req = c.purge_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientPurgeResponse", fn(r: http.Response) -> ReplicationFabricsClientPurgeResponse ! Str { replication_fabrics_purge_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientPurgeResponse", fn(r: http.Response) -> ReplicationFabricsClientPurgeResponse ! Str { replication_fabrics_purge_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginCheckConsistencyOptions: the optional parameters of ReplicationFabricsClient.begin_check_consistency.
@@ -260,14 +267,16 @@ fn (c: ReplicationFabricsClient) check_consistency_create_request(resource_group
 /// The operation to perform a consistency check on the fabric.
 pub fn (c: ReplicationFabricsClient[fx]) begin_check_consistency(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientBeginCheckConsistencyOptions = ReplicationFabricsClientBeginCheckConsistencyOptions{}) -> runtime.Poller[ReplicationFabricsClientCheckConsistencyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientCheckConsistencyResponse", fn(r: http.Response) -> ReplicationFabricsClientCheckConsistencyResponse ! Str { replication_fabrics_check_consistency_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientCheckConsistencyResponse", fn(r: http.Response) -> ReplicationFabricsClientCheckConsistencyResponse ! Str { replication_fabrics_check_consistency_handle(r) }, traced: true)
   }
-  let req = c.check_consistency_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginCheckConsistency", c.setup.pipeline.tracer)
+  let req = c.check_consistency_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientCheckConsistencyResponse", fn(r: http.Response) -> ReplicationFabricsClientCheckConsistencyResponse ! Str { replication_fabrics_check_consistency_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientCheckConsistencyResponse", fn(r: http.Response) -> ReplicationFabricsClientCheckConsistencyResponse ! Str { replication_fabrics_check_consistency_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginMigrateToAADOptions: the optional parameters of ReplicationFabricsClient.begin_migrate_to_aad.
@@ -310,14 +319,16 @@ fn (c: ReplicationFabricsClient) migrate_to_aad_create_request(resource_group_na
 /// The operation to migrate an Azure Site Recovery fabric to AAD.
 pub fn (c: ReplicationFabricsClient[fx]) begin_migrate_to_aad(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientBeginMigrateToAADOptions = ReplicationFabricsClientBeginMigrateToAADOptions{}) -> runtime.Poller[ReplicationFabricsClientMigrateToAADResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientMigrateToAADResponse", fn(r: http.Response) -> ReplicationFabricsClientMigrateToAADResponse ! Str { replication_fabrics_migrate_to_aad_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientMigrateToAADResponse", fn(r: http.Response) -> ReplicationFabricsClientMigrateToAADResponse ! Str { replication_fabrics_migrate_to_aad_handle(r) }, traced: true)
   }
-  let req = c.migrate_to_aad_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginMigrateToAAD", c.setup.pipeline.tracer)
+  let req = c.migrate_to_aad_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientMigrateToAADResponse", fn(r: http.Response) -> ReplicationFabricsClientMigrateToAADResponse ! Str { replication_fabrics_migrate_to_aad_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientMigrateToAADResponse", fn(r: http.Response) -> ReplicationFabricsClientMigrateToAADResponse ! Str { replication_fabrics_migrate_to_aad_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginReassociateGatewayOptions: the optional parameters of ReplicationFabricsClient.begin_reassociate_gateway.
@@ -364,14 +375,16 @@ fn (c: ReplicationFabricsClient) reassociate_gateway_create_request(resource_gro
 /// The operation to move replications from a process server to another process server.
 pub fn (c: ReplicationFabricsClient[fx]) begin_reassociate_gateway(resource_group_name: Str, resource_name: Str, fabric_name: Str, failover_process_server_request: FailoverProcessServerRequest, options: ReplicationFabricsClientBeginReassociateGatewayOptions = ReplicationFabricsClientBeginReassociateGatewayOptions{}) -> runtime.Poller[ReplicationFabricsClientReassociateGatewayResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientReassociateGatewayResponse", fn(r: http.Response) -> ReplicationFabricsClientReassociateGatewayResponse ! Str { replication_fabrics_reassociate_gateway_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientReassociateGatewayResponse", fn(r: http.Response) -> ReplicationFabricsClientReassociateGatewayResponse ! Str { replication_fabrics_reassociate_gateway_handle(r) }, traced: true)
   }
-  let req = c.reassociate_gateway_create_request(resource_group_name, resource_name, fabric_name, failover_process_server_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginReassociateGateway", c.setup.pipeline.tracer)
+  let req = c.reassociate_gateway_create_request(resource_group_name, resource_name, fabric_name, failover_process_server_request, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientReassociateGatewayResponse", fn(r: http.Response) -> ReplicationFabricsClientReassociateGatewayResponse ! Str { replication_fabrics_reassociate_gateway_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientReassociateGatewayResponse", fn(r: http.Response) -> ReplicationFabricsClientReassociateGatewayResponse ! Str { replication_fabrics_reassociate_gateway_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginDeleteOptions: the optional parameters of ReplicationFabricsClient.begin_delete.
@@ -414,14 +427,16 @@ fn (c: ReplicationFabricsClient) delete_create_request(resource_group_name: Str,
 /// The operation to delete or remove an Azure Site Recovery fabric.
 pub fn (c: ReplicationFabricsClient[fx]) begin_delete(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientBeginDeleteOptions = ReplicationFabricsClientBeginDeleteOptions{}) -> runtime.Poller[ReplicationFabricsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientDeleteResponse", fn(r: http.Response) -> ReplicationFabricsClientDeleteResponse ! Str { replication_fabrics_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientDeleteResponse", fn(r: http.Response) -> ReplicationFabricsClientDeleteResponse ! Str { replication_fabrics_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientDeleteResponse", fn(r: http.Response) -> ReplicationFabricsClientDeleteResponse ! Str { replication_fabrics_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientDeleteResponse", fn(r: http.Response) -> ReplicationFabricsClientDeleteResponse ! Str { replication_fabrics_delete_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginRemoveInfraOptions: the optional parameters of ReplicationFabricsClient.begin_remove_infra.
@@ -464,14 +479,16 @@ fn (c: ReplicationFabricsClient) remove_infra_create_request(resource_group_name
 /// Removes the appliance's infrastructure under the fabric.
 pub fn (c: ReplicationFabricsClient[fx]) begin_remove_infra(resource_group_name: Str, resource_name: Str, fabric_name: Str, options: ReplicationFabricsClientBeginRemoveInfraOptions = ReplicationFabricsClientBeginRemoveInfraOptions{}) -> runtime.Poller[ReplicationFabricsClientRemoveInfraResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientRemoveInfraResponse", fn(r: http.Response) -> ReplicationFabricsClientRemoveInfraResponse ! Str { replication_fabrics_remove_infra_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientRemoveInfraResponse", fn(r: http.Response) -> ReplicationFabricsClientRemoveInfraResponse ! Str { replication_fabrics_remove_infra_handle(r) }, traced: true)
   }
-  let req = c.remove_infra_create_request(resource_group_name, resource_name, fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginRemoveInfra", c.setup.pipeline.tracer)
+  let req = c.remove_infra_create_request(resource_group_name, resource_name, fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientRemoveInfraResponse", fn(r: http.Response) -> ReplicationFabricsClientRemoveInfraResponse ! Str { replication_fabrics_remove_infra_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientRemoveInfraResponse", fn(r: http.Response) -> ReplicationFabricsClientRemoveInfraResponse ! Str { replication_fabrics_remove_infra_handle(r) }, traced: true)
 }
 
 /// ReplicationFabricsClientBeginRenewCertificateOptions: the optional parameters of ReplicationFabricsClient.begin_renew_certificate.
@@ -518,12 +535,14 @@ fn (c: ReplicationFabricsClient) renew_certificate_create_request(resource_group
 /// Renews the connection certificate for the ASR replication fabric.
 pub fn (c: ReplicationFabricsClient[fx]) begin_renew_certificate(resource_group_name: Str, resource_name: Str, fabric_name: Str, renew_certificate: RenewCertificateInput, options: ReplicationFabricsClientBeginRenewCertificateOptions = ReplicationFabricsClientBeginRenewCertificateOptions{}) -> runtime.Poller[ReplicationFabricsClientRenewCertificateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientRenewCertificateResponse", fn(r: http.Response) -> ReplicationFabricsClientRenewCertificateResponse ! Str { replication_fabrics_renew_certificate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationFabricsClientRenewCertificateResponse", fn(r: http.Response) -> ReplicationFabricsClientRenewCertificateResponse ! Str { replication_fabrics_renew_certificate_handle(r) }, traced: true)
   }
-  let req = c.renew_certificate_create_request(resource_group_name, resource_name, fabric_name, renew_certificate, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationFabricsClient.BeginRenewCertificate", c.setup.pipeline.tracer)
+  let req = c.renew_certificate_create_request(resource_group_name, resource_name, fabric_name, renew_certificate, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientRenewCertificateResponse", fn(r: http.Response) -> ReplicationFabricsClientRenewCertificateResponse ! Str { replication_fabrics_renew_certificate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationFabricsClientRenewCertificateResponse", fn(r: http.Response) -> ReplicationFabricsClientRenewCertificateResponse ! Str { replication_fabrics_renew_certificate_handle(r) }, traced: true)
 }

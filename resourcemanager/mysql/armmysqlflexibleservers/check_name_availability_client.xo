@@ -53,10 +53,13 @@ fn (c: CheckNameAvailabilityClient) execute_create_request(location_name: Str, n
 
 /// Check the availability of name for server
 pub fn (c: CheckNameAvailabilityClient) execute(location_name: Str, name_availability_request: NameAvailabilityRequest, options: CheckNameAvailabilityClientExecuteOptions = CheckNameAvailabilityClientExecuteOptions{}) -> CheckNameAvailabilityClientExecuteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.execute_create_request(location_name, name_availability_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CheckNameAvailabilityClient.Execute", c.setup.pipeline.tracer)
+  let req = sp.on(c.execute_create_request(location_name, name_availability_request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  check_name_availability_execute_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = check_name_availability_execute_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

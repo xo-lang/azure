@@ -49,7 +49,7 @@ fn (c: CachesClient) list_create_request(options: CachesClientListOptions) -> po
 /// Returns all caches the user has access to under a subscription.
 pub fn (c: CachesClient[fx]) new_list_pager(options: CachesClientListOptions = CachesClientListOptions{}) -> runtime.Pager[CachesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CachesClientListResponse ! Str { caches_list_handle(r) }, c.setup.endpoint, fn(r: CachesClientListResponse) -> Str? { r.caches_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CachesClientListResponse ! Str { caches_list_handle(r) }, c.setup.endpoint, fn(r: CachesClientListResponse) -> Str? { r.caches_list_result.next_link }).traced_as("CachesClientListResponse"))
 }
 
 /// CachesClientListByResourceGroupOptions: the optional parameters of CachesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: CachesClient) list_by_resource_group_create_request(resource_group_name: 
 /// Returns all caches the user has access to under a resource group.
 pub fn (c: CachesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: CachesClientListByResourceGroupOptions = CachesClientListByResourceGroupOptions{}) -> runtime.Pager[CachesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CachesClientListByResourceGroupResponse ! Str { caches_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: CachesClientListByResourceGroupResponse) -> Str? { r.caches_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CachesClientListByResourceGroupResponse ! Str { caches_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: CachesClientListByResourceGroupResponse) -> Str? { r.caches_list_result.next_link }).traced_as("CachesClientListByResourceGroupResponse"))
 }
 
 /// CachesClientGetOptions: the optional parameters of CachesClient.get.
@@ -122,12 +122,15 @@ fn (c: CachesClient) get_create_request(resource_group_name: Str, cache_name: St
 
 /// Returns a cache.
 pub fn (c: CachesClient) get(resource_group_name: Str, cache_name: Str, options: CachesClientGetOptions = CachesClientGetOptions{}) -> CachesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  caches_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = caches_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CachesClientBeginCreateOrUpdateOptions: the optional parameters of CachesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: CachesClient) create_or_update_create_request(resource_group_name: Str, c
 /// Create or update a cache.
 pub fn (c: CachesClient[fx]) begin_create_or_update(resource_group_name: Str, cache_name: Str, cache: Cache, options: CachesClientBeginCreateOrUpdateOptions = CachesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[CachesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientCreateOrUpdateResponse", fn(r: http.Response) -> CachesClientCreateOrUpdateResponse ! Str { caches_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientCreateOrUpdateResponse", fn(r: http.Response) -> CachesClientCreateOrUpdateResponse ! Str { caches_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cache_name, cache, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cache_name, cache, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CachesClientCreateOrUpdateResponse", fn(r: http.Response) -> CachesClientCreateOrUpdateResponse ! Str { caches_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CachesClientCreateOrUpdateResponse", fn(r: http.Response) -> CachesClientCreateOrUpdateResponse ! Str { caches_create_or_update_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginUpdateOptions: the optional parameters of CachesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: CachesClient) update_create_request(resource_group_name: Str, cache_name:
 /// Update a cache instance.
 pub fn (c: CachesClient[fx]) begin_update(resource_group_name: Str, cache_name: Str, cache: Cache, options: CachesClientBeginUpdateOptions = CachesClientBeginUpdateOptions{}) -> runtime.Poller[CachesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientUpdateResponse", fn(r: http.Response) -> CachesClientUpdateResponse ! Str { caches_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientUpdateResponse", fn(r: http.Response) -> CachesClientUpdateResponse ! Str { caches_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cache_name, cache, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cache_name, cache, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientUpdateResponse", fn(r: http.Response) -> CachesClientUpdateResponse ! Str { caches_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientUpdateResponse", fn(r: http.Response) -> CachesClientUpdateResponse ! Str { caches_update_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginDeleteOptions: the optional parameters of CachesClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: CachesClient) delete_create_request(resource_group_name: Str, cache_name:
 /// Schedules a cache for deletion.
 pub fn (c: CachesClient[fx]) begin_delete(resource_group_name: Str, cache_name: Str, options: CachesClientBeginDeleteOptions = CachesClientBeginDeleteOptions{}) -> runtime.Poller[CachesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientDeleteResponse", fn(r: http.Response) -> CachesClientDeleteResponse ! Str { caches_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientDeleteResponse", fn(r: http.Response) -> CachesClientDeleteResponse ! Str { caches_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CachesClientDeleteResponse", fn(r: http.Response) -> CachesClientDeleteResponse ! Str { caches_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CachesClientDeleteResponse", fn(r: http.Response) -> CachesClientDeleteResponse ! Str { caches_delete_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginDebugInfoOptions: the optional parameters of CachesClient.begin_debug_info.
@@ -312,14 +321,16 @@ fn (c: CachesClient) debug_info_create_request(resource_group_name: Str, cache_n
 /// Tells a cache to write generate debug info for support to process.
 pub fn (c: CachesClient[fx]) begin_debug_info(resource_group_name: Str, cache_name: Str, options: CachesClientBeginDebugInfoOptions = CachesClientBeginDebugInfoOptions{}) -> runtime.Poller[CachesClientDebugInfoResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientDebugInfoResponse", fn(r: http.Response) -> CachesClientDebugInfoResponse ! Str { caches_debug_info_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientDebugInfoResponse", fn(r: http.Response) -> CachesClientDebugInfoResponse ! Str { caches_debug_info_handle(r) }, traced: true)
   }
-  let req = c.debug_info_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginDebugInfo", c.setup.pipeline.tracer)
+  let req = c.debug_info_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientDebugInfoResponse", fn(r: http.Response) -> CachesClientDebugInfoResponse ! Str { caches_debug_info_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientDebugInfoResponse", fn(r: http.Response) -> CachesClientDebugInfoResponse ! Str { caches_debug_info_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginFlushOptions: the optional parameters of CachesClient.begin_flush.
@@ -358,14 +369,16 @@ fn (c: CachesClient) flush_create_request(resource_group_name: Str, cache_name: 
 /// Tells a cache to write all dirty data to the Storage Target(s). During the flush, clients will see errors returned until the flush is complete.
 pub fn (c: CachesClient[fx]) begin_flush(resource_group_name: Str, cache_name: Str, options: CachesClientBeginFlushOptions = CachesClientBeginFlushOptions{}) -> runtime.Poller[CachesClientFlushResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientFlushResponse", fn(r: http.Response) -> CachesClientFlushResponse ! Str { caches_flush_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientFlushResponse", fn(r: http.Response) -> CachesClientFlushResponse ! Str { caches_flush_handle(r) }, traced: true)
   }
-  let req = c.flush_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginFlush", c.setup.pipeline.tracer)
+  let req = c.flush_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientFlushResponse", fn(r: http.Response) -> CachesClientFlushResponse ! Str { caches_flush_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientFlushResponse", fn(r: http.Response) -> CachesClientFlushResponse ! Str { caches_flush_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginPausePrimingJobOptions: the optional parameters of CachesClient.begin_pause_priming_job.
@@ -411,14 +424,16 @@ fn (c: CachesClient) pause_priming_job_create_request(resource_group_name: Str, 
 /// Schedule a priming job to be paused.
 pub fn (c: CachesClient[fx]) begin_pause_priming_job(resource_group_name: Str, cache_name: Str, options: CachesClientBeginPausePrimingJobOptions = CachesClientBeginPausePrimingJobOptions{}) -> runtime.Poller[CachesClientPausePrimingJobResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientPausePrimingJobResponse", fn(r: http.Response) -> CachesClientPausePrimingJobResponse ! Str { caches_pause_priming_job_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientPausePrimingJobResponse", fn(r: http.Response) -> CachesClientPausePrimingJobResponse ! Str { caches_pause_priming_job_handle(r) }, traced: true)
   }
-  let req = c.pause_priming_job_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginPausePrimingJob", c.setup.pipeline.tracer)
+  let req = c.pause_priming_job_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientPausePrimingJobResponse", fn(r: http.Response) -> CachesClientPausePrimingJobResponse ! Str { caches_pause_priming_job_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientPausePrimingJobResponse", fn(r: http.Response) -> CachesClientPausePrimingJobResponse ! Str { caches_pause_priming_job_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginResumePrimingJobOptions: the optional parameters of CachesClient.begin_resume_priming_job.
@@ -464,14 +479,16 @@ fn (c: CachesClient) resume_priming_job_create_request(resource_group_name: Str,
 /// Resumes a paused priming job.
 pub fn (c: CachesClient[fx]) begin_resume_priming_job(resource_group_name: Str, cache_name: Str, options: CachesClientBeginResumePrimingJobOptions = CachesClientBeginResumePrimingJobOptions{}) -> runtime.Poller[CachesClientResumePrimingJobResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientResumePrimingJobResponse", fn(r: http.Response) -> CachesClientResumePrimingJobResponse ! Str { caches_resume_priming_job_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientResumePrimingJobResponse", fn(r: http.Response) -> CachesClientResumePrimingJobResponse ! Str { caches_resume_priming_job_handle(r) }, traced: true)
   }
-  let req = c.resume_priming_job_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginResumePrimingJob", c.setup.pipeline.tracer)
+  let req = c.resume_priming_job_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientResumePrimingJobResponse", fn(r: http.Response) -> CachesClientResumePrimingJobResponse ! Str { caches_resume_priming_job_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientResumePrimingJobResponse", fn(r: http.Response) -> CachesClientResumePrimingJobResponse ! Str { caches_resume_priming_job_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginSpaceAllocationOptions: the optional parameters of CachesClient.begin_space_allocation.
@@ -517,14 +534,16 @@ fn (c: CachesClient) space_allocation_create_request(resource_group_name: Str, c
 /// Update cache space allocation.
 pub fn (c: CachesClient[fx]) begin_space_allocation(resource_group_name: Str, cache_name: Str, options: CachesClientBeginSpaceAllocationOptions = CachesClientBeginSpaceAllocationOptions{}) -> runtime.Poller[CachesClientSpaceAllocationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientSpaceAllocationResponse", fn(r: http.Response) -> CachesClientSpaceAllocationResponse ! Str { caches_space_allocation_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientSpaceAllocationResponse", fn(r: http.Response) -> CachesClientSpaceAllocationResponse ! Str { caches_space_allocation_handle(r) }, traced: true)
   }
-  let req = c.space_allocation_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginSpaceAllocation", c.setup.pipeline.tracer)
+  let req = c.space_allocation_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientSpaceAllocationResponse", fn(r: http.Response) -> CachesClientSpaceAllocationResponse ! Str { caches_space_allocation_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientSpaceAllocationResponse", fn(r: http.Response) -> CachesClientSpaceAllocationResponse ! Str { caches_space_allocation_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginStartOptions: the optional parameters of CachesClient.begin_start.
@@ -563,14 +582,16 @@ fn (c: CachesClient) start_create_request(resource_group_name: Str, cache_name: 
 /// Tells a Stopped state cache to transition to Active state.
 pub fn (c: CachesClient[fx]) begin_start(resource_group_name: Str, cache_name: Str, options: CachesClientBeginStartOptions = CachesClientBeginStartOptions{}) -> runtime.Poller[CachesClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStartResponse", fn(r: http.Response) -> CachesClientStartResponse ! Str { caches_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStartResponse", fn(r: http.Response) -> CachesClientStartResponse ! Str { caches_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStartResponse", fn(r: http.Response) -> CachesClientStartResponse ! Str { caches_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStartResponse", fn(r: http.Response) -> CachesClientStartResponse ! Str { caches_start_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginStartPrimingJobOptions: the optional parameters of CachesClient.begin_start_priming_job.
@@ -616,14 +637,16 @@ fn (c: CachesClient) start_priming_job_create_request(resource_group_name: Str, 
 /// Create a priming job. This operation is only allowed when the cache is healthy.
 pub fn (c: CachesClient[fx]) begin_start_priming_job(resource_group_name: Str, cache_name: Str, options: CachesClientBeginStartPrimingJobOptions = CachesClientBeginStartPrimingJobOptions{}) -> runtime.Poller[CachesClientStartPrimingJobResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStartPrimingJobResponse", fn(r: http.Response) -> CachesClientStartPrimingJobResponse ! Str { caches_start_priming_job_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStartPrimingJobResponse", fn(r: http.Response) -> CachesClientStartPrimingJobResponse ! Str { caches_start_priming_job_handle(r) }, traced: true)
   }
-  let req = c.start_priming_job_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginStartPrimingJob", c.setup.pipeline.tracer)
+  let req = c.start_priming_job_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStartPrimingJobResponse", fn(r: http.Response) -> CachesClientStartPrimingJobResponse ! Str { caches_start_priming_job_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStartPrimingJobResponse", fn(r: http.Response) -> CachesClientStartPrimingJobResponse ! Str { caches_start_priming_job_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginStopOptions: the optional parameters of CachesClient.begin_stop.
@@ -662,14 +685,16 @@ fn (c: CachesClient) stop_create_request(resource_group_name: Str, cache_name: S
 /// Tells an Active cache to transition to Stopped state.
 pub fn (c: CachesClient[fx]) begin_stop(resource_group_name: Str, cache_name: Str, options: CachesClientBeginStopOptions = CachesClientBeginStopOptions{}) -> runtime.Poller[CachesClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStopResponse", fn(r: http.Response) -> CachesClientStopResponse ! Str { caches_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStopResponse", fn(r: http.Response) -> CachesClientStopResponse ! Str { caches_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStopResponse", fn(r: http.Response) -> CachesClientStopResponse ! Str { caches_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStopResponse", fn(r: http.Response) -> CachesClientStopResponse ! Str { caches_stop_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginStopPrimingJobOptions: the optional parameters of CachesClient.begin_stop_priming_job.
@@ -715,14 +740,16 @@ fn (c: CachesClient) stop_priming_job_create_request(resource_group_name: Str, c
 /// Schedule a priming job for deletion.
 pub fn (c: CachesClient[fx]) begin_stop_priming_job(resource_group_name: Str, cache_name: Str, options: CachesClientBeginStopPrimingJobOptions = CachesClientBeginStopPrimingJobOptions{}) -> runtime.Poller[CachesClientStopPrimingJobResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStopPrimingJobResponse", fn(r: http.Response) -> CachesClientStopPrimingJobResponse ! Str { caches_stop_priming_job_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientStopPrimingJobResponse", fn(r: http.Response) -> CachesClientStopPrimingJobResponse ! Str { caches_stop_priming_job_handle(r) }, traced: true)
   }
-  let req = c.stop_priming_job_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginStopPrimingJob", c.setup.pipeline.tracer)
+  let req = c.stop_priming_job_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStopPrimingJobResponse", fn(r: http.Response) -> CachesClientStopPrimingJobResponse ! Str { caches_stop_priming_job_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientStopPrimingJobResponse", fn(r: http.Response) -> CachesClientStopPrimingJobResponse ! Str { caches_stop_priming_job_handle(r) }, traced: true)
 }
 
 /// CachesClientBeginUpgradeFirmwareOptions: the optional parameters of CachesClient.begin_upgrade_firmware.
@@ -761,12 +788,14 @@ fn (c: CachesClient) upgrade_firmware_create_request(resource_group_name: Str, c
 /// Upgrade a cache's firmware if a new version is available. Otherwise, this operation has no effect.
 pub fn (c: CachesClient[fx]) begin_upgrade_firmware(resource_group_name: Str, cache_name: Str, options: CachesClientBeginUpgradeFirmwareOptions = CachesClientBeginUpgradeFirmwareOptions{}) -> runtime.Poller[CachesClientUpgradeFirmwareResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientUpgradeFirmwareResponse", fn(r: http.Response) -> CachesClientUpgradeFirmwareResponse ! Str { caches_upgrade_firmware_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CachesClientUpgradeFirmwareResponse", fn(r: http.Response) -> CachesClientUpgradeFirmwareResponse ! Str { caches_upgrade_firmware_handle(r) }, traced: true)
   }
-  let req = c.upgrade_firmware_create_request(resource_group_name, cache_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CachesClient.BeginUpgradeFirmware", c.setup.pipeline.tracer)
+  let req = c.upgrade_firmware_create_request(resource_group_name, cache_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![201, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientUpgradeFirmwareResponse", fn(r: http.Response) -> CachesClientUpgradeFirmwareResponse ! Str { caches_upgrade_firmware_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "CachesClientUpgradeFirmwareResponse", fn(r: http.Response) -> CachesClientUpgradeFirmwareResponse ! Str { caches_upgrade_firmware_handle(r) }, traced: true)
 }

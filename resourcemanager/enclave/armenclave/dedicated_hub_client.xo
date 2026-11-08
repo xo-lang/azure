@@ -53,7 +53,7 @@ fn (c: DedicatedHubClient) list_by_subscription_create_request(community_name: S
 /// List DedicatedHubResource resources by subscription ID
 pub fn (c: DedicatedHubClient[fx]) new_list_by_subscription_pager(community_name: Str, options: DedicatedHubClientListBySubscriptionOptions = DedicatedHubClientListBySubscriptionOptions{}) -> runtime.Pager[DedicatedHubClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(community_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DedicatedHubClientListBySubscriptionResponse ! Str { dedicated_hub_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DedicatedHubClientListBySubscriptionResponse) -> Str? { r.dedicated_hub_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DedicatedHubClientListBySubscriptionResponse ! Str { dedicated_hub_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DedicatedHubClientListBySubscriptionResponse) -> Str? { r.dedicated_hub_resource_list_result.next_link }).traced_as("DedicatedHubClientListBySubscriptionResponse"))
 }
 
 /// DedicatedHubClientListByCommunityResourceOptions: the optional parameters of DedicatedHubClient.new_list_by_community_resource_pager.
@@ -92,7 +92,7 @@ fn (c: DedicatedHubClient) list_by_community_resource_create_request(resource_gr
 /// List DedicatedHubResource resources by CommunityResource
 pub fn (c: DedicatedHubClient[fx]) new_list_by_community_resource_pager(resource_group_name: Str, community_name: Str, options: DedicatedHubClientListByCommunityResourceOptions = DedicatedHubClientListByCommunityResourceOptions{}) -> runtime.Pager[DedicatedHubClientListByCommunityResourceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_community_resource_create_request(resource_group_name, community_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DedicatedHubClientListByCommunityResourceResponse ! Str { dedicated_hub_list_by_community_resource_handle(r) }, c.setup.endpoint, fn(r: DedicatedHubClientListByCommunityResourceResponse) -> Str? { r.dedicated_hub_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DedicatedHubClientListByCommunityResourceResponse ! Str { dedicated_hub_list_by_community_resource_handle(r) }, c.setup.endpoint, fn(r: DedicatedHubClientListByCommunityResourceResponse) -> Str? { r.dedicated_hub_resource_list_result.next_link }).traced_as("DedicatedHubClientListByCommunityResourceResponse"))
 }
 
 /// DedicatedHubClientGetOptions: the optional parameters of DedicatedHubClient.get.
@@ -134,12 +134,15 @@ fn (c: DedicatedHubClient) get_create_request(resource_group_name: Str, communit
 
 /// Get a DedicatedHubResource
 pub fn (c: DedicatedHubClient) get(resource_group_name: Str, community_name: Str, dedicated_hub_name: Str, options: DedicatedHubClientGetOptions = DedicatedHubClientGetOptions{}) -> DedicatedHubClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, community_name, dedicated_hub_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DedicatedHubClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, community_name, dedicated_hub_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dedicated_hub_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dedicated_hub_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DedicatedHubClientBeginCreateOrUpdateOptions: the optional parameters of DedicatedHubClient.begin_create_or_update.
@@ -186,14 +189,16 @@ fn (c: DedicatedHubClient) create_or_update_create_request(resource_group_name: 
 /// Create a DedicatedHubResource
 pub fn (c: DedicatedHubClient[fx]) begin_create_or_update(resource_group_name: Str, community_name: Str, dedicated_hub_name: Str, resource: DedicatedHubResource, options: DedicatedHubClientBeginCreateOrUpdateOptions = DedicatedHubClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DedicatedHubClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientCreateOrUpdateResponse", fn(r: http.Response) -> DedicatedHubClientCreateOrUpdateResponse ! Str { dedicated_hub_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientCreateOrUpdateResponse", fn(r: http.Response) -> DedicatedHubClientCreateOrUpdateResponse ! Str { dedicated_hub_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, community_name, dedicated_hub_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DedicatedHubClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, community_name, dedicated_hub_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DedicatedHubClientCreateOrUpdateResponse", fn(r: http.Response) -> DedicatedHubClientCreateOrUpdateResponse ! Str { dedicated_hub_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DedicatedHubClientCreateOrUpdateResponse", fn(r: http.Response) -> DedicatedHubClientCreateOrUpdateResponse ! Str { dedicated_hub_create_or_update_handle(r) }, traced: true)
 }
 
 /// DedicatedHubClientBeginUpdateOptions: the optional parameters of DedicatedHubClient.begin_update.
@@ -240,14 +245,16 @@ fn (c: DedicatedHubClient) update_create_request(resource_group_name: Str, commu
 /// Update a DedicatedHubResource
 pub fn (c: DedicatedHubClient[fx]) begin_update(resource_group_name: Str, community_name: Str, dedicated_hub_name: Str, properties: DedicatedHubPatchModel, options: DedicatedHubClientBeginUpdateOptions = DedicatedHubClientBeginUpdateOptions{}) -> runtime.Poller[DedicatedHubClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientUpdateResponse", fn(r: http.Response) -> DedicatedHubClientUpdateResponse ! Str { dedicated_hub_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientUpdateResponse", fn(r: http.Response) -> DedicatedHubClientUpdateResponse ! Str { dedicated_hub_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, community_name, dedicated_hub_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DedicatedHubClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, community_name, dedicated_hub_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DedicatedHubClientUpdateResponse", fn(r: http.Response) -> DedicatedHubClientUpdateResponse ! Str { dedicated_hub_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DedicatedHubClientUpdateResponse", fn(r: http.Response) -> DedicatedHubClientUpdateResponse ! Str { dedicated_hub_update_handle(r) }, traced: true)
 }
 
 /// DedicatedHubClientBeginDeleteOptions: the optional parameters of DedicatedHubClient.begin_delete.
@@ -290,12 +297,14 @@ fn (c: DedicatedHubClient) delete_create_request(resource_group_name: Str, commu
 /// Delete a DedicatedHubResource
 pub fn (c: DedicatedHubClient[fx]) begin_delete(resource_group_name: Str, community_name: Str, dedicated_hub_name: Str, options: DedicatedHubClientBeginDeleteOptions = DedicatedHubClientBeginDeleteOptions{}) -> runtime.Poller[DedicatedHubClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientDeleteResponse", fn(r: http.Response) -> DedicatedHubClientDeleteResponse ! Str { dedicated_hub_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DedicatedHubClientDeleteResponse", fn(r: http.Response) -> DedicatedHubClientDeleteResponse ! Str { dedicated_hub_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, community_name, dedicated_hub_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DedicatedHubClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, community_name, dedicated_hub_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DedicatedHubClientDeleteResponse", fn(r: http.Response) -> DedicatedHubClientDeleteResponse ! Str { dedicated_hub_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DedicatedHubClientDeleteResponse", fn(r: http.Response) -> DedicatedHubClientDeleteResponse ! Str { dedicated_hub_delete_handle(r) }, traced: true)
 }

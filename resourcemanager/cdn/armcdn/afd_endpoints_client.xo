@@ -57,7 +57,7 @@ fn (c: AFDEndpointsClient) list_by_profile_create_request(resource_group_name: S
 /// Lists existing AzureFrontDoor endpoints.
 pub fn (c: AFDEndpointsClient[fx]) new_list_by_profile_pager(resource_group_name: Str, profile_name: Str, options: AFDEndpointsClientListByProfileOptions = AFDEndpointsClientListByProfileOptions{}) -> runtime.Pager[AFDEndpointsClientListByProfileResponse, fx] ! azcore.CallErr {
   let req = c.list_by_profile_create_request(resource_group_name, profile_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AFDEndpointsClientListByProfileResponse ! Str { afd_endpoints_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: AFDEndpointsClientListByProfileResponse) -> Str? { r.afd_endpoint_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AFDEndpointsClientListByProfileResponse ! Str { afd_endpoints_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: AFDEndpointsClientListByProfileResponse) -> Str? { r.afd_endpoint_list_result.next_link }).traced_as("AFDEndpointsClientListByProfileResponse"))
 }
 
 /// AFDEndpointsClientGetOptions: the optional parameters of AFDEndpointsClient.get.
@@ -99,12 +99,15 @@ fn (c: AFDEndpointsClient) get_create_request(resource_group_name: Str, profile_
 
 /// Gets an existing AzureFrontDoor endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: AFDEndpointsClient) get(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: AFDEndpointsClientGetOptions = AFDEndpointsClientGetOptions{}) -> AFDEndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  afd_endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = afd_endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AFDEndpointsClientBeginCreateOptions: the optional parameters of AFDEndpointsClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: AFDEndpointsClient) create_create_request(resource_group_name: Str, profi
 /// Creates a new AzureFrontDoor endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: AFDEndpointsClient[fx]) begin_create(resource_group_name: Str, profile_name: Str, endpoint_name: Str, endpoint: AFDEndpoint, options: AFDEndpointsClientBeginCreateOptions = AFDEndpointsClientBeginCreateOptions{}) -> runtime.Poller[AFDEndpointsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientCreateResponse", fn(r: http.Response) -> AFDEndpointsClientCreateResponse ! Str { afd_endpoints_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientCreateResponse", fn(r: http.Response) -> AFDEndpointsClientCreateResponse ! Str { afd_endpoints_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, profile_name, endpoint_name, endpoint, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, profile_name, endpoint_name, endpoint, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AFDEndpointsClientCreateResponse", fn(r: http.Response) -> AFDEndpointsClientCreateResponse ! Str { afd_endpoints_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AFDEndpointsClientCreateResponse", fn(r: http.Response) -> AFDEndpointsClientCreateResponse ! Str { afd_endpoints_create_handle(r) }, traced: true)
 }
 
 /// AFDEndpointsClientBeginUpdateOptions: the optional parameters of AFDEndpointsClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: AFDEndpointsClient) update_create_request(resource_group_name: Str, profi
 /// Updates an existing AzureFrontDoor endpoint with the specified endpoint name under the specified subscription, resource group and profile. Only tags can be updated after creating an endpoint. To update origins, use the Update Origin operation. To update origin groups, use the Update Origin group operation. To update domains, use the Update Custom Domain operation.
 pub fn (c: AFDEndpointsClient[fx]) begin_update(resource_group_name: Str, profile_name: Str, endpoint_name: Str, endpoint_update_properties: AFDEndpointUpdateParameters, options: AFDEndpointsClientBeginUpdateOptions = AFDEndpointsClientBeginUpdateOptions{}) -> runtime.Poller[AFDEndpointsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientUpdateResponse", fn(r: http.Response) -> AFDEndpointsClientUpdateResponse ! Str { afd_endpoints_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientUpdateResponse", fn(r: http.Response) -> AFDEndpointsClientUpdateResponse ! Str { afd_endpoints_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, profile_name, endpoint_name, endpoint_update_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, profile_name, endpoint_name, endpoint_update_properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AFDEndpointsClientUpdateResponse", fn(r: http.Response) -> AFDEndpointsClientUpdateResponse ! Str { afd_endpoints_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AFDEndpointsClientUpdateResponse", fn(r: http.Response) -> AFDEndpointsClientUpdateResponse ! Str { afd_endpoints_update_handle(r) }, traced: true)
 }
 
 /// AFDEndpointsClientBeginDeleteOptions: the optional parameters of AFDEndpointsClient.begin_delete.
@@ -255,14 +262,16 @@ fn (c: AFDEndpointsClient) delete_create_request(resource_group_name: Str, profi
 /// Deletes an existing AzureFrontDoor endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: AFDEndpointsClient[fx]) begin_delete(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: AFDEndpointsClientBeginDeleteOptions = AFDEndpointsClientBeginDeleteOptions{}) -> runtime.Poller[AFDEndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientDeleteResponse", fn(r: http.Response) -> AFDEndpointsClientDeleteResponse ! Str { afd_endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientDeleteResponse", fn(r: http.Response) -> AFDEndpointsClientDeleteResponse ! Str { afd_endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AFDEndpointsClientDeleteResponse", fn(r: http.Response) -> AFDEndpointsClientDeleteResponse ! Str { afd_endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AFDEndpointsClientDeleteResponse", fn(r: http.Response) -> AFDEndpointsClientDeleteResponse ! Str { afd_endpoints_delete_handle(r) }, traced: true)
 }
 
 /// AFDEndpointsClientBeginPurgeContentOptions: the optional parameters of AFDEndpointsClient.begin_purge_content.
@@ -306,14 +315,16 @@ fn (c: AFDEndpointsClient) purge_content_create_request(resource_group_name: Str
 /// Removes a content from AzureFrontDoor.
 pub fn (c: AFDEndpointsClient[fx]) begin_purge_content(resource_group_name: Str, profile_name: Str, endpoint_name: Str, contents: AfdPurgeParameters, options: AFDEndpointsClientBeginPurgeContentOptions = AFDEndpointsClientBeginPurgeContentOptions{}) -> runtime.Poller[AFDEndpointsClientPurgeContentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientPurgeContentResponse", fn(r: http.Response) -> AFDEndpointsClientPurgeContentResponse ! Str { afd_endpoints_purge_content_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AFDEndpointsClientPurgeContentResponse", fn(r: http.Response) -> AFDEndpointsClientPurgeContentResponse ! Str { afd_endpoints_purge_content_handle(r) }, traced: true)
   }
-  let req = c.purge_content_create_request(resource_group_name, profile_name, endpoint_name, contents, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.BeginPurgeContent", c.setup.pipeline.tracer)
+  let req = c.purge_content_create_request(resource_group_name, profile_name, endpoint_name, contents, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AFDEndpointsClientPurgeContentResponse", fn(r: http.Response) -> AFDEndpointsClientPurgeContentResponse ! Str { afd_endpoints_purge_content_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AFDEndpointsClientPurgeContentResponse", fn(r: http.Response) -> AFDEndpointsClientPurgeContentResponse ! Str { afd_endpoints_purge_content_handle(r) }, traced: true)
 }
 
 /// AFDEndpointsClientListResourceUsageOptions: the optional parameters of AFDEndpointsClient.new_list_resource_usage_pager.
@@ -356,7 +367,7 @@ fn (c: AFDEndpointsClient) list_resource_usage_create_request(resource_group_nam
 /// Checks the quota and actual usage of endpoints under the given Azure Front Door profile.
 pub fn (c: AFDEndpointsClient[fx]) new_list_resource_usage_pager(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: AFDEndpointsClientListResourceUsageOptions = AFDEndpointsClientListResourceUsageOptions{}) -> runtime.Pager[AFDEndpointsClientListResourceUsageResponse, fx] ! azcore.CallErr {
   let req = c.list_resource_usage_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AFDEndpointsClientListResourceUsageResponse ! Str { afd_endpoints_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: AFDEndpointsClientListResourceUsageResponse) -> Str? { r.usages_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AFDEndpointsClientListResourceUsageResponse ! Str { afd_endpoints_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: AFDEndpointsClientListResourceUsageResponse) -> Str? { r.usages_list_result.next_link }).traced_as("AFDEndpointsClientListResourceUsageResponse"))
 }
 
 /// AFDEndpointsClientValidateCustomDomainOptions: the optional parameters of AFDEndpointsClient.validate_custom_domain.
@@ -399,10 +410,13 @@ fn (c: AFDEndpointsClient) validate_custom_domain_create_request(resource_group_
 
 /// Validates the custom domain mapping to ensure it maps to the correct Azure Front Door endpoint in DNS.
 pub fn (c: AFDEndpointsClient) validate_custom_domain(resource_group_name: Str, profile_name: Str, endpoint_name: Str, custom_domain_properties: ValidateCustomDomainInput, options: AFDEndpointsClientValidateCustomDomainOptions = AFDEndpointsClientValidateCustomDomainOptions{}) -> AFDEndpointsClientValidateCustomDomainResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.validate_custom_domain_create_request(resource_group_name, profile_name, endpoint_name, custom_domain_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AFDEndpointsClient.ValidateCustomDomain", c.setup.pipeline.tracer)
+  let req = sp.on(c.validate_custom_domain_create_request(resource_group_name, profile_name, endpoint_name, custom_domain_properties, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  afd_endpoints_validate_custom_domain_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = afd_endpoints_validate_custom_domain_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

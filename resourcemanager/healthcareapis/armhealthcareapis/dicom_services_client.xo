@@ -57,7 +57,7 @@ fn (c: DicomServicesClient) list_by_workspace_create_request(resource_group_name
 /// Lists all DICOM Services for the given workspace
 pub fn (c: DicomServicesClient[fx]) new_list_by_workspace_pager(resource_group_name: Str, workspace_name: Str, options: DicomServicesClientListByWorkspaceOptions = DicomServicesClientListByWorkspaceOptions{}) -> runtime.Pager[DicomServicesClientListByWorkspaceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_workspace_create_request(resource_group_name, workspace_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DicomServicesClientListByWorkspaceResponse ! Str { dicom_services_list_by_workspace_handle(r) }, fn(r: DicomServicesClientListByWorkspaceResponse) -> Str? { r.dicom_service_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DicomServicesClientListByWorkspaceResponse ! Str { dicom_services_list_by_workspace_handle(r) }, fn(r: DicomServicesClientListByWorkspaceResponse) -> Str? { r.dicom_service_collection.next_link }).traced_as("DicomServicesClientListByWorkspaceResponse"))
 }
 
 /// DicomServicesClientGetOptions: the optional parameters of DicomServicesClient.get.
@@ -99,12 +99,15 @@ fn (c: DicomServicesClient) get_create_request(resource_group_name: Str, workspa
 
 /// Gets the properties of the specified DICOM Service.
 pub fn (c: DicomServicesClient) get(resource_group_name: Str, workspace_name: Str, dicom_service_name: Str, options: DicomServicesClientGetOptions = DicomServicesClientGetOptions{}) -> DicomServicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, workspace_name, dicom_service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DicomServicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, workspace_name, dicom_service_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dicom_services_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dicom_services_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DicomServicesClientBeginCreateOrUpdateOptions: the optional parameters of DicomServicesClient.begin_create_or_update.
@@ -151,14 +154,16 @@ fn (c: DicomServicesClient) create_or_update_create_request(resource_group_name:
 /// Creates or updates a DICOM Service resource with the specified parameters.
 pub fn (c: DicomServicesClient[fx]) begin_create_or_update(resource_group_name: Str, workspace_name: Str, dicom_service_name: Str, dicomservice: DicomService, options: DicomServicesClientBeginCreateOrUpdateOptions = DicomServicesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DicomServicesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DicomServicesClientCreateOrUpdateResponse ! Str { dicom_services_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DicomServicesClientCreateOrUpdateResponse ! Str { dicom_services_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, workspace_name, dicom_service_name, dicomservice, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DicomServicesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, workspace_name, dicom_service_name, dicomservice, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DicomServicesClientCreateOrUpdateResponse ! Str { dicom_services_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DicomServicesClientCreateOrUpdateResponse ! Str { dicom_services_create_or_update_handle(r) }, traced: true)
 }
 
 /// DicomServicesClientBeginUpdateOptions: the optional parameters of DicomServicesClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: DicomServicesClient) update_create_request(resource_group_name: Str, dico
 /// Patch DICOM Service details.
 pub fn (c: DicomServicesClient[fx]) begin_update(resource_group_name: Str, dicom_service_name: Str, workspace_name: Str, dicomservice_patch_resource: DicomServicePatchResource, options: DicomServicesClientBeginUpdateOptions = DicomServicesClientBeginUpdateOptions{}) -> runtime.Poller[DicomServicesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientUpdateResponse", fn(r: http.Response) -> DicomServicesClientUpdateResponse ! Str { dicom_services_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientUpdateResponse", fn(r: http.Response) -> DicomServicesClientUpdateResponse ! Str { dicom_services_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, dicom_service_name, workspace_name, dicomservice_patch_resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DicomServicesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, dicom_service_name, workspace_name, dicomservice_patch_resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientUpdateResponse", fn(r: http.Response) -> DicomServicesClientUpdateResponse ! Str { dicom_services_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientUpdateResponse", fn(r: http.Response) -> DicomServicesClientUpdateResponse ! Str { dicom_services_update_handle(r) }, traced: true)
 }
 
 /// DicomServicesClientBeginDeleteOptions: the optional parameters of DicomServicesClient.begin_delete.
@@ -255,12 +262,14 @@ fn (c: DicomServicesClient) delete_create_request(resource_group_name: Str, dico
 /// Deletes a DICOM Service.
 pub fn (c: DicomServicesClient[fx]) begin_delete(resource_group_name: Str, dicom_service_name: Str, workspace_name: Str, options: DicomServicesClientBeginDeleteOptions = DicomServicesClientBeginDeleteOptions{}) -> runtime.Poller[DicomServicesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientDeleteResponse", fn(r: http.Response) -> DicomServicesClientDeleteResponse ! Str { dicom_services_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DicomServicesClientDeleteResponse", fn(r: http.Response) -> DicomServicesClientDeleteResponse ! Str { dicom_services_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, dicom_service_name, workspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DicomServicesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, dicom_service_name, workspace_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientDeleteResponse", fn(r: http.Response) -> DicomServicesClientDeleteResponse ! Str { dicom_services_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DicomServicesClientDeleteResponse", fn(r: http.Response) -> DicomServicesClientDeleteResponse ! Str { dicom_services_delete_handle(r) }, traced: true)
 }

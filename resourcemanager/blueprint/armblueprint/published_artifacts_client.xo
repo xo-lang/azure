@@ -59,12 +59,15 @@ fn (c: PublishedArtifactsClient) get_create_request(resource_scope: Str, bluepri
 
 /// Get an artifact for a published blueprint definition.
 pub fn (c: PublishedArtifactsClient) get(resource_scope: Str, blueprint_name: Str, version_id: Str, artifact_name: Str, options: PublishedArtifactsClientGetOptions = PublishedArtifactsClientGetOptions{}) -> PublishedArtifactsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_scope, blueprint_name, version_id, artifact_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublishedArtifactsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_scope, blueprint_name, version_id, artifact_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  published_artifacts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = published_artifacts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PublishedArtifactsClientListOptions: the optional parameters of PublishedArtifactsClient.new_list_pager.
@@ -100,5 +103,5 @@ fn (c: PublishedArtifactsClient) list_create_request(resource_scope: Str, bluepr
 /// List artifacts for a version of a published blueprint definition.
 pub fn (c: PublishedArtifactsClient[fx]) new_list_pager(resource_scope: Str, blueprint_name: Str, version_id: Str, options: PublishedArtifactsClientListOptions = PublishedArtifactsClientListOptions{}) -> runtime.Pager[PublishedArtifactsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_scope, blueprint_name, version_id, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublishedArtifactsClientListResponse ! Str { published_artifacts_list_handle(r) }, fn(r: PublishedArtifactsClientListResponse) -> Str? { r.artifact_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublishedArtifactsClientListResponse ! Str { published_artifacts_list_handle(r) }, fn(r: PublishedArtifactsClientListResponse) -> Str? { r.artifact_list.next_link }).traced_as("PublishedArtifactsClientListResponse"))
 }

@@ -60,7 +60,7 @@ fn (c: AccessBridgesClient) list_by_subscription_create_request(options: AccessB
 /// Get a list of access bridges in the provided subscription.
 pub fn (c: AccessBridgesClient[fx]) new_list_by_subscription_pager(options: AccessBridgesClientListBySubscriptionOptions = AccessBridgesClientListBySubscriptionOptions{}) -> runtime.Pager[AccessBridgesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccessBridgesClientListBySubscriptionResponse ! Str { access_bridges_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: AccessBridgesClientListBySubscriptionResponse) -> Str? { r.access_bridge_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccessBridgesClientListBySubscriptionResponse ! Str { access_bridges_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: AccessBridgesClientListBySubscriptionResponse) -> Str? { r.access_bridge_list.next_link }).traced_as("AccessBridgesClientListBySubscriptionResponse"))
 }
 
 /// AccessBridgesClientListByResourceGroupOptions: the optional parameters of AccessBridgesClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: AccessBridgesClient) list_by_resource_group_create_request(resource_group
 /// Get a list of access bridges in the provided resource group.
 pub fn (c: AccessBridgesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AccessBridgesClientListByResourceGroupOptions = AccessBridgesClientListByResourceGroupOptions{}) -> runtime.Pager[AccessBridgesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccessBridgesClientListByResourceGroupResponse ! Str { access_bridges_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AccessBridgesClientListByResourceGroupResponse) -> Str? { r.access_bridge_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccessBridgesClientListByResourceGroupResponse ! Str { access_bridges_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AccessBridgesClientListByResourceGroupResponse) -> Str? { r.access_bridge_list.next_link }).traced_as("AccessBridgesClientListByResourceGroupResponse"))
 }
 
 /// AccessBridgesClientGetOptions: the optional parameters of AccessBridgesClient.get.
@@ -144,12 +144,15 @@ fn (c: AccessBridgesClient) get_create_request(resource_group_name: Str, access_
 
 /// Get the properties of the provided access bridge.
 pub fn (c: AccessBridgesClient) get(resource_group_name: Str, access_bridge_name: AccessBridgeAllowedName, options: AccessBridgesClientGetOptions = AccessBridgesClientGetOptions{}) -> AccessBridgesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, access_bridge_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccessBridgesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, access_bridge_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  access_bridges_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = access_bridges_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccessBridgesClientBeginCreateOrUpdateOptions: the optional parameters of AccessBridgesClient.begin_create_or_update.
@@ -192,14 +195,16 @@ fn (c: AccessBridgesClient) create_or_update_create_request(resource_group_name:
 /// Create a new access bridge or update the properties of the existing access bridge.
 pub fn (c: AccessBridgesClient[fx]) begin_create_or_update(resource_group_name: Str, access_bridge_name: AccessBridgeAllowedName, access_bridge: AccessBridge, options: AccessBridgesClientBeginCreateOrUpdateOptions = AccessBridgesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[AccessBridgesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientCreateOrUpdateResponse", fn(r: http.Response) -> AccessBridgesClientCreateOrUpdateResponse ! Str { access_bridges_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientCreateOrUpdateResponse", fn(r: http.Response) -> AccessBridgesClientCreateOrUpdateResponse ! Str { access_bridges_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, access_bridge_name, access_bridge, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccessBridgesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, access_bridge_name, access_bridge, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientCreateOrUpdateResponse", fn(r: http.Response) -> AccessBridgesClientCreateOrUpdateResponse ! Str { access_bridges_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientCreateOrUpdateResponse", fn(r: http.Response) -> AccessBridgesClientCreateOrUpdateResponse ! Str { access_bridges_create_or_update_handle(r) }, traced: true)
 }
 
 /// AccessBridgesClientBeginUpdateOptions: the optional parameters of AccessBridgesClient.begin_update.
@@ -252,14 +257,16 @@ fn (c: AccessBridgesClient) update_create_request(resource_group_name: Str, acce
 /// Update properties of the provided access bridge, or update tags associated with the access bridge. Properties and tag updates can be done independently.
 pub fn (c: AccessBridgesClient[fx]) begin_update(resource_group_name: Str, access_bridge_name: AccessBridgeAllowedName, access_bridge_update_parameters: AccessBridgePatchParameters, options: AccessBridgesClientBeginUpdateOptions = AccessBridgesClientBeginUpdateOptions{}) -> runtime.Poller[AccessBridgesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientUpdateResponse", fn(r: http.Response) -> AccessBridgesClientUpdateResponse ! Str { access_bridges_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientUpdateResponse", fn(r: http.Response) -> AccessBridgesClientUpdateResponse ! Str { access_bridges_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, access_bridge_name, access_bridge_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccessBridgesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, access_bridge_name, access_bridge_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientUpdateResponse", fn(r: http.Response) -> AccessBridgesClientUpdateResponse ! Str { access_bridges_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientUpdateResponse", fn(r: http.Response) -> AccessBridgesClientUpdateResponse ! Str { access_bridges_update_handle(r) }, traced: true)
 }
 
 /// AccessBridgesClientBeginDeleteOptions: the optional parameters of AccessBridgesClient.begin_delete.
@@ -311,12 +318,14 @@ fn (c: AccessBridgesClient) delete_create_request(resource_group_name: Str, acce
 /// Delete the specified access bridge.
 pub fn (c: AccessBridgesClient[fx]) begin_delete(resource_group_name: Str, access_bridge_name: AccessBridgeAllowedName, options: AccessBridgesClientBeginDeleteOptions = AccessBridgesClientBeginDeleteOptions{}) -> runtime.Poller[AccessBridgesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientDeleteResponse", fn(r: http.Response) -> AccessBridgesClientDeleteResponse ! Str { access_bridges_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccessBridgesClientDeleteResponse", fn(r: http.Response) -> AccessBridgesClientDeleteResponse ! Str { access_bridges_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, access_bridge_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccessBridgesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, access_bridge_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientDeleteResponse", fn(r: http.Response) -> AccessBridgesClientDeleteResponse ! Str { access_bridges_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccessBridgesClientDeleteResponse", fn(r: http.Response) -> AccessBridgesClientDeleteResponse ! Str { access_bridges_delete_handle(r) }, traced: true)
 }

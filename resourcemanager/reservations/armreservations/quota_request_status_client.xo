@@ -72,7 +72,7 @@ fn (c: QuotaRequestStatusClient) list_create_request(subscription_id: Str, provi
 /// For the specified Azure region (location), subscription, and resource provider, get the history of the quota requests for the past year. To select specific quota requests, use the oData filter.
 pub fn (c: QuotaRequestStatusClient[fx]) new_list_pager(subscription_id: Str, provider_id: Str, location: Str, options: QuotaRequestStatusClientListOptions = QuotaRequestStatusClientListOptions{}) -> runtime.Pager[QuotaRequestStatusClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(subscription_id, provider_id, location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> QuotaRequestStatusClientListResponse ! Str { quota_request_status_list_handle(r) }, c.setup.endpoint, fn(r: QuotaRequestStatusClientListResponse) -> Str? { r.quota_request_details_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> QuotaRequestStatusClientListResponse ! Str { quota_request_status_list_handle(r) }, c.setup.endpoint, fn(r: QuotaRequestStatusClientListResponse) -> Str? { r.quota_request_details_list.next_link }).traced_as("QuotaRequestStatusClientListResponse"))
 }
 
 /// QuotaRequestStatusClientGetOptions: the optional parameters of QuotaRequestStatusClient.get.
@@ -114,10 +114,13 @@ fn (c: QuotaRequestStatusClient) get_create_request(subscription_id: Str, provid
 
 /// For the specified Azure region (location), get the details and status of the quota request by the quota request ID for the resources of the resource provider. The PUT request for the quota (service limit) returns a response with the requestId parameter.
 pub fn (c: QuotaRequestStatusClient) get(subscription_id: Str, provider_id: Str, location: Str, id: Str, options: QuotaRequestStatusClientGetOptions = QuotaRequestStatusClientGetOptions{}) -> QuotaRequestStatusClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(subscription_id, provider_id, location, id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "QuotaRequestStatusClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(subscription_id, provider_id, location, id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  quota_request_status_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = quota_request_status_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

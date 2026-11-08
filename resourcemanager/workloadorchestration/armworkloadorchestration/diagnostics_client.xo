@@ -49,7 +49,7 @@ fn (c: DiagnosticsClient) list_by_subscription_create_request(options: Diagnosti
 /// Lists Diagnostics resources within an Azure subscription.
 pub fn (c: DiagnosticsClient[fx]) new_list_by_subscription_pager(options: DiagnosticsClientListBySubscriptionOptions = DiagnosticsClientListBySubscriptionOptions{}) -> runtime.Pager[DiagnosticsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiagnosticsClientListBySubscriptionResponse ! Str { diagnostics_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DiagnosticsClientListBySubscriptionResponse) -> Str? { r.diagnostic_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiagnosticsClientListBySubscriptionResponse ! Str { diagnostics_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DiagnosticsClientListBySubscriptionResponse) -> Str? { r.diagnostic_list_result.next_link }).traced_as("DiagnosticsClientListBySubscriptionResponse"))
 }
 
 /// DiagnosticsClientListByResourceGroupOptions: the optional parameters of DiagnosticsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: DiagnosticsClient) list_by_resource_group_create_request(resource_group_n
 /// Returns a collection of Diagnostic resources within the resource group.
 pub fn (c: DiagnosticsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: DiagnosticsClientListByResourceGroupOptions = DiagnosticsClientListByResourceGroupOptions{}) -> runtime.Pager[DiagnosticsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiagnosticsClientListByResourceGroupResponse ! Str { diagnostics_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DiagnosticsClientListByResourceGroupResponse) -> Str? { r.diagnostic_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiagnosticsClientListByResourceGroupResponse ! Str { diagnostics_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DiagnosticsClientListByResourceGroupResponse) -> Str? { r.diagnostic_list_result.next_link }).traced_as("DiagnosticsClientListByResourceGroupResponse"))
 }
 
 /// DiagnosticsClientGetOptions: the optional parameters of DiagnosticsClient.get.
@@ -122,12 +122,15 @@ fn (c: DiagnosticsClient) get_create_request(resource_group_name: Str, diagnosti
 
 /// Returns details of specified Diagnostic resource.
 pub fn (c: DiagnosticsClient) get(resource_group_name: Str, diagnostic_name: Str, options: DiagnosticsClientGetOptions = DiagnosticsClientGetOptions{}) -> DiagnosticsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, diagnostic_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiagnosticsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, diagnostic_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  diagnostics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = diagnostics_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DiagnosticsClientBeginCreateOrUpdateOptions: the optional parameters of DiagnosticsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: DiagnosticsClient) create_or_update_create_request(resource_group_name: S
 /// Creates new or updates existing Diagnostic resource.
 pub fn (c: DiagnosticsClient[fx]) begin_create_or_update(resource_group_name: Str, diagnostic_name: Str, resource: Diagnostic, options: DiagnosticsClientBeginCreateOrUpdateOptions = DiagnosticsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DiagnosticsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientCreateOrUpdateResponse", fn(r: http.Response) -> DiagnosticsClientCreateOrUpdateResponse ! Str { diagnostics_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientCreateOrUpdateResponse", fn(r: http.Response) -> DiagnosticsClientCreateOrUpdateResponse ! Str { diagnostics_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, diagnostic_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiagnosticsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, diagnostic_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientCreateOrUpdateResponse", fn(r: http.Response) -> DiagnosticsClientCreateOrUpdateResponse ! Str { diagnostics_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientCreateOrUpdateResponse", fn(r: http.Response) -> DiagnosticsClientCreateOrUpdateResponse ! Str { diagnostics_create_or_update_handle(r) }, traced: true)
 }
 
 /// DiagnosticsClientBeginUpdateOptions: the optional parameters of DiagnosticsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: DiagnosticsClient) update_create_request(resource_group_name: Str, diagno
 /// Updates existing Diagnostic resource.
 pub fn (c: DiagnosticsClient[fx]) begin_update(resource_group_name: Str, diagnostic_name: Str, properties: DiagnosticUpdate, options: DiagnosticsClientBeginUpdateOptions = DiagnosticsClientBeginUpdateOptions{}) -> runtime.Poller[DiagnosticsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientUpdateResponse", fn(r: http.Response) -> DiagnosticsClientUpdateResponse ! Str { diagnostics_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientUpdateResponse", fn(r: http.Response) -> DiagnosticsClientUpdateResponse ! Str { diagnostics_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, diagnostic_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiagnosticsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, diagnostic_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientUpdateResponse", fn(r: http.Response) -> DiagnosticsClientUpdateResponse ! Str { diagnostics_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientUpdateResponse", fn(r: http.Response) -> DiagnosticsClientUpdateResponse ! Str { diagnostics_update_handle(r) }, traced: true)
 }
 
 /// DiagnosticsClientBeginDeleteOptions: the optional parameters of DiagnosticsClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: DiagnosticsClient) delete_create_request(resource_group_name: Str, diagno
 /// Deletes specified Diagnostic resource.
 pub fn (c: DiagnosticsClient[fx]) begin_delete(resource_group_name: Str, diagnostic_name: Str, options: DiagnosticsClientBeginDeleteOptions = DiagnosticsClientBeginDeleteOptions{}) -> runtime.Poller[DiagnosticsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientDeleteResponse", fn(r: http.Response) -> DiagnosticsClientDeleteResponse ! Str { diagnostics_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiagnosticsClientDeleteResponse", fn(r: http.Response) -> DiagnosticsClientDeleteResponse ! Str { diagnostics_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, diagnostic_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiagnosticsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, diagnostic_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientDeleteResponse", fn(r: http.Response) -> DiagnosticsClientDeleteResponse ! Str { diagnostics_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiagnosticsClientDeleteResponse", fn(r: http.Response) -> DiagnosticsClientDeleteResponse ! Str { diagnostics_delete_handle(r) }, traced: true)
 }

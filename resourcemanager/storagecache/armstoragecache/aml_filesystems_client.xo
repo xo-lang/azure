@@ -49,7 +49,7 @@ fn (c: AmlFilesystemsClient) list_create_request(options: AmlFilesystemsClientLi
 /// Returns all AML file systems the user has access to under a subscription.
 pub fn (c: AmlFilesystemsClient[fx]) new_list_pager(options: AmlFilesystemsClientListOptions = AmlFilesystemsClientListOptions{}) -> runtime.Pager[AmlFilesystemsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AmlFilesystemsClientListResponse ! Str { aml_filesystems_list_handle(r) }, c.setup.endpoint, fn(r: AmlFilesystemsClientListResponse) -> Str? { r.aml_filesystems_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AmlFilesystemsClientListResponse ! Str { aml_filesystems_list_handle(r) }, c.setup.endpoint, fn(r: AmlFilesystemsClientListResponse) -> Str? { r.aml_filesystems_list_result.next_link }).traced_as("AmlFilesystemsClientListResponse"))
 }
 
 /// AmlFilesystemsClientListByResourceGroupOptions: the optional parameters of AmlFilesystemsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: AmlFilesystemsClient) list_by_resource_group_create_request(resource_grou
 /// Returns all AML file systems the user has access to under a resource group.
 pub fn (c: AmlFilesystemsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AmlFilesystemsClientListByResourceGroupOptions = AmlFilesystemsClientListByResourceGroupOptions{}) -> runtime.Pager[AmlFilesystemsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AmlFilesystemsClientListByResourceGroupResponse ! Str { aml_filesystems_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AmlFilesystemsClientListByResourceGroupResponse) -> Str? { r.aml_filesystems_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AmlFilesystemsClientListByResourceGroupResponse ! Str { aml_filesystems_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AmlFilesystemsClientListByResourceGroupResponse) -> Str? { r.aml_filesystems_list_result.next_link }).traced_as("AmlFilesystemsClientListByResourceGroupResponse"))
 }
 
 /// AmlFilesystemsClientGetOptions: the optional parameters of AmlFilesystemsClient.get.
@@ -122,12 +122,15 @@ fn (c: AmlFilesystemsClient) get_create_request(resource_group_name: Str, aml_fi
 
 /// Returns an AML file system.
 pub fn (c: AmlFilesystemsClient) get(resource_group_name: Str, aml_filesystem_name: Str, options: AmlFilesystemsClientGetOptions = AmlFilesystemsClientGetOptions{}) -> AmlFilesystemsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, aml_filesystem_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, aml_filesystem_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  aml_filesystems_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = aml_filesystems_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AmlFilesystemsClientBeginCreateOrUpdateOptions: the optional parameters of AmlFilesystemsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: AmlFilesystemsClient) create_or_update_create_request(resource_group_name
 /// Create or update an AML file system.
 pub fn (c: AmlFilesystemsClient[fx]) begin_create_or_update(resource_group_name: Str, aml_filesystem_name: Str, aml_filesystem: AmlFilesystem, options: AmlFilesystemsClientBeginCreateOrUpdateOptions = AmlFilesystemsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[AmlFilesystemsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientCreateOrUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientCreateOrUpdateResponse ! Str { aml_filesystems_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientCreateOrUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientCreateOrUpdateResponse ! Str { aml_filesystems_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, aml_filesystem_name, aml_filesystem, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, aml_filesystem_name, aml_filesystem, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AmlFilesystemsClientCreateOrUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientCreateOrUpdateResponse ! Str { aml_filesystems_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AmlFilesystemsClientCreateOrUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientCreateOrUpdateResponse ! Str { aml_filesystems_create_or_update_handle(r) }, traced: true)
 }
 
 /// AmlFilesystemsClientBeginUpdateOptions: the optional parameters of AmlFilesystemsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: AmlFilesystemsClient) update_create_request(resource_group_name: Str, aml
 /// Update an AML file system instance.
 pub fn (c: AmlFilesystemsClient[fx]) begin_update(resource_group_name: Str, aml_filesystem_name: Str, aml_filesystem: AmlFilesystemUpdate, options: AmlFilesystemsClientBeginUpdateOptions = AmlFilesystemsClientBeginUpdateOptions{}) -> runtime.Poller[AmlFilesystemsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientUpdateResponse ! Str { aml_filesystems_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientUpdateResponse ! Str { aml_filesystems_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, aml_filesystem_name, aml_filesystem, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, aml_filesystem_name, aml_filesystem, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AmlFilesystemsClientUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientUpdateResponse ! Str { aml_filesystems_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "AmlFilesystemsClientUpdateResponse", fn(r: http.Response) -> AmlFilesystemsClientUpdateResponse ! Str { aml_filesystems_update_handle(r) }, traced: true)
 }
 
 /// AmlFilesystemsClientBeginDeleteOptions: the optional parameters of AmlFilesystemsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: AmlFilesystemsClient) delete_create_request(resource_group_name: Str, aml
 /// Schedules an AML file system for deletion.
 pub fn (c: AmlFilesystemsClient[fx]) begin_delete(resource_group_name: Str, aml_filesystem_name: Str, options: AmlFilesystemsClientBeginDeleteOptions = AmlFilesystemsClientBeginDeleteOptions{}) -> runtime.Poller[AmlFilesystemsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientDeleteResponse", fn(r: http.Response) -> AmlFilesystemsClientDeleteResponse ! Str { aml_filesystems_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AmlFilesystemsClientDeleteResponse", fn(r: http.Response) -> AmlFilesystemsClientDeleteResponse ! Str { aml_filesystems_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, aml_filesystem_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, aml_filesystem_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AmlFilesystemsClientDeleteResponse", fn(r: http.Response) -> AmlFilesystemsClientDeleteResponse ! Str { aml_filesystems_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AmlFilesystemsClientDeleteResponse", fn(r: http.Response) -> AmlFilesystemsClientDeleteResponse ! Str { aml_filesystems_delete_handle(r) }, traced: true)
 }
 
 /// AmlFilesystemsClientArchiveOptions: the optional parameters of AmlFilesystemsClient.archive.
@@ -316,12 +325,15 @@ fn (c: AmlFilesystemsClient) archive_create_request(resource_group_name: Str, am
 
 /// Archive data from the AML file system.
 pub fn (c: AmlFilesystemsClient) archive(resource_group_name: Str, aml_filesystem_name: Str, options: AmlFilesystemsClientArchiveOptions = AmlFilesystemsClientArchiveOptions{}) -> AmlFilesystemsClientArchiveResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.archive_create_request(resource_group_name, aml_filesystem_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.Archive", c.setup.pipeline.tracer)
+  let req = sp.on(c.archive_create_request(resource_group_name, aml_filesystem_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  aml_filesystems_archive_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = aml_filesystems_archive_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AmlFilesystemsClientCancelArchiveOptions: the optional parameters of AmlFilesystemsClient.cancel_archive.
@@ -356,10 +368,13 @@ fn (c: AmlFilesystemsClient) cancel_archive_create_request(resource_group_name: 
 
 /// Cancel archiving data from the AML file system.
 pub fn (c: AmlFilesystemsClient) cancel_archive(resource_group_name: Str, aml_filesystem_name: Str, options: AmlFilesystemsClientCancelArchiveOptions = AmlFilesystemsClientCancelArchiveOptions{}) -> AmlFilesystemsClientCancelArchiveResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_archive_create_request(resource_group_name, aml_filesystem_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AmlFilesystemsClient.CancelArchive", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_archive_create_request(resource_group_name, aml_filesystem_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  aml_filesystems_cancel_archive_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = aml_filesystems_cancel_archive_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

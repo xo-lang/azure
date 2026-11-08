@@ -57,7 +57,7 @@ fn (c: ResourcePoolsClient) list_create_request(region_id: Str, pc_name: Str, op
 /// Returns list of resource pools in region for private cloud
 pub fn (c: ResourcePoolsClient[fx]) new_list_pager(region_id: Str, pc_name: Str, options: ResourcePoolsClientListOptions = ResourcePoolsClientListOptions{}) -> runtime.Pager[ResourcePoolsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(region_id, pc_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcePoolsClientListResponse ! Str { resource_pools_list_handle(r) }, fn(r: ResourcePoolsClientListResponse) -> Str? { r.resource_pools_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcePoolsClientListResponse ! Str { resource_pools_list_handle(r) }, fn(r: ResourcePoolsClientListResponse) -> Str? { r.resource_pools_list_response.next_link }).traced_as("ResourcePoolsClientListResponse"))
 }
 
 /// ResourcePoolsClientGetOptions: the optional parameters of ResourcePoolsClient.get.
@@ -99,10 +99,13 @@ fn (c: ResourcePoolsClient) get_create_request(region_id: Str, pc_name: Str, res
 
 /// Returns resource pool templates by its name
 pub fn (c: ResourcePoolsClient) get(region_id: Str, pc_name: Str, resource_pool_name: Str, options: ResourcePoolsClientGetOptions = ResourcePoolsClientGetOptions{}) -> ResourcePoolsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(region_id, pc_name, resource_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourcePoolsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(region_id, pc_name, resource_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  resource_pools_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = resource_pools_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

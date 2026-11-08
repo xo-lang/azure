@@ -49,7 +49,7 @@ fn (c: StoragePoolsClient) list_by_subscription_create_request(options: StorageP
 /// List storage pools by Azure subscription ID
 pub fn (c: StoragePoolsClient[fx]) new_list_by_subscription_pager(options: StoragePoolsClientListBySubscriptionOptions = StoragePoolsClientListBySubscriptionOptions{}) -> runtime.Pager[StoragePoolsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StoragePoolsClientListBySubscriptionResponse ! Str { storage_pools_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: StoragePoolsClientListBySubscriptionResponse) -> Str? { r.storage_pool_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StoragePoolsClientListBySubscriptionResponse ! Str { storage_pools_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: StoragePoolsClientListBySubscriptionResponse) -> Str? { r.storage_pool_list_result.next_link }).traced_as("StoragePoolsClientListBySubscriptionResponse"))
 }
 
 /// StoragePoolsClientListByResourceGroupOptions: the optional parameters of StoragePoolsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: StoragePoolsClient) list_by_resource_group_create_request(resource_group_
 /// List storage pools by resource group
 pub fn (c: StoragePoolsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: StoragePoolsClientListByResourceGroupOptions = StoragePoolsClientListByResourceGroupOptions{}) -> runtime.Pager[StoragePoolsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StoragePoolsClientListByResourceGroupResponse ! Str { storage_pools_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: StoragePoolsClientListByResourceGroupResponse) -> Str? { r.storage_pool_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StoragePoolsClientListByResourceGroupResponse ! Str { storage_pools_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: StoragePoolsClientListByResourceGroupResponse) -> Str? { r.storage_pool_list_result.next_link }).traced_as("StoragePoolsClientListByResourceGroupResponse"))
 }
 
 /// StoragePoolsClientGetOptions: the optional parameters of StoragePoolsClient.get.
@@ -122,12 +122,15 @@ fn (c: StoragePoolsClient) get_create_request(resource_group_name: Str, storage_
 
 /// Get a storage pool
 pub fn (c: StoragePoolsClient) get(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientGetOptions = StoragePoolsClientGetOptions{}) -> StoragePoolsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_pools_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_pools_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StoragePoolsClientBeginCreateOptions: the optional parameters of StoragePoolsClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: StoragePoolsClient) create_create_request(resource_group_name: Str, stora
 /// Create a storage pool
 pub fn (c: StoragePoolsClient[fx]) begin_create(resource_group_name: Str, storage_pool_name: Str, resource: StoragePool, options: StoragePoolsClientBeginCreateOptions = StoragePoolsClientBeginCreateOptions{}) -> runtime.Poller[StoragePoolsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientCreateResponse", fn(r: http.Response) -> StoragePoolsClientCreateResponse ! Str { storage_pools_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientCreateResponse", fn(r: http.Response) -> StoragePoolsClientCreateResponse ! Str { storage_pools_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, storage_pool_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, storage_pool_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientCreateResponse", fn(r: http.Response) -> StoragePoolsClientCreateResponse ! Str { storage_pools_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientCreateResponse", fn(r: http.Response) -> StoragePoolsClientCreateResponse ! Str { storage_pools_create_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientBeginUpdateOptions: the optional parameters of StoragePoolsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: StoragePoolsClient) update_create_request(resource_group_name: Str, stora
 /// Update a storage pool
 pub fn (c: StoragePoolsClient[fx]) begin_update(resource_group_name: Str, storage_pool_name: Str, properties: StoragePoolUpdate, options: StoragePoolsClientBeginUpdateOptions = StoragePoolsClientBeginUpdateOptions{}) -> runtime.Poller[StoragePoolsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientUpdateResponse", fn(r: http.Response) -> StoragePoolsClientUpdateResponse ! Str { storage_pools_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientUpdateResponse", fn(r: http.Response) -> StoragePoolsClientUpdateResponse ! Str { storage_pools_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, storage_pool_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, storage_pool_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientUpdateResponse", fn(r: http.Response) -> StoragePoolsClientUpdateResponse ! Str { storage_pools_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientUpdateResponse", fn(r: http.Response) -> StoragePoolsClientUpdateResponse ! Str { storage_pools_update_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientBeginDeleteOptions: the optional parameters of StoragePoolsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: StoragePoolsClient) delete_create_request(resource_group_name: Str, stora
 /// Delete a storage pool
 pub fn (c: StoragePoolsClient[fx]) begin_delete(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientBeginDeleteOptions = StoragePoolsClientBeginDeleteOptions{}) -> runtime.Poller[StoragePoolsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientDeleteResponse", fn(r: http.Response) -> StoragePoolsClientDeleteResponse ! Str { storage_pools_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientDeleteResponse", fn(r: http.Response) -> StoragePoolsClientDeleteResponse ! Str { storage_pools_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientDeleteResponse", fn(r: http.Response) -> StoragePoolsClientDeleteResponse ! Str { storage_pools_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientDeleteResponse", fn(r: http.Response) -> StoragePoolsClientDeleteResponse ! Str { storage_pools_delete_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientBeginDisableAvsConnectionOptions: the optional parameters of StoragePoolsClient.begin_disable_avs_connection.
@@ -312,14 +321,16 @@ fn (c: StoragePoolsClient) disable_avs_connection_create_request(resource_group_
 /// Disable the existing AVS connection
 pub fn (c: StoragePoolsClient[fx]) begin_disable_avs_connection(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientBeginDisableAvsConnectionOptions = StoragePoolsClientBeginDisableAvsConnectionOptions{}) -> runtime.Poller[StoragePoolsClientDisableAvsConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientDisableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientDisableAvsConnectionResponse ! Str { storage_pools_disable_avs_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientDisableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientDisableAvsConnectionResponse ! Str { storage_pools_disable_avs_connection_handle(r) }, traced: true)
   }
-  let req = c.disable_avs_connection_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginDisableAvsConnection", c.setup.pipeline.tracer)
+  let req = c.disable_avs_connection_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientDisableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientDisableAvsConnectionResponse ! Str { storage_pools_disable_avs_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientDisableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientDisableAvsConnectionResponse ! Str { storage_pools_disable_avs_connection_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientBeginEnableAvsConnectionOptions: the optional parameters of StoragePoolsClient.begin_enable_avs_connection.
@@ -359,14 +370,16 @@ fn (c: StoragePoolsClient) enable_avs_connection_create_request(resource_group_n
 /// Initiate a connection between the storage pool and a specified AVS SDDC resource
 pub fn (c: StoragePoolsClient[fx]) begin_enable_avs_connection(resource_group_name: Str, storage_pool_name: Str, properties: StoragePoolEnableAvsConnectionPost, options: StoragePoolsClientBeginEnableAvsConnectionOptions = StoragePoolsClientBeginEnableAvsConnectionOptions{}) -> runtime.Poller[StoragePoolsClientEnableAvsConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientEnableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientEnableAvsConnectionResponse ! Str { storage_pools_enable_avs_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientEnableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientEnableAvsConnectionResponse ! Str { storage_pools_enable_avs_connection_handle(r) }, traced: true)
   }
-  let req = c.enable_avs_connection_create_request(resource_group_name, storage_pool_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginEnableAvsConnection", c.setup.pipeline.tracer)
+  let req = c.enable_avs_connection_create_request(resource_group_name, storage_pool_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientEnableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientEnableAvsConnectionResponse ! Str { storage_pools_enable_avs_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientEnableAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientEnableAvsConnectionResponse ! Str { storage_pools_enable_avs_connection_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientBeginFinalizeAvsConnectionOptions: the optional parameters of StoragePoolsClient.begin_finalize_avs_connection.
@@ -406,14 +419,16 @@ fn (c: StoragePoolsClient) finalize_avs_connection_create_request(resource_group
 /// Finalize an already started AVS connection to a specific AVS SDDC
 pub fn (c: StoragePoolsClient[fx]) begin_finalize_avs_connection(resource_group_name: Str, storage_pool_name: Str, properties: StoragePoolFinalizeAvsConnectionPost, options: StoragePoolsClientBeginFinalizeAvsConnectionOptions = StoragePoolsClientBeginFinalizeAvsConnectionOptions{}) -> runtime.Poller[StoragePoolsClientFinalizeAvsConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientFinalizeAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientFinalizeAvsConnectionResponse ! Str { storage_pools_finalize_avs_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientFinalizeAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientFinalizeAvsConnectionResponse ! Str { storage_pools_finalize_avs_connection_handle(r) }, traced: true)
   }
-  let req = c.finalize_avs_connection_create_request(resource_group_name, storage_pool_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginFinalizeAvsConnection", c.setup.pipeline.tracer)
+  let req = c.finalize_avs_connection_create_request(resource_group_name, storage_pool_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientFinalizeAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientFinalizeAvsConnectionResponse ! Str { storage_pools_finalize_avs_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientFinalizeAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientFinalizeAvsConnectionResponse ! Str { storage_pools_finalize_avs_connection_handle(r) }, traced: true)
 }
 
 /// StoragePoolsClientGetAvsConnectionOptions: the optional parameters of StoragePoolsClient.get_avs_connection.
@@ -451,12 +466,15 @@ fn (c: StoragePoolsClient) get_avs_connection_create_request(resource_group_name
 
 /// Returns current information about an on-going connection to an AVS instance
 pub fn (c: StoragePoolsClient) get_avs_connection(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientGetAvsConnectionOptions = StoragePoolsClientGetAvsConnectionOptions{}) -> StoragePoolsClientGetAvsConnectionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_avs_connection_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.GetAvsConnection", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_avs_connection_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_pools_get_avs_connection_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_pools_get_avs_connection_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StoragePoolsClientGetAvsStatusOptions: the optional parameters of StoragePoolsClient.get_avs_status.
@@ -494,12 +512,15 @@ fn (c: StoragePoolsClient) get_avs_status_create_request(resource_group_name: St
 
 /// Returns the status of the storage pool connection to AVS
 pub fn (c: StoragePoolsClient) get_avs_status(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientGetAvsStatusOptions = StoragePoolsClientGetAvsStatusOptions{}) -> StoragePoolsClientGetAvsStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_avs_status_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.GetAvsStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_avs_status_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_pools_get_avs_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_pools_get_avs_status_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StoragePoolsClientGetHealthStatusOptions: the optional parameters of StoragePoolsClient.get_health_status.
@@ -537,12 +558,15 @@ fn (c: StoragePoolsClient) get_health_status_create_request(resource_group_name:
 
 /// Retrieve health metrics of a storage pool
 pub fn (c: StoragePoolsClient) get_health_status(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientGetHealthStatusOptions = StoragePoolsClientGetHealthStatusOptions{}) -> StoragePoolsClientGetHealthStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_health_status_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.GetHealthStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_health_status_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_pools_get_health_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_pools_get_health_status_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StoragePoolsClientBeginRepairAvsConnectionOptions: the optional parameters of StoragePoolsClient.begin_repair_avs_connection.
@@ -581,12 +605,14 @@ fn (c: StoragePoolsClient) repair_avs_connection_create_request(resource_group_n
 /// Test and repair, if needed, all configuration elements of the storage pool connection to the AVS instance
 pub fn (c: StoragePoolsClient[fx]) begin_repair_avs_connection(resource_group_name: Str, storage_pool_name: Str, options: StoragePoolsClientBeginRepairAvsConnectionOptions = StoragePoolsClientBeginRepairAvsConnectionOptions{}) -> runtime.Poller[StoragePoolsClientRepairAvsConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientRepairAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientRepairAvsConnectionResponse ! Str { storage_pools_repair_avs_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StoragePoolsClientRepairAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientRepairAvsConnectionResponse ! Str { storage_pools_repair_avs_connection_handle(r) }, traced: true)
   }
-  let req = c.repair_avs_connection_create_request(resource_group_name, storage_pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StoragePoolsClient.BeginRepairAvsConnection", c.setup.pipeline.tracer)
+  let req = c.repair_avs_connection_create_request(resource_group_name, storage_pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientRepairAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientRepairAvsConnectionResponse ! Str { storage_pools_repair_avs_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StoragePoolsClientRepairAvsConnectionResponse", fn(r: http.Response) -> StoragePoolsClientRepairAvsConnectionResponse ! Str { storage_pools_repair_avs_connection_handle(r) }, traced: true)
 }

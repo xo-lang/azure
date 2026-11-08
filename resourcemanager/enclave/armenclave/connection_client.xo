@@ -49,7 +49,7 @@ fn (c: ConnectionClient) list_by_subscription_create_request(options: Connection
 /// List EnclaveConnectionResource resources by subscription ID
 pub fn (c: ConnectionClient[fx]) new_list_by_subscription_pager(options: ConnectionClientListBySubscriptionOptions = ConnectionClientListBySubscriptionOptions{}) -> runtime.Pager[ConnectionClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConnectionClientListBySubscriptionResponse ! Str { connection_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ConnectionClientListBySubscriptionResponse) -> Str? { r.connection_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConnectionClientListBySubscriptionResponse ! Str { connection_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ConnectionClientListBySubscriptionResponse) -> Str? { r.connection_resource_list_result.next_link }).traced_as("ConnectionClientListBySubscriptionResponse"))
 }
 
 /// ConnectionClientListByResourceGroupOptions: the optional parameters of ConnectionClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ConnectionClient) list_by_resource_group_create_request(resource_group_na
 /// List EnclaveConnectionResource resources by resource group
 pub fn (c: ConnectionClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ConnectionClientListByResourceGroupOptions = ConnectionClientListByResourceGroupOptions{}) -> runtime.Pager[ConnectionClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConnectionClientListByResourceGroupResponse ! Str { connection_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ConnectionClientListByResourceGroupResponse) -> Str? { r.connection_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConnectionClientListByResourceGroupResponse ! Str { connection_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ConnectionClientListByResourceGroupResponse) -> Str? { r.connection_resource_list_result.next_link }).traced_as("ConnectionClientListByResourceGroupResponse"))
 }
 
 /// ConnectionClientGetOptions: the optional parameters of ConnectionClient.get.
@@ -122,12 +122,15 @@ fn (c: ConnectionClient) get_create_request(resource_group_name: Str, enclave_co
 
 /// Get a EnclaveConnectionResource
 pub fn (c: ConnectionClient) get(resource_group_name: Str, enclave_connection_name: Str, options: ConnectionClientGetOptions = ConnectionClientGetOptions{}) -> ConnectionClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, enclave_connection_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, enclave_connection_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  connection_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = connection_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ConnectionClientBeginCreateOrUpdateOptions: the optional parameters of ConnectionClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ConnectionClient) create_or_update_create_request(resource_group_name: St
 /// Create a EnclaveConnectionResource
 pub fn (c: ConnectionClient[fx]) begin_create_or_update(resource_group_name: Str, enclave_connection_name: Str, resource: ConnectionResource, options: ConnectionClientBeginCreateOrUpdateOptions = ConnectionClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ConnectionClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientCreateOrUpdateResponse", fn(r: http.Response) -> ConnectionClientCreateOrUpdateResponse ! Str { connection_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientCreateOrUpdateResponse", fn(r: http.Response) -> ConnectionClientCreateOrUpdateResponse ! Str { connection_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, enclave_connection_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, enclave_connection_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ConnectionClientCreateOrUpdateResponse", fn(r: http.Response) -> ConnectionClientCreateOrUpdateResponse ! Str { connection_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ConnectionClientCreateOrUpdateResponse", fn(r: http.Response) -> ConnectionClientCreateOrUpdateResponse ! Str { connection_create_or_update_handle(r) }, traced: true)
 }
 
 /// ConnectionClientBeginUpdateOptions: the optional parameters of ConnectionClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ConnectionClient) update_create_request(resource_group_name: Str, enclave
 /// Update a EnclaveConnectionResource
 pub fn (c: ConnectionClient[fx]) begin_update(resource_group_name: Str, enclave_connection_name: Str, properties: ConnectionPatchModel, options: ConnectionClientBeginUpdateOptions = ConnectionClientBeginUpdateOptions{}) -> runtime.Poller[ConnectionClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientUpdateResponse", fn(r: http.Response) -> ConnectionClientUpdateResponse ! Str { connection_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientUpdateResponse", fn(r: http.Response) -> ConnectionClientUpdateResponse ! Str { connection_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, enclave_connection_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, enclave_connection_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientUpdateResponse", fn(r: http.Response) -> ConnectionClientUpdateResponse ! Str { connection_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientUpdateResponse", fn(r: http.Response) -> ConnectionClientUpdateResponse ! Str { connection_update_handle(r) }, traced: true)
 }
 
 /// ConnectionClientBeginDeleteOptions: the optional parameters of ConnectionClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: ConnectionClient) delete_create_request(resource_group_name: Str, enclave
 /// Delete a EnclaveConnectionResource
 pub fn (c: ConnectionClient[fx]) begin_delete(resource_group_name: Str, enclave_connection_name: Str, options: ConnectionClientBeginDeleteOptions = ConnectionClientBeginDeleteOptions{}) -> runtime.Poller[ConnectionClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientDeleteResponse", fn(r: http.Response) -> ConnectionClientDeleteResponse ! Str { connection_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientDeleteResponse", fn(r: http.Response) -> ConnectionClientDeleteResponse ! Str { connection_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, enclave_connection_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, enclave_connection_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientDeleteResponse", fn(r: http.Response) -> ConnectionClientDeleteResponse ! Str { connection_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientDeleteResponse", fn(r: http.Response) -> ConnectionClientDeleteResponse ! Str { connection_delete_handle(r) }, traced: true)
 }
 
 /// ConnectionClientBeginHandleApprovalCreationOptions: the optional parameters of ConnectionClient.begin_handle_approval_creation.
@@ -316,14 +325,16 @@ fn (c: ConnectionClient) handle_approval_creation_create_request(resource_group_
 /// Callback that triggers on approval state change.
 pub fn (c: ConnectionClient[fx]) begin_handle_approval_creation(resource_group_name: Str, enclave_connection_name: Str, body: ApprovalCallbackRequest, options: ConnectionClientBeginHandleApprovalCreationOptions = ConnectionClientBeginHandleApprovalCreationOptions{}) -> runtime.Poller[ConnectionClientHandleApprovalCreationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientHandleApprovalCreationResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalCreationResponse ! Str { connection_handle_approval_creation_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientHandleApprovalCreationResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalCreationResponse ! Str { connection_handle_approval_creation_handle(r) }, traced: true)
   }
-  let req = c.handle_approval_creation_create_request(resource_group_name, enclave_connection_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.BeginHandleApprovalCreation", c.setup.pipeline.tracer)
+  let req = c.handle_approval_creation_create_request(resource_group_name, enclave_connection_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientHandleApprovalCreationResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalCreationResponse ! Str { connection_handle_approval_creation_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientHandleApprovalCreationResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalCreationResponse ! Str { connection_handle_approval_creation_handle(r) }, traced: true)
 }
 
 /// ConnectionClientBeginHandleApprovalDeletionOptions: the optional parameters of ConnectionClient.begin_handle_approval_deletion.
@@ -366,12 +377,14 @@ fn (c: ConnectionClient) handle_approval_deletion_create_request(resource_group_
 /// Callback that triggers on approval deletion state change.
 pub fn (c: ConnectionClient[fx]) begin_handle_approval_deletion(resource_group_name: Str, enclave_connection_name: Str, body: ApprovalDeletionCallbackRequest, options: ConnectionClientBeginHandleApprovalDeletionOptions = ConnectionClientBeginHandleApprovalDeletionOptions{}) -> runtime.Poller[ConnectionClientHandleApprovalDeletionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientHandleApprovalDeletionResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalDeletionResponse ! Str { connection_handle_approval_deletion_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConnectionClientHandleApprovalDeletionResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalDeletionResponse ! Str { connection_handle_approval_deletion_handle(r) }, traced: true)
   }
-  let req = c.handle_approval_deletion_create_request(resource_group_name, enclave_connection_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConnectionClient.BeginHandleApprovalDeletion", c.setup.pipeline.tracer)
+  let req = c.handle_approval_deletion_create_request(resource_group_name, enclave_connection_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientHandleApprovalDeletionResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalDeletionResponse ! Str { connection_handle_approval_deletion_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConnectionClientHandleApprovalDeletionResponse", fn(r: http.Response) -> ConnectionClientHandleApprovalDeletionResponse ! Str { connection_handle_approval_deletion_handle(r) }, traced: true)
 }

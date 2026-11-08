@@ -57,7 +57,7 @@ fn (c: EndpointsClient) list_by_profile_create_request(resource_group_name: Str,
 /// Lists existing CDN endpoints.
 pub fn (c: EndpointsClient[fx]) new_list_by_profile_pager(resource_group_name: Str, profile_name: Str, options: EndpointsClientListByProfileOptions = EndpointsClientListByProfileOptions{}) -> runtime.Pager[EndpointsClientListByProfileResponse, fx] ! azcore.CallErr {
   let req = c.list_by_profile_create_request(resource_group_name, profile_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListByProfileResponse ! Str { endpoints_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListByProfileResponse) -> Str? { r.endpoint_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListByProfileResponse ! Str { endpoints_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListByProfileResponse) -> Str? { r.endpoint_list_result.next_link }).traced_as("EndpointsClientListByProfileResponse"))
 }
 
 /// EndpointsClientGetOptions: the optional parameters of EndpointsClient.get.
@@ -99,12 +99,15 @@ fn (c: EndpointsClient) get_create_request(resource_group_name: Str, profile_nam
 
 /// Gets an existing CDN endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: EndpointsClient) get(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: EndpointsClientGetOptions = EndpointsClientGetOptions{}) -> EndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// EndpointsClientBeginCreateOptions: the optional parameters of EndpointsClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: EndpointsClient) create_create_request(resource_group_name: Str, profile_
 /// Creates a new CDN endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: EndpointsClient[fx]) begin_create(resource_group_name: Str, profile_name: Str, endpoint_name: Str, endpoint: Endpoint, options: EndpointsClientBeginCreateOptions = EndpointsClientBeginCreateOptions{}) -> runtime.Poller[EndpointsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientCreateResponse", fn(r: http.Response) -> EndpointsClientCreateResponse ! Str { endpoints_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientCreateResponse", fn(r: http.Response) -> EndpointsClientCreateResponse ! Str { endpoints_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, profile_name, endpoint_name, endpoint, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, profile_name, endpoint_name, endpoint, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientCreateResponse", fn(r: http.Response) -> EndpointsClientCreateResponse ! Str { endpoints_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientCreateResponse", fn(r: http.Response) -> EndpointsClientCreateResponse ! Str { endpoints_create_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginUpdateOptions: the optional parameters of EndpointsClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: EndpointsClient) update_create_request(resource_group_name: Str, profile_
 /// Updates an existing CDN endpoint with the specified endpoint name under the specified subscription, resource group and profile. Only tags can be updated after creating an endpoint. To update origins, use the Update Origin operation. To update origin groups, use the Update Origin group operation. To update custom domains, use the Update Custom Domain operation.
 pub fn (c: EndpointsClient[fx]) begin_update(resource_group_name: Str, profile_name: Str, endpoint_name: Str, endpoint_update_properties: EndpointUpdateParameters, options: EndpointsClientBeginUpdateOptions = EndpointsClientBeginUpdateOptions{}) -> runtime.Poller[EndpointsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, profile_name, endpoint_name, endpoint_update_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, profile_name, endpoint_name, endpoint_update_properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientUpdateResponse", fn(r: http.Response) -> EndpointsClientUpdateResponse ! Str { endpoints_update_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginDeleteOptions: the optional parameters of EndpointsClient.begin_delete.
@@ -255,14 +262,16 @@ fn (c: EndpointsClient) delete_create_request(resource_group_name: Str, profile_
 /// Deletes an existing CDN endpoint with the specified endpoint name under the specified subscription, resource group and profile.
 pub fn (c: EndpointsClient[fx]) begin_delete(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: EndpointsClientBeginDeleteOptions = EndpointsClientBeginDeleteOptions{}) -> runtime.Poller[EndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientDeleteResponse", fn(r: http.Response) -> EndpointsClientDeleteResponse ! Str { endpoints_delete_handle(r) }, traced: true)
 }
 
 /// EndpointsClientListResourceUsageOptions: the optional parameters of EndpointsClient.new_list_resource_usage_pager.
@@ -305,7 +314,7 @@ fn (c: EndpointsClient) list_resource_usage_create_request(resource_group_name: 
 /// Checks the quota and usage of geo filters and custom domains under the given endpoint.
 pub fn (c: EndpointsClient[fx]) new_list_resource_usage_pager(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: EndpointsClientListResourceUsageOptions = EndpointsClientListResourceUsageOptions{}) -> runtime.Pager[EndpointsClientListResourceUsageResponse, fx] ! azcore.CallErr {
   let req = c.list_resource_usage_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListResourceUsageResponse ! Str { endpoints_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListResourceUsageResponse) -> Str? { r.resource_usage_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListResourceUsageResponse ! Str { endpoints_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListResourceUsageResponse) -> Str? { r.resource_usage_list_result.next_link }).traced_as("EndpointsClientListResourceUsageResponse"))
 }
 
 /// EndpointsClientBeginLoadContentOptions: the optional parameters of EndpointsClient.begin_load_content.
@@ -349,14 +358,16 @@ fn (c: EndpointsClient) load_content_create_request(resource_group_name: Str, pr
 /// Pre-loads a content to CDN. Available for Verizon Profiles.
 pub fn (c: EndpointsClient[fx]) begin_load_content(resource_group_name: Str, profile_name: Str, endpoint_name: Str, content_file_paths: LoadParameters, options: EndpointsClientBeginLoadContentOptions = EndpointsClientBeginLoadContentOptions{}) -> runtime.Poller[EndpointsClientLoadContentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientLoadContentResponse", fn(r: http.Response) -> EndpointsClientLoadContentResponse ! Str { endpoints_load_content_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientLoadContentResponse", fn(r: http.Response) -> EndpointsClientLoadContentResponse ! Str { endpoints_load_content_handle(r) }, traced: true)
   }
-  let req = c.load_content_create_request(resource_group_name, profile_name, endpoint_name, content_file_paths, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginLoadContent", c.setup.pipeline.tracer)
+  let req = c.load_content_create_request(resource_group_name, profile_name, endpoint_name, content_file_paths, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientLoadContentResponse", fn(r: http.Response) -> EndpointsClientLoadContentResponse ! Str { endpoints_load_content_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientLoadContentResponse", fn(r: http.Response) -> EndpointsClientLoadContentResponse ! Str { endpoints_load_content_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginPurgeContentOptions: the optional parameters of EndpointsClient.begin_purge_content.
@@ -400,14 +411,16 @@ fn (c: EndpointsClient) purge_content_create_request(resource_group_name: Str, p
 /// Removes a content from CDN.
 pub fn (c: EndpointsClient[fx]) begin_purge_content(resource_group_name: Str, profile_name: Str, endpoint_name: Str, content_file_paths: PurgeParameters, options: EndpointsClientBeginPurgeContentOptions = EndpointsClientBeginPurgeContentOptions{}) -> runtime.Poller[EndpointsClientPurgeContentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) }, traced: true)
   }
-  let req = c.purge_content_create_request(resource_group_name, profile_name, endpoint_name, content_file_paths, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginPurgeContent", c.setup.pipeline.tracer)
+  let req = c.purge_content_create_request(resource_group_name, profile_name, endpoint_name, content_file_paths, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginStartOptions: the optional parameters of EndpointsClient.begin_start.
@@ -453,14 +466,16 @@ fn (c: EndpointsClient) start_create_request(resource_group_name: Str, profile_n
 /// Starts an existing CDN endpoint that is on a stopped state.
 pub fn (c: EndpointsClient[fx]) begin_start(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: EndpointsClientBeginStartOptions = EndpointsClientBeginStartOptions{}) -> runtime.Poller[EndpointsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientStartResponse", fn(r: http.Response) -> EndpointsClientStartResponse ! Str { endpoints_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientStartResponse", fn(r: http.Response) -> EndpointsClientStartResponse ! Str { endpoints_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientStartResponse", fn(r: http.Response) -> EndpointsClientStartResponse ! Str { endpoints_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientStartResponse", fn(r: http.Response) -> EndpointsClientStartResponse ! Str { endpoints_start_handle(r) }, traced: true)
 }
 
 /// EndpointsClientBeginStopOptions: the optional parameters of EndpointsClient.begin_stop.
@@ -506,14 +521,16 @@ fn (c: EndpointsClient) stop_create_request(resource_group_name: Str, profile_na
 /// Stops an existing running CDN endpoint.
 pub fn (c: EndpointsClient[fx]) begin_stop(resource_group_name: Str, profile_name: Str, endpoint_name: Str, options: EndpointsClientBeginStopOptions = EndpointsClientBeginStopOptions{}) -> runtime.Poller[EndpointsClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientStopResponse", fn(r: http.Response) -> EndpointsClientStopResponse ! Str { endpoints_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientStopResponse", fn(r: http.Response) -> EndpointsClientStopResponse ! Str { endpoints_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, profile_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, profile_name, endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientStopResponse", fn(r: http.Response) -> EndpointsClientStopResponse ! Str { endpoints_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientStopResponse", fn(r: http.Response) -> EndpointsClientStopResponse ! Str { endpoints_stop_handle(r) }, traced: true)
 }
 
 /// EndpointsClientValidateCustomDomainOptions: the optional parameters of EndpointsClient.validate_custom_domain.
@@ -556,10 +573,13 @@ fn (c: EndpointsClient) validate_custom_domain_create_request(resource_group_nam
 
 /// Validates the custom domain mapping to ensure it maps to the correct CDN endpoint in DNS.
 pub fn (c: EndpointsClient) validate_custom_domain(resource_group_name: Str, profile_name: Str, endpoint_name: Str, custom_domain_properties: ValidateCustomDomainInput, options: EndpointsClientValidateCustomDomainOptions = EndpointsClientValidateCustomDomainOptions{}) -> EndpointsClientValidateCustomDomainResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.validate_custom_domain_create_request(resource_group_name, profile_name, endpoint_name, custom_domain_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.ValidateCustomDomain", c.setup.pipeline.tracer)
+  let req = sp.on(c.validate_custom_domain_create_request(resource_group_name, profile_name, endpoint_name, custom_domain_properties, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  endpoints_validate_custom_domain_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = endpoints_validate_custom_domain_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

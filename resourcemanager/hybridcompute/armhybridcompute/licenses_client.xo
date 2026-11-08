@@ -49,7 +49,7 @@ fn (c: LicensesClient) list_by_subscription_create_request(options: LicensesClie
 /// The operation to get all licenses of a non-Azure machine
 pub fn (c: LicensesClient[fx]) new_list_by_subscription_pager(options: LicensesClientListBySubscriptionOptions = LicensesClientListBySubscriptionOptions{}) -> runtime.Pager[LicensesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LicensesClientListBySubscriptionResponse ! Str { licenses_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: LicensesClientListBySubscriptionResponse) -> Str? { r.licenses_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LicensesClientListBySubscriptionResponse ! Str { licenses_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: LicensesClientListBySubscriptionResponse) -> Str? { r.licenses_list_result.next_link }).traced_as("LicensesClientListBySubscriptionResponse"))
 }
 
 /// LicensesClientBeginValidateLicenseOptions: the optional parameters of LicensesClient.begin_validate_license.
@@ -84,14 +84,16 @@ fn (c: LicensesClient) validate_license_create_request(parameters: License, opti
 /// The operation to validate a license.
 pub fn (c: LicensesClient[fx]) begin_validate_license(parameters: License, options: LicensesClientBeginValidateLicenseOptions = LicensesClientBeginValidateLicenseOptions{}) -> runtime.Poller[LicensesClientValidateLicenseResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientValidateLicenseResponse", fn(r: http.Response) -> LicensesClientValidateLicenseResponse ! Str { licenses_validate_license_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientValidateLicenseResponse", fn(r: http.Response) -> LicensesClientValidateLicenseResponse ! Str { licenses_validate_license_handle(r) }, traced: true)
   }
-  let req = c.validate_license_create_request(parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LicensesClient.BeginValidateLicense", c.setup.pipeline.tracer)
+  let req = c.validate_license_create_request(parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientValidateLicenseResponse", fn(r: http.Response) -> LicensesClientValidateLicenseResponse ! Str { licenses_validate_license_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientValidateLicenseResponse", fn(r: http.Response) -> LicensesClientValidateLicenseResponse ! Str { licenses_validate_license_handle(r) }, traced: true)
 }
 
 /// LicensesClientListByResourceGroupOptions: the optional parameters of LicensesClient.new_list_by_resource_group_pager.
@@ -126,7 +128,7 @@ fn (c: LicensesClient) list_by_resource_group_create_request(resource_group_name
 /// The operation to get all licenses of a non-Azure machine
 pub fn (c: LicensesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: LicensesClientListByResourceGroupOptions = LicensesClientListByResourceGroupOptions{}) -> runtime.Pager[LicensesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LicensesClientListByResourceGroupResponse ! Str { licenses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: LicensesClientListByResourceGroupResponse) -> Str? { r.licenses_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LicensesClientListByResourceGroupResponse ! Str { licenses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: LicensesClientListByResourceGroupResponse) -> Str? { r.licenses_list_result.next_link }).traced_as("LicensesClientListByResourceGroupResponse"))
 }
 
 /// LicensesClientGetOptions: the optional parameters of LicensesClient.get.
@@ -164,12 +166,15 @@ fn (c: LicensesClient) get_create_request(resource_group_name: Str, license_name
 
 /// Retrieves information about the view of a license.
 pub fn (c: LicensesClient) get(resource_group_name: Str, license_name: Str, options: LicensesClientGetOptions = LicensesClientGetOptions{}) -> LicensesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, license_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LicensesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, license_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  licenses_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = licenses_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LicensesClientBeginCreateOrUpdateOptions: the optional parameters of LicensesClient.begin_create_or_update.
@@ -212,14 +217,16 @@ fn (c: LicensesClient) create_or_update_create_request(resource_group_name: Str,
 /// The operation to create or update a license.
 pub fn (c: LicensesClient[fx]) begin_create_or_update(resource_group_name: Str, license_name: Str, parameters: License, options: LicensesClientBeginCreateOrUpdateOptions = LicensesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LicensesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientCreateOrUpdateResponse", fn(r: http.Response) -> LicensesClientCreateOrUpdateResponse ! Str { licenses_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientCreateOrUpdateResponse", fn(r: http.Response) -> LicensesClientCreateOrUpdateResponse ! Str { licenses_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, license_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LicensesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, license_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientCreateOrUpdateResponse", fn(r: http.Response) -> LicensesClientCreateOrUpdateResponse ! Str { licenses_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientCreateOrUpdateResponse", fn(r: http.Response) -> LicensesClientCreateOrUpdateResponse ! Str { licenses_create_or_update_handle(r) }, traced: true)
 }
 
 /// LicensesClientBeginUpdateOptions: the optional parameters of LicensesClient.begin_update.
@@ -262,14 +269,16 @@ fn (c: LicensesClient) update_create_request(resource_group_name: Str, license_n
 /// The operation to update a license.
 pub fn (c: LicensesClient[fx]) begin_update(resource_group_name: Str, license_name: Str, parameters: LicenseUpdate, options: LicensesClientBeginUpdateOptions = LicensesClientBeginUpdateOptions{}) -> runtime.Poller[LicensesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientUpdateResponse", fn(r: http.Response) -> LicensesClientUpdateResponse ! Str { licenses_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientUpdateResponse", fn(r: http.Response) -> LicensesClientUpdateResponse ! Str { licenses_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, license_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LicensesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, license_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientUpdateResponse", fn(r: http.Response) -> LicensesClientUpdateResponse ! Str { licenses_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientUpdateResponse", fn(r: http.Response) -> LicensesClientUpdateResponse ! Str { licenses_update_handle(r) }, traced: true)
 }
 
 /// LicensesClientBeginDeleteOptions: the optional parameters of LicensesClient.begin_delete.
@@ -308,12 +317,14 @@ fn (c: LicensesClient) delete_create_request(resource_group_name: Str, license_n
 /// The operation to delete a license.
 pub fn (c: LicensesClient[fx]) begin_delete(resource_group_name: Str, license_name: Str, options: LicensesClientBeginDeleteOptions = LicensesClientBeginDeleteOptions{}) -> runtime.Poller[LicensesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientDeleteResponse", fn(r: http.Response) -> LicensesClientDeleteResponse ! Str { licenses_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LicensesClientDeleteResponse", fn(r: http.Response) -> LicensesClientDeleteResponse ! Str { licenses_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, license_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LicensesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, license_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientDeleteResponse", fn(r: http.Response) -> LicensesClientDeleteResponse ! Str { licenses_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LicensesClientDeleteResponse", fn(r: http.Response) -> LicensesClientDeleteResponse ! Str { licenses_delete_handle(r) }, traced: true)
 }

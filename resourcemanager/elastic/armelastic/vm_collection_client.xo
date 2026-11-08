@@ -60,10 +60,13 @@ fn (c: VMCollectionClient) update_create_request(resource_group_name: Str, monit
 
 /// Update the VM details that will be monitored by the Elastic monitor resource, ensuring optimal observability and performance.
 pub fn (c: VMCollectionClient) update(resource_group_name: Str, monitor_name: Str, options: VMCollectionClientUpdateOptions = VMCollectionClientUpdateOptions{}) -> VMCollectionClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, monitor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VMCollectionClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, monitor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vm_collection_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vm_collection_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

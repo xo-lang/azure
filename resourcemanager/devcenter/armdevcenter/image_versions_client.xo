@@ -65,7 +65,7 @@ fn (c: ImageVersionsClient) list_by_image_create_request(resource_group_name: St
 /// Lists versions for an image.
 pub fn (c: ImageVersionsClient[fx]) new_list_by_image_pager(resource_group_name: Str, dev_center_name: Str, gallery_name: Str, image_name: Str, options: ImageVersionsClientListByImageOptions = ImageVersionsClientListByImageOptions{}) -> runtime.Pager[ImageVersionsClientListByImageResponse, fx] ! azcore.CallErr {
   let req = c.list_by_image_create_request(resource_group_name, dev_center_name, gallery_name, image_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ImageVersionsClientListByImageResponse ! Str { image_versions_list_by_image_handle(r) }, fn(r: ImageVersionsClientListByImageResponse) -> Str? { r.image_version_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ImageVersionsClientListByImageResponse ! Str { image_versions_list_by_image_handle(r) }, fn(r: ImageVersionsClientListByImageResponse) -> Str? { r.image_version_list_result.next_link }).traced_as("ImageVersionsClientListByImageResponse"))
 }
 
 /// ImageVersionsClientGetOptions: the optional parameters of ImageVersionsClient.get.
@@ -115,10 +115,13 @@ fn (c: ImageVersionsClient) get_create_request(resource_group_name: Str, dev_cen
 
 /// Gets an image version.
 pub fn (c: ImageVersionsClient) get(resource_group_name: Str, dev_center_name: Str, gallery_name: Str, image_name: Str, version_name: Str, options: ImageVersionsClientGetOptions = ImageVersionsClientGetOptions{}) -> ImageVersionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, dev_center_name, gallery_name, image_name, version_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ImageVersionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, dev_center_name, gallery_name, image_name, version_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  image_versions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = image_versions_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -60,7 +60,7 @@ fn (c: ClusterManagersClient) list_by_subscription_create_request(options: Clust
 /// Get a list of cluster managers in the provided subscription.
 pub fn (c: ClusterManagersClient[fx]) new_list_by_subscription_pager(options: ClusterManagersClientListBySubscriptionOptions = ClusterManagersClientListBySubscriptionOptions{}) -> runtime.Pager[ClusterManagersClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClusterManagersClientListBySubscriptionResponse ! Str { cluster_managers_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClusterManagersClientListBySubscriptionResponse) -> Str? { r.cluster_manager_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClusterManagersClientListBySubscriptionResponse ! Str { cluster_managers_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClusterManagersClientListBySubscriptionResponse) -> Str? { r.cluster_manager_list.next_link }).traced_as("ClusterManagersClientListBySubscriptionResponse"))
 }
 
 /// ClusterManagersClientListByResourceGroupOptions: the optional parameters of ClusterManagersClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: ClusterManagersClient) list_by_resource_group_create_request(resource_gro
 /// Get a list of cluster managers in the provided resource group.
 pub fn (c: ClusterManagersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ClusterManagersClientListByResourceGroupOptions = ClusterManagersClientListByResourceGroupOptions{}) -> runtime.Pager[ClusterManagersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClusterManagersClientListByResourceGroupResponse ! Str { cluster_managers_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClusterManagersClientListByResourceGroupResponse) -> Str? { r.cluster_manager_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClusterManagersClientListByResourceGroupResponse ! Str { cluster_managers_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClusterManagersClientListByResourceGroupResponse) -> Str? { r.cluster_manager_list.next_link }).traced_as("ClusterManagersClientListByResourceGroupResponse"))
 }
 
 /// ClusterManagersClientGetOptions: the optional parameters of ClusterManagersClient.get.
@@ -144,12 +144,15 @@ fn (c: ClusterManagersClient) get_create_request(resource_group_name: Str, clust
 
 /// Get the properties of the provided cluster manager.
 pub fn (c: ClusterManagersClient) get(resource_group_name: Str, cluster_manager_name: Str, options: ClusterManagersClientGetOptions = ClusterManagersClientGetOptions{}) -> ClusterManagersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_manager_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClusterManagersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_manager_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cluster_managers_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cluster_managers_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClusterManagersClientBeginCreateOrUpdateOptions: the optional parameters of ClusterManagersClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: ClusterManagersClient) create_or_update_create_request(resource_group_nam
 /// Create a new cluster manager or update properties of the cluster manager if it exists.
 pub fn (c: ClusterManagersClient[fx]) begin_create_or_update(resource_group_name: Str, cluster_manager_name: Str, cluster_manager_parameters: ClusterManager, options: ClusterManagersClientBeginCreateOrUpdateOptions = ClusterManagersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ClusterManagersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClusterManagersClientCreateOrUpdateResponse ! Str { cluster_managers_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClusterManagersClientCreateOrUpdateResponse ! Str { cluster_managers_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cluster_manager_name, cluster_manager_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClusterManagersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cluster_manager_name, cluster_manager_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClusterManagersClientCreateOrUpdateResponse ! Str { cluster_managers_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClusterManagersClientCreateOrUpdateResponse ! Str { cluster_managers_create_or_update_handle(r) }, traced: true)
 }
 
 /// ClusterManagersClientUpdateOptions: the optional parameters of ClusterManagersClient.update.
@@ -259,12 +264,15 @@ fn (c: ClusterManagersClient) update_create_request(resource_group_name: Str, cl
 
 /// Patch properties of the provided cluster manager, or update the tags assigned to the cluster manager. Properties and tag updates can be done independently.
 pub fn (c: ClusterManagersClient) update(resource_group_name: Str, cluster_manager_name: Str, cluster_manager_update_parameters: ClusterManagerPatchParameters, options: ClusterManagersClientUpdateOptions = ClusterManagersClientUpdateOptions{}) -> ClusterManagersClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, cluster_manager_name, cluster_manager_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClusterManagersClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, cluster_manager_name, cluster_manager_update_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cluster_managers_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cluster_managers_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClusterManagersClientBeginDeleteOptions: the optional parameters of ClusterManagersClient.begin_delete.
@@ -316,14 +324,16 @@ fn (c: ClusterManagersClient) delete_create_request(resource_group_name: Str, cl
 /// Delete the provided cluster manager.
 pub fn (c: ClusterManagersClient[fx]) begin_delete(resource_group_name: Str, cluster_manager_name: Str, options: ClusterManagersClientBeginDeleteOptions = ClusterManagersClientBeginDeleteOptions{}) -> runtime.Poller[ClusterManagersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientDeleteResponse", fn(r: http.Response) -> ClusterManagersClientDeleteResponse ! Str { cluster_managers_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientDeleteResponse", fn(r: http.Response) -> ClusterManagersClientDeleteResponse ! Str { cluster_managers_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_manager_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClusterManagersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_manager_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientDeleteResponse", fn(r: http.Response) -> ClusterManagersClientDeleteResponse ! Str { cluster_managers_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientDeleteResponse", fn(r: http.Response) -> ClusterManagersClientDeleteResponse ! Str { cluster_managers_delete_handle(r) }, traced: true)
 }
 
 /// ClusterManagersClientBeginUpdateRelayPrivateEndpointConnectionOptions: the optional parameters of ClusterManagersClient.begin_update_relay_private_endpoint_connection.
@@ -372,12 +382,14 @@ fn (c: ClusterManagersClient) update_relay_private_endpoint_connection_create_re
 /// Update the private endpoint connection for the Azure Relay namespace managed by the specified cluster manager. Use this operation to approve or reject a pending private endpoint connection request for the relay namespace managed by the cluster manager.
 pub fn (c: ClusterManagersClient[fx]) begin_update_relay_private_endpoint_connection(resource_group_name: Str, cluster_manager_name: Str, options: ClusterManagersClientBeginUpdateRelayPrivateEndpointConnectionOptions = ClusterManagersClientBeginUpdateRelayPrivateEndpointConnectionOptions{}) -> runtime.Poller[ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse", fn(r: http.Response) -> ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse ! Str { cluster_managers_update_relay_private_endpoint_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse", fn(r: http.Response) -> ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse ! Str { cluster_managers_update_relay_private_endpoint_connection_handle(r) }, traced: true)
   }
-  let req = c.update_relay_private_endpoint_connection_create_request(resource_group_name, cluster_manager_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClusterManagersClient.BeginUpdateRelayPrivateEndpointConnection", c.setup.pipeline.tracer)
+  let req = c.update_relay_private_endpoint_connection_create_request(resource_group_name, cluster_manager_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse", fn(r: http.Response) -> ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse ! Str { cluster_managers_update_relay_private_endpoint_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse", fn(r: http.Response) -> ClusterManagersClientUpdateRelayPrivateEndpointConnectionResponse ! Str { cluster_managers_update_relay_private_endpoint_connection_handle(r) }, traced: true)
 }

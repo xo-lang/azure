@@ -70,7 +70,7 @@ fn (c: OrderItemsClient) list_by_subscription_create_request(options: OrderItems
 /// List order items at subscription level.
 pub fn (c: OrderItemsClient[fx]) new_list_by_subscription_pager(options: OrderItemsClientListBySubscriptionOptions = OrderItemsClientListBySubscriptionOptions{}) -> runtime.Pager[OrderItemsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OrderItemsClientListBySubscriptionResponse ! Str { order_items_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: OrderItemsClientListBySubscriptionResponse) -> Str? { r.order_item_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OrderItemsClientListBySubscriptionResponse ! Str { order_items_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: OrderItemsClientListBySubscriptionResponse) -> Str? { r.order_item_resource_list.next_link }).traced_as("OrderItemsClientListBySubscriptionResponse"))
 }
 
 /// OrderItemsClientListByResourceGroupOptions: the optional parameters of OrderItemsClient.new_list_by_resource_group_pager.
@@ -126,7 +126,7 @@ fn (c: OrderItemsClient) list_by_resource_group_create_request(resource_group_na
 /// List order items at resource group level.
 pub fn (c: OrderItemsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: OrderItemsClientListByResourceGroupOptions = OrderItemsClientListByResourceGroupOptions{}) -> runtime.Pager[OrderItemsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OrderItemsClientListByResourceGroupResponse ! Str { order_items_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: OrderItemsClientListByResourceGroupResponse) -> Str? { r.order_item_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OrderItemsClientListByResourceGroupResponse ! Str { order_items_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: OrderItemsClientListByResourceGroupResponse) -> Str? { r.order_item_resource_list.next_link }).traced_as("OrderItemsClientListByResourceGroupResponse"))
 }
 
 /// OrderItemsClientGetOptions: the optional parameters of OrderItemsClient.get.
@@ -170,12 +170,15 @@ fn (c: OrderItemsClient) get_create_request(resource_group_name: Str, order_item
 
 /// Get an order item.
 pub fn (c: OrderItemsClient) get(resource_group_name: Str, order_item_name: Str, options: OrderItemsClientGetOptions = OrderItemsClientGetOptions{}) -> OrderItemsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, order_item_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, order_item_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  order_items_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = order_items_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// OrderItemsClientBeginCreateOptions: the optional parameters of OrderItemsClient.begin_create.
@@ -218,14 +221,16 @@ fn (c: OrderItemsClient) create_create_request(resource_group_name: Str, order_i
 /// Create an order item. Existing order item cannot be updated with this api and should instead be updated with the Update order item API.
 pub fn (c: OrderItemsClient[fx]) begin_create(resource_group_name: Str, order_item_name: Str, order_item_resource: OrderItemResource, options: OrderItemsClientBeginCreateOptions = OrderItemsClientBeginCreateOptions{}) -> runtime.Poller[OrderItemsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientCreateResponse", fn(r: http.Response) -> OrderItemsClientCreateResponse ! Str { order_items_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientCreateResponse", fn(r: http.Response) -> OrderItemsClientCreateResponse ! Str { order_items_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, order_item_name, order_item_resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, order_item_name, order_item_resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientCreateResponse", fn(r: http.Response) -> OrderItemsClientCreateResponse ! Str { order_items_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientCreateResponse", fn(r: http.Response) -> OrderItemsClientCreateResponse ! Str { order_items_create_handle(r) }, traced: true)
 }
 
 /// OrderItemsClientBeginUpdateOptions: the optional parameters of OrderItemsClient.begin_update.
@@ -273,14 +278,16 @@ fn (c: OrderItemsClient) update_create_request(resource_group_name: Str, order_i
 /// Update the properties of an existing order item.
 pub fn (c: OrderItemsClient[fx]) begin_update(resource_group_name: Str, order_item_name: Str, order_item_update_parameter: OrderItemUpdateParameter, options: OrderItemsClientBeginUpdateOptions = OrderItemsClientBeginUpdateOptions{}) -> runtime.Poller[OrderItemsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientUpdateResponse", fn(r: http.Response) -> OrderItemsClientUpdateResponse ! Str { order_items_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientUpdateResponse", fn(r: http.Response) -> OrderItemsClientUpdateResponse ! Str { order_items_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, order_item_name, order_item_update_parameter, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, order_item_name, order_item_update_parameter, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientUpdateResponse", fn(r: http.Response) -> OrderItemsClientUpdateResponse ! Str { order_items_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientUpdateResponse", fn(r: http.Response) -> OrderItemsClientUpdateResponse ! Str { order_items_update_handle(r) }, traced: true)
 }
 
 /// OrderItemsClientBeginDeleteOptions: the optional parameters of OrderItemsClient.begin_delete.
@@ -319,14 +326,16 @@ fn (c: OrderItemsClient) delete_create_request(resource_group_name: Str, order_i
 /// Delete an order item.
 pub fn (c: OrderItemsClient[fx]) begin_delete(resource_group_name: Str, order_item_name: Str, options: OrderItemsClientBeginDeleteOptions = OrderItemsClientBeginDeleteOptions{}) -> runtime.Poller[OrderItemsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientDeleteResponse", fn(r: http.Response) -> OrderItemsClientDeleteResponse ! Str { order_items_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientDeleteResponse", fn(r: http.Response) -> OrderItemsClientDeleteResponse ! Str { order_items_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, order_item_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, order_item_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientDeleteResponse", fn(r: http.Response) -> OrderItemsClientDeleteResponse ! Str { order_items_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientDeleteResponse", fn(r: http.Response) -> OrderItemsClientDeleteResponse ! Str { order_items_delete_handle(r) }, traced: true)
 }
 
 /// OrderItemsClientCancelOptions: the optional parameters of OrderItemsClient.cancel.
@@ -362,12 +371,15 @@ fn (c: OrderItemsClient) cancel_create_request(resource_group_name: Str, order_i
 
 /// Cancel order item.
 pub fn (c: OrderItemsClient) cancel(resource_group_name: Str, order_item_name: Str, cancellation_reason: CancellationReason, options: OrderItemsClientCancelOptions = OrderItemsClientCancelOptions{}) -> OrderItemsClientCancelResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_create_request(resource_group_name, order_item_name, cancellation_reason, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.Cancel", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_create_request(resource_group_name, order_item_name, cancellation_reason, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  order_items_cancel_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = order_items_cancel_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// OrderItemsClientBeginReturnOptions: the optional parameters of OrderItemsClient.begin_return_.
@@ -407,12 +419,14 @@ fn (c: OrderItemsClient) return__create_request(resource_group_name: Str, order_
 /// Return order item.
 pub fn (c: OrderItemsClient[fx]) begin_return_(resource_group_name: Str, order_item_name: Str, return_order_item_details: ReturnOrderItemDetails, options: OrderItemsClientBeginReturnOptions = OrderItemsClientBeginReturnOptions{}) -> runtime.Poller[OrderItemsClientReturnResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientReturnResponse", fn(r: http.Response) -> OrderItemsClientReturnResponse ! Str { order_items_return__handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "OrderItemsClientReturnResponse", fn(r: http.Response) -> OrderItemsClientReturnResponse ! Str { order_items_return__handle(r) }, traced: true)
   }
-  let req = c.return__create_request(resource_group_name, order_item_name, return_order_item_details, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OrderItemsClient.BeginReturn", c.setup.pipeline.tracer)
+  let req = c.return__create_request(resource_group_name, order_item_name, return_order_item_details, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientReturnResponse", fn(r: http.Response) -> OrderItemsClientReturnResponse ! Str { order_items_return__handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "OrderItemsClientReturnResponse", fn(r: http.Response) -> OrderItemsClientReturnResponse ! Str { order_items_return__handle(r) }, traced: true)
 }

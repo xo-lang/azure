@@ -65,7 +65,7 @@ fn (c: CloudEndpointsClient) list_by_sync_group_create_request(resource_group_na
 /// Get a CloudEndpoint List.
 pub fn (c: CloudEndpointsClient[fx]) new_list_by_sync_group_pager(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, options: CloudEndpointsClientListBySyncGroupOptions = CloudEndpointsClientListBySyncGroupOptions{}) -> runtime.Pager[CloudEndpointsClientListBySyncGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_sync_group_create_request(resource_group_name, storage_sync_service_name, sync_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudEndpointsClientListBySyncGroupResponse ! Str { cloud_endpoints_list_by_sync_group_handle(r) }, c.setup.endpoint, fn(r: CloudEndpointsClientListBySyncGroupResponse) -> Str? { r.cloud_endpoint_array.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CloudEndpointsClientListBySyncGroupResponse ! Str { cloud_endpoints_list_by_sync_group_handle(r) }, c.setup.endpoint, fn(r: CloudEndpointsClientListBySyncGroupResponse) -> Str? { r.cloud_endpoint_array.next_link }).traced_as("CloudEndpointsClientListBySyncGroupResponse"))
 }
 
 /// CloudEndpointsClientGetOptions: the optional parameters of CloudEndpointsClient.get.
@@ -115,12 +115,15 @@ fn (c: CloudEndpointsClient) get_create_request(resource_group_name: Str, storag
 
 /// Get a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient) get(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, options: CloudEndpointsClientGetOptions = CloudEndpointsClientGetOptions{}) -> CloudEndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cloud_endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cloud_endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CloudEndpointsClientBeginCreateOptions: the optional parameters of CloudEndpointsClient.begin_create.
@@ -171,14 +174,16 @@ fn (c: CloudEndpointsClient) create_create_request(resource_group_name: Str, sto
 /// Create a new CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_create(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: CloudEndpointCreateParameters, options: CloudEndpointsClientBeginCreateOptions = CloudEndpointsClientBeginCreateOptions{}) -> runtime.Poller[CloudEndpointsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientCreateResponse", fn(r: http.Response) -> CloudEndpointsClientCreateResponse ! Str { cloud_endpoints_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientCreateResponse", fn(r: http.Response) -> CloudEndpointsClientCreateResponse ! Str { cloud_endpoints_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientCreateResponse", fn(r: http.Response) -> CloudEndpointsClientCreateResponse ! Str { cloud_endpoints_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientCreateResponse", fn(r: http.Response) -> CloudEndpointsClientCreateResponse ! Str { cloud_endpoints_create_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientBeginUpdateOptions: the optional parameters of CloudEndpointsClient.begin_update.
@@ -229,14 +234,16 @@ fn (c: CloudEndpointsClient) update_create_request(resource_group_name: Str, sto
 /// Patch a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_update(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, properties: CloudEndpointUpdateParameters, options: CloudEndpointsClientBeginUpdateOptions = CloudEndpointsClientBeginUpdateOptions{}) -> runtime.Poller[CloudEndpointsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientUpdateResponse", fn(r: http.Response) -> CloudEndpointsClientUpdateResponse ! Str { cloud_endpoints_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientUpdateResponse", fn(r: http.Response) -> CloudEndpointsClientUpdateResponse ! Str { cloud_endpoints_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientUpdateResponse", fn(r: http.Response) -> CloudEndpointsClientUpdateResponse ! Str { cloud_endpoints_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientUpdateResponse", fn(r: http.Response) -> CloudEndpointsClientUpdateResponse ! Str { cloud_endpoints_update_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientBeginDeleteOptions: the optional parameters of CloudEndpointsClient.begin_delete.
@@ -283,14 +290,16 @@ fn (c: CloudEndpointsClient) delete_create_request(resource_group_name: Str, sto
 /// Delete a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_delete(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, options: CloudEndpointsClientBeginDeleteOptions = CloudEndpointsClientBeginDeleteOptions{}) -> runtime.Poller[CloudEndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientDeleteResponse", fn(r: http.Response) -> CloudEndpointsClientDeleteResponse ! Str { cloud_endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientDeleteResponse", fn(r: http.Response) -> CloudEndpointsClientDeleteResponse ! Str { cloud_endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientDeleteResponse", fn(r: http.Response) -> CloudEndpointsClientDeleteResponse ! Str { cloud_endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "CloudEndpointsClientDeleteResponse", fn(r: http.Response) -> CloudEndpointsClientDeleteResponse ! Str { cloud_endpoints_delete_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientAfsShareMetadataCertificatePublicKeysOptions: the optional parameters of CloudEndpointsClient.afs_share_metadata_certificate_public_keys.
@@ -340,12 +349,15 @@ fn (c: CloudEndpointsClient) afs_share_metadata_certificate_public_keys_create_r
 
 /// Get the AFS file share metadata signing certificate public keys.
 pub fn (c: CloudEndpointsClient) afs_share_metadata_certificate_public_keys(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, options: CloudEndpointsClientAfsShareMetadataCertificatePublicKeysOptions = CloudEndpointsClientAfsShareMetadataCertificatePublicKeysOptions{}) -> CloudEndpointsClientAfsShareMetadataCertificatePublicKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.afs_share_metadata_certificate_public_keys_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.AfsShareMetadataCertificatePublicKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.afs_share_metadata_certificate_public_keys_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cloud_endpoints_afs_share_metadata_certificate_public_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cloud_endpoints_afs_share_metadata_certificate_public_keys_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CloudEndpointsClientBeginPostBackupOptions: the optional parameters of CloudEndpointsClient.begin_post_backup.
@@ -396,14 +408,16 @@ fn (c: CloudEndpointsClient) post_backup_create_request(resource_group_name: Str
 /// Post Backup a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_post_backup(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: BackupRequest, options: CloudEndpointsClientBeginPostBackupOptions = CloudEndpointsClientBeginPostBackupOptions{}) -> runtime.Poller[CloudEndpointsClientPostBackupResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPostBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPostBackupResponse ! Str { cloud_endpoints_post_backup_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPostBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPostBackupResponse ! Str { cloud_endpoints_post_backup_handle(r) }, traced: true)
   }
-  let req = c.post_backup_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginPostBackup", c.setup.pipeline.tracer)
+  let req = c.post_backup_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPostBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPostBackupResponse ! Str { cloud_endpoints_post_backup_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPostBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPostBackupResponse ! Str { cloud_endpoints_post_backup_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientBeginPostRestoreOptions: the optional parameters of CloudEndpointsClient.begin_post_restore.
@@ -451,14 +465,16 @@ fn (c: CloudEndpointsClient) post_restore_create_request(resource_group_name: St
 /// Post Restore a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_post_restore(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: PostRestoreRequest, options: CloudEndpointsClientBeginPostRestoreOptions = CloudEndpointsClientBeginPostRestoreOptions{}) -> runtime.Poller[CloudEndpointsClientPostRestoreResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPostRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPostRestoreResponse ! Str { cloud_endpoints_post_restore_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPostRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPostRestoreResponse ! Str { cloud_endpoints_post_restore_handle(r) }, traced: true)
   }
-  let req = c.post_restore_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginPostRestore", c.setup.pipeline.tracer)
+  let req = c.post_restore_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPostRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPostRestoreResponse ! Str { cloud_endpoints_post_restore_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPostRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPostRestoreResponse ! Str { cloud_endpoints_post_restore_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientBeginPreBackupOptions: the optional parameters of CloudEndpointsClient.begin_pre_backup.
@@ -506,14 +522,16 @@ fn (c: CloudEndpointsClient) pre_backup_create_request(resource_group_name: Str,
 /// Pre Backup a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_pre_backup(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: BackupRequest, options: CloudEndpointsClientBeginPreBackupOptions = CloudEndpointsClientBeginPreBackupOptions{}) -> runtime.Poller[CloudEndpointsClientPreBackupResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPreBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPreBackupResponse ! Str { cloud_endpoints_pre_backup_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPreBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPreBackupResponse ! Str { cloud_endpoints_pre_backup_handle(r) }, traced: true)
   }
-  let req = c.pre_backup_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginPreBackup", c.setup.pipeline.tracer)
+  let req = c.pre_backup_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPreBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPreBackupResponse ! Str { cloud_endpoints_pre_backup_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPreBackupResponse", fn(r: http.Response) -> CloudEndpointsClientPreBackupResponse ! Str { cloud_endpoints_pre_backup_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientBeginPreRestoreOptions: the optional parameters of CloudEndpointsClient.begin_pre_restore.
@@ -561,14 +579,16 @@ fn (c: CloudEndpointsClient) pre_restore_create_request(resource_group_name: Str
 /// Pre Restore a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_pre_restore(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: PreRestoreRequest, options: CloudEndpointsClientBeginPreRestoreOptions = CloudEndpointsClientBeginPreRestoreOptions{}) -> runtime.Poller[CloudEndpointsClientPreRestoreResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPreRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPreRestoreResponse ! Str { cloud_endpoints_pre_restore_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientPreRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPreRestoreResponse ! Str { cloud_endpoints_pre_restore_handle(r) }, traced: true)
   }
-  let req = c.pre_restore_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginPreRestore", c.setup.pipeline.tracer)
+  let req = c.pre_restore_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPreRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPreRestoreResponse ! Str { cloud_endpoints_pre_restore_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientPreRestoreResponse", fn(r: http.Response) -> CloudEndpointsClientPreRestoreResponse ! Str { cloud_endpoints_pre_restore_handle(r) }, traced: true)
 }
 
 /// CloudEndpointsClientRestoreheartbeatOptions: the optional parameters of CloudEndpointsClient.restoreheartbeat.
@@ -616,12 +636,15 @@ fn (c: CloudEndpointsClient) restoreheartbeat_create_request(resource_group_name
 
 /// Restore Heartbeat a given CloudEndpoint.
 pub fn (c: CloudEndpointsClient) restoreheartbeat(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, options: CloudEndpointsClientRestoreheartbeatOptions = CloudEndpointsClientRestoreheartbeatOptions{}) -> CloudEndpointsClientRestoreheartbeatResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.restoreheartbeat_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.Restoreheartbeat", c.setup.pipeline.tracer)
+  let req = sp.on(c.restoreheartbeat_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cloud_endpoints_restoreheartbeat_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cloud_endpoints_restoreheartbeat_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CloudEndpointsClientBeginTriggerChangeDetectionOptions: the optional parameters of CloudEndpointsClient.begin_trigger_change_detection.
@@ -669,12 +692,14 @@ fn (c: CloudEndpointsClient) trigger_change_detection_create_request(resource_gr
 /// Triggers detection of changes performed on Azure File share connected to the specified Azure File Sync Cloud Endpoint.
 pub fn (c: CloudEndpointsClient[fx]) begin_trigger_change_detection(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, cloud_endpoint_name: Str, parameters: TriggerChangeDetectionParameters, options: CloudEndpointsClientBeginTriggerChangeDetectionOptions = CloudEndpointsClientBeginTriggerChangeDetectionOptions{}) -> runtime.Poller[CloudEndpointsClientTriggerChangeDetectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientTriggerChangeDetectionResponse", fn(r: http.Response) -> CloudEndpointsClientTriggerChangeDetectionResponse ! Str { cloud_endpoints_trigger_change_detection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CloudEndpointsClientTriggerChangeDetectionResponse", fn(r: http.Response) -> CloudEndpointsClientTriggerChangeDetectionResponse ! Str { cloud_endpoints_trigger_change_detection_handle(r) }, traced: true)
   }
-  let req = c.trigger_change_detection_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CloudEndpointsClient.BeginTriggerChangeDetection", c.setup.pipeline.tracer)
+  let req = c.trigger_change_detection_create_request(resource_group_name, storage_sync_service_name, sync_group_name, cloud_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientTriggerChangeDetectionResponse", fn(r: http.Response) -> CloudEndpointsClientTriggerChangeDetectionResponse ! Str { cloud_endpoints_trigger_change_detection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CloudEndpointsClientTriggerChangeDetectionResponse", fn(r: http.Response) -> CloudEndpointsClientTriggerChangeDetectionResponse ! Str { cloud_endpoints_trigger_change_detection_handle(r) }, traced: true)
 }

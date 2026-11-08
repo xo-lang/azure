@@ -44,7 +44,7 @@ fn (c: MetadataClient) list_create_request(options: MetadataClientListOptions) -
 /// Gets the list of metadata entities.
 pub fn (c: MetadataClient[fx]) new_list_pager(options: MetadataClientListOptions = MetadataClientListOptions{}) -> runtime.Pager[MetadataClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MetadataClientListResponse ! Str { metadata_list_handle(r) }, c.setup.endpoint, fn(r: MetadataClientListResponse) -> Str? { r.metadata_entity_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MetadataClientListResponse ! Str { metadata_list_handle(r) }, c.setup.endpoint, fn(r: MetadataClientListResponse) -> Str? { r.metadata_entity_list_result.next_link }).traced_as("MetadataClientListResponse"))
 }
 
 /// MetadataClientGetEntityOptions: the optional parameters of MetadataClient.get_entity.
@@ -74,10 +74,13 @@ fn (c: MetadataClient) get_entity_create_request(name: Str, options: MetadataCli
 
 /// Gets the list of metadata entities.
 pub fn (c: MetadataClient) get_entity(name: Str, options: MetadataClientGetEntityOptions = MetadataClientGetEntityOptions{}) -> MetadataClientGetEntityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_entity_create_request(name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MetadataClient.GetEntity", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_entity_create_request(name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  metadata_get_entity_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = metadata_get_entity_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -61,7 +61,7 @@ fn (c: ReplicationLinksClient) list_by_database_create_request(resource_group_na
 /// Gets a list of replication links on database.
 pub fn (c: ReplicationLinksClient[fx]) new_list_by_database_pager(resource_group_name: Str, server_name: Str, database_name: Str, options: ReplicationLinksClientListByDatabaseOptions = ReplicationLinksClientListByDatabaseOptions{}) -> runtime.Pager[ReplicationLinksClientListByDatabaseResponse, fx] ! azcore.CallErr {
   let req = c.list_by_database_create_request(resource_group_name, server_name, database_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationLinksClientListByDatabaseResponse ! Str { replication_links_list_by_database_handle(r) }, fn(r: ReplicationLinksClientListByDatabaseResponse) -> Str? { r.replication_link_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationLinksClientListByDatabaseResponse ! Str { replication_links_list_by_database_handle(r) }, fn(r: ReplicationLinksClientListByDatabaseResponse) -> Str? { r.replication_link_list_result.next_link }).traced_as("ReplicationLinksClientListByDatabaseResponse"))
 }
 
 /// ReplicationLinksClientGetOptions: the optional parameters of ReplicationLinksClient.get.
@@ -107,12 +107,15 @@ fn (c: ReplicationLinksClient) get_create_request(resource_group_name: Str, serv
 
 /// Gets a replication link.
 pub fn (c: ReplicationLinksClient) get(resource_group_name: Str, server_name: Str, database_name: Str, link_id: Str, options: ReplicationLinksClientGetOptions = ReplicationLinksClientGetOptions{}) -> ReplicationLinksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, database_name, link_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationLinksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, database_name, link_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  replication_links_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = replication_links_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReplicationLinksClientDeleteOptions: the optional parameters of ReplicationLinksClient.delete.
@@ -155,12 +158,15 @@ fn (c: ReplicationLinksClient) delete_create_request(resource_group_name: Str, s
 
 /// Deletes the replication link.
 pub fn (c: ReplicationLinksClient) delete(resource_group_name: Str, server_name: Str, database_name: Str, link_id: Str, options: ReplicationLinksClientDeleteOptions = ReplicationLinksClientDeleteOptions{}) -> ReplicationLinksClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, server_name, database_name, link_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationLinksClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, server_name, database_name, link_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  replication_links_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = replication_links_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReplicationLinksClientBeginFailoverOptions: the optional parameters of ReplicationLinksClient.begin_failover.
@@ -210,14 +216,16 @@ fn (c: ReplicationLinksClient) failover_create_request(resource_group_name: Str,
 /// Fails over from the current primary server to this server.
 pub fn (c: ReplicationLinksClient[fx]) begin_failover(resource_group_name: Str, server_name: Str, database_name: Str, link_id: Str, options: ReplicationLinksClientBeginFailoverOptions = ReplicationLinksClientBeginFailoverOptions{}) -> runtime.Poller[ReplicationLinksClientFailoverResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationLinksClientFailoverResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverResponse ! Str { replication_links_failover_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationLinksClientFailoverResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverResponse ! Str { replication_links_failover_handle(r) }, traced: true)
   }
-  let req = c.failover_create_request(resource_group_name, server_name, database_name, link_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationLinksClient.BeginFailover", c.setup.pipeline.tracer)
+  let req = c.failover_create_request(resource_group_name, server_name, database_name, link_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationLinksClientFailoverResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverResponse ! Str { replication_links_failover_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationLinksClientFailoverResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverResponse ! Str { replication_links_failover_handle(r) }, traced: true)
 }
 
 /// ReplicationLinksClientBeginFailoverAllowDataLossOptions: the optional parameters of ReplicationLinksClient.begin_failover_allow_data_loss.
@@ -267,14 +275,16 @@ fn (c: ReplicationLinksClient) failover_allow_data_loss_create_request(resource_
 /// Fails over from the current primary server to this server allowing data loss.
 pub fn (c: ReplicationLinksClient[fx]) begin_failover_allow_data_loss(resource_group_name: Str, server_name: Str, database_name: Str, link_id: Str, options: ReplicationLinksClientBeginFailoverAllowDataLossOptions = ReplicationLinksClientBeginFailoverAllowDataLossOptions{}) -> runtime.Poller[ReplicationLinksClientFailoverAllowDataLossResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationLinksClientFailoverAllowDataLossResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverAllowDataLossResponse ! Str { replication_links_failover_allow_data_loss_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReplicationLinksClientFailoverAllowDataLossResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverAllowDataLossResponse ! Str { replication_links_failover_allow_data_loss_handle(r) }, traced: true)
   }
-  let req = c.failover_allow_data_loss_create_request(resource_group_name, server_name, database_name, link_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationLinksClient.BeginFailoverAllowDataLoss", c.setup.pipeline.tracer)
+  let req = c.failover_allow_data_loss_create_request(resource_group_name, server_name, database_name, link_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationLinksClientFailoverAllowDataLossResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverAllowDataLossResponse ! Str { replication_links_failover_allow_data_loss_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReplicationLinksClientFailoverAllowDataLossResponse", fn(r: http.Response) -> ReplicationLinksClientFailoverAllowDataLossResponse ! Str { replication_links_failover_allow_data_loss_handle(r) }, traced: true)
 }
 
 /// ReplicationLinksClientListByServerOptions: the optional parameters of ReplicationLinksClient.new_list_by_server_pager.
@@ -313,5 +323,5 @@ fn (c: ReplicationLinksClient) list_by_server_create_request(resource_group_name
 /// Gets a list of replication links.
 pub fn (c: ReplicationLinksClient[fx]) new_list_by_server_pager(resource_group_name: Str, server_name: Str, options: ReplicationLinksClientListByServerOptions = ReplicationLinksClientListByServerOptions{}) -> runtime.Pager[ReplicationLinksClientListByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_by_server_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationLinksClientListByServerResponse ! Str { replication_links_list_by_server_handle(r) }, fn(r: ReplicationLinksClientListByServerResponse) -> Str? { r.replication_link_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationLinksClientListByServerResponse ! Str { replication_links_list_by_server_handle(r) }, fn(r: ReplicationLinksClientListByServerResponse) -> Str? { r.replication_link_list_result.next_link }).traced_as("ReplicationLinksClientListByServerResponse"))
 }

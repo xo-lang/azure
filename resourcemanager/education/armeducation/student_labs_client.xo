@@ -44,7 +44,7 @@ fn (c: StudentLabsClient) list_all_create_request(options: StudentLabsClientList
 /// Get a list of all labs associated with the caller of the API.
 pub fn (c: StudentLabsClient[fx]) new_list_all_pager(options: StudentLabsClientListAllOptions = StudentLabsClientListAllOptions{}) -> runtime.Pager[StudentLabsClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StudentLabsClientListAllResponse ! Str { student_labs_list_all_handle(r) }, c.setup.endpoint, fn(r: StudentLabsClientListAllResponse) -> Str? { r.student_lab_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StudentLabsClientListAllResponse ! Str { student_labs_list_all_handle(r) }, c.setup.endpoint, fn(r: StudentLabsClientListAllResponse) -> Str? { r.student_lab_list_result.next_link }).traced_as("StudentLabsClientListAllResponse"))
 }
 
 /// StudentLabsClientGetOptions: the optional parameters of StudentLabsClient.get.
@@ -74,10 +74,13 @@ fn (c: StudentLabsClient) get_create_request(student_lab_name: Str, options: Stu
 
 /// Get the details for a specified lab associated with the student lab.
 pub fn (c: StudentLabsClient) get(student_lab_name: Str, options: StudentLabsClientGetOptions = StudentLabsClientGetOptions{}) -> StudentLabsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(student_lab_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StudentLabsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(student_lab_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  student_labs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = student_labs_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

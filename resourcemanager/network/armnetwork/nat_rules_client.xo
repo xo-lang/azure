@@ -57,7 +57,7 @@ fn (c: NatRulesClient) list_by_vpn_gateway_create_request(resource_group_name: S
 /// Retrieves all nat rules for a particular virtual wan vpn gateway.
 pub fn (c: NatRulesClient[fx]) new_list_by_vpn_gateway_pager(resource_group_name: Str, gateway_name: Str, options: NatRulesClientListByVPNGatewayOptions = NatRulesClientListByVPNGatewayOptions{}) -> runtime.Pager[NatRulesClientListByVPNGatewayResponse, fx] ! azcore.CallErr {
   let req = c.list_by_vpn_gateway_create_request(resource_group_name, gateway_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatRulesClientListByVPNGatewayResponse ! Str { nat_rules_list_by_vpn_gateway_handle(r) }, c.setup.endpoint, fn(r: NatRulesClientListByVPNGatewayResponse) -> Str? { r.list_vpn_gateway_nat_rules_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatRulesClientListByVPNGatewayResponse ! Str { nat_rules_list_by_vpn_gateway_handle(r) }, c.setup.endpoint, fn(r: NatRulesClientListByVPNGatewayResponse) -> Str? { r.list_vpn_gateway_nat_rules_result.next_link }).traced_as("NatRulesClientListByVPNGatewayResponse"))
 }
 
 /// NatRulesClientGetOptions: the optional parameters of NatRulesClient.get.
@@ -99,12 +99,15 @@ fn (c: NatRulesClient) get_create_request(resource_group_name: Str, gateway_name
 
 /// Retrieves the details of a nat ruleGet.
 pub fn (c: NatRulesClient) get(resource_group_name: Str, gateway_name: Str, nat_rule_name: Str, options: NatRulesClientGetOptions = NatRulesClientGetOptions{}) -> NatRulesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, gateway_name, nat_rule_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatRulesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, gateway_name, nat_rule_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  nat_rules_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = nat_rules_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NatRulesClientBeginCreateOrUpdateOptions: the optional parameters of NatRulesClient.begin_create_or_update.
@@ -151,14 +154,16 @@ fn (c: NatRulesClient) create_or_update_create_request(resource_group_name: Str,
 /// Creates a nat rule to a scalable vpn gateway if it doesn't exist else updates the existing nat rules.
 pub fn (c: NatRulesClient[fx]) begin_create_or_update(resource_group_name: Str, gateway_name: Str, nat_rule_name: Str, nat_rule_parameters: VPNGatewayNatRule, options: NatRulesClientBeginCreateOrUpdateOptions = NatRulesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[NatRulesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatRulesClientCreateOrUpdateResponse", fn(r: http.Response) -> NatRulesClientCreateOrUpdateResponse ! Str { nat_rules_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatRulesClientCreateOrUpdateResponse", fn(r: http.Response) -> NatRulesClientCreateOrUpdateResponse ! Str { nat_rules_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, gateway_name, nat_rule_name, nat_rule_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatRulesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, gateway_name, nat_rule_name, nat_rule_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatRulesClientCreateOrUpdateResponse", fn(r: http.Response) -> NatRulesClientCreateOrUpdateResponse ! Str { nat_rules_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatRulesClientCreateOrUpdateResponse", fn(r: http.Response) -> NatRulesClientCreateOrUpdateResponse ! Str { nat_rules_create_or_update_handle(r) }, traced: true)
 }
 
 /// NatRulesClientBeginDeleteOptions: the optional parameters of NatRulesClient.begin_delete.
@@ -201,12 +206,14 @@ fn (c: NatRulesClient) delete_create_request(resource_group_name: Str, gateway_n
 /// Deletes a nat rule.
 pub fn (c: NatRulesClient[fx]) begin_delete(resource_group_name: Str, gateway_name: Str, nat_rule_name: Str, options: NatRulesClientBeginDeleteOptions = NatRulesClientBeginDeleteOptions{}) -> runtime.Poller[NatRulesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatRulesClientDeleteResponse", fn(r: http.Response) -> NatRulesClientDeleteResponse ! Str { nat_rules_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatRulesClientDeleteResponse", fn(r: http.Response) -> NatRulesClientDeleteResponse ! Str { nat_rules_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, gateway_name, nat_rule_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatRulesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, gateway_name, nat_rule_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatRulesClientDeleteResponse", fn(r: http.Response) -> NatRulesClientDeleteResponse ! Str { nat_rules_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatRulesClientDeleteResponse", fn(r: http.Response) -> NatRulesClientDeleteResponse ! Str { nat_rules_delete_handle(r) }, traced: true)
 }

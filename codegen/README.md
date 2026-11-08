@@ -186,6 +186,15 @@ response type equal, except armkeyvault's `Secret`, which is
   v2; armresources v4 came from an older emitter that keeps the
   offset), so they are `azcore.DateTimeUTC`, which reads as
   `azcore.DateTime` and writes UTC.
+- `span_errors` in a services.toml row (codegen/gorows, decision 0013):
+  each method opens Go's `<Client>.<Method>` span, each pager and
+  poller Go's own; "all" records every error a method returns in its
+  span, as Go's generated code that sets `err` before returning; "send"
+  only a request's create and send errors (Go's older generators return
+  a status or decode error without setting `err`: armstorage 4.3.0). No
+  value: Go's module has no spans, and neither does ours. gorows reads
+  a module's root package only; the azadmin rows (backup, rbac,
+  settings) carry the value of their own Go packages by hand.
 - A PUT's or PATCH's optional body is a parameter of the method, as Go's
   TypeSpec emitter takes it (armstorage's `TableClient.Create`); an
   action's optional body stays in the options.

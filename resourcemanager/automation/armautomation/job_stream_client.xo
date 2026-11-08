@@ -72,7 +72,7 @@ fn (c: JobStreamClient) list_by_job_create_request(resource_group_name: Str, aut
 /// Retrieve a list of jobs streams identified by job name.
 pub fn (c: JobStreamClient[fx]) new_list_by_job_pager(resource_group_name: Str, automation_account_name: Str, job_name: Str, options: JobStreamClientListByJobOptions = JobStreamClientListByJobOptions{}) -> runtime.Pager[JobStreamClientListByJobResponse, fx] ! azcore.CallErr {
   let req = c.list_by_job_create_request(resource_group_name, automation_account_name, job_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobStreamClientListByJobResponse ! Str { job_stream_list_by_job_handle(r) }, c.setup.endpoint, fn(r: JobStreamClientListByJobResponse) -> Str? { r.job_stream_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobStreamClientListByJobResponse ! Str { job_stream_list_by_job_handle(r) }, c.setup.endpoint, fn(r: JobStreamClientListByJobResponse) -> Str? { r.job_stream_list_result.next_link }).traced_as("JobStreamClientListByJobResponse"))
 }
 
 /// JobStreamClientGetOptions: the optional parameters of JobStreamClient.get.
@@ -124,10 +124,13 @@ fn (c: JobStreamClient) get_create_request(resource_group_name: Str, automation_
 
 /// Retrieve the job stream identified by job stream id.
 pub fn (c: JobStreamClient) get(resource_group_name: Str, automation_account_name: Str, job_name: Str, job_stream_id: Str, options: JobStreamClientGetOptions = JobStreamClientGetOptions{}) -> JobStreamClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, automation_account_name, job_name, job_stream_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobStreamClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, automation_account_name, job_name, job_stream_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  job_stream_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = job_stream_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

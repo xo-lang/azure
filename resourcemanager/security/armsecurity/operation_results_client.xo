@@ -61,10 +61,13 @@ fn (c: OperationResultsClient) get_create_request(location: Str, operation_id: S
 
 /// Returns operation results for long running operations.
 pub fn (c: OperationResultsClient) get(location: Str, operation_id: Str, options: OperationResultsClientGetOptions = OperationResultsClientGetOptions{}) -> OperationResultsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, operation_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OperationResultsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, operation_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  operation_results_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = operation_results_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -65,7 +65,7 @@ fn (c: BucketsClient) list_create_request(resource_group_name: Str, account_name
 /// Describes all buckets belonging to a volume. Buckets allow additional services, such as AI services, connect to the volume data contained in those buckets.
 pub fn (c: BucketsClient[fx]) new_list_pager(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, options: BucketsClientListOptions = BucketsClientListOptions{}) -> runtime.Pager[BucketsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, account_name, pool_name, volume_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BucketsClientListResponse ! Str { buckets_list_handle(r) }, c.setup.endpoint, fn(r: BucketsClientListResponse) -> Str? { r.bucket_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BucketsClientListResponse ! Str { buckets_list_handle(r) }, c.setup.endpoint, fn(r: BucketsClientListResponse) -> Str? { r.bucket_list.next_link }).traced_as("BucketsClientListResponse"))
 }
 
 /// BucketsClientGetOptions: the optional parameters of BucketsClient.get.
@@ -115,12 +115,15 @@ fn (c: BucketsClient) get_create_request(resource_group_name: Str, account_name:
 
 /// Get the details of the specified volume's bucket. A bucket allows additional services, such as AI services, connect to the volume data contained in those buckets.
 pub fn (c: BucketsClient) get(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, options: BucketsClientGetOptions = BucketsClientGetOptions{}) -> BucketsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  buckets_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = buckets_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BucketsClientBeginCreateOrUpdateOptions: the optional parameters of BucketsClient.begin_create_or_update.
@@ -175,14 +178,16 @@ fn (c: BucketsClient) create_or_update_create_request(resource_group_name: Str, 
 /// Creates or updates a bucket for a volume. A bucket allows additional services, such as AI services, connect to the volume data contained in those buckets.
 pub fn (c: BucketsClient[fx]) begin_create_or_update(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, body: Bucket, options: BucketsClientBeginCreateOrUpdateOptions = BucketsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[BucketsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientCreateOrUpdateResponse", fn(r: http.Response) -> BucketsClientCreateOrUpdateResponse ! Str { buckets_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientCreateOrUpdateResponse", fn(r: http.Response) -> BucketsClientCreateOrUpdateResponse ! Str { buckets_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BucketsClientCreateOrUpdateResponse", fn(r: http.Response) -> BucketsClientCreateOrUpdateResponse ! Str { buckets_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BucketsClientCreateOrUpdateResponse", fn(r: http.Response) -> BucketsClientCreateOrUpdateResponse ! Str { buckets_create_or_update_handle(r) }, traced: true)
 }
 
 /// BucketsClientBeginUpdateOptions: the optional parameters of BucketsClient.begin_update.
@@ -237,14 +242,16 @@ fn (c: BucketsClient) update_create_request(resource_group_name: Str, account_na
 /// Updates the details of a volume bucket.
 pub fn (c: BucketsClient[fx]) begin_update(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, body: BucketPatch, options: BucketsClientBeginUpdateOptions = BucketsClientBeginUpdateOptions{}) -> runtime.Poller[BucketsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientUpdateResponse", fn(r: http.Response) -> BucketsClientUpdateResponse ! Str { buckets_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientUpdateResponse", fn(r: http.Response) -> BucketsClientUpdateResponse ! Str { buckets_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientUpdateResponse", fn(r: http.Response) -> BucketsClientUpdateResponse ! Str { buckets_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientUpdateResponse", fn(r: http.Response) -> BucketsClientUpdateResponse ! Str { buckets_update_handle(r) }, traced: true)
 }
 
 /// BucketsClientBeginDeleteOptions: the optional parameters of BucketsClient.begin_delete.
@@ -295,14 +302,16 @@ fn (c: BucketsClient) delete_create_request(resource_group_name: Str, account_na
 /// Delete a volume's bucket.
 pub fn (c: BucketsClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, options: BucketsClientBeginDeleteOptions = BucketsClientBeginDeleteOptions{}) -> runtime.Poller[BucketsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientDeleteResponse", fn(r: http.Response) -> BucketsClientDeleteResponse ! Str { buckets_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientDeleteResponse", fn(r: http.Response) -> BucketsClientDeleteResponse ! Str { buckets_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "BucketsClientDeleteResponse", fn(r: http.Response) -> BucketsClientDeleteResponse ! Str { buckets_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "BucketsClientDeleteResponse", fn(r: http.Response) -> BucketsClientDeleteResponse ! Str { buckets_delete_handle(r) }, traced: true)
 }
 
 /// BucketsClientBeginGenerateAkvCredentialsOptions: the optional parameters of BucketsClient.begin_generate_akv_credentials.
@@ -354,14 +363,16 @@ fn (c: BucketsClient) generate_akv_credentials_create_request(resource_group_nam
 /// Generate the access key and secret key used for accessing the specified volume bucket and store in Azure Key Vault.
 pub fn (c: BucketsClient[fx]) begin_generate_akv_credentials(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, body: BucketCredentialsExpiry, options: BucketsClientBeginGenerateAkvCredentialsOptions = BucketsClientBeginGenerateAkvCredentialsOptions{}) -> runtime.Poller[BucketsClientGenerateAkvCredentialsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientGenerateAkvCredentialsResponse", fn(r: http.Response) -> BucketsClientGenerateAkvCredentialsResponse ! Str { buckets_generate_akv_credentials_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientGenerateAkvCredentialsResponse", fn(r: http.Response) -> BucketsClientGenerateAkvCredentialsResponse ! Str { buckets_generate_akv_credentials_handle(r) }, traced: true)
   }
-  let req = c.generate_akv_credentials_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.BeginGenerateAkvCredentials", c.setup.pipeline.tracer)
+  let req = c.generate_akv_credentials_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientGenerateAkvCredentialsResponse", fn(r: http.Response) -> BucketsClientGenerateAkvCredentialsResponse ! Str { buckets_generate_akv_credentials_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientGenerateAkvCredentialsResponse", fn(r: http.Response) -> BucketsClientGenerateAkvCredentialsResponse ! Str { buckets_generate_akv_credentials_handle(r) }, traced: true)
 }
 
 /// BucketsClientGenerateCredentialsOptions: the optional parameters of BucketsClient.generate_credentials.
@@ -412,12 +423,15 @@ fn (c: BucketsClient) generate_credentials_create_request(resource_group_name: S
 
 /// Generate the access key and secret key used for accessing the specified volume bucket. Also return expiry date and time of key pair (in UTC).
 pub fn (c: BucketsClient) generate_credentials(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, body: BucketCredentialsExpiry, options: BucketsClientGenerateCredentialsOptions = BucketsClientGenerateCredentialsOptions{}) -> BucketsClientGenerateCredentialsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.generate_credentials_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.GenerateCredentials", c.setup.pipeline.tracer)
+  let req = sp.on(c.generate_credentials_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, body, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  buckets_generate_credentials_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = buckets_generate_credentials_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BucketsClientBeginRefreshCertificateOptions: the optional parameters of BucketsClient.begin_refresh_certificate.
@@ -468,12 +482,14 @@ fn (c: BucketsClient) refresh_certificate_create_request(resource_group_name: St
 /// This operation will fetch the certificate from Azure Key Vault and install it on the bucket server.
 pub fn (c: BucketsClient[fx]) begin_refresh_certificate(resource_group_name: Str, account_name: Str, pool_name: Str, volume_name: Str, bucket_name: Str, options: BucketsClientBeginRefreshCertificateOptions = BucketsClientBeginRefreshCertificateOptions{}) -> runtime.Poller[BucketsClientRefreshCertificateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientRefreshCertificateResponse", fn(r: http.Response) -> BucketsClientRefreshCertificateResponse ! Str { buckets_refresh_certificate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "BucketsClientRefreshCertificateResponse", fn(r: http.Response) -> BucketsClientRefreshCertificateResponse ! Str { buckets_refresh_certificate_handle(r) }, traced: true)
   }
-  let req = c.refresh_certificate_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BucketsClient.BeginRefreshCertificate", c.setup.pipeline.tracer)
+  let req = c.refresh_certificate_create_request(resource_group_name, account_name, pool_name, volume_name, bucket_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientRefreshCertificateResponse", fn(r: http.Response) -> BucketsClientRefreshCertificateResponse ! Str { buckets_refresh_certificate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "BucketsClientRefreshCertificateResponse", fn(r: http.Response) -> BucketsClientRefreshCertificateResponse ! Str { buckets_refresh_certificate_handle(r) }, traced: true)
 }

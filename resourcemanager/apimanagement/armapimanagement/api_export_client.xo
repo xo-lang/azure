@@ -62,10 +62,13 @@ fn (c: APIExportClient) get_create_request(resource_group_name: Str, service_nam
 
 /// Gets the details of the API specified by its identifier in the format specified to the Storage Blob with SAS Key valid for 5 minutes.
 pub fn (c: APIExportClient) get(resource_group_name: Str, service_name: Str, api_id: Str, format: ExportFormat, export: ExportAPI, options: APIExportClientGetOptions = APIExportClientGetOptions{}) -> APIExportClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, api_id, format, export, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIExportClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, api_id, format, export, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_export_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_export_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -56,10 +56,13 @@ fn (c: GatewaysClient) delete_create_request(resource_group_name: Str, workspace
 
 /// Delete a Log Analytics gateway.
 pub fn (c: GatewaysClient) delete(resource_group_name: Str, workspace_name: Str, gateway_id: Str, options: GatewaysClientDeleteOptions = GatewaysClientDeleteOptions{}) -> GatewaysClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, workspace_name, gateway_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GatewaysClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, workspace_name, gateway_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  gateways_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = gateways_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

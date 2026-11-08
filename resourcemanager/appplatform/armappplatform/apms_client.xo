@@ -57,7 +57,7 @@ fn (c: ApmsClient) list_create_request(resource_group_name: Str, service_name: S
 /// Get collection of APMs.
 pub fn (c: ApmsClient[fx]) new_list_pager(resource_group_name: Str, service_name: Str, options: ApmsClientListOptions = ApmsClientListOptions{}) -> runtime.Pager[ApmsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, service_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ApmsClientListResponse ! Str { apms_list_handle(r) }, fn(r: ApmsClientListResponse) -> Str? { r.apm_resource_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ApmsClientListResponse ! Str { apms_list_handle(r) }, fn(r: ApmsClientListResponse) -> Str? { r.apm_resource_collection.next_link }).traced_as("ApmsClientListResponse"))
 }
 
 /// ApmsClientGetOptions: the optional parameters of ApmsClient.get.
@@ -99,12 +99,15 @@ fn (c: ApmsClient) get_create_request(resource_group_name: Str, service_name: St
 
 /// Get the APM by name.
 pub fn (c: ApmsClient) get(resource_group_name: Str, service_name: Str, apm_name: Str, options: ApmsClientGetOptions = ApmsClientGetOptions{}) -> ApmsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, apm_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ApmsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, apm_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  apms_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = apms_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ApmsClientBeginCreateOrUpdateOptions: the optional parameters of ApmsClient.begin_create_or_update.
@@ -151,14 +154,16 @@ fn (c: ApmsClient) create_or_update_create_request(resource_group_name: Str, ser
 /// Create or update an APM.
 pub fn (c: ApmsClient[fx]) begin_create_or_update(resource_group_name: Str, service_name: Str, apm_name: Str, apm_resource: ApmResource, options: ApmsClientBeginCreateOrUpdateOptions = ApmsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ApmsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ApmsClientCreateOrUpdateResponse", fn(r: http.Response) -> ApmsClientCreateOrUpdateResponse ! Str { apms_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ApmsClientCreateOrUpdateResponse", fn(r: http.Response) -> ApmsClientCreateOrUpdateResponse ! Str { apms_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, service_name, apm_name, apm_resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ApmsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, service_name, apm_name, apm_resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ApmsClientCreateOrUpdateResponse", fn(r: http.Response) -> ApmsClientCreateOrUpdateResponse ! Str { apms_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ApmsClientCreateOrUpdateResponse", fn(r: http.Response) -> ApmsClientCreateOrUpdateResponse ! Str { apms_create_or_update_handle(r) }, traced: true)
 }
 
 /// ApmsClientBeginDeleteOptions: the optional parameters of ApmsClient.begin_delete.
@@ -201,14 +206,16 @@ fn (c: ApmsClient) delete_create_request(resource_group_name: Str, service_name:
 /// Operation to delete an APM
 pub fn (c: ApmsClient[fx]) begin_delete(resource_group_name: Str, service_name: Str, apm_name: Str, options: ApmsClientBeginDeleteOptions = ApmsClientBeginDeleteOptions{}) -> runtime.Poller[ApmsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ApmsClientDeleteResponse", fn(r: http.Response) -> ApmsClientDeleteResponse ! Str { apms_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ApmsClientDeleteResponse", fn(r: http.Response) -> ApmsClientDeleteResponse ! Str { apms_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, service_name, apm_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ApmsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, service_name, apm_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ApmsClientDeleteResponse", fn(r: http.Response) -> ApmsClientDeleteResponse ! Str { apms_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ApmsClientDeleteResponse", fn(r: http.Response) -> ApmsClientDeleteResponse ! Str { apms_delete_handle(r) }, traced: true)
 }
 
 /// ApmsClientListSecretKeysOptions: the optional parameters of ApmsClient.list_secret_keys.
@@ -250,10 +257,13 @@ fn (c: ApmsClient) list_secret_keys_create_request(resource_group_name: Str, ser
 
 /// List keys of APM sensitive properties.
 pub fn (c: ApmsClient) list_secret_keys(resource_group_name: Str, service_name: Str, apm_name: Str, options: ApmsClientListSecretKeysOptions = ApmsClientListSecretKeysOptions{}) -> ApmsClientListSecretKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_secret_keys_create_request(resource_group_name, service_name, apm_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ApmsClient.ListSecretKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_secret_keys_create_request(resource_group_name, service_name, apm_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  apms_list_secret_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = apms_list_secret_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

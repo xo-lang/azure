@@ -80,7 +80,7 @@ fn (c: AccountsClient) list_create_request(options: AccountsClientListOptions) -
 /// Gets the first page of Data Lake Analytics accounts, if any, within the current subscription. This includes a link to the next page, if any.
 pub fn (c: AccountsClient[fx]) new_list_pager(options: AccountsClientListOptions = AccountsClientListOptions{}) -> runtime.Pager[AccountsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListResponse ! Str { accounts_list_handle(r) }, fn(r: AccountsClientListResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListResponse ! Str { accounts_list_handle(r) }, fn(r: AccountsClientListResponse) -> Str? { r.account_list_result.next_link }).traced_as("AccountsClientListResponse"))
 }
 
 /// AccountsClientListByResourceGroupOptions: the optional parameters of AccountsClient.new_list_by_resource_group_pager.
@@ -146,7 +146,7 @@ fn (c: AccountsClient) list_by_resource_group_create_request(resource_group_name
 /// Gets the first page of Data Lake Analytics accounts, if any, within a specific resource group. This includes a link to the next page, if any.
 pub fn (c: AccountsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AccountsClientListByResourceGroupOptions = AccountsClientListByResourceGroupOptions{}) -> runtime.Pager[AccountsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListByResourceGroupResponse ! Str { accounts_list_by_resource_group_handle(r) }, fn(r: AccountsClientListByResourceGroupResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountsClientListByResourceGroupResponse ! Str { accounts_list_by_resource_group_handle(r) }, fn(r: AccountsClientListByResourceGroupResponse) -> Str? { r.account_list_result.next_link }).traced_as("AccountsClientListByResourceGroupResponse"))
 }
 
 /// AccountsClientBeginCreateOptions: the optional parameters of AccountsClient.begin_create.
@@ -189,14 +189,16 @@ fn (c: AccountsClient) create_create_request(resource_group_name: Str, account_n
 /// Creates the specified Data Lake Analytics account. This supplies the user with computation services for Data Lake Analytics workloads.
 pub fn (c: AccountsClient[fx]) begin_create(resource_group_name: Str, account_name: Str, parameters: CreateDataLakeAnalyticsAccountParameters, options: AccountsClientBeginCreateOptions = AccountsClientBeginCreateOptions{}) -> runtime.Poller[AccountsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientCreateResponse", fn(r: http.Response) -> AccountsClientCreateResponse ! Str { accounts_create_handle(r) }, traced: true)
 }
 
 /// AccountsClientGetOptions: the optional parameters of AccountsClient.get.
@@ -234,12 +236,15 @@ fn (c: AccountsClient) get_create_request(resource_group_name: Str, account_name
 
 /// Gets details of the specified Data Lake Analytics account.
 pub fn (c: AccountsClient) get(resource_group_name: Str, account_name: Str, options: AccountsClientGetOptions = AccountsClientGetOptions{}) -> AccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountsClientBeginUpdateOptions: the optional parameters of AccountsClient.begin_update.
@@ -288,14 +293,16 @@ fn (c: AccountsClient) update_create_request(resource_group_name: Str, account_n
 /// Updates the Data Lake Analytics account object specified by the accountName with the contents of the account object.
 pub fn (c: AccountsClient[fx]) begin_update(resource_group_name: Str, account_name: Str, options: AccountsClientBeginUpdateOptions = AccountsClientBeginUpdateOptions{}) -> runtime.Poller[AccountsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientUpdateResponse", fn(r: http.Response) -> AccountsClientUpdateResponse ! Str { accounts_update_handle(r) }, traced: true)
 }
 
 /// AccountsClientBeginDeleteOptions: the optional parameters of AccountsClient.begin_delete.
@@ -334,14 +341,16 @@ fn (c: AccountsClient) delete_create_request(resource_group_name: Str, account_n
 /// Begins the delete process for the Data Lake Analytics account object specified by the account name.
 pub fn (c: AccountsClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, options: AccountsClientBeginDeleteOptions = AccountsClientBeginDeleteOptions{}) -> runtime.Poller[AccountsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountsClientDeleteResponse", fn(r: http.Response) -> AccountsClientDeleteResponse ! Str { accounts_delete_handle(r) }, traced: true)
 }
 
 /// AccountsClientCheckNameAvailabilityOptions: the optional parameters of AccountsClient.check_name_availability.
@@ -376,10 +385,13 @@ fn (c: AccountsClient) check_name_availability_create_request(location: Str, par
 
 /// Checks whether the specified account name is available or taken.
 pub fn (c: AccountsClient) check_name_availability(location: Str, parameters: CheckNameAvailabilityParameters, options: AccountsClientCheckNameAvailabilityOptions = AccountsClientCheckNameAvailabilityOptions{}) -> AccountsClientCheckNameAvailabilityResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_name_availability_create_request(location, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountsClient.CheckNameAvailability", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_name_availability_create_request(location, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  accounts_check_name_availability_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = accounts_check_name_availability_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

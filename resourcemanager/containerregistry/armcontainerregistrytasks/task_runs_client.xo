@@ -57,7 +57,7 @@ fn (c: TaskRunsClient) list_create_request(resource_group_name: Str, registry_na
 /// Lists all the task runs for a specified container registry.
 pub fn (c: TaskRunsClient[fx]) new_list_pager(resource_group_name: Str, registry_name: Str, options: TaskRunsClientListOptions = TaskRunsClientListOptions{}) -> runtime.Pager[TaskRunsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, registry_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TaskRunsClientListResponse ! Str { task_runs_list_handle(r) }, c.setup.endpoint, fn(r: TaskRunsClientListResponse) -> Str? { r.task_run_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TaskRunsClientListResponse ! Str { task_runs_list_handle(r) }, c.setup.endpoint, fn(r: TaskRunsClientListResponse) -> Str? { r.task_run_list_result.next_link }).traced_as("TaskRunsClientListResponse"))
 }
 
 /// TaskRunsClientGetOptions: the optional parameters of TaskRunsClient.get.
@@ -99,12 +99,15 @@ fn (c: TaskRunsClient) get_create_request(resource_group_name: Str, registry_nam
 
 /// Gets the detailed information for a given task run.
 pub fn (c: TaskRunsClient) get(resource_group_name: Str, registry_name: Str, task_run_name: Str, options: TaskRunsClientGetOptions = TaskRunsClientGetOptions{}) -> TaskRunsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, registry_name, task_run_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TaskRunsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, registry_name, task_run_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  task_runs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = task_runs_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// TaskRunsClientBeginCreateOptions: the optional parameters of TaskRunsClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: TaskRunsClient) create_create_request(resource_group_name: Str, registry_
 /// Creates a task run for a container registry with the specified parameters.
 pub fn (c: TaskRunsClient[fx]) begin_create(resource_group_name: Str, registry_name: Str, task_run_name: Str, task_run: TaskRun, options: TaskRunsClientBeginCreateOptions = TaskRunsClientBeginCreateOptions{}) -> runtime.Poller[TaskRunsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TaskRunsClientCreateResponse", fn(r: http.Response) -> TaskRunsClientCreateResponse ! Str { task_runs_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TaskRunsClientCreateResponse", fn(r: http.Response) -> TaskRunsClientCreateResponse ! Str { task_runs_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, registry_name, task_run_name, task_run, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TaskRunsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, registry_name, task_run_name, task_run, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "TaskRunsClientCreateResponse", fn(r: http.Response) -> TaskRunsClientCreateResponse ! Str { task_runs_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "TaskRunsClientCreateResponse", fn(r: http.Response) -> TaskRunsClientCreateResponse ! Str { task_runs_create_handle(r) }, traced: true)
 }
 
 /// TaskRunsClientBeginUpdateOptions: the optional parameters of TaskRunsClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: TaskRunsClient) update_create_request(resource_group_name: Str, registry_
 /// Updates a task run with the specified parameters.
 pub fn (c: TaskRunsClient[fx]) begin_update(resource_group_name: Str, registry_name: Str, task_run_name: Str, update_parameters: TaskRunUpdateParameters, options: TaskRunsClientBeginUpdateOptions = TaskRunsClientBeginUpdateOptions{}) -> runtime.Poller[TaskRunsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TaskRunsClientUpdateResponse", fn(r: http.Response) -> TaskRunsClientUpdateResponse ! Str { task_runs_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TaskRunsClientUpdateResponse", fn(r: http.Response) -> TaskRunsClientUpdateResponse ! Str { task_runs_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, registry_name, task_run_name, update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TaskRunsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, registry_name, task_run_name, update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "TaskRunsClientUpdateResponse", fn(r: http.Response) -> TaskRunsClientUpdateResponse ! Str { task_runs_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "TaskRunsClientUpdateResponse", fn(r: http.Response) -> TaskRunsClientUpdateResponse ! Str { task_runs_update_handle(r) }, traced: true)
 }
 
 /// TaskRunsClientDeleteOptions: the optional parameters of TaskRunsClient.delete.
@@ -251,12 +258,15 @@ fn (c: TaskRunsClient) delete_create_request(resource_group_name: Str, registry_
 
 /// Deletes a specified task run resource.
 pub fn (c: TaskRunsClient) delete(resource_group_name: Str, registry_name: Str, task_run_name: Str, options: TaskRunsClientDeleteOptions = TaskRunsClientDeleteOptions{}) -> TaskRunsClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, registry_name, task_run_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TaskRunsClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, registry_name, task_run_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  task_runs_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = task_runs_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// TaskRunsClientGetDetailsOptions: the optional parameters of TaskRunsClient.get_details.
@@ -298,10 +308,13 @@ fn (c: TaskRunsClient) get_details_create_request(resource_group_name: Str, regi
 
 /// Gets the detailed information for a given task run that includes all secrets.
 pub fn (c: TaskRunsClient) get_details(resource_group_name: Str, registry_name: Str, task_run_name: Str, options: TaskRunsClientGetDetailsOptions = TaskRunsClientGetDetailsOptions{}) -> TaskRunsClientGetDetailsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_details_create_request(resource_group_name, registry_name, task_run_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TaskRunsClient.GetDetails", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_details_create_request(resource_group_name, registry_name, task_run_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  task_runs_get_details_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = task_runs_get_details_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

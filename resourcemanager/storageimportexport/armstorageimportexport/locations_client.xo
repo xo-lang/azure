@@ -50,7 +50,7 @@ fn (c: LocationsClient) list_create_request(options: LocationsClientListOptions)
 /// Returns a list of locations to which you can ship the disks associated with an import or export job. A location is a Microsoft data center region.
 pub fn (c: LocationsClient[fx]) new_list_pager(options: LocationsClientListOptions = LocationsClientListOptions{}) -> runtime.Pager[LocationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationsClientListResponse ! Str { locations_list_handle(r) }, fn(r: LocationsClientListResponse) -> Str? { None }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationsClientListResponse ! Str { locations_list_handle(r) }, fn(r: LocationsClientListResponse) -> Str? { None }).traced_as("LocationsClientListResponse"))
 }
 
 /// LocationsClientGetOptions: the optional parameters of LocationsClient.get.
@@ -86,10 +86,13 @@ fn (c: LocationsClient) get_create_request(location_name: Str, options: Location
 
 /// Returns the details about a location to which you can ship the disks associated with an import or export job. A location is an Azure region.
 pub fn (c: LocationsClient) get(location_name: Str, options: LocationsClientGetOptions = LocationsClientGetOptions{}) -> LocationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LocationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  locations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = locations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

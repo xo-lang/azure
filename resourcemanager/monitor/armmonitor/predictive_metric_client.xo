@@ -61,10 +61,13 @@ fn (c: PredictiveMetricClient) get_create_request(resource_group_name: Str, auto
 
 /// get predictive autoscale metric future data
 pub fn (c: PredictiveMetricClient) get(resource_group_name: Str, autoscale_setting_name: Str, timespan: Str, interval: Str, metric_namespace: Str, metric_name: Str, aggregation: Str, options: PredictiveMetricClientGetOptions = PredictiveMetricClientGetOptions{}) -> PredictiveMetricClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, autoscale_setting_name, timespan, interval, metric_namespace, metric_name, aggregation, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PredictiveMetricClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, autoscale_setting_name, timespan, interval, metric_namespace, metric_name, aggregation, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  predictive_metric_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = predictive_metric_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

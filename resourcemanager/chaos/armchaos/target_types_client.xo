@@ -59,7 +59,7 @@ fn (c: TargetTypesClient) list_create_request(location: Str, options: TargetType
 /// Get a list of Target Type resources for given location.
 pub fn (c: TargetTypesClient[fx]) new_list_pager(location: Str, options: TargetTypesClientListOptions = TargetTypesClientListOptions{}) -> runtime.Pager[TargetTypesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TargetTypesClientListResponse ! Str { target_types_list_handle(r) }, c.setup.endpoint, fn(r: TargetTypesClientListResponse) -> Str? { r.target_type_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TargetTypesClientListResponse ! Str { target_types_list_handle(r) }, c.setup.endpoint, fn(r: TargetTypesClientListResponse) -> Str? { r.target_type_list_result.next_link }).traced_as("TargetTypesClientListResponse"))
 }
 
 /// TargetTypesClientGetOptions: the optional parameters of TargetTypesClient.get.
@@ -97,10 +97,13 @@ fn (c: TargetTypesClient) get_create_request(location: Str, target_type_name: St
 
 /// Get a Target Type resources for given location.
 pub fn (c: TargetTypesClient) get(location: Str, target_type_name: Str, options: TargetTypesClientGetOptions = TargetTypesClientGetOptions{}) -> TargetTypesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, target_type_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TargetTypesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, target_type_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  target_types_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = target_types_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

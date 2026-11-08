@@ -61,7 +61,7 @@ fn (c: AvsVMVolumesClient) list_by_avs_vm_create_request(resource_group_name: St
 /// List volumes in an AVS VM
 pub fn (c: AvsVMVolumesClient[fx]) new_list_by_avs_vm_pager(resource_group_name: Str, storage_pool_name: Str, avs_vm_id: Str, options: AvsVMVolumesClientListByAvsVMOptions = AvsVMVolumesClientListByAvsVMOptions{}) -> runtime.Pager[AvsVMVolumesClientListByAvsVMResponse, fx] ! azcore.CallErr {
   let req = c.list_by_avs_vm_create_request(resource_group_name, storage_pool_name, avs_vm_id, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AvsVMVolumesClientListByAvsVMResponse ! Str { avs_vm_volumes_list_by_avs_vm_handle(r) }, c.setup.endpoint, fn(r: AvsVMVolumesClientListByAvsVMResponse) -> Str? { r.avs_vm_volume_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AvsVMVolumesClientListByAvsVMResponse ! Str { avs_vm_volumes_list_by_avs_vm_handle(r) }, c.setup.endpoint, fn(r: AvsVMVolumesClientListByAvsVMResponse) -> Str? { r.avs_vm_volume_list_result.next_link }).traced_as("AvsVMVolumesClientListByAvsVMResponse"))
 }
 
 /// AvsVMVolumesClientGetOptions: the optional parameters of AvsVMVolumesClient.get.
@@ -107,12 +107,15 @@ fn (c: AvsVMVolumesClient) get_create_request(resource_group_name: Str, storage_
 
 /// Get a volume in an AVS VM
 pub fn (c: AvsVMVolumesClient) get(resource_group_name: Str, storage_pool_name: Str, avs_vm_id: Str, volume_id: Str, options: AvsVMVolumesClientGetOptions = AvsVMVolumesClientGetOptions{}) -> AvsVMVolumesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AvsVMVolumesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  avs_vm_volumes_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = avs_vm_volumes_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AvsVMVolumesClientBeginUpdateOptions: the optional parameters of AvsVMVolumesClient.begin_update.
@@ -163,14 +166,16 @@ fn (c: AvsVMVolumesClient) update_create_request(resource_group_name: Str, stora
 /// Update a volume in an AVS VM
 pub fn (c: AvsVMVolumesClient[fx]) begin_update(resource_group_name: Str, storage_pool_name: Str, avs_vm_id: Str, volume_id: Str, properties: AvsVMVolumeUpdate, options: AvsVMVolumesClientBeginUpdateOptions = AvsVMVolumesClientBeginUpdateOptions{}) -> runtime.Poller[AvsVMVolumesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AvsVMVolumesClientUpdateResponse", fn(r: http.Response) -> AvsVMVolumesClientUpdateResponse ! Str { avs_vm_volumes_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AvsVMVolumesClientUpdateResponse", fn(r: http.Response) -> AvsVMVolumesClientUpdateResponse ! Str { avs_vm_volumes_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AvsVMVolumesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AvsVMVolumesClientUpdateResponse", fn(r: http.Response) -> AvsVMVolumesClientUpdateResponse ! Str { avs_vm_volumes_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AvsVMVolumesClientUpdateResponse", fn(r: http.Response) -> AvsVMVolumesClientUpdateResponse ! Str { avs_vm_volumes_update_handle(r) }, traced: true)
 }
 
 /// AvsVMVolumesClientBeginDeleteOptions: the optional parameters of AvsVMVolumesClient.begin_delete.
@@ -217,12 +222,14 @@ fn (c: AvsVMVolumesClient) delete_create_request(resource_group_name: Str, stora
 /// Delete a volume in an AVS VM
 pub fn (c: AvsVMVolumesClient[fx]) begin_delete(resource_group_name: Str, storage_pool_name: Str, avs_vm_id: Str, volume_id: Str, options: AvsVMVolumesClientBeginDeleteOptions = AvsVMVolumesClientBeginDeleteOptions{}) -> runtime.Poller[AvsVMVolumesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AvsVMVolumesClientDeleteResponse", fn(r: http.Response) -> AvsVMVolumesClientDeleteResponse ! Str { avs_vm_volumes_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AvsVMVolumesClientDeleteResponse", fn(r: http.Response) -> AvsVMVolumesClientDeleteResponse ! Str { avs_vm_volumes_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AvsVMVolumesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, storage_pool_name, avs_vm_id, volume_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AvsVMVolumesClientDeleteResponse", fn(r: http.Response) -> AvsVMVolumesClientDeleteResponse ! Str { avs_vm_volumes_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AvsVMVolumesClientDeleteResponse", fn(r: http.Response) -> AvsVMVolumesClientDeleteResponse ! Str { avs_vm_volumes_delete_handle(r) }, traced: true)
 }

@@ -65,7 +65,7 @@ fn (c: InstanceHistoriesClient) list_by_instance_create_request(resource_group_n
 /// List InstanceHistory Resources
 pub fn (c: InstanceHistoriesClient[fx]) new_list_by_instance_pager(resource_group_name: Str, target_name: Str, solution_name: Str, instance_name: Str, options: InstanceHistoriesClientListByInstanceOptions = InstanceHistoriesClientListByInstanceOptions{}) -> runtime.Pager[InstanceHistoriesClientListByInstanceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_instance_create_request(resource_group_name, target_name, solution_name, instance_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InstanceHistoriesClientListByInstanceResponse ! Str { instance_histories_list_by_instance_handle(r) }, c.setup.endpoint, fn(r: InstanceHistoriesClientListByInstanceResponse) -> Str? { r.instance_history_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InstanceHistoriesClientListByInstanceResponse ! Str { instance_histories_list_by_instance_handle(r) }, c.setup.endpoint, fn(r: InstanceHistoriesClientListByInstanceResponse) -> Str? { r.instance_history_list_result.next_link }).traced_as("InstanceHistoriesClientListByInstanceResponse"))
 }
 
 /// InstanceHistoriesClientGetOptions: the optional parameters of InstanceHistoriesClient.get.
@@ -115,10 +115,13 @@ fn (c: InstanceHistoriesClient) get_create_request(resource_group_name: Str, tar
 
 /// Get InstanceHistory Resource
 pub fn (c: InstanceHistoriesClient) get(resource_group_name: Str, target_name: Str, solution_name: Str, instance_name: Str, instance_history_name: Str, options: InstanceHistoriesClientGetOptions = InstanceHistoriesClientGetOptions{}) -> InstanceHistoriesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, target_name, solution_name, instance_name, instance_history_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstanceHistoriesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, target_name, solution_name, instance_name, instance_history_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  instance_histories_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = instance_histories_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

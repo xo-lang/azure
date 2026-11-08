@@ -65,7 +65,7 @@ fn (c: DevicesClient) list_by_device_group_create_request(resource_group_name: S
 /// List Device resources by DeviceGroup. '.default' and '.unassigned' are system defined values and cannot be used for product or device group name.
 pub fn (c: DevicesClient[fx]) new_list_by_device_group_pager(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, options: DevicesClientListByDeviceGroupOptions = DevicesClientListByDeviceGroupOptions{}) -> runtime.Pager[DevicesClientListByDeviceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_device_group_create_request(resource_group_name, catalog_name, product_name, device_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DevicesClientListByDeviceGroupResponse ! Str { devices_list_by_device_group_handle(r) }, fn(r: DevicesClientListByDeviceGroupResponse) -> Str? { r.device_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DevicesClientListByDeviceGroupResponse ! Str { devices_list_by_device_group_handle(r) }, fn(r: DevicesClientListByDeviceGroupResponse) -> Str? { r.device_list_result.next_link }).traced_as("DevicesClientListByDeviceGroupResponse"))
 }
 
 /// DevicesClientGetOptions: the optional parameters of DevicesClient.get.
@@ -115,12 +115,15 @@ fn (c: DevicesClient) get_create_request(resource_group_name: Str, catalog_name:
 
 /// Get a Device. Use '.unassigned' or '.default' for the device group and product names when a device does not belong to a device group and product.
 pub fn (c: DevicesClient) get(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, device_name: Str, options: DevicesClientGetOptions = DevicesClientGetOptions{}) -> DevicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DevicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  devices_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = devices_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DevicesClientBeginCreateOrUpdateOptions: the optional parameters of DevicesClient.begin_create_or_update.
@@ -175,14 +178,16 @@ fn (c: DevicesClient) create_or_update_create_request(resource_group_name: Str, 
 /// Create a Device. Use '.unassigned' or '.default' for the device group and product names to claim a device to the catalog only.
 pub fn (c: DevicesClient[fx]) begin_create_or_update(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, device_name: Str, resource: Device, options: DevicesClientBeginCreateOrUpdateOptions = DevicesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DevicesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DevicesClientCreateOrUpdateResponse ! Str { devices_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DevicesClientCreateOrUpdateResponse ! Str { devices_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DevicesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DevicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DevicesClientCreateOrUpdateResponse ! Str { devices_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DevicesClientCreateOrUpdateResponse", fn(r: http.Response) -> DevicesClientCreateOrUpdateResponse ! Str { devices_create_or_update_handle(r) }, traced: true)
 }
 
 /// DevicesClientBeginUpdateOptions: the optional parameters of DevicesClient.begin_update.
@@ -237,14 +242,16 @@ fn (c: DevicesClient) update_create_request(resource_group_name: Str, catalog_na
 /// Update a Device. Use '.unassigned' or '.default' for the device group and product names to move a device to the catalog level.
 pub fn (c: DevicesClient[fx]) begin_update(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, device_name: Str, properties: DeviceUpdate, options: DevicesClientBeginUpdateOptions = DevicesClientBeginUpdateOptions{}) -> runtime.Poller[DevicesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientUpdateResponse", fn(r: http.Response) -> DevicesClientUpdateResponse ! Str { devices_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientUpdateResponse", fn(r: http.Response) -> DevicesClientUpdateResponse ! Str { devices_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DevicesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientUpdateResponse", fn(r: http.Response) -> DevicesClientUpdateResponse ! Str { devices_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientUpdateResponse", fn(r: http.Response) -> DevicesClientUpdateResponse ! Str { devices_update_handle(r) }, traced: true)
 }
 
 /// DevicesClientBeginDeleteOptions: the optional parameters of DevicesClient.begin_delete.
@@ -295,14 +302,16 @@ fn (c: DevicesClient) delete_create_request(resource_group_name: Str, catalog_na
 /// Delete a Device
 pub fn (c: DevicesClient[fx]) begin_delete(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, device_name: Str, options: DevicesClientBeginDeleteOptions = DevicesClientBeginDeleteOptions{}) -> runtime.Poller[DevicesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientDeleteResponse", fn(r: http.Response) -> DevicesClientDeleteResponse ! Str { devices_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientDeleteResponse", fn(r: http.Response) -> DevicesClientDeleteResponse ! Str { devices_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DevicesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientDeleteResponse", fn(r: http.Response) -> DevicesClientDeleteResponse ! Str { devices_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientDeleteResponse", fn(r: http.Response) -> DevicesClientDeleteResponse ! Str { devices_delete_handle(r) }, traced: true)
 }
 
 /// DevicesClientBeginGenerateCapabilityImageOptions: the optional parameters of DevicesClient.begin_generate_capability_image.
@@ -357,12 +366,14 @@ fn (c: DevicesClient) generate_capability_image_create_request(resource_group_na
 /// Generates the capability image for the device. Use '.unassigned' or '.default' for the device group and product names to generate the image for a device that does not belong to a specific device group and product.
 pub fn (c: DevicesClient[fx]) begin_generate_capability_image(resource_group_name: Str, catalog_name: Str, product_name: Str, device_group_name: Str, device_name: Str, generate_device_capability_request: GenerateCapabilityImageRequest, options: DevicesClientBeginGenerateCapabilityImageOptions = DevicesClientBeginGenerateCapabilityImageOptions{}) -> runtime.Poller[DevicesClientGenerateCapabilityImageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientGenerateCapabilityImageResponse", fn(r: http.Response) -> DevicesClientGenerateCapabilityImageResponse ! Str { devices_generate_capability_image_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DevicesClientGenerateCapabilityImageResponse", fn(r: http.Response) -> DevicesClientGenerateCapabilityImageResponse ! Str { devices_generate_capability_image_handle(r) }, traced: true)
   }
-  let req = c.generate_capability_image_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, generate_device_capability_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DevicesClient.BeginGenerateCapabilityImage", c.setup.pipeline.tracer)
+  let req = c.generate_capability_image_create_request(resource_group_name, catalog_name, product_name, device_group_name, device_name, generate_device_capability_request, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientGenerateCapabilityImageResponse", fn(r: http.Response) -> DevicesClientGenerateCapabilityImageResponse ! Str { devices_generate_capability_image_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "DevicesClientGenerateCapabilityImageResponse", fn(r: http.Response) -> DevicesClientGenerateCapabilityImageResponse ! Str { devices_generate_capability_image_handle(r) }, traced: true)
 }

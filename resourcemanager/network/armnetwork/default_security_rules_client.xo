@@ -57,7 +57,7 @@ fn (c: DefaultSecurityRulesClient) list_create_request(resource_group_name: Str,
 /// Gets all default security rules in a network security group.
 pub fn (c: DefaultSecurityRulesClient[fx]) new_list_pager(resource_group_name: Str, network_security_group_name: Str, options: DefaultSecurityRulesClientListOptions = DefaultSecurityRulesClientListOptions{}) -> runtime.Pager[DefaultSecurityRulesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, network_security_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DefaultSecurityRulesClientListResponse ! Str { default_security_rules_list_handle(r) }, c.setup.endpoint, fn(r: DefaultSecurityRulesClientListResponse) -> Str? { r.security_rule_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DefaultSecurityRulesClientListResponse ! Str { default_security_rules_list_handle(r) }, c.setup.endpoint, fn(r: DefaultSecurityRulesClientListResponse) -> Str? { r.security_rule_list_result.next_link }).traced_as("DefaultSecurityRulesClientListResponse"))
 }
 
 /// DefaultSecurityRulesClientGetOptions: the optional parameters of DefaultSecurityRulesClient.get.
@@ -99,10 +99,13 @@ fn (c: DefaultSecurityRulesClient) get_create_request(resource_group_name: Str, 
 
 /// Get the specified default network security rule.
 pub fn (c: DefaultSecurityRulesClient) get(resource_group_name: Str, network_security_group_name: Str, default_security_rule_name: Str, options: DefaultSecurityRulesClientGetOptions = DefaultSecurityRulesClientGetOptions{}) -> DefaultSecurityRulesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_security_group_name, default_security_rule_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DefaultSecurityRulesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_security_group_name, default_security_rule_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  default_security_rules_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = default_security_rules_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

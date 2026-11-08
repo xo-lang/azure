@@ -68,7 +68,7 @@ fn (c: BackupEnginesClient) list_create_request(vault_name: Str, resource_group_
 /// Backup management servers registered to Recovery Services Vault. Returns a pageable list of servers.
 pub fn (c: BackupEnginesClient[fx]) new_list_pager(vault_name: Str, resource_group_name: Str, options: BackupEnginesClientListOptions = BackupEnginesClientListOptions{}) -> runtime.Pager[BackupEnginesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(vault_name, resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BackupEnginesClientListResponse ! Str { backup_engines_list_handle(r) }, c.setup.endpoint, fn(r: BackupEnginesClientListResponse) -> Str? { r.backup_engine_base_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BackupEnginesClientListResponse ! Str { backup_engines_list_handle(r) }, c.setup.endpoint, fn(r: BackupEnginesClientListResponse) -> Str? { r.backup_engine_base_resource_list.next_link }).traced_as("BackupEnginesClientListResponse"))
 }
 
 /// BackupEnginesClientGetOptions: the optional parameters of BackupEnginesClient.get.
@@ -121,10 +121,13 @@ fn (c: BackupEnginesClient) get_create_request(vault_name: Str, resource_group_n
 
 /// Returns backup management server registered to Recovery Services Vault.
 pub fn (c: BackupEnginesClient) get(vault_name: Str, resource_group_name: Str, backup_engine_name: Str, options: BackupEnginesClientGetOptions = BackupEnginesClientGetOptions{}) -> BackupEnginesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(vault_name, resource_group_name, backup_engine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BackupEnginesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(vault_name, resource_group_name, backup_engine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  backup_engines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = backup_engines_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

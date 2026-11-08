@@ -45,7 +45,7 @@ fn (c: CompliancesClient) list_create_request(scope: Str, options: CompliancesCl
 /// The Compliance scores of the specific management group.
 pub fn (c: CompliancesClient[fx]) new_list_pager(scope: Str, options: CompliancesClientListOptions = CompliancesClientListOptions{}) -> runtime.Pager[CompliancesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(scope, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CompliancesClientListResponse ! Str { compliances_list_handle(r) }, c.setup.endpoint, fn(r: CompliancesClientListResponse) -> Str? { r.compliance_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CompliancesClientListResponse ! Str { compliances_list_handle(r) }, c.setup.endpoint, fn(r: CompliancesClientListResponse) -> Str? { r.compliance_list.next_link }).traced_as("CompliancesClientListResponse"))
 }
 
 /// CompliancesClientGetOptions: the optional parameters of CompliancesClient.get.
@@ -76,10 +76,13 @@ fn (c: CompliancesClient) get_create_request(scope: Str, compliance_name: Str, o
 
 /// Details of a specific Compliance.
 pub fn (c: CompliancesClient) get(scope: Str, compliance_name: Str, options: CompliancesClientGetOptions = CompliancesClientGetOptions{}) -> CompliancesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(scope, compliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CompliancesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(scope, compliance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  compliances_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = compliances_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

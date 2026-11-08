@@ -57,7 +57,7 @@ fn (c: ManagedCertificatesClient) list_create_request(resource_group_name: Str, 
 /// Get the Managed Certificates in a given managed environment.
 pub fn (c: ManagedCertificatesClient[fx]) new_list_pager(resource_group_name: Str, environment_name: Str, options: ManagedCertificatesClientListOptions = ManagedCertificatesClientListOptions{}) -> runtime.Pager[ManagedCertificatesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, environment_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedCertificatesClientListResponse ! Str { managed_certificates_list_handle(r) }, c.setup.endpoint, fn(r: ManagedCertificatesClientListResponse) -> Str? { r.managed_certificate_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedCertificatesClientListResponse ! Str { managed_certificates_list_handle(r) }, c.setup.endpoint, fn(r: ManagedCertificatesClientListResponse) -> Str? { r.managed_certificate_collection.next_link }).traced_as("ManagedCertificatesClientListResponse"))
 }
 
 /// ManagedCertificatesClientGetOptions: the optional parameters of ManagedCertificatesClient.get.
@@ -99,12 +99,15 @@ fn (c: ManagedCertificatesClient) get_create_request(resource_group_name: Str, e
 
 /// Get the specified Managed Certificate.
 pub fn (c: ManagedCertificatesClient) get(resource_group_name: Str, environment_name: Str, managed_certificate_name: Str, options: ManagedCertificatesClientGetOptions = ManagedCertificatesClientGetOptions{}) -> ManagedCertificatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, environment_name, managed_certificate_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedCertificatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, environment_name, managed_certificate_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  managed_certificates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = managed_certificates_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ManagedCertificatesClientBeginCreateOrUpdateOptions: the optional parameters of ManagedCertificatesClient.begin_create_or_update.
@@ -151,14 +154,16 @@ fn (c: ManagedCertificatesClient) create_or_update_create_request(resource_group
 /// Create or Update a Managed Certificate.
 pub fn (c: ManagedCertificatesClient[fx]) begin_create_or_update(resource_group_name: Str, environment_name: Str, managed_certificate_name: Str, managed_certificate_envelope: ManagedCertificate, options: ManagedCertificatesClientBeginCreateOrUpdateOptions = ManagedCertificatesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ManagedCertificatesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedCertificatesClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedCertificatesClientCreateOrUpdateResponse ! Str { managed_certificates_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedCertificatesClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedCertificatesClientCreateOrUpdateResponse ! Str { managed_certificates_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, environment_name, managed_certificate_name, managed_certificate_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedCertificatesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, environment_name, managed_certificate_name, managed_certificate_envelope, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedCertificatesClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedCertificatesClientCreateOrUpdateResponse ! Str { managed_certificates_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedCertificatesClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedCertificatesClientCreateOrUpdateResponse ! Str { managed_certificates_create_or_update_handle(r) }, traced: true)
 }
 
 /// ManagedCertificatesClientUpdateOptions: the optional parameters of ManagedCertificatesClient.update.
@@ -201,12 +206,15 @@ fn (c: ManagedCertificatesClient) update_create_request(resource_group_name: Str
 
 /// Patches a managed certificate. Oly patching of tags is supported
 pub fn (c: ManagedCertificatesClient) update(resource_group_name: Str, environment_name: Str, managed_certificate_name: Str, managed_certificate_envelope: ManagedCertificatePatch, options: ManagedCertificatesClientUpdateOptions = ManagedCertificatesClientUpdateOptions{}) -> ManagedCertificatesClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, environment_name, managed_certificate_name, managed_certificate_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedCertificatesClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, environment_name, managed_certificate_name, managed_certificate_envelope, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  managed_certificates_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = managed_certificates_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ManagedCertificatesClientDeleteOptions: the optional parameters of ManagedCertificatesClient.delete.
@@ -245,10 +253,13 @@ fn (c: ManagedCertificatesClient) delete_create_request(resource_group_name: Str
 
 /// Deletes the specified Managed Certificate.
 pub fn (c: ManagedCertificatesClient) delete(resource_group_name: Str, environment_name: Str, managed_certificate_name: Str, options: ManagedCertificatesClientDeleteOptions = ManagedCertificatesClientDeleteOptions{}) -> ManagedCertificatesClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, environment_name, managed_certificate_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedCertificatesClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, environment_name, managed_certificate_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  managed_certificates_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = managed_certificates_delete_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

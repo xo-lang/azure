@@ -61,7 +61,7 @@ fn (c: ContainersClient) list_by_storage_account_create_request(device_name: Str
 /// Lists all the containers of a storage Account in a Data Box Edge/Data Box Gateway device.
 pub fn (c: ContainersClient[fx]) new_list_by_storage_account_pager(device_name: Str, storage_account_name: Str, resource_group_name: Str, options: ContainersClientListByStorageAccountOptions = ContainersClientListByStorageAccountOptions{}) -> runtime.Pager[ContainersClientListByStorageAccountResponse, fx] ! azcore.CallErr {
   let req = c.list_by_storage_account_create_request(device_name, storage_account_name, resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainersClientListByStorageAccountResponse ! Str { containers_list_by_storage_account_handle(r) }, c.setup.endpoint, fn(r: ContainersClientListByStorageAccountResponse) -> Str? { r.container_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainersClientListByStorageAccountResponse ! Str { containers_list_by_storage_account_handle(r) }, c.setup.endpoint, fn(r: ContainersClientListByStorageAccountResponse) -> Str? { r.container_list.next_link }).traced_as("ContainersClientListByStorageAccountResponse"))
 }
 
 /// ContainersClientGetOptions: the optional parameters of ContainersClient.get.
@@ -107,12 +107,15 @@ fn (c: ContainersClient) get_create_request(device_name: Str, storage_account_na
 
 /// Gets a container by name.
 pub fn (c: ContainersClient) get(device_name: Str, storage_account_name: Str, container_name: Str, resource_group_name: Str, options: ContainersClientGetOptions = ContainersClientGetOptions{}) -> ContainersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(device_name, storage_account_name, container_name, resource_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(device_name, storage_account_name, container_name, resource_group_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  containers_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = containers_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainersClientBeginCreateOrUpdateOptions: the optional parameters of ContainersClient.begin_create_or_update.
@@ -163,14 +166,16 @@ fn (c: ContainersClient) create_or_update_create_request(device_name: Str, stora
 /// Creates a new container or updates an existing container on the device.
 pub fn (c: ContainersClient[fx]) begin_create_or_update(device_name: Str, storage_account_name: Str, container_name: Str, resource_group_name: Str, container: Container, options: ContainersClientBeginCreateOrUpdateOptions = ContainersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ContainersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainersClientCreateOrUpdateResponse ! Str { containers_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainersClientCreateOrUpdateResponse ! Str { containers_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(device_name, storage_account_name, container_name, resource_group_name, container, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(device_name, storage_account_name, container_name, resource_group_name, container, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainersClientCreateOrUpdateResponse ! Str { containers_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainersClientCreateOrUpdateResponse ! Str { containers_create_or_update_handle(r) }, traced: true)
 }
 
 /// ContainersClientBeginDeleteOptions: the optional parameters of ContainersClient.begin_delete.
@@ -217,14 +222,16 @@ fn (c: ContainersClient) delete_create_request(device_name: Str, storage_account
 /// Deletes the container on the Data Box Edge/Data Box Gateway device.
 pub fn (c: ContainersClient[fx]) begin_delete(device_name: Str, storage_account_name: Str, container_name: Str, resource_group_name: Str, options: ContainersClientBeginDeleteOptions = ContainersClientBeginDeleteOptions{}) -> runtime.Poller[ContainersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientDeleteResponse", fn(r: http.Response) -> ContainersClientDeleteResponse ! Str { containers_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientDeleteResponse", fn(r: http.Response) -> ContainersClientDeleteResponse ! Str { containers_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(device_name, storage_account_name, container_name, resource_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(device_name, storage_account_name, container_name, resource_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientDeleteResponse", fn(r: http.Response) -> ContainersClientDeleteResponse ! Str { containers_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientDeleteResponse", fn(r: http.Response) -> ContainersClientDeleteResponse ! Str { containers_delete_handle(r) }, traced: true)
 }
 
 /// ContainersClientBeginRefreshOptions: the optional parameters of ContainersClient.begin_refresh.
@@ -271,12 +278,14 @@ fn (c: ContainersClient) refresh_create_request(device_name: Str, storage_accoun
 /// Refreshes the container metadata with the data from the cloud.
 pub fn (c: ContainersClient[fx]) begin_refresh(device_name: Str, storage_account_name: Str, container_name: Str, resource_group_name: Str, options: ContainersClientBeginRefreshOptions = ContainersClientBeginRefreshOptions{}) -> runtime.Poller[ContainersClientRefreshResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientRefreshResponse", fn(r: http.Response) -> ContainersClientRefreshResponse ! Str { containers_refresh_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainersClientRefreshResponse", fn(r: http.Response) -> ContainersClientRefreshResponse ! Str { containers_refresh_handle(r) }, traced: true)
   }
-  let req = c.refresh_create_request(device_name, storage_account_name, container_name, resource_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainersClient.BeginRefresh", c.setup.pipeline.tracer)
+  let req = c.refresh_create_request(device_name, storage_account_name, container_name, resource_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientRefreshResponse", fn(r: http.Response) -> ContainersClientRefreshResponse ! Str { containers_refresh_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainersClientRefreshResponse", fn(r: http.Response) -> ContainersClientRefreshResponse ! Str { containers_refresh_handle(r) }, traced: true)
 }

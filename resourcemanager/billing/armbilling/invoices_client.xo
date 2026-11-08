@@ -94,7 +94,7 @@ fn (c: InvoicesClient) list_by_billing_profile_create_request(billing_account_na
 /// Lists the invoices for a billing profile for a given start date and end date. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) new_list_by_billing_profile_pager(billing_account_name: Str, billing_profile_name: Str, options: InvoicesClientListByBillingProfileOptions = InvoicesClientListByBillingProfileOptions{}) -> runtime.Pager[InvoicesClientListByBillingProfileResponse, fx] ! azcore.CallErr {
   let req = c.list_by_billing_profile_create_request(billing_account_name, billing_profile_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingProfileResponse ! Str { invoices_list_by_billing_profile_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingProfileResponse) -> Str? { r.invoice_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingProfileResponse ! Str { invoices_list_by_billing_profile_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingProfileResponse) -> Str? { r.invoice_list_result.next_link }).traced_as("InvoicesClientListByBillingProfileResponse"))
 }
 
 /// InvoicesClientBeginDownloadDocumentsByBillingAccountOptions: the optional parameters of InvoicesClient.begin_download_documents_by_billing_account.
@@ -129,14 +129,16 @@ fn (c: InvoicesClient) download_documents_by_billing_account_create_request(bill
 /// Gets a URL to download multiple invoice documents (invoice pdf, tax receipts, credit notes) as a zip file. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) begin_download_documents_by_billing_account(billing_account_name: Str, parameters: List[DocumentDownloadRequest], options: InvoicesClientBeginDownloadDocumentsByBillingAccountOptions = InvoicesClientBeginDownloadDocumentsByBillingAccountOptions{}) -> runtime.Poller[InvoicesClientDownloadDocumentsByBillingAccountResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadDocumentsByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingAccountResponse ! Str { invoices_download_documents_by_billing_account_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadDocumentsByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingAccountResponse ! Str { invoices_download_documents_by_billing_account_handle(r) }, traced: true)
   }
-  let req = c.download_documents_by_billing_account_create_request(billing_account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginDownloadDocumentsByBillingAccount", c.setup.pipeline.tracer)
+  let req = c.download_documents_by_billing_account_create_request(billing_account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadDocumentsByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingAccountResponse ! Str { invoices_download_documents_by_billing_account_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadDocumentsByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingAccountResponse ! Str { invoices_download_documents_by_billing_account_handle(r) }, traced: true)
 }
 
 /// InvoicesClientListByBillingAccountOptions: the optional parameters of InvoicesClient.new_list_by_billing_account_pager.
@@ -208,7 +210,7 @@ fn (c: InvoicesClient) list_by_billing_account_create_request(billing_account_na
 /// Lists the invoices for a billing account for a given start date and end date. The operation is supported for all billing account types.
 pub fn (c: InvoicesClient[fx]) new_list_by_billing_account_pager(billing_account_name: Str, options: InvoicesClientListByBillingAccountOptions = InvoicesClientListByBillingAccountOptions{}) -> runtime.Pager[InvoicesClientListByBillingAccountResponse, fx] ! azcore.CallErr {
   let req = c.list_by_billing_account_create_request(billing_account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingAccountResponse ! Str { invoices_list_by_billing_account_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingAccountResponse) -> Str? { r.invoice_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingAccountResponse ! Str { invoices_list_by_billing_account_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingAccountResponse) -> Str? { r.invoice_list_result.next_link }).traced_as("InvoicesClientListByBillingAccountResponse"))
 }
 
 /// InvoicesClientGetByBillingAccountOptions: the optional parameters of InvoicesClient.get_by_billing_account.
@@ -242,12 +244,15 @@ fn (c: InvoicesClient) get_by_billing_account_create_request(billing_account_nam
 
 /// Gets an invoice by billing account name and ID. The operation is supported for all billing account types.
 pub fn (c: InvoicesClient) get_by_billing_account(billing_account_name: Str, invoice_name: Str, options: InvoicesClientGetByBillingAccountOptions = InvoicesClientGetByBillingAccountOptions{}) -> InvoicesClientGetByBillingAccountResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_by_billing_account_create_request(billing_account_name, invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.GetByBillingAccount", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_by_billing_account_create_request(billing_account_name, invoice_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  invoices_get_by_billing_account_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = invoices_get_by_billing_account_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InvoicesClientBeginAmendOptions: the optional parameters of InvoicesClient.begin_amend.
@@ -282,14 +287,16 @@ fn (c: InvoicesClient) amend_create_request(billing_account_name: Str, invoice_n
 /// Regenerate an invoice by billing account name and invoice name. The operation is supported for billing accounts with agreement type Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) begin_amend(billing_account_name: Str, invoice_name: Str, options: InvoicesClientBeginAmendOptions = InvoicesClientBeginAmendOptions{}) -> runtime.Poller[InvoicesClientAmendResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientAmendResponse", fn(r: http.Response) -> InvoicesClientAmendResponse ! Str { invoices_amend_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientAmendResponse", fn(r: http.Response) -> InvoicesClientAmendResponse ! Str { invoices_amend_handle(r) }, traced: true)
   }
-  let req = c.amend_create_request(billing_account_name, invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginAmend", c.setup.pipeline.tracer)
+  let req = c.amend_create_request(billing_account_name, invoice_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientAmendResponse", fn(r: http.Response) -> InvoicesClientAmendResponse ! Str { invoices_amend_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientAmendResponse", fn(r: http.Response) -> InvoicesClientAmendResponse ! Str { invoices_amend_handle(r) }, traced: true)
 }
 
 /// InvoicesClientBeginDownloadByBillingAccountOptions: the optional parameters of InvoicesClient.begin_download_by_billing_account.
@@ -332,14 +339,16 @@ fn (c: InvoicesClient) download_by_billing_account_create_request(billing_accoun
 /// Gets a URL to download an invoice document. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement, Microsoft Customer Agreement or Enterprise Agreement.
 pub fn (c: InvoicesClient[fx]) begin_download_by_billing_account(billing_account_name: Str, invoice_name: Str, options: InvoicesClientBeginDownloadByBillingAccountOptions = InvoicesClientBeginDownloadByBillingAccountOptions{}) -> runtime.Poller[InvoicesClientDownloadByBillingAccountResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingAccountResponse ! Str { invoices_download_by_billing_account_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingAccountResponse ! Str { invoices_download_by_billing_account_handle(r) }, traced: true)
   }
-  let req = c.download_by_billing_account_create_request(billing_account_name, invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginDownloadByBillingAccount", c.setup.pipeline.tracer)
+  let req = c.download_by_billing_account_create_request(billing_account_name, invoice_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingAccountResponse ! Str { invoices_download_by_billing_account_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingAccountResponse ! Str { invoices_download_by_billing_account_handle(r) }, traced: true)
 }
 
 /// InvoicesClientBeginDownloadSummaryByBillingAccountOptions: the optional parameters of InvoicesClient.begin_download_summary_by_billing_account.
@@ -377,14 +386,16 @@ fn (c: InvoicesClient) download_summary_by_billing_account_create_request(billin
 /// Gets a URL to download the summary document for an invoice. The operation is supported for billing accounts with agreement type Enterprise Agreement.
 pub fn (c: InvoicesClient[fx]) begin_download_summary_by_billing_account(billing_account_name: Str, invoice_name: Str, options: InvoicesClientBeginDownloadSummaryByBillingAccountOptions = InvoicesClientBeginDownloadSummaryByBillingAccountOptions{}) -> runtime.Poller[InvoicesClientDownloadSummaryByBillingAccountResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadSummaryByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadSummaryByBillingAccountResponse ! Str { invoices_download_summary_by_billing_account_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadSummaryByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadSummaryByBillingAccountResponse ! Str { invoices_download_summary_by_billing_account_handle(r) }, traced: true)
   }
-  let req = c.download_summary_by_billing_account_create_request(billing_account_name, invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginDownloadSummaryByBillingAccount", c.setup.pipeline.tracer)
+  let req = c.download_summary_by_billing_account_create_request(billing_account_name, invoice_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadSummaryByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadSummaryByBillingAccountResponse ! Str { invoices_download_summary_by_billing_account_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadSummaryByBillingAccountResponse", fn(r: http.Response) -> InvoicesClientDownloadSummaryByBillingAccountResponse ! Str { invoices_download_summary_by_billing_account_handle(r) }, traced: true)
 }
 
 /// InvoicesClientBeginDownloadDocumentsByBillingSubscriptionOptions: the optional parameters of InvoicesClient.begin_download_documents_by_billing_subscription.
@@ -419,14 +430,16 @@ fn (c: InvoicesClient) download_documents_by_billing_subscription_create_request
 /// Gets a URL to download multiple invoice documents (invoice pdf, tax receipts, credit notes) as a zip file. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) begin_download_documents_by_billing_subscription(parameters: List[DocumentDownloadRequest], options: InvoicesClientBeginDownloadDocumentsByBillingSubscriptionOptions = InvoicesClientBeginDownloadDocumentsByBillingSubscriptionOptions{}) -> runtime.Poller[InvoicesClientDownloadDocumentsByBillingSubscriptionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadDocumentsByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingSubscriptionResponse ! Str { invoices_download_documents_by_billing_subscription_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadDocumentsByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingSubscriptionResponse ! Str { invoices_download_documents_by_billing_subscription_handle(r) }, traced: true)
   }
-  let req = c.download_documents_by_billing_subscription_create_request(parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginDownloadDocumentsByBillingSubscription", c.setup.pipeline.tracer)
+  let req = c.download_documents_by_billing_subscription_create_request(parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadDocumentsByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingSubscriptionResponse ! Str { invoices_download_documents_by_billing_subscription_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadDocumentsByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadDocumentsByBillingSubscriptionResponse ! Str { invoices_download_documents_by_billing_subscription_handle(r) }, traced: true)
 }
 
 /// InvoicesClientListByBillingSubscriptionOptions: the optional parameters of InvoicesClient.new_list_by_billing_subscription_pager.
@@ -498,7 +511,7 @@ fn (c: InvoicesClient) list_by_billing_subscription_create_request(options: Invo
 /// Lists the invoices for a subscription. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) new_list_by_billing_subscription_pager(options: InvoicesClientListByBillingSubscriptionOptions = InvoicesClientListByBillingSubscriptionOptions{}) -> runtime.Pager[InvoicesClientListByBillingSubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_billing_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingSubscriptionResponse ! Str { invoices_list_by_billing_subscription_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingSubscriptionResponse) -> Str? { r.invoice_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InvoicesClientListByBillingSubscriptionResponse ! Str { invoices_list_by_billing_subscription_handle(r) }, c.setup.endpoint, fn(r: InvoicesClientListByBillingSubscriptionResponse) -> Str? { r.invoice_list_result.next_link }).traced_as("InvoicesClientListByBillingSubscriptionResponse"))
 }
 
 /// InvoicesClientGetByBillingSubscriptionOptions: the optional parameters of InvoicesClient.get_by_billing_subscription.
@@ -532,12 +545,15 @@ fn (c: InvoicesClient) get_by_billing_subscription_create_request(invoice_name: 
 
 /// Gets an invoice by subscription ID and invoice ID. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient) get_by_billing_subscription(invoice_name: Str, options: InvoicesClientGetByBillingSubscriptionOptions = InvoicesClientGetByBillingSubscriptionOptions{}) -> InvoicesClientGetByBillingSubscriptionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_by_billing_subscription_create_request(invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.GetByBillingSubscription", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_by_billing_subscription_create_request(invoice_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  invoices_get_by_billing_subscription_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = invoices_get_by_billing_subscription_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InvoicesClientBeginDownloadByBillingSubscriptionOptions: the optional parameters of InvoicesClient.begin_download_by_billing_subscription.
@@ -580,14 +596,16 @@ fn (c: InvoicesClient) download_by_billing_subscription_create_request(invoice_n
 /// Gets a URL to download an invoice by billing subscription. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient[fx]) begin_download_by_billing_subscription(invoice_name: Str, options: InvoicesClientBeginDownloadByBillingSubscriptionOptions = InvoicesClientBeginDownloadByBillingSubscriptionOptions{}) -> runtime.Poller[InvoicesClientDownloadByBillingSubscriptionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingSubscriptionResponse ! Str { invoices_download_by_billing_subscription_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InvoicesClientDownloadByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingSubscriptionResponse ! Str { invoices_download_by_billing_subscription_handle(r) }, traced: true)
   }
-  let req = c.download_by_billing_subscription_create_request(invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.BeginDownloadByBillingSubscription", c.setup.pipeline.tracer)
+  let req = c.download_by_billing_subscription_create_request(invoice_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingSubscriptionResponse ! Str { invoices_download_by_billing_subscription_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InvoicesClientDownloadByBillingSubscriptionResponse", fn(r: http.Response) -> InvoicesClientDownloadByBillingSubscriptionResponse ! Str { invoices_download_by_billing_subscription_handle(r) }, traced: true)
 }
 
 /// InvoicesClientGetOptions: the optional parameters of InvoicesClient.get.
@@ -617,10 +635,13 @@ fn (c: InvoicesClient) get_create_request(invoice_name: Str, options: InvoicesCl
 
 /// Gets an invoice by ID. The operation is supported for billing accounts with agreement type Microsoft Partner Agreement or Microsoft Customer Agreement.
 pub fn (c: InvoicesClient) get(invoice_name: Str, options: InvoicesClientGetOptions = InvoicesClientGetOptions{}) -> InvoicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(invoice_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InvoicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(invoice_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  invoices_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = invoices_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

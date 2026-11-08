@@ -44,7 +44,7 @@ fn (c: ServicesClient) list_create_request(options: ServicesClientListOptions) -
 /// Lists all the Azure services available for support ticket creation. For **Technical** issues, select the Service Id that maps to the Azure service/product as displayed in the **Services** drop-down list on the Azure portal's [New support request](https://portal.azure.com/#blade/Microsoft_Azure_Support/HelpAndSupportBlade/overview) page. Always use the service and its corresponding problem classification(s) obtained programmatically for support ticket creation. This practice ensures that you always have the most recent set of service and problem classification Ids.
 pub fn (c: ServicesClient[fx]) new_list_pager(options: ServicesClientListOptions = ServicesClientListOptions{}) -> runtime.Pager[ServicesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicesClientListResponse ! Str { services_list_handle(r) }, c.setup.endpoint, fn(r: ServicesClientListResponse) -> Str? { r.services_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicesClientListResponse ! Str { services_list_handle(r) }, c.setup.endpoint, fn(r: ServicesClientListResponse) -> Str? { r.services_list_result.next_link }).traced_as("ServicesClientListResponse"))
 }
 
 /// ServicesClientGetOptions: the optional parameters of ServicesClient.get.
@@ -74,10 +74,13 @@ fn (c: ServicesClient) get_create_request(service_name: Str, options: ServicesCl
 
 /// Gets a specific Azure service for support ticket creation.
 pub fn (c: ServicesClient) get(service_name: Str, options: ServicesClientGetOptions = ServicesClientGetOptions{}) -> ServicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(service_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  services_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = services_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

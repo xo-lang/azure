@@ -63,7 +63,7 @@ fn (c: CustomizationPoliciesClient) list_create_request(region_id: Str, pc_name:
 /// Returns list of customization policies in region for private cloud
 pub fn (c: CustomizationPoliciesClient[fx]) new_list_pager(region_id: Str, pc_name: Str, options: CustomizationPoliciesClientListOptions = CustomizationPoliciesClientListOptions{}) -> runtime.Pager[CustomizationPoliciesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(region_id, pc_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CustomizationPoliciesClientListResponse ! Str { customization_policies_list_handle(r) }, fn(r: CustomizationPoliciesClientListResponse) -> Str? { r.customization_policies_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> CustomizationPoliciesClientListResponse ! Str { customization_policies_list_handle(r) }, fn(r: CustomizationPoliciesClientListResponse) -> Str? { r.customization_policies_list_response.next_link }).traced_as("CustomizationPoliciesClientListResponse"))
 }
 
 /// CustomizationPoliciesClientGetOptions: the optional parameters of CustomizationPoliciesClient.get.
@@ -105,10 +105,13 @@ fn (c: CustomizationPoliciesClient) get_create_request(region_id: Str, pc_name: 
 
 /// Returns customization policy by its name
 pub fn (c: CustomizationPoliciesClient) get(region_id: Str, pc_name: Str, customization_policy_name: Str, options: CustomizationPoliciesClientGetOptions = CustomizationPoliciesClientGetOptions{}) -> CustomizationPoliciesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(region_id, pc_name, customization_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CustomizationPoliciesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(region_id, pc_name, customization_policy_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  customization_policies_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = customization_policies_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

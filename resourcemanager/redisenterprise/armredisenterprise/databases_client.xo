@@ -57,7 +57,7 @@ fn (c: DatabasesClient) list_by_cluster_create_request(resource_group_name: Str,
 /// Gets all databases in the specified Redis Enterprise cluster.
 pub fn (c: DatabasesClient[fx]) new_list_by_cluster_pager(resource_group_name: Str, cluster_name: Str, options: DatabasesClientListByClusterOptions = DatabasesClientListByClusterOptions{}) -> runtime.Pager[DatabasesClientListByClusterResponse, fx] ! azcore.CallErr {
   let req = c.list_by_cluster_create_request(resource_group_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByClusterResponse ! Str { databases_list_by_cluster_handle(r) }, c.setup.endpoint, fn(r: DatabasesClientListByClusterResponse) -> Str? { r.database_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByClusterResponse ! Str { databases_list_by_cluster_handle(r) }, c.setup.endpoint, fn(r: DatabasesClientListByClusterResponse) -> Str? { r.database_list.next_link }).traced_as("DatabasesClientListByClusterResponse"))
 }
 
 /// DatabasesClientGetOptions: the optional parameters of DatabasesClient.get.
@@ -99,12 +99,15 @@ fn (c: DatabasesClient) get_create_request(resource_group_name: Str, cluster_nam
 
 /// Gets information about a database in a Redis Enterprise cluster.
 pub fn (c: DatabasesClient) get(resource_group_name: Str, cluster_name: Str, database_name: Str, options: DatabasesClientGetOptions = DatabasesClientGetOptions{}) -> DatabasesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, database_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  databases_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = databases_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabasesClientBeginCreateOptions: the optional parameters of DatabasesClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: DatabasesClient) create_create_request(resource_group_name: Str, cluster_
 /// Creates a database
 pub fn (c: DatabasesClient[fx]) begin_create(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: Database, options: DatabasesClientBeginCreateOptions = DatabasesClientBeginCreateOptions{}) -> runtime.Poller[DatabasesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientCreateResponse", fn(r: http.Response) -> DatabasesClientCreateResponse ! Str { databases_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientCreateResponse", fn(r: http.Response) -> DatabasesClientCreateResponse ! Str { databases_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "DatabasesClientCreateResponse", fn(r: http.Response) -> DatabasesClientCreateResponse ! Str { databases_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "DatabasesClientCreateResponse", fn(r: http.Response) -> DatabasesClientCreateResponse ! Str { databases_create_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginUpdateOptions: the optional parameters of DatabasesClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: DatabasesClient) update_create_request(resource_group_name: Str, cluster_
 /// Updates a database
 pub fn (c: DatabasesClient[fx]) begin_update(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: DatabaseUpdate, options: DatabasesClientBeginUpdateOptions = DatabasesClientBeginUpdateOptions{}) -> runtime.Poller[DatabasesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginDeleteOptions: the optional parameters of DatabasesClient.begin_delete.
@@ -255,14 +262,16 @@ fn (c: DatabasesClient) delete_create_request(resource_group_name: Str, cluster_
 /// Deletes a single database
 pub fn (c: DatabasesClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, database_name: Str, options: DatabasesClientBeginDeleteOptions = DatabasesClientBeginDeleteOptions{}) -> runtime.Poller[DatabasesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginExportOptions: the optional parameters of DatabasesClient.begin_export.
@@ -306,14 +315,16 @@ fn (c: DatabasesClient) export_create_request(resource_group_name: Str, cluster_
 /// Exports a database file from target database.
 pub fn (c: DatabasesClient[fx]) begin_export(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: ExportClusterParameters, options: DatabasesClientBeginExportOptions = DatabasesClientBeginExportOptions{}) -> runtime.Poller[DatabasesClientExportResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) }, traced: true)
   }
-  let req = c.export_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginExport", c.setup.pipeline.tracer)
+  let req = c.export_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginFlushOptions: the optional parameters of DatabasesClient.begin_flush.
@@ -363,14 +374,16 @@ fn (c: DatabasesClient) flush_create_request(resource_group_name: Str, cluster_n
 /// Flushes all the keys in this database and also from its linked databases.
 pub fn (c: DatabasesClient[fx]) begin_flush(resource_group_name: Str, cluster_name: Str, database_name: Str, options: DatabasesClientBeginFlushOptions = DatabasesClientBeginFlushOptions{}) -> runtime.Poller[DatabasesClientFlushResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientFlushResponse", fn(r: http.Response) -> DatabasesClientFlushResponse ! Str { databases_flush_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientFlushResponse", fn(r: http.Response) -> DatabasesClientFlushResponse ! Str { databases_flush_handle(r) }, traced: true)
   }
-  let req = c.flush_create_request(resource_group_name, cluster_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginFlush", c.setup.pipeline.tracer)
+  let req = c.flush_create_request(resource_group_name, cluster_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientFlushResponse", fn(r: http.Response) -> DatabasesClientFlushResponse ! Str { databases_flush_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientFlushResponse", fn(r: http.Response) -> DatabasesClientFlushResponse ! Str { databases_flush_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginForceLinkToReplicationGroupOptions: the optional parameters of DatabasesClient.begin_force_link_to_replication_group.
@@ -414,14 +427,16 @@ fn (c: DatabasesClient) force_link_to_replication_group_create_request(resource_
 /// Forcibly recreates an existing database on the specified cluster, and rejoins it to an existing replication group. **IMPORTANT NOTE:** All data in this database will be discarded, and the database will temporarily be unavailable while rejoining the replication group.
 pub fn (c: DatabasesClient[fx]) begin_force_link_to_replication_group(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: ForceLinkParameters, options: DatabasesClientBeginForceLinkToReplicationGroupOptions = DatabasesClientBeginForceLinkToReplicationGroupOptions{}) -> runtime.Poller[DatabasesClientForceLinkToReplicationGroupResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientForceLinkToReplicationGroupResponse", fn(r: http.Response) -> DatabasesClientForceLinkToReplicationGroupResponse ! Str { databases_force_link_to_replication_group_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientForceLinkToReplicationGroupResponse", fn(r: http.Response) -> DatabasesClientForceLinkToReplicationGroupResponse ! Str { databases_force_link_to_replication_group_handle(r) }, traced: true)
   }
-  let req = c.force_link_to_replication_group_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginForceLinkToReplicationGroup", c.setup.pipeline.tracer)
+  let req = c.force_link_to_replication_group_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientForceLinkToReplicationGroupResponse", fn(r: http.Response) -> DatabasesClientForceLinkToReplicationGroupResponse ! Str { databases_force_link_to_replication_group_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientForceLinkToReplicationGroupResponse", fn(r: http.Response) -> DatabasesClientForceLinkToReplicationGroupResponse ! Str { databases_force_link_to_replication_group_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginForceUnlinkOptions: the optional parameters of DatabasesClient.begin_force_unlink.
@@ -465,14 +480,16 @@ fn (c: DatabasesClient) force_unlink_create_request(resource_group_name: Str, cl
 /// Forcibly removes the link to the specified database resource.
 pub fn (c: DatabasesClient[fx]) begin_force_unlink(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: ForceUnlinkParameters, options: DatabasesClientBeginForceUnlinkOptions = DatabasesClientBeginForceUnlinkOptions{}) -> runtime.Poller[DatabasesClientForceUnlinkResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientForceUnlinkResponse", fn(r: http.Response) -> DatabasesClientForceUnlinkResponse ! Str { databases_force_unlink_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientForceUnlinkResponse", fn(r: http.Response) -> DatabasesClientForceUnlinkResponse ! Str { databases_force_unlink_handle(r) }, traced: true)
   }
-  let req = c.force_unlink_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginForceUnlink", c.setup.pipeline.tracer)
+  let req = c.force_unlink_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientForceUnlinkResponse", fn(r: http.Response) -> DatabasesClientForceUnlinkResponse ! Str { databases_force_unlink_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientForceUnlinkResponse", fn(r: http.Response) -> DatabasesClientForceUnlinkResponse ! Str { databases_force_unlink_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginImportOptions: the optional parameters of DatabasesClient.begin_import.
@@ -516,14 +533,16 @@ fn (c: DatabasesClient) import_create_request(resource_group_name: Str, cluster_
 /// Imports database files to target database.
 pub fn (c: DatabasesClient[fx]) begin_import(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: ImportClusterParameters, options: DatabasesClientBeginImportOptions = DatabasesClientBeginImportOptions{}) -> runtime.Poller[DatabasesClientImportResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) }, traced: true)
   }
-  let req = c.import_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginImport", c.setup.pipeline.tracer)
+  let req = c.import_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) }, traced: true)
 }
 
 /// DatabasesClientListKeysOptions: the optional parameters of DatabasesClient.list_keys.
@@ -565,12 +584,15 @@ fn (c: DatabasesClient) list_keys_create_request(resource_group_name: Str, clust
 
 /// Retrieves the access keys for the Redis Enterprise database.
 pub fn (c: DatabasesClient) list_keys(resource_group_name: Str, cluster_name: Str, database_name: Str, options: DatabasesClientListKeysOptions = DatabasesClientListKeysOptions{}) -> DatabasesClientListKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_keys_create_request(resource_group_name, cluster_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.ListKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_keys_create_request(resource_group_name, cluster_name, database_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  databases_list_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = databases_list_keys_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabasesClientBeginRegenerateKeyOptions: the optional parameters of DatabasesClient.begin_regenerate_key.
@@ -617,14 +639,16 @@ fn (c: DatabasesClient) regenerate_key_create_request(resource_group_name: Str, 
 /// Regenerates the Redis Enterprise database's access keys.
 pub fn (c: DatabasesClient[fx]) begin_regenerate_key(resource_group_name: Str, cluster_name: Str, database_name: Str, parameters: RegenerateKeyParameters, options: DatabasesClientBeginRegenerateKeyOptions = DatabasesClientBeginRegenerateKeyOptions{}) -> runtime.Poller[DatabasesClientRegenerateKeyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientRegenerateKeyResponse", fn(r: http.Response) -> DatabasesClientRegenerateKeyResponse ! Str { databases_regenerate_key_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientRegenerateKeyResponse", fn(r: http.Response) -> DatabasesClientRegenerateKeyResponse ! Str { databases_regenerate_key_handle(r) }, traced: true)
   }
-  let req = c.regenerate_key_create_request(resource_group_name, cluster_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginRegenerateKey", c.setup.pipeline.tracer)
+  let req = c.regenerate_key_create_request(resource_group_name, cluster_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientRegenerateKeyResponse", fn(r: http.Response) -> DatabasesClientRegenerateKeyResponse ! Str { databases_regenerate_key_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "DatabasesClientRegenerateKeyResponse", fn(r: http.Response) -> DatabasesClientRegenerateKeyResponse ! Str { databases_regenerate_key_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginUpgradeDBRedisVersionOptions: the optional parameters of DatabasesClient.begin_upgrade_db_redis_version.
@@ -667,12 +691,14 @@ fn (c: DatabasesClient) upgrade_db_redis_version_create_request(resource_group_n
 /// Upgrades the database Redis version to the latest available.
 pub fn (c: DatabasesClient[fx]) begin_upgrade_db_redis_version(resource_group_name: Str, cluster_name: Str, database_name: Str, options: DatabasesClientBeginUpgradeDBRedisVersionOptions = DatabasesClientBeginUpgradeDBRedisVersionOptions{}) -> runtime.Poller[DatabasesClientUpgradeDBRedisVersionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpgradeDBRedisVersionResponse", fn(r: http.Response) -> DatabasesClientUpgradeDBRedisVersionResponse ! Str { databases_upgrade_db_redis_version_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpgradeDBRedisVersionResponse", fn(r: http.Response) -> DatabasesClientUpgradeDBRedisVersionResponse ! Str { databases_upgrade_db_redis_version_handle(r) }, traced: true)
   }
-  let req = c.upgrade_db_redis_version_create_request(resource_group_name, cluster_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginUpgradeDBRedisVersion", c.setup.pipeline.tracer)
+  let req = c.upgrade_db_redis_version_create_request(resource_group_name, cluster_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpgradeDBRedisVersionResponse", fn(r: http.Response) -> DatabasesClientUpgradeDBRedisVersionResponse ! Str { databases_upgrade_db_redis_version_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpgradeDBRedisVersionResponse", fn(r: http.Response) -> DatabasesClientUpgradeDBRedisVersionResponse ! Str { databases_upgrade_db_redis_version_handle(r) }, traced: true)
 }

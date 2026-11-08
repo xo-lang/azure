@@ -53,7 +53,7 @@ fn (c: DefaultParameterGroupsClient) list_by_subscription_and_region_create_requ
 /// Lists default parameter groups available for a subscription in a specific region. The response contains at most one default parameter group for each PostgreSQL version.
 pub fn (c: DefaultParameterGroupsClient[fx]) new_list_by_subscription_and_region_pager(location: Str, options: DefaultParameterGroupsClientListBySubscriptionAndRegionOptions = DefaultParameterGroupsClientListBySubscriptionAndRegionOptions{}) -> runtime.Pager[DefaultParameterGroupsClientListBySubscriptionAndRegionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_and_region_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DefaultParameterGroupsClientListBySubscriptionAndRegionResponse ! Str { default_parameter_groups_list_by_subscription_and_region_handle(r) }, c.setup.endpoint, fn(r: DefaultParameterGroupsClientListBySubscriptionAndRegionResponse) -> Str? { r.default_parameter_group_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DefaultParameterGroupsClientListBySubscriptionAndRegionResponse ! Str { default_parameter_groups_list_by_subscription_and_region_handle(r) }, c.setup.endpoint, fn(r: DefaultParameterGroupsClientListBySubscriptionAndRegionResponse) -> Str? { r.default_parameter_group_list_result.next_link }).traced_as("DefaultParameterGroupsClientListBySubscriptionAndRegionResponse"))
 }
 
 /// DefaultParameterGroupsClientGetOptions: the optional parameters of DefaultParameterGroupsClient.get.
@@ -91,10 +91,13 @@ fn (c: DefaultParameterGroupsClient) get_create_request(location: Str, name: Str
 
 /// Gets a default parameter group available for a subscription in a specific region. Each PostgreSQL version has at most one default parameter group in a location.
 pub fn (c: DefaultParameterGroupsClient) get(location: Str, name: Str, options: DefaultParameterGroupsClientGetOptions = DefaultParameterGroupsClientGetOptions{}) -> DefaultParameterGroupsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DefaultParameterGroupsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  default_parameter_groups_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = default_parameter_groups_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

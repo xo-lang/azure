@@ -49,7 +49,7 @@ fn (c: PublicIPAddressesClient) list_all_create_request(options: PublicIPAddress
 /// Gets all the public IP addresses in a subscription.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_all_pager(options: PublicIPAddressesClientListAllOptions = PublicIPAddressesClientListAllOptions{}) -> runtime.Pager[PublicIPAddressesClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListAllResponse ! Str { public_ip_addresses_list_all_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListAllResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListAllResponse ! Str { public_ip_addresses_list_all_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListAllResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListAllResponse"))
 }
 
 /// PublicIPAddressesClientListOptions: the optional parameters of PublicIPAddressesClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: PublicIPAddressesClient) list_create_request(resource_group_name: Str, op
 /// Gets all public IP addresses in a resource group.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_pager(resource_group_name: Str, options: PublicIPAddressesClientListOptions = PublicIPAddressesClientListOptions{}) -> runtime.Pager[PublicIPAddressesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListResponse ! Str { public_ip_addresses_list_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListResponse ! Str { public_ip_addresses_list_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListResponse"))
 }
 
 /// PublicIPAddressesClientGetOptions: the optional parameters of PublicIPAddressesClient.get.
@@ -128,12 +128,15 @@ fn (c: PublicIPAddressesClient) get_create_request(resource_group_name: Str, pub
 
 /// Gets the specified public IP address in a specified resource group.
 pub fn (c: PublicIPAddressesClient) get(resource_group_name: Str, public_ip_address_name: Str, options: PublicIPAddressesClientGetOptions = PublicIPAddressesClientGetOptions{}) -> PublicIPAddressesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, public_ip_address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, public_ip_address_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  public_ip_addresses_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = public_ip_addresses_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PublicIPAddressesClientBeginCreateOrUpdateOptions: the optional parameters of PublicIPAddressesClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: PublicIPAddressesClient) create_or_update_create_request(resource_group_n
 /// Creates or updates a static or dynamic public IP address.
 pub fn (c: PublicIPAddressesClient[fx]) begin_create_or_update(resource_group_name: Str, public_ip_address_name: Str, parameters: PublicIPAddress, options: PublicIPAddressesClientBeginCreateOrUpdateOptions = PublicIPAddressesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[PublicIPAddressesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientCreateOrUpdateResponse", fn(r: http.Response) -> PublicIPAddressesClientCreateOrUpdateResponse ! Str { public_ip_addresses_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientCreateOrUpdateResponse", fn(r: http.Response) -> PublicIPAddressesClientCreateOrUpdateResponse ! Str { public_ip_addresses_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, public_ip_address_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, public_ip_address_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientCreateOrUpdateResponse", fn(r: http.Response) -> PublicIPAddressesClientCreateOrUpdateResponse ! Str { public_ip_addresses_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientCreateOrUpdateResponse", fn(r: http.Response) -> PublicIPAddressesClientCreateOrUpdateResponse ! Str { public_ip_addresses_create_or_update_handle(r) }, traced: true)
 }
 
 /// PublicIPAddressesClientUpdateTagsOptions: the optional parameters of PublicIPAddressesClient.update_tags.
@@ -222,12 +227,15 @@ fn (c: PublicIPAddressesClient) update_tags_create_request(resource_group_name: 
 
 /// Updates public IP address tags.
 pub fn (c: PublicIPAddressesClient) update_tags(resource_group_name: Str, public_ip_address_name: Str, parameters: TagsObject, options: PublicIPAddressesClientUpdateTagsOptions = PublicIPAddressesClientUpdateTagsOptions{}) -> PublicIPAddressesClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, public_ip_address_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, public_ip_address_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  public_ip_addresses_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = public_ip_addresses_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PublicIPAddressesClientBeginDeleteOptions: the optional parameters of PublicIPAddressesClient.begin_delete.
@@ -266,14 +274,16 @@ fn (c: PublicIPAddressesClient) delete_create_request(resource_group_name: Str, 
 /// Deletes the specified public IP address.
 pub fn (c: PublicIPAddressesClient[fx]) begin_delete(resource_group_name: Str, public_ip_address_name: Str, options: PublicIPAddressesClientBeginDeleteOptions = PublicIPAddressesClientBeginDeleteOptions{}) -> runtime.Poller[PublicIPAddressesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDeleteResponse", fn(r: http.Response) -> PublicIPAddressesClientDeleteResponse ! Str { public_ip_addresses_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDeleteResponse", fn(r: http.Response) -> PublicIPAddressesClientDeleteResponse ! Str { public_ip_addresses_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, public_ip_address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, public_ip_address_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDeleteResponse", fn(r: http.Response) -> PublicIPAddressesClientDeleteResponse ! Str { public_ip_addresses_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDeleteResponse", fn(r: http.Response) -> PublicIPAddressesClientDeleteResponse ! Str { public_ip_addresses_delete_handle(r) }, traced: true)
 }
 
 /// PublicIPAddressesClientBeginDdosProtectionStatusOptions: the optional parameters of PublicIPAddressesClient.begin_ddos_protection_status.
@@ -315,14 +325,16 @@ fn (c: PublicIPAddressesClient) ddos_protection_status_create_request(resource_g
 /// Gets the Ddos Protection Status of a Public IP Address
 pub fn (c: PublicIPAddressesClient[fx]) begin_ddos_protection_status(resource_group_name: Str, public_ip_address_name: Str, options: PublicIPAddressesClientBeginDdosProtectionStatusOptions = PublicIPAddressesClientBeginDdosProtectionStatusOptions{}) -> runtime.Poller[PublicIPAddressesClientDdosProtectionStatusResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDdosProtectionStatusResponse", fn(r: http.Response) -> PublicIPAddressesClientDdosProtectionStatusResponse ! Str { public_ip_addresses_ddos_protection_status_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDdosProtectionStatusResponse", fn(r: http.Response) -> PublicIPAddressesClientDdosProtectionStatusResponse ! Str { public_ip_addresses_ddos_protection_status_handle(r) }, traced: true)
   }
-  let req = c.ddos_protection_status_create_request(resource_group_name, public_ip_address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.BeginDdosProtectionStatus", c.setup.pipeline.tracer)
+  let req = c.ddos_protection_status_create_request(resource_group_name, public_ip_address_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDdosProtectionStatusResponse", fn(r: http.Response) -> PublicIPAddressesClientDdosProtectionStatusResponse ! Str { public_ip_addresses_ddos_protection_status_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDdosProtectionStatusResponse", fn(r: http.Response) -> PublicIPAddressesClientDdosProtectionStatusResponse ! Str { public_ip_addresses_ddos_protection_status_handle(r) }, traced: true)
 }
 
 /// PublicIPAddressesClientBeginDisassociateCloudServiceReservedPublicIPOptions: the optional parameters of PublicIPAddressesClient.begin_disassociate_cloud_service_reserved_public_ip.
@@ -365,14 +377,16 @@ fn (c: PublicIPAddressesClient) disassociate_cloud_service_reserved_public_ip_cr
 /// Disassociates the Cloud Service reserved Public IP and associates the specified Standalone Public IP to the same Cloud Service frontend.
 pub fn (c: PublicIPAddressesClient[fx]) begin_disassociate_cloud_service_reserved_public_ip(resource_group_name: Str, public_ip_address_name: Str, parameters: DisassociateCloudServicePublicIPRequest, options: PublicIPAddressesClientBeginDisassociateCloudServiceReservedPublicIPOptions = PublicIPAddressesClientBeginDisassociateCloudServiceReservedPublicIPOptions{}) -> runtime.Poller[PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse", fn(r: http.Response) -> PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse ! Str { public_ip_addresses_disassociate_cloud_service_reserved_public_ip_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse", fn(r: http.Response) -> PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse ! Str { public_ip_addresses_disassociate_cloud_service_reserved_public_ip_handle(r) }, traced: true)
   }
-  let req = c.disassociate_cloud_service_reserved_public_ip_create_request(resource_group_name, public_ip_address_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.BeginDisassociateCloudServiceReservedPublicIP", c.setup.pipeline.tracer)
+  let req = c.disassociate_cloud_service_reserved_public_ip_create_request(resource_group_name, public_ip_address_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse", fn(r: http.Response) -> PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse ! Str { public_ip_addresses_disassociate_cloud_service_reserved_public_ip_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse", fn(r: http.Response) -> PublicIPAddressesClientDisassociateCloudServiceReservedPublicIPResponse ! Str { public_ip_addresses_disassociate_cloud_service_reserved_public_ip_handle(r) }, traced: true)
 }
 
 /// PublicIPAddressesClientBeginReserveCloudServicePublicIPAddressOptions: the optional parameters of PublicIPAddressesClient.begin_reserve_cloud_service_public_ip_address.
@@ -415,14 +429,16 @@ fn (c: PublicIPAddressesClient) reserve_cloud_service_public_ip_address_create_r
 /// Reserves the specified Cloud Service Public IP by switching its allocation method to Static. If rollback is requested, reverts the allocation method to Dynamic.
 pub fn (c: PublicIPAddressesClient[fx]) begin_reserve_cloud_service_public_ip_address(resource_group_name: Str, public_ip_address_name: Str, parameters: ReserveCloudServicePublicIPAddressRequest, options: PublicIPAddressesClientBeginReserveCloudServicePublicIPAddressOptions = PublicIPAddressesClientBeginReserveCloudServicePublicIPAddressOptions{}) -> runtime.Poller[PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse", fn(r: http.Response) -> PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse ! Str { public_ip_addresses_reserve_cloud_service_public_ip_address_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse", fn(r: http.Response) -> PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse ! Str { public_ip_addresses_reserve_cloud_service_public_ip_address_handle(r) }, traced: true)
   }
-  let req = c.reserve_cloud_service_public_ip_address_create_request(resource_group_name, public_ip_address_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.BeginReserveCloudServicePublicIPAddress", c.setup.pipeline.tracer)
+  let req = c.reserve_cloud_service_public_ip_address_create_request(resource_group_name, public_ip_address_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse", fn(r: http.Response) -> PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse ! Str { public_ip_addresses_reserve_cloud_service_public_ip_address_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse", fn(r: http.Response) -> PublicIPAddressesClientReserveCloudServicePublicIPAddressResponse ! Str { public_ip_addresses_reserve_cloud_service_public_ip_address_handle(r) }, traced: true)
 }
 
 /// PublicIPAddressesClientListCloudServicePublicIPAddressesOptions: the optional parameters of PublicIPAddressesClient.new_list_cloud_service_public_ip_addresses_pager.
@@ -461,7 +477,7 @@ fn (c: PublicIPAddressesClient) list_cloud_service_public_ip_addresses_create_re
 /// Gets information about all public IP addresses on a cloud service level.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_cloud_service_public_ip_addresses_pager(resource_group_name: Str, cloud_service_name: Str, options: PublicIPAddressesClientListCloudServicePublicIPAddressesOptions = PublicIPAddressesClientListCloudServicePublicIPAddressesOptions{}) -> runtime.Pager[PublicIPAddressesClientListCloudServicePublicIPAddressesResponse, fx] ! azcore.CallErr {
   let req = c.list_cloud_service_public_ip_addresses_create_request(resource_group_name, cloud_service_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListCloudServicePublicIPAddressesResponse ! Str { public_ip_addresses_list_cloud_service_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListCloudServicePublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListCloudServicePublicIPAddressesResponse ! Str { public_ip_addresses_list_cloud_service_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListCloudServicePublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListCloudServicePublicIPAddressesResponse"))
 }
 
 /// PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesOptions: the optional parameters of PublicIPAddressesClient.new_list_cloud_service_role_instance_public_ip_addresses_pager.
@@ -512,7 +528,7 @@ fn (c: PublicIPAddressesClient) list_cloud_service_role_instance_public_ip_addre
 /// Gets information about all public IP addresses in a role instance IP configuration in a cloud service.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_cloud_service_role_instance_public_ip_addresses_pager(resource_group_name: Str, cloud_service_name: Str, role_instance_name: Str, network_interface_name: Str, ip_configuration_name: Str, options: PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesOptions = PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesOptions{}) -> runtime.Pager[PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse, fx] ! azcore.CallErr {
   let req = c.list_cloud_service_role_instance_public_ip_addresses_create_request(resource_group_name, cloud_service_name, role_instance_name, network_interface_name, ip_configuration_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse ! Str { public_ip_addresses_list_cloud_service_role_instance_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse ! Str { public_ip_addresses_list_cloud_service_role_instance_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListCloudServiceRoleInstancePublicIPAddressesResponse"))
 }
 
 /// PublicIPAddressesClientGetCloudServicePublicIPAddressOptions: the optional parameters of PublicIPAddressesClient.get_cloud_service_public_ip_address.
@@ -572,12 +588,15 @@ fn (c: PublicIPAddressesClient) get_cloud_service_public_ip_address_create_reque
 
 /// Get the specified public IP address in a cloud service.
 pub fn (c: PublicIPAddressesClient) get_cloud_service_public_ip_address(resource_group_name: Str, cloud_service_name: Str, role_instance_name: Str, network_interface_name: Str, ip_configuration_name: Str, public_ip_address_name: Str, options: PublicIPAddressesClientGetCloudServicePublicIPAddressOptions = PublicIPAddressesClientGetCloudServicePublicIPAddressOptions{}) -> PublicIPAddressesClientGetCloudServicePublicIPAddressResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cloud_service_public_ip_address_create_request(resource_group_name, cloud_service_name, role_instance_name, network_interface_name, ip_configuration_name, public_ip_address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.GetCloudServicePublicIPAddress", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cloud_service_public_ip_address_create_request(resource_group_name, cloud_service_name, role_instance_name, network_interface_name, ip_configuration_name, public_ip_address_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  public_ip_addresses_get_cloud_service_public_ip_address_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = public_ip_addresses_get_cloud_service_public_ip_address_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesOptions: the optional parameters of PublicIPAddressesClient.new_list_virtual_machine_scale_set_public_ip_addresses_pager.
@@ -616,7 +635,7 @@ fn (c: PublicIPAddressesClient) list_virtual_machine_scale_set_public_ip_address
 /// Gets information about all public IP addresses on a virtual machine scale set level.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_virtual_machine_scale_set_public_ip_addresses_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, options: PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesOptions = PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesOptions{}) -> runtime.Pager[PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_set_public_ip_addresses_create_request(resource_group_name, virtual_machine_scale_set_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse ! Str { public_ip_addresses_list_virtual_machine_scale_set_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse ! Str { public_ip_addresses_list_virtual_machine_scale_set_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListVirtualMachineScaleSetPublicIPAddressesResponse"))
 }
 
 /// PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesOptions: the optional parameters of PublicIPAddressesClient.new_list_virtual_machine_scale_set_vm_public_ip_addresses_pager.
@@ -667,7 +686,7 @@ fn (c: PublicIPAddressesClient) list_virtual_machine_scale_set_vm_public_ip_addr
 /// Gets information about all public IP addresses in a virtual machine IP configuration in a virtual machine scale set.
 pub fn (c: PublicIPAddressesClient[fx]) new_list_virtual_machine_scale_set_vm_public_ip_addresses_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, network_interface_name: Str, ip_configuration_name: Str, options: PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesOptions = PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesOptions{}) -> runtime.Pager[PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_set_vm_public_ip_addresses_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, ip_configuration_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse ! Str { public_ip_addresses_list_virtual_machine_scale_set_vm_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse ! Str { public_ip_addresses_list_virtual_machine_scale_set_vm_public_ip_addresses_handle(r) }, c.setup.endpoint, fn(r: PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse) -> Str? { r.public_ip_address_list_result.next_link }).traced_as("PublicIPAddressesClientListVirtualMachineScaleSetVMPublicIPAddressesResponse"))
 }
 
 /// PublicIPAddressesClientGetVirtualMachineScaleSetPublicIPAddressOptions: the optional parameters of PublicIPAddressesClient.get_virtual_machine_scale_set_public_ip_address.
@@ -727,10 +746,13 @@ fn (c: PublicIPAddressesClient) get_virtual_machine_scale_set_public_ip_address_
 
 /// Get the specified public IP address in a virtual machine scale set.
 pub fn (c: PublicIPAddressesClient) get_virtual_machine_scale_set_public_ip_address(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, network_interface_name: Str, ip_configuration_name: Str, public_ip_address_name: Str, options: PublicIPAddressesClientGetVirtualMachineScaleSetPublicIPAddressOptions = PublicIPAddressesClientGetVirtualMachineScaleSetPublicIPAddressOptions{}) -> PublicIPAddressesClientGetVirtualMachineScaleSetPublicIPAddressResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_virtual_machine_scale_set_public_ip_address_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, ip_configuration_name, public_ip_address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PublicIPAddressesClient.GetVirtualMachineScaleSetPublicIPAddress", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_virtual_machine_scale_set_public_ip_address_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, ip_configuration_name, public_ip_address_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  public_ip_addresses_get_virtual_machine_scale_set_public_ip_address_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = public_ip_addresses_get_virtual_machine_scale_set_public_ip_address_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

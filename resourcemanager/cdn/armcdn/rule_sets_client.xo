@@ -57,7 +57,7 @@ fn (c: RuleSetsClient) list_by_profile_create_request(resource_group_name: Str, 
 /// Lists existing AzureFrontDoor rule sets within a profile.
 pub fn (c: RuleSetsClient[fx]) new_list_by_profile_pager(resource_group_name: Str, profile_name: Str, options: RuleSetsClientListByProfileOptions = RuleSetsClientListByProfileOptions{}) -> runtime.Pager[RuleSetsClientListByProfileResponse, fx] ! azcore.CallErr {
   let req = c.list_by_profile_create_request(resource_group_name, profile_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RuleSetsClientListByProfileResponse ! Str { rule_sets_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: RuleSetsClientListByProfileResponse) -> Str? { r.rule_set_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RuleSetsClientListByProfileResponse ! Str { rule_sets_list_by_profile_handle(r) }, c.setup.endpoint, fn(r: RuleSetsClientListByProfileResponse) -> Str? { r.rule_set_list_result.next_link }).traced_as("RuleSetsClientListByProfileResponse"))
 }
 
 /// RuleSetsClientGetOptions: the optional parameters of RuleSetsClient.get.
@@ -99,12 +99,15 @@ fn (c: RuleSetsClient) get_create_request(resource_group_name: Str, profile_name
 
 /// Gets an existing AzureFrontDoor rule set with the specified rule set name under the specified subscription, resource group and profile.
 pub fn (c: RuleSetsClient) get(resource_group_name: Str, profile_name: Str, rule_set_name: Str, options: RuleSetsClientGetOptions = RuleSetsClientGetOptions{}) -> RuleSetsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, profile_name, rule_set_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RuleSetsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, profile_name, rule_set_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  rule_sets_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = rule_sets_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// RuleSetsClientBeginCreateOptions: the optional parameters of RuleSetsClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: RuleSetsClient) create_create_request(resource_group_name: Str, profile_n
 /// Creates or update a batch rule set within the specified profile along with the rules associate to it.
 pub fn (c: RuleSetsClient[fx]) begin_create(resource_group_name: Str, profile_name: Str, rule_set_name: Str, resource: RuleSet, options: RuleSetsClientBeginCreateOptions = RuleSetsClientBeginCreateOptions{}) -> runtime.Poller[RuleSetsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RuleSetsClientCreateResponse", fn(r: http.Response) -> RuleSetsClientCreateResponse ! Str { rule_sets_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RuleSetsClientCreateResponse", fn(r: http.Response) -> RuleSetsClientCreateResponse ! Str { rule_sets_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, profile_name, rule_set_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RuleSetsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, profile_name, rule_set_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "RuleSetsClientCreateResponse", fn(r: http.Response) -> RuleSetsClientCreateResponse ! Str { rule_sets_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "RuleSetsClientCreateResponse", fn(r: http.Response) -> RuleSetsClientCreateResponse ! Str { rule_sets_create_handle(r) }, traced: true)
 }
 
 /// RuleSetsClientBeginDeleteOptions: the optional parameters of RuleSetsClient.begin_delete.
@@ -201,14 +206,16 @@ fn (c: RuleSetsClient) delete_create_request(resource_group_name: Str, profile_n
 /// Deletes an existing AzureFrontDoor rule set with the specified rule set name under the specified subscription, resource group and profile.
 pub fn (c: RuleSetsClient[fx]) begin_delete(resource_group_name: Str, profile_name: Str, rule_set_name: Str, options: RuleSetsClientBeginDeleteOptions = RuleSetsClientBeginDeleteOptions{}) -> runtime.Poller[RuleSetsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RuleSetsClientDeleteResponse", fn(r: http.Response) -> RuleSetsClientDeleteResponse ! Str { rule_sets_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RuleSetsClientDeleteResponse", fn(r: http.Response) -> RuleSetsClientDeleteResponse ! Str { rule_sets_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, profile_name, rule_set_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RuleSetsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, profile_name, rule_set_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "RuleSetsClientDeleteResponse", fn(r: http.Response) -> RuleSetsClientDeleteResponse ! Str { rule_sets_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "RuleSetsClientDeleteResponse", fn(r: http.Response) -> RuleSetsClientDeleteResponse ! Str { rule_sets_delete_handle(r) }, traced: true)
 }
 
 /// RuleSetsClientListResourceUsageOptions: the optional parameters of RuleSetsClient.new_list_resource_usage_pager.
@@ -251,5 +258,5 @@ fn (c: RuleSetsClient) list_resource_usage_create_request(resource_group_name: S
 /// Checks the quota and actual usage of endpoints under the given Azure Front Door profile.
 pub fn (c: RuleSetsClient[fx]) new_list_resource_usage_pager(resource_group_name: Str, profile_name: Str, rule_set_name: Str, options: RuleSetsClientListResourceUsageOptions = RuleSetsClientListResourceUsageOptions{}) -> runtime.Pager[RuleSetsClientListResourceUsageResponse, fx] ! azcore.CallErr {
   let req = c.list_resource_usage_create_request(resource_group_name, profile_name, rule_set_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RuleSetsClientListResourceUsageResponse ! Str { rule_sets_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: RuleSetsClientListResourceUsageResponse) -> Str? { r.usages_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RuleSetsClientListResourceUsageResponse ! Str { rule_sets_list_resource_usage_handle(r) }, c.setup.endpoint, fn(r: RuleSetsClientListResourceUsageResponse) -> Str? { r.usages_list_result.next_link }).traced_as("RuleSetsClientListResourceUsageResponse"))
 }

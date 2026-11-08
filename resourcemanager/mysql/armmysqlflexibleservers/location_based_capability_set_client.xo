@@ -53,7 +53,7 @@ fn (c: LocationBasedCapabilitySetClient) list_create_request(location_name: Str,
 /// Get capabilities at specified location in a given subscription.
 pub fn (c: LocationBasedCapabilitySetClient[fx]) new_list_pager(location_name: Str, options: LocationBasedCapabilitySetClientListOptions = LocationBasedCapabilitySetClientListOptions{}) -> runtime.Pager[LocationBasedCapabilitySetClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationBasedCapabilitySetClientListResponse ! Str { location_based_capability_set_list_handle(r) }, c.setup.endpoint, fn(r: LocationBasedCapabilitySetClientListResponse) -> Str? { r.capability_sets_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationBasedCapabilitySetClientListResponse ! Str { location_based_capability_set_list_handle(r) }, c.setup.endpoint, fn(r: LocationBasedCapabilitySetClientListResponse) -> Str? { r.capability_sets_list.next_link }).traced_as("LocationBasedCapabilitySetClientListResponse"))
 }
 
 /// LocationBasedCapabilitySetClientGetOptions: the optional parameters of LocationBasedCapabilitySetClient.get.
@@ -91,10 +91,13 @@ fn (c: LocationBasedCapabilitySetClient) get_create_request(location_name: Str, 
 
 /// Get capabilities at specified location in a given subscription.
 pub fn (c: LocationBasedCapabilitySetClient) get(location_name: Str, capability_set_name: Str, options: LocationBasedCapabilitySetClientGetOptions = LocationBasedCapabilitySetClientGetOptions{}) -> LocationBasedCapabilitySetClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location_name, capability_set_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LocationBasedCapabilitySetClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location_name, capability_set_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  location_based_capability_set_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = location_based_capability_set_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

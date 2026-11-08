@@ -1,0 +1,37 @@
+// The tracing package's plain values: Go's codes, the zero values doing
+// nothing, and a wrapped tracer's attributes in Go's order.
+
+test "kinds and statuses carry Go's numbers" {
+  expect(SpanKind.Internal.code()) == 1
+  expect(SpanKind.Client.code()) == 3
+  expect(SpanKind.Consumer.code()) == 5
+  expect(span_kind_of(4).map(fn(k: SpanKind) -> Int { k.code() })) == Some(4)
+  expect(span_kind_of(0).is_none()) == true
+  expect(SpanStatus.Unset.code()) == 0
+  expect(SpanStatus.Error.code()) == 1
+  expect(SpanStatus.Ok.code()) == 2
+  expect(Value.Bool(true).display()) == "true"
+  expect(Value.Int(42).display()) == "42"
+}
+
+test "the zero provider and tracer do nothing" {
+  let t = Provider{}.new_tracer("m", "v1")
+  expect(t.enabled()) == false
+  let (ctx, span) = t.start(Context{values: {"k": "v"}}, "x")
+  expect(ctx.values.get("k")) == Some("v")
+  span.set_status(SpanStatus.Error, "ignored")
+  span.end()
+}
+
+test "a tracer adds its attributes after the options', a wrapper's after its own" {
+  let seen = Mutex[List[Str]].new([])
+  let base = new_tracer(fn(ctx: Context, name: Str, opts: SpanOptions) -> (Context, Span) {
+    seen.with(fn(var l: List[Str]) { l.push("${name}: ${opts.attributes.map(fn(a: Attribute) -> Str { a.key }).join(",")}") })
+    (ctx, Span{})
+  }).with_attributes([str_attr("base", "1")])
+  let wrapped = wrap_tracer(base, fn(t: Tracer) -> Tracer { t.with_attributes([int_attr("wrap", 2)]) })
+  expect(wrapped.enabled()) == true
+  let _ = wrapped.start(Context{}, "op", SpanOptions{attributes: [str_attr("own", "x")]})
+  expect(seen.with(fn(var l: List[Str]) -> List[Str] { l })) == ["op: own,base,wrap"]
+  expect(wrapped.span_from_context(Context{}).impl.end.is_none()) == true
+}

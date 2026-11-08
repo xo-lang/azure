@@ -49,7 +49,7 @@ fn (c: DiskAccessesClient) list_create_request(options: DiskAccessesClientListOp
 /// Lists all the disk access resources under a subscription.
 pub fn (c: DiskAccessesClient[fx]) new_list_pager(options: DiskAccessesClientListOptions = DiskAccessesClientListOptions{}) -> runtime.Pager[DiskAccessesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListResponse ! Str { disk_accesses_list_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListResponse) -> Str? { r.disk_access_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListResponse ! Str { disk_accesses_list_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListResponse) -> Str? { r.disk_access_list.next_link }).traced_as("DiskAccessesClientListResponse"))
 }
 
 /// DiskAccessesClientListByResourceGroupOptions: the optional parameters of DiskAccessesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: DiskAccessesClient) list_by_resource_group_create_request(resource_group_
 /// Lists all the disk access resources under a resource group.
 pub fn (c: DiskAccessesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: DiskAccessesClientListByResourceGroupOptions = DiskAccessesClientListByResourceGroupOptions{}) -> runtime.Pager[DiskAccessesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListByResourceGroupResponse ! Str { disk_accesses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListByResourceGroupResponse) -> Str? { r.disk_access_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListByResourceGroupResponse ! Str { disk_accesses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListByResourceGroupResponse) -> Str? { r.disk_access_list.next_link }).traced_as("DiskAccessesClientListByResourceGroupResponse"))
 }
 
 /// DiskAccessesClientGetOptions: the optional parameters of DiskAccessesClient.get.
@@ -122,12 +122,15 @@ fn (c: DiskAccessesClient) get_create_request(resource_group_name: Str, disk_acc
 
 /// Gets information about a disk access resource.
 pub fn (c: DiskAccessesClient) get(resource_group_name: Str, disk_access_name: Str, options: DiskAccessesClientGetOptions = DiskAccessesClientGetOptions{}) -> DiskAccessesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, disk_access_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, disk_access_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  disk_accesses_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = disk_accesses_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DiskAccessesClientBeginCreateOrUpdateOptions: the optional parameters of DiskAccessesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: DiskAccessesClient) create_or_update_create_request(resource_group_name: 
 /// Creates or updates a disk access resource
 pub fn (c: DiskAccessesClient[fx]) begin_create_or_update(resource_group_name: Str, disk_access_name: Str, disk_access: DiskAccess, options: DiskAccessesClientBeginCreateOrUpdateOptions = DiskAccessesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DiskAccessesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientCreateOrUpdateResponse", fn(r: http.Response) -> DiskAccessesClientCreateOrUpdateResponse ! Str { disk_accesses_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientCreateOrUpdateResponse", fn(r: http.Response) -> DiskAccessesClientCreateOrUpdateResponse ! Str { disk_accesses_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, disk_access_name, disk_access, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, disk_access_name, disk_access, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientCreateOrUpdateResponse", fn(r: http.Response) -> DiskAccessesClientCreateOrUpdateResponse ! Str { disk_accesses_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientCreateOrUpdateResponse", fn(r: http.Response) -> DiskAccessesClientCreateOrUpdateResponse ! Str { disk_accesses_create_or_update_handle(r) }, traced: true)
 }
 
 /// DiskAccessesClientBeginUpdateOptions: the optional parameters of DiskAccessesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: DiskAccessesClient) update_create_request(resource_group_name: Str, disk_
 /// Updates (patches) a disk access resource.
 pub fn (c: DiskAccessesClient[fx]) begin_update(resource_group_name: Str, disk_access_name: Str, disk_access: DiskAccessUpdate, options: DiskAccessesClientBeginUpdateOptions = DiskAccessesClientBeginUpdateOptions{}) -> runtime.Poller[DiskAccessesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientUpdateResponse", fn(r: http.Response) -> DiskAccessesClientUpdateResponse ! Str { disk_accesses_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientUpdateResponse", fn(r: http.Response) -> DiskAccessesClientUpdateResponse ! Str { disk_accesses_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, disk_access_name, disk_access, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, disk_access_name, disk_access, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientUpdateResponse", fn(r: http.Response) -> DiskAccessesClientUpdateResponse ! Str { disk_accesses_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientUpdateResponse", fn(r: http.Response) -> DiskAccessesClientUpdateResponse ! Str { disk_accesses_update_handle(r) }, traced: true)
 }
 
 /// DiskAccessesClientBeginDeleteOptions: the optional parameters of DiskAccessesClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: DiskAccessesClient) delete_create_request(resource_group_name: Str, disk_
 /// Deletes a disk access resource.
 pub fn (c: DiskAccessesClient[fx]) begin_delete(resource_group_name: Str, disk_access_name: Str, options: DiskAccessesClientBeginDeleteOptions = DiskAccessesClientBeginDeleteOptions{}) -> runtime.Poller[DiskAccessesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientDeleteResponse", fn(r: http.Response) -> DiskAccessesClientDeleteResponse ! Str { disk_accesses_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientDeleteResponse", fn(r: http.Response) -> DiskAccessesClientDeleteResponse ! Str { disk_accesses_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, disk_access_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, disk_access_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientDeleteResponse", fn(r: http.Response) -> DiskAccessesClientDeleteResponse ! Str { disk_accesses_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientDeleteResponse", fn(r: http.Response) -> DiskAccessesClientDeleteResponse ! Str { disk_accesses_delete_handle(r) }, traced: true)
 }
 
 /// DiskAccessesClientListPrivateEndpointConnectionsOptions: the optional parameters of DiskAccessesClient.new_list_private_endpoint_connections_pager.
@@ -312,7 +321,7 @@ fn (c: DiskAccessesClient) list_private_endpoint_connections_create_request(reso
 /// List information about private endpoint connections under a disk access resource
 pub fn (c: DiskAccessesClient[fx]) new_list_private_endpoint_connections_pager(resource_group_name: Str, disk_access_name: Str, options: DiskAccessesClientListPrivateEndpointConnectionsOptions = DiskAccessesClientListPrivateEndpointConnectionsOptions{}) -> runtime.Pager[DiskAccessesClientListPrivateEndpointConnectionsResponse, fx] ! azcore.CallErr {
   let req = c.list_private_endpoint_connections_create_request(resource_group_name, disk_access_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListPrivateEndpointConnectionsResponse ! Str { disk_accesses_list_private_endpoint_connections_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListPrivateEndpointConnectionsResponse) -> Str? { r.private_endpoint_connection_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DiskAccessesClientListPrivateEndpointConnectionsResponse ! Str { disk_accesses_list_private_endpoint_connections_handle(r) }, c.setup.endpoint, fn(r: DiskAccessesClientListPrivateEndpointConnectionsResponse) -> Str? { r.private_endpoint_connection_list_result.next_link }).traced_as("DiskAccessesClientListPrivateEndpointConnectionsResponse"))
 }
 
 /// DiskAccessesClientGetAPrivateEndpointConnectionOptions: the optional parameters of DiskAccessesClient.get_a_private_endpoint_connection.
@@ -354,12 +363,15 @@ fn (c: DiskAccessesClient) get_a_private_endpoint_connection_create_request(reso
 
 /// Gets information about a private endpoint connection under a disk access resource.
 pub fn (c: DiskAccessesClient) get_a_private_endpoint_connection(resource_group_name: Str, disk_access_name: Str, private_endpoint_connection_name: Str, options: DiskAccessesClientGetAPrivateEndpointConnectionOptions = DiskAccessesClientGetAPrivateEndpointConnectionOptions{}) -> DiskAccessesClientGetAPrivateEndpointConnectionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.GetAPrivateEndpointConnection", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  disk_accesses_get_a_private_endpoint_connection_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = disk_accesses_get_a_private_endpoint_connection_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DiskAccessesClientBeginUpdateAPrivateEndpointConnectionOptions: the optional parameters of DiskAccessesClient.begin_update_a_private_endpoint_connection.
@@ -406,14 +418,16 @@ fn (c: DiskAccessesClient) update_a_private_endpoint_connection_create_request(r
 /// Approve or reject a private endpoint connection under disk access resource, this can't be used to create a new private endpoint connection.
 pub fn (c: DiskAccessesClient[fx]) begin_update_a_private_endpoint_connection(resource_group_name: Str, disk_access_name: Str, private_endpoint_connection_name: Str, private_endpoint_connection: PrivateEndpointConnection, options: DiskAccessesClientBeginUpdateAPrivateEndpointConnectionOptions = DiskAccessesClientBeginUpdateAPrivateEndpointConnectionOptions{}) -> runtime.Poller[DiskAccessesClientUpdateAPrivateEndpointConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientUpdateAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientUpdateAPrivateEndpointConnectionResponse ! Str { disk_accesses_update_a_private_endpoint_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientUpdateAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientUpdateAPrivateEndpointConnectionResponse ! Str { disk_accesses_update_a_private_endpoint_connection_handle(r) }, traced: true)
   }
-  let req = c.update_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, private_endpoint_connection, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.BeginUpdateAPrivateEndpointConnection", c.setup.pipeline.tracer)
+  let req = c.update_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, private_endpoint_connection, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientUpdateAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientUpdateAPrivateEndpointConnectionResponse ! Str { disk_accesses_update_a_private_endpoint_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientUpdateAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientUpdateAPrivateEndpointConnectionResponse ! Str { disk_accesses_update_a_private_endpoint_connection_handle(r) }, traced: true)
 }
 
 /// DiskAccessesClientBeginDeleteAPrivateEndpointConnectionOptions: the optional parameters of DiskAccessesClient.begin_delete_a_private_endpoint_connection.
@@ -456,14 +470,16 @@ fn (c: DiskAccessesClient) delete_a_private_endpoint_connection_create_request(r
 /// Deletes a private endpoint connection under a disk access resource.
 pub fn (c: DiskAccessesClient[fx]) begin_delete_a_private_endpoint_connection(resource_group_name: Str, disk_access_name: Str, private_endpoint_connection_name: Str, options: DiskAccessesClientBeginDeleteAPrivateEndpointConnectionOptions = DiskAccessesClientBeginDeleteAPrivateEndpointConnectionOptions{}) -> runtime.Poller[DiskAccessesClientDeleteAPrivateEndpointConnectionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientDeleteAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientDeleteAPrivateEndpointConnectionResponse ! Str { disk_accesses_delete_a_private_endpoint_connection_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DiskAccessesClientDeleteAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientDeleteAPrivateEndpointConnectionResponse ! Str { disk_accesses_delete_a_private_endpoint_connection_handle(r) }, traced: true)
   }
-  let req = c.delete_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.BeginDeleteAPrivateEndpointConnection", c.setup.pipeline.tracer)
+  let req = c.delete_a_private_endpoint_connection_create_request(resource_group_name, disk_access_name, private_endpoint_connection_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientDeleteAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientDeleteAPrivateEndpointConnectionResponse ! Str { disk_accesses_delete_a_private_endpoint_connection_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DiskAccessesClientDeleteAPrivateEndpointConnectionResponse", fn(r: http.Response) -> DiskAccessesClientDeleteAPrivateEndpointConnectionResponse ! Str { disk_accesses_delete_a_private_endpoint_connection_handle(r) }, traced: true)
 }
 
 /// DiskAccessesClientGetPrivateLinkResourcesOptions: the optional parameters of DiskAccessesClient.get_private_link_resources.
@@ -501,10 +517,13 @@ fn (c: DiskAccessesClient) get_private_link_resources_create_request(resource_gr
 
 /// Gets the private link resources possible under disk access resource
 pub fn (c: DiskAccessesClient) get_private_link_resources(resource_group_name: Str, disk_access_name: Str, options: DiskAccessesClientGetPrivateLinkResourcesOptions = DiskAccessesClientGetPrivateLinkResourcesOptions{}) -> DiskAccessesClientGetPrivateLinkResourcesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_private_link_resources_create_request(resource_group_name, disk_access_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DiskAccessesClient.GetPrivateLinkResources", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_private_link_resources_create_request(resource_group_name, disk_access_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  disk_accesses_get_private_link_resources_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = disk_accesses_get_private_link_resources_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

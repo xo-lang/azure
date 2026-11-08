@@ -59,7 +59,7 @@ fn (c: MachinesClient) list_by_project_create_request(resource_group_name: Str, 
 /// Get data of all the machines available in the project. Returns a json array of objects of type 'machine' defined in Models section.
 pub fn (c: MachinesClient[fx]) new_list_by_project_pager(resource_group_name: Str, project_name: Str, options: MachinesClientListByProjectOptions = MachinesClientListByProjectOptions{}) -> runtime.Pager[MachinesClientListByProjectResponse, fx] ! azcore.CallErr {
   let req = c.list_by_project_create_request(resource_group_name, project_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MachinesClientListByProjectResponse ! Str { machines_list_by_project_handle(r) }, fn(r: MachinesClientListByProjectResponse) -> Str? { r.machine_result_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MachinesClientListByProjectResponse ! Str { machines_list_by_project_handle(r) }, fn(r: MachinesClientListByProjectResponse) -> Str? { r.machine_result_list.next_link }).traced_as("MachinesClientListByProjectResponse"))
 }
 
 /// MachinesClientGetOptions: the optional parameters of MachinesClient.get.
@@ -103,10 +103,13 @@ fn (c: MachinesClient) get_create_request(resource_group_name: Str, project_name
 
 /// Get the machine with the specified name. Returns a json object of type 'machine' defined in Models section.
 pub fn (c: MachinesClient) get(resource_group_name: Str, project_name: Str, machine_name: Str, options: MachinesClientGetOptions = MachinesClientGetOptions{}) -> MachinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, project_name, machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MachinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, project_name, machine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  machines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = machines_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

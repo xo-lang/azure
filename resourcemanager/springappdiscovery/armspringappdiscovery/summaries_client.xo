@@ -60,12 +60,15 @@ fn (c: SummariesClient) get_create_request(resource_group_name: Str, site_name: 
 
 /// Gets the Summaries resource.
 pub fn (c: SummariesClient) get(resource_group_name: Str, site_name: Str, summary_name: Str, options: SummariesClientGetOptions = SummariesClientGetOptions{}) -> SummariesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, site_name, summary_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SummariesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, site_name, summary_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  summaries_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = summaries_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SummariesClientListBySiteOptions: the optional parameters of SummariesClient.new_list_by_site_pager.
@@ -104,5 +107,5 @@ fn (c: SummariesClient) list_by_site_create_request(resource_group_name: Str, si
 /// Lists the Summaries resource in springbootsites.
 pub fn (c: SummariesClient[fx]) new_list_by_site_pager(resource_group_name: Str, site_name: Str, options: SummariesClientListBySiteOptions = SummariesClientListBySiteOptions{}) -> runtime.Pager[SummariesClientListBySiteResponse, fx] ! azcore.CallErr {
   let req = c.list_by_site_create_request(resource_group_name, site_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SummariesClientListBySiteResponse ! Str { summaries_list_by_site_handle(r) }, fn(r: SummariesClientListBySiteResponse) -> Str? { r.summary_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SummariesClientListBySiteResponse ! Str { summaries_list_by_site_handle(r) }, fn(r: SummariesClientListBySiteResponse) -> Str? { r.summary_list.next_link }).traced_as("SummariesClientListBySiteResponse"))
 }

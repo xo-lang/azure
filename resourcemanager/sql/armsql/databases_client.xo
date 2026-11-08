@@ -62,7 +62,7 @@ fn (c: DatabasesClient) list_metrics_create_request(resource_group_name: Str, se
 /// Returns database metrics.
 pub fn (c: DatabasesClient[fx]) new_list_metrics_pager(resource_group_name: Str, server_name: Str, database_name: Str, filter: Str, options: DatabasesClientListMetricsOptions = DatabasesClientListMetricsOptions{}) -> runtime.Pager[DatabasesClientListMetricsResponse, fx] ! azcore.CallErr {
   let req = c.list_metrics_create_request(resource_group_name, server_name, database_name, filter, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListMetricsResponse ! Str { databases_list_metrics_handle(r) }, fn(r: DatabasesClientListMetricsResponse) -> Str? { None }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListMetricsResponse ! Str { databases_list_metrics_handle(r) }, fn(r: DatabasesClientListMetricsResponse) -> Str? { None }).traced_as("DatabasesClientListMetricsResponse"))
 }
 
 /// DatabasesClientListMetricDefinitionsOptions: the optional parameters of DatabasesClient.new_list_metric_definitions_pager.
@@ -105,7 +105,7 @@ fn (c: DatabasesClient) list_metric_definitions_create_request(resource_group_na
 /// Returns database metric definitions.
 pub fn (c: DatabasesClient[fx]) new_list_metric_definitions_pager(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientListMetricDefinitionsOptions = DatabasesClientListMetricDefinitionsOptions{}) -> runtime.Pager[DatabasesClientListMetricDefinitionsResponse, fx] ! azcore.CallErr {
   let req = c.list_metric_definitions_create_request(resource_group_name, server_name, database_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListMetricDefinitionsResponse ! Str { databases_list_metric_definitions_handle(r) }, fn(r: DatabasesClientListMetricDefinitionsResponse) -> Str? { None }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListMetricDefinitionsResponse ! Str { databases_list_metric_definitions_handle(r) }, fn(r: DatabasesClientListMetricDefinitionsResponse) -> Str? { None }).traced_as("DatabasesClientListMetricDefinitionsResponse"))
 }
 
 /// DatabasesClientListByServerOptions: the optional parameters of DatabasesClient.new_list_by_server_pager.
@@ -149,7 +149,7 @@ fn (c: DatabasesClient) list_by_server_create_request(resource_group_name: Str, 
 /// Gets a list of databases.
 pub fn (c: DatabasesClient[fx]) new_list_by_server_pager(resource_group_name: Str, server_name: Str, options: DatabasesClientListByServerOptions = DatabasesClientListByServerOptions{}) -> runtime.Pager[DatabasesClientListByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_by_server_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByServerResponse ! Str { databases_list_by_server_handle(r) }, fn(r: DatabasesClientListByServerResponse) -> Str? { r.database_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByServerResponse ! Str { databases_list_by_server_handle(r) }, fn(r: DatabasesClientListByServerResponse) -> Str? { r.database_list_result.next_link }).traced_as("DatabasesClientListByServerResponse"))
 }
 
 /// DatabasesClientGetOptions: the optional parameters of DatabasesClient.get.
@@ -191,12 +191,15 @@ fn (c: DatabasesClient) get_create_request(resource_group_name: Str, server_name
 
 /// Gets a database.
 pub fn (c: DatabasesClient) get(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientGetOptions = DatabasesClientGetOptions{}) -> DatabasesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  databases_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = databases_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabasesClientBeginCreateOrUpdateOptions: the optional parameters of DatabasesClient.begin_create_or_update.
@@ -243,14 +246,16 @@ fn (c: DatabasesClient) create_or_update_create_request(resource_group_name: Str
 /// Creates a new database or updates an existing database.
 pub fn (c: DatabasesClient[fx]) begin_create_or_update(resource_group_name: Str, server_name: Str, database_name: Str, parameters: Database, options: DatabasesClientBeginCreateOrUpdateOptions = DatabasesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DatabasesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabasesClientCreateOrUpdateResponse ! Str { databases_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabasesClientCreateOrUpdateResponse ! Str { databases_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, server_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, server_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabasesClientCreateOrUpdateResponse ! Str { databases_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientCreateOrUpdateResponse", fn(r: http.Response) -> DatabasesClientCreateOrUpdateResponse ! Str { databases_create_or_update_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginDeleteOptions: the optional parameters of DatabasesClient.begin_delete.
@@ -293,14 +298,16 @@ fn (c: DatabasesClient) delete_create_request(resource_group_name: Str, server_n
 /// Deletes the database.
 pub fn (c: DatabasesClient[fx]) begin_delete(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientBeginDeleteOptions = DatabasesClientBeginDeleteOptions{}) -> runtime.Poller[DatabasesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientDeleteResponse", fn(r: http.Response) -> DatabasesClientDeleteResponse ! Str { databases_delete_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginUpdateOptions: the optional parameters of DatabasesClient.begin_update.
@@ -347,14 +354,16 @@ fn (c: DatabasesClient) update_create_request(resource_group_name: Str, server_n
 /// Updates an existing database.
 pub fn (c: DatabasesClient[fx]) begin_update(resource_group_name: Str, server_name: Str, database_name: Str, parameters: DatabaseUpdate, options: DatabasesClientBeginUpdateOptions = DatabasesClientBeginUpdateOptions{}) -> runtime.Poller[DatabasesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, server_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, server_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpdateResponse", fn(r: http.Response) -> DatabasesClientUpdateResponse ! Str { databases_update_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginExportOptions: the optional parameters of DatabasesClient.begin_export.
@@ -401,14 +410,16 @@ fn (c: DatabasesClient) export_create_request(resource_group_name: Str, server_n
 /// Exports a database.
 pub fn (c: DatabasesClient[fx]) begin_export(resource_group_name: Str, server_name: Str, database_name: Str, parameters: ExportDatabaseDefinition, options: DatabasesClientBeginExportOptions = DatabasesClientBeginExportOptions{}) -> runtime.Poller[DatabasesClientExportResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) }, traced: true)
   }
-  let req = c.export_create_request(resource_group_name, server_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginExport", c.setup.pipeline.tracer)
+  let req = c.export_create_request(resource_group_name, server_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientExportResponse", fn(r: http.Response) -> DatabasesClientExportResponse ! Str { databases_export_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginFailoverOptions: the optional parameters of DatabasesClient.begin_failover.
@@ -456,14 +467,16 @@ fn (c: DatabasesClient) failover_create_request(resource_group_name: Str, server
 /// Failovers a database.
 pub fn (c: DatabasesClient[fx]) begin_failover(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientBeginFailoverOptions = DatabasesClientBeginFailoverOptions{}) -> runtime.Poller[DatabasesClientFailoverResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientFailoverResponse", fn(r: http.Response) -> DatabasesClientFailoverResponse ! Str { databases_failover_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientFailoverResponse", fn(r: http.Response) -> DatabasesClientFailoverResponse ! Str { databases_failover_handle(r) }, traced: true)
   }
-  let req = c.failover_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginFailover", c.setup.pipeline.tracer)
+  let req = c.failover_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientFailoverResponse", fn(r: http.Response) -> DatabasesClientFailoverResponse ! Str { databases_failover_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientFailoverResponse", fn(r: http.Response) -> DatabasesClientFailoverResponse ! Str { databases_failover_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginImportOptions: the optional parameters of DatabasesClient.begin_import.
@@ -510,14 +523,16 @@ fn (c: DatabasesClient) import_create_request(resource_group_name: Str, server_n
 /// Imports a bacpac into a new database.
 pub fn (c: DatabasesClient[fx]) begin_import(resource_group_name: Str, server_name: Str, database_name: Str, parameters: ImportExistingDatabaseDefinition, options: DatabasesClientBeginImportOptions = DatabasesClientBeginImportOptions{}) -> runtime.Poller[DatabasesClientImportResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) }, traced: true)
   }
-  let req = c.import_create_request(resource_group_name, server_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginImport", c.setup.pipeline.tracer)
+  let req = c.import_create_request(resource_group_name, server_name, database_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientImportResponse", fn(r: http.Response) -> DatabasesClientImportResponse ! Str { databases_import_handle(r) }, traced: true)
 }
 
 /// DatabasesClientRenameOptions: the optional parameters of DatabasesClient.rename.
@@ -557,12 +572,15 @@ fn (c: DatabasesClient) rename_create_request(resource_group_name: Str, server_n
 
 /// Renames a database.
 pub fn (c: DatabasesClient) rename(resource_group_name: Str, server_name: Str, database_name: Str, parameters: ResourceMoveDefinition, options: DatabasesClientRenameOptions = DatabasesClientRenameOptions{}) -> DatabasesClientRenameResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.rename_create_request(resource_group_name, server_name, database_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.Rename", c.setup.pipeline.tracer)
+  let req = sp.on(c.rename_create_request(resource_group_name, server_name, database_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  databases_rename_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = databases_rename_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DatabasesClientBeginPauseOptions: the optional parameters of DatabasesClient.begin_pause.
@@ -608,14 +626,16 @@ fn (c: DatabasesClient) pause_create_request(resource_group_name: Str, server_na
 /// Pauses a database.
 pub fn (c: DatabasesClient[fx]) begin_pause(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientBeginPauseOptions = DatabasesClientBeginPauseOptions{}) -> runtime.Poller[DatabasesClientPauseResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientPauseResponse", fn(r: http.Response) -> DatabasesClientPauseResponse ! Str { databases_pause_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientPauseResponse", fn(r: http.Response) -> DatabasesClientPauseResponse ! Str { databases_pause_handle(r) }, traced: true)
   }
-  let req = c.pause_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginPause", c.setup.pipeline.tracer)
+  let req = c.pause_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientPauseResponse", fn(r: http.Response) -> DatabasesClientPauseResponse ! Str { databases_pause_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientPauseResponse", fn(r: http.Response) -> DatabasesClientPauseResponse ! Str { databases_pause_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginResumeOptions: the optional parameters of DatabasesClient.begin_resume.
@@ -661,14 +681,16 @@ fn (c: DatabasesClient) resume_create_request(resource_group_name: Str, server_n
 /// Resumes a database.
 pub fn (c: DatabasesClient[fx]) begin_resume(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientBeginResumeOptions = DatabasesClientBeginResumeOptions{}) -> runtime.Poller[DatabasesClientResumeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientResumeResponse", fn(r: http.Response) -> DatabasesClientResumeResponse ! Str { databases_resume_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientResumeResponse", fn(r: http.Response) -> DatabasesClientResumeResponse ! Str { databases_resume_handle(r) }, traced: true)
   }
-  let req = c.resume_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginResume", c.setup.pipeline.tracer)
+  let req = c.resume_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientResumeResponse", fn(r: http.Response) -> DatabasesClientResumeResponse ! Str { databases_resume_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientResumeResponse", fn(r: http.Response) -> DatabasesClientResumeResponse ! Str { databases_resume_handle(r) }, traced: true)
 }
 
 /// DatabasesClientBeginUpgradeDataWarehouseOptions: the optional parameters of DatabasesClient.begin_upgrade_data_warehouse.
@@ -711,14 +733,16 @@ fn (c: DatabasesClient) upgrade_data_warehouse_create_request(resource_group_nam
 /// Upgrades a data warehouse.
 pub fn (c: DatabasesClient[fx]) begin_upgrade_data_warehouse(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabasesClientBeginUpgradeDataWarehouseOptions = DatabasesClientBeginUpgradeDataWarehouseOptions{}) -> runtime.Poller[DatabasesClientUpgradeDataWarehouseResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpgradeDataWarehouseResponse", fn(r: http.Response) -> DatabasesClientUpgradeDataWarehouseResponse ! Str { databases_upgrade_data_warehouse_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DatabasesClientUpgradeDataWarehouseResponse", fn(r: http.Response) -> DatabasesClientUpgradeDataWarehouseResponse ! Str { databases_upgrade_data_warehouse_handle(r) }, traced: true)
   }
-  let req = c.upgrade_data_warehouse_create_request(resource_group_name, server_name, database_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabasesClient.BeginUpgradeDataWarehouse", c.setup.pipeline.tracer)
+  let req = c.upgrade_data_warehouse_create_request(resource_group_name, server_name, database_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpgradeDataWarehouseResponse", fn(r: http.Response) -> DatabasesClientUpgradeDataWarehouseResponse ! Str { databases_upgrade_data_warehouse_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DatabasesClientUpgradeDataWarehouseResponse", fn(r: http.Response) -> DatabasesClientUpgradeDataWarehouseResponse ! Str { databases_upgrade_data_warehouse_handle(r) }, traced: true)
 }
 
 /// DatabasesClientListByElasticPoolOptions: the optional parameters of DatabasesClient.new_list_by_elastic_pool_pager.
@@ -761,7 +785,7 @@ fn (c: DatabasesClient) list_by_elastic_pool_create_request(resource_group_name:
 /// Gets a list of databases in an elastic pool.
 pub fn (c: DatabasesClient[fx]) new_list_by_elastic_pool_pager(resource_group_name: Str, server_name: Str, elastic_pool_name: Str, options: DatabasesClientListByElasticPoolOptions = DatabasesClientListByElasticPoolOptions{}) -> runtime.Pager[DatabasesClientListByElasticPoolResponse, fx] ! azcore.CallErr {
   let req = c.list_by_elastic_pool_create_request(resource_group_name, server_name, elastic_pool_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByElasticPoolResponse ! Str { databases_list_by_elastic_pool_handle(r) }, fn(r: DatabasesClientListByElasticPoolResponse) -> Str? { r.database_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListByElasticPoolResponse ! Str { databases_list_by_elastic_pool_handle(r) }, fn(r: DatabasesClientListByElasticPoolResponse) -> Str? { r.database_list_result.next_link }).traced_as("DatabasesClientListByElasticPoolResponse"))
 }
 
 /// DatabasesClientListInaccessibleByServerOptions: the optional parameters of DatabasesClient.new_list_inaccessible_by_server_pager.
@@ -800,5 +824,5 @@ fn (c: DatabasesClient) list_inaccessible_by_server_create_request(resource_grou
 /// Gets a list of inaccessible databases in a logical server
 pub fn (c: DatabasesClient[fx]) new_list_inaccessible_by_server_pager(resource_group_name: Str, server_name: Str, options: DatabasesClientListInaccessibleByServerOptions = DatabasesClientListInaccessibleByServerOptions{}) -> runtime.Pager[DatabasesClientListInaccessibleByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_inaccessible_by_server_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListInaccessibleByServerResponse ! Str { databases_list_inaccessible_by_server_handle(r) }, fn(r: DatabasesClientListInaccessibleByServerResponse) -> Str? { r.database_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabasesClientListInaccessibleByServerResponse ! Str { databases_list_inaccessible_by_server_handle(r) }, fn(r: DatabasesClientListInaccessibleByServerResponse) -> Str? { r.database_list_result.next_link }).traced_as("DatabasesClientListInaccessibleByServerResponse"))
 }

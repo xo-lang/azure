@@ -48,7 +48,7 @@ fn (c: MarketplaceAgreementsClient) list_create_request(options: MarketplaceAgre
 
 pub fn (c: MarketplaceAgreementsClient[fx]) new_list_pager(options: MarketplaceAgreementsClientListOptions = MarketplaceAgreementsClientListOptions{}) -> runtime.Pager[MarketplaceAgreementsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MarketplaceAgreementsClientListResponse ! Str { marketplace_agreements_list_handle(r) }, fn(r: MarketplaceAgreementsClientListResponse) -> Str? { r.agreement_resource_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MarketplaceAgreementsClientListResponse ! Str { marketplace_agreements_list_handle(r) }, fn(r: MarketplaceAgreementsClientListResponse) -> Str? { r.agreement_resource_list_response.next_link }).traced_as("MarketplaceAgreementsClientListResponse"))
 }
 
 /// MarketplaceAgreementsClientCreateOptions: the optional parameters of MarketplaceAgreementsClient.create.
@@ -85,10 +85,13 @@ fn (c: MarketplaceAgreementsClient) create_create_request(options: MarketplaceAg
 }
 
 pub fn (c: MarketplaceAgreementsClient) create(options: MarketplaceAgreementsClientCreateOptions = MarketplaceAgreementsClientCreateOptions{}) -> MarketplaceAgreementsClientCreateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_create_request(options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MarketplaceAgreementsClient.Create", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_create_request(options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  marketplace_agreements_create_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = marketplace_agreements_create_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

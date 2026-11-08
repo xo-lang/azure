@@ -53,7 +53,7 @@ fn (c: AIModelsClient) list_create_request(location: Str, options: AIModelsClien
 /// List AIModel resources by SubscriptionLocationResource
 pub fn (c: AIModelsClient[fx]) new_list_pager(location: Str, options: AIModelsClientListOptions = AIModelsClientListOptions{}) -> runtime.Pager[AIModelsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AIModelsClientListResponse ! Str { ai_models_list_handle(r) }, c.setup.endpoint, fn(r: AIModelsClientListResponse) -> Str? { r.ai_model_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AIModelsClientListResponse ! Str { ai_models_list_handle(r) }, c.setup.endpoint, fn(r: AIModelsClientListResponse) -> Str? { r.ai_model_list_result.next_link }).traced_as("AIModelsClientListResponse"))
 }
 
 /// AIModelsClientGetOptions: the optional parameters of AIModelsClient.get.
@@ -91,12 +91,15 @@ fn (c: AIModelsClient) get_create_request(location: Str, ai_model_name: Str, opt
 
 /// Get a AIModel
 pub fn (c: AIModelsClient) get(location: Str, ai_model_name: Str, options: AIModelsClientGetOptions = AIModelsClientGetOptions{}) -> AIModelsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, ai_model_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AIModelsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, ai_model_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  ai_models_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = ai_models_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AIModelsClientCalculateCostOptions: the optional parameters of AIModelsClient.calculate_cost.
@@ -134,10 +137,13 @@ fn (c: AIModelsClient) calculate_cost_create_request(location: Str, ai_model_nam
 
 /// Returns a ranked list of GPU SKU pricing plans for deploying this model in the target region, each annotated with feasibility, per-replica hourly cost, and estimated relative performance. No Azure or Kubernetes resources are provisioned.
 pub fn (c: AIModelsClient) calculate_cost(location: Str, ai_model_name: Str, options: AIModelsClientCalculateCostOptions = AIModelsClientCalculateCostOptions{}) -> AIModelsClientCalculateCostResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.calculate_cost_create_request(location, ai_model_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AIModelsClient.CalculateCost", c.setup.pipeline.tracer)
+  let req = sp.on(c.calculate_cost_create_request(location, ai_model_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  ai_models_calculate_cost_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = ai_models_calculate_cost_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

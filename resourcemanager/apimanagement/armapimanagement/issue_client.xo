@@ -73,7 +73,7 @@ fn (c: IssueClient) list_by_service_create_request(resource_group_name: Str, ser
 /// Lists a collection of issues in the specified service instance.
 pub fn (c: IssueClient[fx]) new_list_by_service_pager(resource_group_name: Str, service_name: Str, options: IssueClientListByServiceOptions = IssueClientListByServiceOptions{}) -> runtime.Pager[IssueClientListByServiceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_service_create_request(resource_group_name, service_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> IssueClientListByServiceResponse ! Str { issue_list_by_service_handle(r) }, fn(r: IssueClientListByServiceResponse) -> Str? { r.issue_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> IssueClientListByServiceResponse ! Str { issue_list_by_service_handle(r) }, fn(r: IssueClientListByServiceResponse) -> Str? { r.issue_collection.next_link }).traced_as("IssueClientListByServiceResponse"))
 }
 
 /// IssueClientGetOptions: the optional parameters of IssueClient.get.
@@ -117,10 +117,13 @@ fn (c: IssueClient) get_create_request(resource_group_name: Str, service_name: S
 
 /// Gets API Management issue details
 pub fn (c: IssueClient) get(resource_group_name: Str, service_name: Str, issue_id: Str, options: IssueClientGetOptions = IssueClientGetOptions{}) -> IssueClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, issue_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "IssueClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, issue_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  issue_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = issue_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

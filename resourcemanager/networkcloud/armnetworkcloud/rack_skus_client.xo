@@ -49,7 +49,7 @@ fn (c: RackSKUsClient) list_by_subscription_create_request(options: RackSKUsClie
 /// Get a list of rack SKUs in the provided subscription.
 pub fn (c: RackSKUsClient[fx]) new_list_by_subscription_pager(options: RackSKUsClientListBySubscriptionOptions = RackSKUsClientListBySubscriptionOptions{}) -> runtime.Pager[RackSKUsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RackSKUsClientListBySubscriptionResponse ! Str { rack_skus_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RackSKUsClientListBySubscriptionResponse) -> Str? { r.rack_sku_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RackSKUsClientListBySubscriptionResponse ! Str { rack_skus_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RackSKUsClientListBySubscriptionResponse) -> Str? { r.rack_sku_list.next_link }).traced_as("RackSKUsClientListBySubscriptionResponse"))
 }
 
 /// RackSKUsClientGetOptions: the optional parameters of RackSKUsClient.get.
@@ -83,10 +83,13 @@ fn (c: RackSKUsClient) get_create_request(rack_sku_name: Str, options: RackSKUsC
 
 /// Get the properties of the provided rack SKU.
 pub fn (c: RackSKUsClient) get(rack_sku_name: Str, options: RackSKUsClientGetOptions = RackSKUsClientGetOptions{}) -> RackSKUsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(rack_sku_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RackSKUsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(rack_sku_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  rack_skus_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = rack_skus_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

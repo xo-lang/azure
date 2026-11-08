@@ -59,7 +59,7 @@ fn (c: FlexComponentsClient) list_by_parent_create_request(location: Str, option
 /// List FlexComponent resources by SubscriptionLocationResource
 pub fn (c: FlexComponentsClient[fx]) new_list_by_parent_pager(location: Str, options: FlexComponentsClientListByParentOptions = FlexComponentsClientListByParentOptions{}) -> runtime.Pager[FlexComponentsClientListByParentResponse, fx] ! azcore.CallErr {
   let req = c.list_by_parent_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FlexComponentsClientListByParentResponse ! Str { flex_components_list_by_parent_handle(r) }, c.setup.endpoint, fn(r: FlexComponentsClientListByParentResponse) -> Str? { r.flex_component_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FlexComponentsClientListByParentResponse ! Str { flex_components_list_by_parent_handle(r) }, c.setup.endpoint, fn(r: FlexComponentsClientListByParentResponse) -> Str? { r.flex_component_list_result.next_link }).traced_as("FlexComponentsClientListByParentResponse"))
 }
 
 /// FlexComponentsClientGetOptions: the optional parameters of FlexComponentsClient.get.
@@ -97,10 +97,13 @@ fn (c: FlexComponentsClient) get_create_request(location: Str, flex_component_na
 
 /// Get a FlexComponent
 pub fn (c: FlexComponentsClient) get(location: Str, flex_component_name: Str, options: FlexComponentsClientGetOptions = FlexComponentsClientGetOptions{}) -> FlexComponentsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, flex_component_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FlexComponentsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, flex_component_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  flex_components_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = flex_components_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

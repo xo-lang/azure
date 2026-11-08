@@ -65,7 +65,7 @@ fn (c: AddressesClient) list_by_subscription_create_request(options: AddressesCl
 /// List all the addresses available under the subscription.
 pub fn (c: AddressesClient[fx]) new_list_by_subscription_pager(options: AddressesClientListBySubscriptionOptions = AddressesClientListBySubscriptionOptions{}) -> runtime.Pager[AddressesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AddressesClientListBySubscriptionResponse ! Str { addresses_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: AddressesClientListBySubscriptionResponse) -> Str? { r.address_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AddressesClientListBySubscriptionResponse ! Str { addresses_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: AddressesClientListBySubscriptionResponse) -> Str? { r.address_resource_list.next_link }).traced_as("AddressesClientListBySubscriptionResponse"))
 }
 
 /// AddressesClientListByResourceGroupOptions: the optional parameters of AddressesClient.new_list_by_resource_group_pager.
@@ -116,7 +116,7 @@ fn (c: AddressesClient) list_by_resource_group_create_request(resource_group_nam
 /// List all the addresses available under the given resource group.
 pub fn (c: AddressesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AddressesClientListByResourceGroupOptions = AddressesClientListByResourceGroupOptions{}) -> runtime.Pager[AddressesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AddressesClientListByResourceGroupResponse ! Str { addresses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AddressesClientListByResourceGroupResponse) -> Str? { r.address_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AddressesClientListByResourceGroupResponse ! Str { addresses_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AddressesClientListByResourceGroupResponse) -> Str? { r.address_resource_list.next_link }).traced_as("AddressesClientListByResourceGroupResponse"))
 }
 
 /// AddressesClientGetOptions: the optional parameters of AddressesClient.get.
@@ -154,12 +154,15 @@ fn (c: AddressesClient) get_create_request(resource_group_name: Str, address_nam
 
 /// Get information about the specified address.
 pub fn (c: AddressesClient) get(resource_group_name: Str, address_name: Str, options: AddressesClientGetOptions = AddressesClientGetOptions{}) -> AddressesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AddressesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, address_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  addresses_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = addresses_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AddressesClientBeginCreateOptions: the optional parameters of AddressesClient.begin_create.
@@ -202,14 +205,16 @@ fn (c: AddressesClient) create_create_request(resource_group_name: Str, address_
 /// Create a new address with the specified parameters. Existing address cannot be updated with this API and should instead be updated with the Update address API.
 pub fn (c: AddressesClient[fx]) begin_create(resource_group_name: Str, address_name: Str, address_resource: AddressResource, options: AddressesClientBeginCreateOptions = AddressesClientBeginCreateOptions{}) -> runtime.Poller[AddressesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientCreateResponse", fn(r: http.Response) -> AddressesClientCreateResponse ! Str { addresses_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientCreateResponse", fn(r: http.Response) -> AddressesClientCreateResponse ! Str { addresses_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, address_name, address_resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AddressesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, address_name, address_resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientCreateResponse", fn(r: http.Response) -> AddressesClientCreateResponse ! Str { addresses_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientCreateResponse", fn(r: http.Response) -> AddressesClientCreateResponse ! Str { addresses_create_handle(r) }, traced: true)
 }
 
 /// AddressesClientBeginUpdateOptions: the optional parameters of AddressesClient.begin_update.
@@ -257,14 +262,16 @@ fn (c: AddressesClient) update_create_request(resource_group_name: Str, address_
 /// Update the properties of an existing address.
 pub fn (c: AddressesClient[fx]) begin_update(resource_group_name: Str, address_name: Str, address_update_parameter: AddressUpdateParameter, options: AddressesClientBeginUpdateOptions = AddressesClientBeginUpdateOptions{}) -> runtime.Poller[AddressesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientUpdateResponse", fn(r: http.Response) -> AddressesClientUpdateResponse ! Str { addresses_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientUpdateResponse", fn(r: http.Response) -> AddressesClientUpdateResponse ! Str { addresses_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, address_name, address_update_parameter, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AddressesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, address_name, address_update_parameter, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientUpdateResponse", fn(r: http.Response) -> AddressesClientUpdateResponse ! Str { addresses_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientUpdateResponse", fn(r: http.Response) -> AddressesClientUpdateResponse ! Str { addresses_update_handle(r) }, traced: true)
 }
 
 /// AddressesClientBeginDeleteOptions: the optional parameters of AddressesClient.begin_delete.
@@ -303,12 +310,14 @@ fn (c: AddressesClient) delete_create_request(resource_group_name: Str, address_
 /// Delete an address.
 pub fn (c: AddressesClient[fx]) begin_delete(resource_group_name: Str, address_name: Str, options: AddressesClientBeginDeleteOptions = AddressesClientBeginDeleteOptions{}) -> runtime.Poller[AddressesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientDeleteResponse", fn(r: http.Response) -> AddressesClientDeleteResponse ! Str { addresses_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AddressesClientDeleteResponse", fn(r: http.Response) -> AddressesClientDeleteResponse ! Str { addresses_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, address_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AddressesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, address_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientDeleteResponse", fn(r: http.Response) -> AddressesClientDeleteResponse ! Str { addresses_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AddressesClientDeleteResponse", fn(r: http.Response) -> AddressesClientDeleteResponse ! Str { addresses_delete_handle(r) }, traced: true)
 }

@@ -60,12 +60,15 @@ fn (c: ComponentsClient) get_create_request(resource_group_name: Str, network_fu
 
 /// Gets information about the specified application instance resource.
 pub fn (c: ComponentsClient) get(resource_group_name: Str, network_function_name: Str, component_name: Str, options: ComponentsClientGetOptions = ComponentsClientGetOptions{}) -> ComponentsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_function_name, component_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ComponentsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_function_name, component_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  components_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = components_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ComponentsClientListByNetworkFunctionOptions: the optional parameters of ComponentsClient.new_list_by_network_function_pager.
@@ -104,5 +107,5 @@ fn (c: ComponentsClient) list_by_network_function_create_request(resource_group_
 /// Lists all the component resources in a network function.
 pub fn (c: ComponentsClient[fx]) new_list_by_network_function_pager(resource_group_name: Str, network_function_name: Str, options: ComponentsClientListByNetworkFunctionOptions = ComponentsClientListByNetworkFunctionOptions{}) -> runtime.Pager[ComponentsClientListByNetworkFunctionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_network_function_create_request(resource_group_name, network_function_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComponentsClientListByNetworkFunctionResponse ! Str { components_list_by_network_function_handle(r) }, fn(r: ComponentsClientListByNetworkFunctionResponse) -> Str? { r.component_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ComponentsClientListByNetworkFunctionResponse ! Str { components_list_by_network_function_handle(r) }, fn(r: ComponentsClientListByNetworkFunctionResponse) -> Str? { r.component_list_result.next_link }).traced_as("ComponentsClientListByNetworkFunctionResponse"))
 }

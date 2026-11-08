@@ -49,7 +49,7 @@ fn (c: PrivateLinksClient) list_by_subscription_create_request(options: PrivateL
 /// Lists all the private links in the specified subscription. private links enable secure, private connectivity to Microsoft Defender for Cloud services without exposing traffic to the public internet. Use the 'nextLink' property in the response to get the next page of private links for the specified subscription.
 pub fn (c: PrivateLinksClient[fx]) new_list_by_subscription_pager(options: PrivateLinksClientListBySubscriptionOptions = PrivateLinksClientListBySubscriptionOptions{}) -> runtime.Pager[PrivateLinksClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateLinksClientListBySubscriptionResponse ! Str { private_links_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PrivateLinksClientListBySubscriptionResponse) -> Str? { r.private_links_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateLinksClientListBySubscriptionResponse ! Str { private_links_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PrivateLinksClientListBySubscriptionResponse) -> Str? { r.private_links_list.next_link }).traced_as("PrivateLinksClientListBySubscriptionResponse"))
 }
 
 /// PrivateLinksClientListOptions: the optional parameters of PrivateLinksClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: PrivateLinksClient) list_create_request(resource_group_name: Str, options
 /// Lists all the private links in the specified resource group. private links enable secure, private connectivity to Microsoft Defender for Cloud services without exposing traffic to the public internet. Use the 'nextLink' property in the response to get the next page of private links for the specified resource group.
 pub fn (c: PrivateLinksClient[fx]) new_list_pager(resource_group_name: Str, options: PrivateLinksClientListOptions = PrivateLinksClientListOptions{}) -> runtime.Pager[PrivateLinksClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateLinksClientListResponse ! Str { private_links_list_handle(r) }, c.setup.endpoint, fn(r: PrivateLinksClientListResponse) -> Str? { r.private_links_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateLinksClientListResponse ! Str { private_links_list_handle(r) }, c.setup.endpoint, fn(r: PrivateLinksClientListResponse) -> Str? { r.private_links_list.next_link }).traced_as("PrivateLinksClientListResponse"))
 }
 
 /// PrivateLinkParameters: a parameter group, Go's PrivateLinkParameters.
@@ -128,12 +128,15 @@ fn (c: PrivateLinksClient) get_create_request(resource_group_name: Str, private_
 
 /// Get a private link resource. Returns the configuration and status of private endpoint connectivity for Microsoft Defender for Cloud services in the specified region.
 pub fn (c: PrivateLinksClient) get(resource_group_name: Str, private_link_name: PrivateLinkParameters, options: PrivateLinksClientGetOptions = PrivateLinksClientGetOptions{}) -> PrivateLinksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateLinksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_link_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  private_links_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = private_links_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PrivateLinksClientBeginCreateOptions: the optional parameters of PrivateLinksClient.begin_create.
@@ -176,14 +179,16 @@ fn (c: PrivateLinksClient) create_create_request(resource_group_name: Str, priva
 /// Create a private link resource. This operation creates the necessary infrastructure to enable private endpoint connections to Microsoft Defender for Cloud services. For updates to existing resources, use the PATCH operation. The operation is asynchronous and may take several minutes to complete.
 pub fn (c: PrivateLinksClient[fx]) begin_create(resource_group_name: Str, private_link: PrivateLinkResource, private_link_name: PrivateLinkParameters, options: PrivateLinksClientBeginCreateOptions = PrivateLinksClientBeginCreateOptions{}) -> runtime.Poller[PrivateLinksClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateLinksClientCreateResponse", fn(r: http.Response) -> PrivateLinksClientCreateResponse ! Str { private_links_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateLinksClientCreateResponse", fn(r: http.Response) -> PrivateLinksClientCreateResponse ! Str { private_links_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, private_link, private_link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateLinksClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, private_link, private_link_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateLinksClientCreateResponse", fn(r: http.Response) -> PrivateLinksClientCreateResponse ! Str { private_links_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateLinksClientCreateResponse", fn(r: http.Response) -> PrivateLinksClientCreateResponse ! Str { private_links_create_handle(r) }, traced: true)
 }
 
 /// PrivateLinksClientUpdateOptions: the optional parameters of PrivateLinksClient.update.
@@ -222,12 +227,15 @@ fn (c: PrivateLinksClient) update_create_request(resource_group_name: Str, priva
 
 /// Update specific properties of a private link resource. Use this operation to update mutable properties like tags without affecting the entire resource configuration.
 pub fn (c: PrivateLinksClient) update(resource_group_name: Str, private_link: PrivateLinkUpdate, private_link_name: PrivateLinkParameters, options: PrivateLinksClientUpdateOptions = PrivateLinksClientUpdateOptions{}) -> PrivateLinksClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, private_link, private_link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateLinksClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, private_link, private_link_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  private_links_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = private_links_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PrivateLinksClientBeginDeleteOptions: the optional parameters of PrivateLinksClient.begin_delete.
@@ -266,14 +274,16 @@ fn (c: PrivateLinksClient) delete_create_request(resource_group_name: Str, priva
 /// Delete a private link resource. This operation will remove the private link infrastructure and disconnect all associated private endpoints. This operation is asynchronous and may take several minutes to complete.
 pub fn (c: PrivateLinksClient[fx]) begin_delete(resource_group_name: Str, private_link_name: PrivateLinkParameters, options: PrivateLinksClientBeginDeleteOptions = PrivateLinksClientBeginDeleteOptions{}) -> runtime.Poller[PrivateLinksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateLinksClientDeleteResponse", fn(r: http.Response) -> PrivateLinksClientDeleteResponse ! Str { private_links_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateLinksClientDeleteResponse", fn(r: http.Response) -> PrivateLinksClientDeleteResponse ! Str { private_links_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, private_link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateLinksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, private_link_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateLinksClientDeleteResponse", fn(r: http.Response) -> PrivateLinksClientDeleteResponse ! Str { private_links_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateLinksClientDeleteResponse", fn(r: http.Response) -> PrivateLinksClientDeleteResponse ! Str { private_links_delete_handle(r) }, traced: true)
 }
 
 /// PrivateLinksClientHeadOptions: the optional parameters of PrivateLinksClient.head.
@@ -311,10 +321,13 @@ fn (c: PrivateLinksClient) head_create_request(resource_group_name: Str, private
 
 /// Checks whether private link exists.
 pub fn (c: PrivateLinksClient) head(resource_group_name: Str, private_link_name: PrivateLinkParameters, options: PrivateLinksClientHeadOptions = PrivateLinksClientHeadOptions{}) -> PrivateLinksClientHeadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.head_create_request(resource_group_name, private_link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateLinksClient.Head", c.setup.pipeline.tracer)
+  let req = sp.on(c.head_create_request(resource_group_name, private_link_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  private_links_head_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = private_links_head_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

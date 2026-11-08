@@ -49,7 +49,7 @@ fn (c: VirtualWansClient) list_create_request(options: VirtualWansClientListOpti
 /// Lists all the VirtualWANs in a subscription.
 pub fn (c: VirtualWansClient[fx]) new_list_pager(options: VirtualWansClientListOptions = VirtualWansClientListOptions{}) -> runtime.Pager[VirtualWansClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualWansClientListResponse ! Str { virtual_wans_list_handle(r) }, c.setup.endpoint, fn(r: VirtualWansClientListResponse) -> Str? { r.list_virtual_wans_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualWansClientListResponse ! Str { virtual_wans_list_handle(r) }, c.setup.endpoint, fn(r: VirtualWansClientListResponse) -> Str? { r.list_virtual_wans_result.next_link }).traced_as("VirtualWansClientListResponse"))
 }
 
 /// VirtualWansClientListByResourceGroupOptions: the optional parameters of VirtualWansClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VirtualWansClient) list_by_resource_group_create_request(resource_group_n
 /// Lists all the VirtualWANs in a resource group.
 pub fn (c: VirtualWansClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VirtualWansClientListByResourceGroupOptions = VirtualWansClientListByResourceGroupOptions{}) -> runtime.Pager[VirtualWansClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualWansClientListByResourceGroupResponse ! Str { virtual_wans_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualWansClientListByResourceGroupResponse) -> Str? { r.list_virtual_wans_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualWansClientListByResourceGroupResponse ! Str { virtual_wans_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualWansClientListByResourceGroupResponse) -> Str? { r.list_virtual_wans_result.next_link }).traced_as("VirtualWansClientListByResourceGroupResponse"))
 }
 
 /// VirtualWansClientGetOptions: the optional parameters of VirtualWansClient.get.
@@ -122,12 +122,15 @@ fn (c: VirtualWansClient) get_create_request(resource_group_name: Str, virtual_w
 
 /// Retrieves the details of a VirtualWAN.
 pub fn (c: VirtualWansClient) get(resource_group_name: Str, virtual_wan_name: Str, options: VirtualWansClientGetOptions = VirtualWansClientGetOptions{}) -> VirtualWansClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_wan_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualWansClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_wan_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_wans_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_wans_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualWansClientBeginCreateOrUpdateOptions: the optional parameters of VirtualWansClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: VirtualWansClient) create_or_update_create_request(resource_group_name: S
 /// Creates a VirtualWAN resource if it doesn't exist else updates the existing VirtualWAN.
 pub fn (c: VirtualWansClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_wan_name: Str, wan_parameters: VirtualWAN, options: VirtualWansClientBeginCreateOrUpdateOptions = VirtualWansClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualWansClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualWansClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualWansClientCreateOrUpdateResponse ! Str { virtual_wans_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualWansClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualWansClientCreateOrUpdateResponse ! Str { virtual_wans_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_wan_name, wan_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualWansClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_wan_name, wan_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualWansClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualWansClientCreateOrUpdateResponse ! Str { virtual_wans_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualWansClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualWansClientCreateOrUpdateResponse ! Str { virtual_wans_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualWansClientUpdateTagsOptions: the optional parameters of VirtualWansClient.update_tags.
@@ -216,12 +221,15 @@ fn (c: VirtualWansClient) update_tags_create_request(resource_group_name: Str, v
 
 /// Updates a VirtualWAN tags.
 pub fn (c: VirtualWansClient) update_tags(resource_group_name: Str, virtual_wan_name: Str, wan_parameters: TagsObject, options: VirtualWansClientUpdateTagsOptions = VirtualWansClientUpdateTagsOptions{}) -> VirtualWansClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, virtual_wan_name, wan_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualWansClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, virtual_wan_name, wan_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_wans_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_wans_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualWansClientBeginDeleteOptions: the optional parameters of VirtualWansClient.begin_delete.
@@ -260,12 +268,14 @@ fn (c: VirtualWansClient) delete_create_request(resource_group_name: Str, virtua
 /// Deletes a VirtualWAN.
 pub fn (c: VirtualWansClient[fx]) begin_delete(resource_group_name: Str, virtual_wan_name: Str, options: VirtualWansClientBeginDeleteOptions = VirtualWansClientBeginDeleteOptions{}) -> runtime.Poller[VirtualWansClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualWansClientDeleteResponse", fn(r: http.Response) -> VirtualWansClientDeleteResponse ! Str { virtual_wans_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualWansClientDeleteResponse", fn(r: http.Response) -> VirtualWansClientDeleteResponse ! Str { virtual_wans_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_wan_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualWansClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_wan_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualWansClientDeleteResponse", fn(r: http.Response) -> VirtualWansClientDeleteResponse ! Str { virtual_wans_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualWansClientDeleteResponse", fn(r: http.Response) -> VirtualWansClientDeleteResponse ! Str { virtual_wans_delete_handle(r) }, traced: true)
 }

@@ -49,7 +49,7 @@ fn (c: SettingsClient) list_create_request(options: SettingsClientListOptions) -
 /// Settings about different configurations in Microsoft Defender for Cloud
 pub fn (c: SettingsClient[fx]) new_list_pager(options: SettingsClientListOptions = SettingsClientListOptions{}) -> runtime.Pager[SettingsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SettingsClientListResponse ! Str { settings_list_handle(r) }, c.setup.endpoint, fn(r: SettingsClientListResponse) -> Str? { r.settings_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SettingsClientListResponse ! Str { settings_list_handle(r) }, c.setup.endpoint, fn(r: SettingsClientListResponse) -> Str? { r.settings_list.next_link }).traced_as("SettingsClientListResponse"))
 }
 
 /// SettingsClientGetOptions: the optional parameters of SettingsClient.get.
@@ -86,12 +86,15 @@ fn (c: SettingsClient) get_create_request(setting_name: SettingName, options: Se
 
 /// Settings of different configurations in Microsoft Defender for Cloud
 pub fn (c: SettingsClient) get(setting_name: SettingName, options: SettingsClientGetOptions = SettingsClientGetOptions{}) -> SettingsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(setting_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SettingsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(setting_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  settings_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = settings_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SettingsClientUpdateOptions: the optional parameters of SettingsClient.update.
@@ -129,10 +132,13 @@ fn (c: SettingsClient) update_create_request(setting_name: SettingName, setting:
 
 /// updating settings about different configurations in Microsoft Defender for Cloud
 pub fn (c: SettingsClient) update(setting_name: SettingName, setting: SettingClassification, options: SettingsClientUpdateOptions = SettingsClientUpdateOptions{}) -> SettingsClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(setting_name, setting, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SettingsClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(setting_name, setting, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  settings_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = settings_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

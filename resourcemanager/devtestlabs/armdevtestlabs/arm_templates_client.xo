@@ -82,7 +82,7 @@ fn (c: ArmTemplatesClient) list_create_request(resource_group_name: Str, lab_nam
 /// List azure resource manager templates in a given artifact source.
 pub fn (c: ArmTemplatesClient[fx]) new_list_pager(resource_group_name: Str, lab_name: Str, artifact_source_name: Str, options: ArmTemplatesClientListOptions = ArmTemplatesClientListOptions{}) -> runtime.Pager[ArmTemplatesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, lab_name, artifact_source_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ArmTemplatesClientListResponse ! Str { arm_templates_list_handle(r) }, fn(r: ArmTemplatesClientListResponse) -> Str? { r.arm_template_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ArmTemplatesClientListResponse ! Str { arm_templates_list_handle(r) }, fn(r: ArmTemplatesClientListResponse) -> Str? { r.arm_template_list.next_link }).traced_as("ArmTemplatesClientListResponse"))
 }
 
 /// ArmTemplatesClientGetOptions: the optional parameters of ArmTemplatesClient.get.
@@ -134,10 +134,13 @@ fn (c: ArmTemplatesClient) get_create_request(resource_group_name: Str, lab_name
 
 /// Get azure resource manager template.
 pub fn (c: ArmTemplatesClient) get(resource_group_name: Str, lab_name: Str, artifact_source_name: Str, name: Str, options: ArmTemplatesClientGetOptions = ArmTemplatesClientGetOptions{}) -> ArmTemplatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, lab_name, artifact_source_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ArmTemplatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, lab_name, artifact_source_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  arm_templates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = arm_templates_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

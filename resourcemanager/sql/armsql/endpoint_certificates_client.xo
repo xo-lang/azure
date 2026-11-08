@@ -57,7 +57,7 @@ fn (c: EndpointCertificatesClient) list_by_instance_create_request(resource_grou
 /// List certificates used on endpoints on the target instance.
 pub fn (c: EndpointCertificatesClient[fx]) new_list_by_instance_pager(resource_group_name: Str, managed_instance_name: Str, options: EndpointCertificatesClientListByInstanceOptions = EndpointCertificatesClientListByInstanceOptions{}) -> runtime.Pager[EndpointCertificatesClientListByInstanceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_instance_create_request(resource_group_name, managed_instance_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointCertificatesClientListByInstanceResponse ! Str { endpoint_certificates_list_by_instance_handle(r) }, fn(r: EndpointCertificatesClientListByInstanceResponse) -> Str? { r.endpoint_certificate_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointCertificatesClientListByInstanceResponse ! Str { endpoint_certificates_list_by_instance_handle(r) }, fn(r: EndpointCertificatesClientListByInstanceResponse) -> Str? { r.endpoint_certificate_list_result.next_link }).traced_as("EndpointCertificatesClientListByInstanceResponse"))
 }
 
 /// EndpointCertificatesClientGetOptions: the optional parameters of EndpointCertificatesClient.get.
@@ -99,10 +99,13 @@ fn (c: EndpointCertificatesClient) get_create_request(resource_group_name: Str, 
 
 /// Gets a certificate used on the endpoint with the given id.
 pub fn (c: EndpointCertificatesClient) get(resource_group_name: Str, managed_instance_name: Str, endpoint_type: Str, options: EndpointCertificatesClientGetOptions = EndpointCertificatesClientGetOptions{}) -> EndpointCertificatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, managed_instance_name, endpoint_type, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointCertificatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, managed_instance_name, endpoint_type, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  endpoint_certificates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = endpoint_certificates_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

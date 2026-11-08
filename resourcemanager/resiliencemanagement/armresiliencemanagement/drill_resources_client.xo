@@ -63,7 +63,7 @@ fn (c: DrillResourcesClient) list_create_request(service_group_name: Str, drill_
 /// List DrillResource resources by Drill
 pub fn (c: DrillResourcesClient[fx]) new_list_pager(service_group_name: Str, drill_name: Str, options: DrillResourcesClientListOptions = DrillResourcesClientListOptions{}) -> runtime.Pager[DrillResourcesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(service_group_name, drill_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DrillResourcesClientListResponse ! Str { drill_resources_list_handle(r) }, c.setup.endpoint, fn(r: DrillResourcesClientListResponse) -> Str? { r.drill_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DrillResourcesClientListResponse ! Str { drill_resources_list_handle(r) }, c.setup.endpoint, fn(r: DrillResourcesClientListResponse) -> Str? { r.drill_resource_list_result.next_link }).traced_as("DrillResourcesClientListResponse"))
 }
 
 /// DrillResourcesClientGetOptions: the optional parameters of DrillResourcesClient.get.
@@ -101,10 +101,13 @@ fn (c: DrillResourcesClient) get_create_request(service_group_name: Str, drill_n
 
 /// Get a DrillResource
 pub fn (c: DrillResourcesClient) get(service_group_name: Str, drill_name: Str, drill_resource_name: Str, options: DrillResourcesClientGetOptions = DrillResourcesClientGetOptions{}) -> DrillResourcesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(service_group_name, drill_name, drill_resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DrillResourcesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(service_group_name, drill_name, drill_resource_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  drill_resources_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = drill_resources_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

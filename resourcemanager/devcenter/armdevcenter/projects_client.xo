@@ -55,7 +55,7 @@ fn (c: ProjectsClient) list_by_subscription_create_request(options: ProjectsClie
 /// Lists all projects in the subscription.
 pub fn (c: ProjectsClient[fx]) new_list_by_subscription_pager(options: ProjectsClientListBySubscriptionOptions = ProjectsClientListBySubscriptionOptions{}) -> runtime.Pager[ProjectsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProjectsClientListBySubscriptionResponse ! Str { projects_list_by_subscription_handle(r) }, fn(r: ProjectsClientListBySubscriptionResponse) -> Str? { r.project_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProjectsClientListBySubscriptionResponse ! Str { projects_list_by_subscription_handle(r) }, fn(r: ProjectsClientListBySubscriptionResponse) -> Str? { r.project_list_result.next_link }).traced_as("ProjectsClientListBySubscriptionResponse"))
 }
 
 /// ProjectsClientListByResourceGroupOptions: the optional parameters of ProjectsClient.new_list_by_resource_group_pager.
@@ -96,7 +96,7 @@ fn (c: ProjectsClient) list_by_resource_group_create_request(resource_group_name
 /// Lists all projects in the resource group.
 pub fn (c: ProjectsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ProjectsClientListByResourceGroupOptions = ProjectsClientListByResourceGroupOptions{}) -> runtime.Pager[ProjectsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProjectsClientListByResourceGroupResponse ! Str { projects_list_by_resource_group_handle(r) }, fn(r: ProjectsClientListByResourceGroupResponse) -> Str? { r.project_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ProjectsClientListByResourceGroupResponse ! Str { projects_list_by_resource_group_handle(r) }, fn(r: ProjectsClientListByResourceGroupResponse) -> Str? { r.project_list_result.next_link }).traced_as("ProjectsClientListByResourceGroupResponse"))
 }
 
 /// ProjectsClientGetOptions: the optional parameters of ProjectsClient.get.
@@ -134,12 +134,15 @@ fn (c: ProjectsClient) get_create_request(resource_group_name: Str, project_name
 
 /// Gets a specific project.
 pub fn (c: ProjectsClient) get(resource_group_name: Str, project_name: Str, options: ProjectsClientGetOptions = ProjectsClientGetOptions{}) -> ProjectsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, project_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ProjectsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, project_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  projects_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = projects_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ProjectsClientBeginCreateOrUpdateOptions: the optional parameters of ProjectsClient.begin_create_or_update.
@@ -182,14 +185,16 @@ fn (c: ProjectsClient) create_or_update_create_request(resource_group_name: Str,
 /// Creates or updates a project.
 pub fn (c: ProjectsClient[fx]) begin_create_or_update(resource_group_name: Str, project_name: Str, body: Project, options: ProjectsClientBeginCreateOrUpdateOptions = ProjectsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ProjectsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientCreateOrUpdateResponse", fn(r: http.Response) -> ProjectsClientCreateOrUpdateResponse ! Str { projects_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientCreateOrUpdateResponse", fn(r: http.Response) -> ProjectsClientCreateOrUpdateResponse ! Str { projects_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, project_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ProjectsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, project_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientCreateOrUpdateResponse", fn(r: http.Response) -> ProjectsClientCreateOrUpdateResponse ! Str { projects_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientCreateOrUpdateResponse", fn(r: http.Response) -> ProjectsClientCreateOrUpdateResponse ! Str { projects_create_or_update_handle(r) }, traced: true)
 }
 
 /// ProjectsClientBeginUpdateOptions: the optional parameters of ProjectsClient.begin_update.
@@ -232,14 +237,16 @@ fn (c: ProjectsClient) update_create_request(resource_group_name: Str, project_n
 /// Partially updates a project.
 pub fn (c: ProjectsClient[fx]) begin_update(resource_group_name: Str, project_name: Str, body: ProjectUpdate, options: ProjectsClientBeginUpdateOptions = ProjectsClientBeginUpdateOptions{}) -> runtime.Poller[ProjectsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientUpdateResponse", fn(r: http.Response) -> ProjectsClientUpdateResponse ! Str { projects_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientUpdateResponse", fn(r: http.Response) -> ProjectsClientUpdateResponse ! Str { projects_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, project_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ProjectsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, project_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientUpdateResponse", fn(r: http.Response) -> ProjectsClientUpdateResponse ! Str { projects_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientUpdateResponse", fn(r: http.Response) -> ProjectsClientUpdateResponse ! Str { projects_update_handle(r) }, traced: true)
 }
 
 /// ProjectsClientBeginDeleteOptions: the optional parameters of ProjectsClient.begin_delete.
@@ -278,12 +285,14 @@ fn (c: ProjectsClient) delete_create_request(resource_group_name: Str, project_n
 /// Deletes a project resource.
 pub fn (c: ProjectsClient[fx]) begin_delete(resource_group_name: Str, project_name: Str, options: ProjectsClientBeginDeleteOptions = ProjectsClientBeginDeleteOptions{}) -> runtime.Poller[ProjectsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientDeleteResponse", fn(r: http.Response) -> ProjectsClientDeleteResponse ! Str { projects_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ProjectsClientDeleteResponse", fn(r: http.Response) -> ProjectsClientDeleteResponse ! Str { projects_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, project_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ProjectsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, project_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientDeleteResponse", fn(r: http.Response) -> ProjectsClientDeleteResponse ! Str { projects_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "ProjectsClientDeleteResponse", fn(r: http.Response) -> ProjectsClientDeleteResponse ! Str { projects_delete_handle(r) }, traced: true)
 }

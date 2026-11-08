@@ -49,7 +49,7 @@ fn (c: NetworkInterfacesClient) list_all_create_request(options: NetworkInterfac
 /// Lists all of the network interfaces in the specified subscription. Use the nextLink property in the response to get the next page of network interfaces.
 pub fn (c: NetworkInterfacesClient[fx]) new_list_all_pager(options: NetworkInterfacesClientListAllOptions = NetworkInterfacesClientListAllOptions{}) -> runtime.Pager[NetworkInterfacesClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkInterfacesClientListAllResponse ! Str { network_interfaces_list_all_handle(r) }, c.setup.endpoint, fn(r: NetworkInterfacesClientListAllResponse) -> Str? { r.network_interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkInterfacesClientListAllResponse ! Str { network_interfaces_list_all_handle(r) }, c.setup.endpoint, fn(r: NetworkInterfacesClientListAllResponse) -> Str? { r.network_interface_list_result.next_link }).traced_as("NetworkInterfacesClientListAllResponse"))
 }
 
 /// NetworkInterfacesClientListByResourceGroupOptions: the optional parameters of NetworkInterfacesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: NetworkInterfacesClient) list_by_resource_group_create_request(resource_g
 /// Lists all of the network interfaces in the specified resource group. Use the nextLink property in the response to get the next page of network interfaces.
 pub fn (c: NetworkInterfacesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: NetworkInterfacesClientListByResourceGroupOptions = NetworkInterfacesClientListByResourceGroupOptions{}) -> runtime.Pager[NetworkInterfacesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkInterfacesClientListByResourceGroupResponse ! Str { network_interfaces_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkInterfacesClientListByResourceGroupResponse) -> Str? { r.network_interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkInterfacesClientListByResourceGroupResponse ! Str { network_interfaces_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkInterfacesClientListByResourceGroupResponse) -> Str? { r.network_interface_list_result.next_link }).traced_as("NetworkInterfacesClientListByResourceGroupResponse"))
 }
 
 /// NetworkInterfacesClientGetOptions: the optional parameters of NetworkInterfacesClient.get.
@@ -122,12 +122,15 @@ fn (c: NetworkInterfacesClient) get_create_request(resource_group_name: Str, net
 
 /// Gets a network interface
 pub fn (c: NetworkInterfacesClient) get(resource_group_name: Str, network_interface_name: Str, options: NetworkInterfacesClientGetOptions = NetworkInterfacesClientGetOptions{}) -> NetworkInterfacesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkInterfacesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  network_interfaces_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = network_interfaces_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NetworkInterfacesClientBeginCreateOrUpdateOptions: the optional parameters of NetworkInterfacesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: NetworkInterfacesClient) create_or_update_create_request(resource_group_n
 /// The operation to create or update a network interface. Please note some properties can be set only during network interface creation.
 pub fn (c: NetworkInterfacesClient[fx]) begin_create_or_update(resource_group_name: Str, network_interface_name: Str, resource: NetworkInterface, options: NetworkInterfacesClientBeginCreateOrUpdateOptions = NetworkInterfacesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[NetworkInterfacesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientCreateOrUpdateResponse ! Str { network_interfaces_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientCreateOrUpdateResponse ! Str { network_interfaces_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, network_interface_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkInterfacesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, network_interface_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "NetworkInterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientCreateOrUpdateResponse ! Str { network_interfaces_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "NetworkInterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientCreateOrUpdateResponse ! Str { network_interfaces_create_or_update_handle(r) }, traced: true)
 }
 
 /// NetworkInterfacesClientBeginUpdateOptions: the optional parameters of NetworkInterfacesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: NetworkInterfacesClient) update_create_request(resource_group_name: Str, 
 /// The operation to update a network interface.
 pub fn (c: NetworkInterfacesClient[fx]) begin_update(resource_group_name: Str, network_interface_name: Str, properties: NetworkInterfacesUpdateRequest, options: NetworkInterfacesClientBeginUpdateOptions = NetworkInterfacesClientBeginUpdateOptions{}) -> runtime.Poller[NetworkInterfacesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientUpdateResponse ! Str { network_interfaces_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientUpdateResponse ! Str { network_interfaces_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, network_interface_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkInterfacesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, network_interface_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkInterfacesClientUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientUpdateResponse ! Str { network_interfaces_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkInterfacesClientUpdateResponse", fn(r: http.Response) -> NetworkInterfacesClientUpdateResponse ! Str { network_interfaces_update_handle(r) }, traced: true)
 }
 
 /// NetworkInterfacesClientBeginDeleteOptions: the optional parameters of NetworkInterfacesClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: NetworkInterfacesClient) delete_create_request(resource_group_name: Str, 
 /// The operation to delete a network interface.
 pub fn (c: NetworkInterfacesClient[fx]) begin_delete(resource_group_name: Str, network_interface_name: Str, options: NetworkInterfacesClientBeginDeleteOptions = NetworkInterfacesClientBeginDeleteOptions{}) -> runtime.Poller[NetworkInterfacesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientDeleteResponse", fn(r: http.Response) -> NetworkInterfacesClientDeleteResponse ! Str { network_interfaces_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkInterfacesClientDeleteResponse", fn(r: http.Response) -> NetworkInterfacesClientDeleteResponse ! Str { network_interfaces_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkInterfacesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkInterfacesClientDeleteResponse", fn(r: http.Response) -> NetworkInterfacesClientDeleteResponse ! Str { network_interfaces_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkInterfacesClientDeleteResponse", fn(r: http.Response) -> NetworkInterfacesClientDeleteResponse ! Str { network_interfaces_delete_handle(r) }, traced: true)
 }

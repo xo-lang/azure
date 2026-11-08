@@ -53,7 +53,7 @@ fn (c: TimeZonesClient) list_by_location_create_request(location_name: Str, opti
 /// Gets a list of managed instance time zones by location.
 pub fn (c: TimeZonesClient[fx]) new_list_by_location_pager(location_name: Str, options: TimeZonesClientListByLocationOptions = TimeZonesClientListByLocationOptions{}) -> runtime.Pager[TimeZonesClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> TimeZonesClientListByLocationResponse ! Str { time_zones_list_by_location_handle(r) }, fn(r: TimeZonesClientListByLocationResponse) -> Str? { r.time_zone_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> TimeZonesClientListByLocationResponse ! Str { time_zones_list_by_location_handle(r) }, fn(r: TimeZonesClientListByLocationResponse) -> Str? { r.time_zone_list_result.next_link }).traced_as("TimeZonesClientListByLocationResponse"))
 }
 
 /// TimeZonesClientGetOptions: the optional parameters of TimeZonesClient.get.
@@ -91,10 +91,13 @@ fn (c: TimeZonesClient) get_create_request(location_name: Str, time_zone_id: Str
 
 /// Gets a managed instance time zone.
 pub fn (c: TimeZonesClient) get(location_name: Str, time_zone_id: Str, options: TimeZonesClientGetOptions = TimeZonesClientGetOptions{}) -> TimeZonesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location_name, time_zone_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TimeZonesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location_name, time_zone_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  time_zones_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = time_zones_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -78,7 +78,7 @@ fn (c: SharesClient) list_synchronization_details_create_request(resource_group_
 /// List synchronization details
 pub fn (c: SharesClient[fx]) new_list_synchronization_details_pager(resource_group_name: Str, account_name: Str, share_name: Str, share_synchronization: ShareSynchronization, options: SharesClientListSynchronizationDetailsOptions = SharesClientListSynchronizationDetailsOptions{}) -> runtime.Pager[SharesClientListSynchronizationDetailsResponse, fx] ! azcore.CallErr {
   let req = c.list_synchronization_details_create_request(resource_group_name, account_name, share_name, share_synchronization, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListSynchronizationDetailsResponse ! Str { shares_list_synchronization_details_handle(r) }, fn(r: SharesClientListSynchronizationDetailsResponse) -> Str? { r.synchronization_details_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListSynchronizationDetailsResponse ! Str { shares_list_synchronization_details_handle(r) }, fn(r: SharesClientListSynchronizationDetailsResponse) -> Str? { r.synchronization_details_list.next_link }).traced_as("SharesClientListSynchronizationDetailsResponse"))
 }
 
 /// SharesClientListSynchronizationsOptions: the optional parameters of SharesClient.new_list_synchronizations_pager.
@@ -137,7 +137,7 @@ fn (c: SharesClient) list_synchronizations_create_request(resource_group_name: S
 /// List synchronizations of a share
 pub fn (c: SharesClient[fx]) new_list_synchronizations_pager(resource_group_name: Str, account_name: Str, share_name: Str, options: SharesClientListSynchronizationsOptions = SharesClientListSynchronizationsOptions{}) -> runtime.Pager[SharesClientListSynchronizationsResponse, fx] ! azcore.CallErr {
   let req = c.list_synchronizations_create_request(resource_group_name, account_name, share_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListSynchronizationsResponse ! Str { shares_list_synchronizations_handle(r) }, fn(r: SharesClientListSynchronizationsResponse) -> Str? { r.share_synchronization_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListSynchronizationsResponse ! Str { shares_list_synchronizations_handle(r) }, fn(r: SharesClientListSynchronizationsResponse) -> Str? { r.share_synchronization_list.next_link }).traced_as("SharesClientListSynchronizationsResponse"))
 }
 
 /// SharesClientGetOptions: the optional parameters of SharesClient.get.
@@ -179,12 +179,15 @@ fn (c: SharesClient) get_create_request(resource_group_name: Str, account_name: 
 
 /// Get a share
 pub fn (c: SharesClient) get(resource_group_name: Str, account_name: Str, share_name: Str, options: SharesClientGetOptions = SharesClientGetOptions{}) -> SharesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, share_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SharesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, share_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  shares_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = shares_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SharesClientCreateOptions: the optional parameters of SharesClient.create.
@@ -227,12 +230,15 @@ fn (c: SharesClient) create_create_request(resource_group_name: Str, account_nam
 
 /// Create a share
 pub fn (c: SharesClient) create(resource_group_name: Str, account_name: Str, share_name: Str, share: Share, options: SharesClientCreateOptions = SharesClientCreateOptions{}) -> SharesClientCreateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_create_request(resource_group_name, account_name, share_name, share, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SharesClient.Create", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_create_request(resource_group_name, account_name, share_name, share, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  shares_create_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = shares_create_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SharesClientBeginDeleteOptions: the optional parameters of SharesClient.begin_delete.
@@ -278,14 +284,16 @@ fn (c: SharesClient) delete_create_request(resource_group_name: Str, account_nam
 /// Delete a share
 pub fn (c: SharesClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, share_name: Str, options: SharesClientBeginDeleteOptions = SharesClientBeginDeleteOptions{}) -> runtime.Poller[SharesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SharesClientDeleteResponse", fn(r: http.Response) -> SharesClientDeleteResponse ! Str { shares_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SharesClientDeleteResponse", fn(r: http.Response) -> SharesClientDeleteResponse ! Str { shares_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, share_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SharesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, share_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SharesClientDeleteResponse", fn(r: http.Response) -> SharesClientDeleteResponse ! Str { shares_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SharesClientDeleteResponse", fn(r: http.Response) -> SharesClientDeleteResponse ! Str { shares_delete_handle(r) }, traced: true)
 }
 
 /// SharesClientListByAccountOptions: the optional parameters of SharesClient.new_list_by_account_pager.
@@ -340,5 +348,5 @@ fn (c: SharesClient) list_by_account_create_request(resource_group_name: Str, ac
 /// List shares in an account
 pub fn (c: SharesClient[fx]) new_list_by_account_pager(resource_group_name: Str, account_name: Str, options: SharesClientListByAccountOptions = SharesClientListByAccountOptions{}) -> runtime.Pager[SharesClientListByAccountResponse, fx] ! azcore.CallErr {
   let req = c.list_by_account_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListByAccountResponse ! Str { shares_list_by_account_handle(r) }, fn(r: SharesClientListByAccountResponse) -> Str? { r.share_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharesClientListByAccountResponse ! Str { shares_list_by_account_handle(r) }, fn(r: SharesClientListByAccountResponse) -> Str? { r.share_list.next_link }).traced_as("SharesClientListByAccountResponse"))
 }

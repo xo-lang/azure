@@ -73,7 +73,7 @@ fn (c: GatesClient) list_by_fleet_create_request(resource_group_name: Str, fleet
 /// List Gate resources by Fleet
 pub fn (c: GatesClient[fx]) new_list_by_fleet_pager(resource_group_name: Str, fleet_name: Str, options: GatesClientListByFleetOptions = GatesClientListByFleetOptions{}) -> runtime.Pager[GatesClientListByFleetResponse, fx] ! azcore.CallErr {
   let req = c.list_by_fleet_create_request(resource_group_name, fleet_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GatesClientListByFleetResponse ! Str { gates_list_by_fleet_handle(r) }, c.setup.endpoint, fn(r: GatesClientListByFleetResponse) -> Str? { r.gate_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GatesClientListByFleetResponse ! Str { gates_list_by_fleet_handle(r) }, c.setup.endpoint, fn(r: GatesClientListByFleetResponse) -> Str? { r.gate_list_result.next_link }).traced_as("GatesClientListByFleetResponse"))
 }
 
 /// GatesClientGetOptions: the optional parameters of GatesClient.get.
@@ -115,12 +115,15 @@ fn (c: GatesClient) get_create_request(resource_group_name: Str, fleet_name: Str
 
 /// Get a Gate
 pub fn (c: GatesClient) get(resource_group_name: Str, fleet_name: Str, gate_name: Str, options: GatesClientGetOptions = GatesClientGetOptions{}) -> GatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, fleet_name, gate_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, fleet_name, gate_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  gates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = gates_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// GatesClientBeginUpdateOptions: the optional parameters of GatesClient.begin_update.
@@ -177,12 +180,14 @@ fn (c: GatesClient) update_create_request(resource_group_name: Str, fleet_name: 
 /// Update a Gate
 pub fn (c: GatesClient[fx]) begin_update(resource_group_name: Str, fleet_name: Str, gate_name: Str, properties: GatePatch, options: GatesClientBeginUpdateOptions = GatesClientBeginUpdateOptions{}) -> runtime.Poller[GatesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GatesClientUpdateResponse", fn(r: http.Response) -> GatesClientUpdateResponse ! Str { gates_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GatesClientUpdateResponse", fn(r: http.Response) -> GatesClientUpdateResponse ! Str { gates_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, fleet_name, gate_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GatesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, fleet_name, gate_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "GatesClientUpdateResponse", fn(r: http.Response) -> GatesClientUpdateResponse ! Str { gates_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "GatesClientUpdateResponse", fn(r: http.Response) -> GatesClientUpdateResponse ! Str { gates_update_handle(r) }, traced: true)
 }

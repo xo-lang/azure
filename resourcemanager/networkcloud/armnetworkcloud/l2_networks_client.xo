@@ -60,7 +60,7 @@ fn (c: L2NetworksClient) list_by_subscription_create_request(options: L2Networks
 /// Get a list of layer 2 (L2) networks in the provided subscription.
 pub fn (c: L2NetworksClient[fx]) new_list_by_subscription_pager(options: L2NetworksClientListBySubscriptionOptions = L2NetworksClientListBySubscriptionOptions{}) -> runtime.Pager[L2NetworksClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L2NetworksClientListBySubscriptionResponse ! Str { l2_networks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: L2NetworksClientListBySubscriptionResponse) -> Str? { r.l2_network_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L2NetworksClientListBySubscriptionResponse ! Str { l2_networks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: L2NetworksClientListBySubscriptionResponse) -> Str? { r.l2_network_list.next_link }).traced_as("L2NetworksClientListBySubscriptionResponse"))
 }
 
 /// L2NetworksClientListByResourceGroupOptions: the optional parameters of L2NetworksClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: L2NetworksClient) list_by_resource_group_create_request(resource_group_na
 /// Get a list of layer 2 (L2) networks in the provided resource group.
 pub fn (c: L2NetworksClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: L2NetworksClientListByResourceGroupOptions = L2NetworksClientListByResourceGroupOptions{}) -> runtime.Pager[L2NetworksClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L2NetworksClientListByResourceGroupResponse ! Str { l2_networks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: L2NetworksClientListByResourceGroupResponse) -> Str? { r.l2_network_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L2NetworksClientListByResourceGroupResponse ! Str { l2_networks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: L2NetworksClientListByResourceGroupResponse) -> Str? { r.l2_network_list.next_link }).traced_as("L2NetworksClientListByResourceGroupResponse"))
 }
 
 /// L2NetworksClientGetOptions: the optional parameters of L2NetworksClient.get.
@@ -144,12 +144,15 @@ fn (c: L2NetworksClient) get_create_request(resource_group_name: Str, l2_network
 
 /// Get properties of the provided layer 2 (L2) network.
 pub fn (c: L2NetworksClient) get(resource_group_name: Str, l2_network_name: Str, options: L2NetworksClientGetOptions = L2NetworksClientGetOptions{}) -> L2NetworksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, l2_network_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L2NetworksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, l2_network_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  l2_networks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = l2_networks_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// L2NetworksClientBeginCreateOrUpdateOptions: the optional parameters of L2NetworksClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: L2NetworksClient) create_or_update_create_request(resource_group_name: St
 /// Create a new layer 2 (L2) network or update the properties of the existing network.
 pub fn (c: L2NetworksClient[fx]) begin_create_or_update(resource_group_name: Str, l2_network_name: Str, l2_network_parameters: L2Network, options: L2NetworksClientBeginCreateOrUpdateOptions = L2NetworksClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[L2NetworksClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L2NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L2NetworksClientCreateOrUpdateResponse ! Str { l2_networks_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L2NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L2NetworksClientCreateOrUpdateResponse ! Str { l2_networks_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, l2_network_name, l2_network_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L2NetworksClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, l2_network_name, l2_network_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "L2NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L2NetworksClientCreateOrUpdateResponse ! Str { l2_networks_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "L2NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L2NetworksClientCreateOrUpdateResponse ! Str { l2_networks_create_or_update_handle(r) }, traced: true)
 }
 
 /// L2NetworksClientUpdateOptions: the optional parameters of L2NetworksClient.update.
@@ -259,12 +264,15 @@ fn (c: L2NetworksClient) update_create_request(resource_group_name: Str, l2_netw
 
 /// Update tags associated with the provided layer 2 (L2) network.
 pub fn (c: L2NetworksClient) update(resource_group_name: Str, l2_network_name: Str, l2_network_update_parameters: L2NetworkPatchParameters, options: L2NetworksClientUpdateOptions = L2NetworksClientUpdateOptions{}) -> L2NetworksClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, l2_network_name, l2_network_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L2NetworksClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, l2_network_name, l2_network_update_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  l2_networks_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = l2_networks_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// L2NetworksClientBeginDeleteOptions: the optional parameters of L2NetworksClient.begin_delete.
@@ -316,12 +324,14 @@ fn (c: L2NetworksClient) delete_create_request(resource_group_name: Str, l2_netw
 /// Delete the provided layer 2 (L2) network.
 pub fn (c: L2NetworksClient[fx]) begin_delete(resource_group_name: Str, l2_network_name: Str, options: L2NetworksClientBeginDeleteOptions = L2NetworksClientBeginDeleteOptions{}) -> runtime.Poller[L2NetworksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L2NetworksClientDeleteResponse", fn(r: http.Response) -> L2NetworksClientDeleteResponse ! Str { l2_networks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L2NetworksClientDeleteResponse", fn(r: http.Response) -> L2NetworksClientDeleteResponse ! Str { l2_networks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, l2_network_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L2NetworksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, l2_network_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "L2NetworksClientDeleteResponse", fn(r: http.Response) -> L2NetworksClientDeleteResponse ! Str { l2_networks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "L2NetworksClientDeleteResponse", fn(r: http.Response) -> L2NetworksClientDeleteResponse ! Str { l2_networks_delete_handle(r) }, traced: true)
 }

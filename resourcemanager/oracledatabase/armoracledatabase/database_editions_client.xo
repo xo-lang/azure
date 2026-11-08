@@ -53,7 +53,7 @@ fn (c: DatabaseEditionsClient) list_by_location_create_request(location: Str, op
 /// List DatabaseEdition resources by SubscriptionLocationResource
 pub fn (c: DatabaseEditionsClient[fx]) new_list_by_location_pager(location: Str, options: DatabaseEditionsClientListByLocationOptions = DatabaseEditionsClientListByLocationOptions{}) -> runtime.Pager[DatabaseEditionsClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseEditionsClientListByLocationResponse ! Str { database_editions_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DatabaseEditionsClientListByLocationResponse) -> Str? { r.database_edition_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseEditionsClientListByLocationResponse ! Str { database_editions_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DatabaseEditionsClientListByLocationResponse) -> Str? { r.database_edition_list_result.next_link }).traced_as("DatabaseEditionsClientListByLocationResponse"))
 }
 
 /// DatabaseEditionsClientGetOptions: the optional parameters of DatabaseEditionsClient.get.
@@ -91,10 +91,13 @@ fn (c: DatabaseEditionsClient) get_create_request(location: Str, databaseedition
 
 /// Get a DatabaseEdition
 pub fn (c: DatabaseEditionsClient) get(location: Str, databaseeditionname: Str, options: DatabaseEditionsClientGetOptions = DatabaseEditionsClientGetOptions{}) -> DatabaseEditionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, databaseeditionname, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseEditionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, databaseeditionname, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_editions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_editions_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

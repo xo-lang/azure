@@ -49,7 +49,7 @@ fn (c: ServiceGatewaysClient) list_all_create_request(options: ServiceGatewaysCl
 /// Gets all the service gateways in a subscription.
 pub fn (c: ServiceGatewaysClient[fx]) new_list_all_pager(options: ServiceGatewaysClientListAllOptions = ServiceGatewaysClientListAllOptions{}) -> runtime.Pager[ServiceGatewaysClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientListAllResponse ! Str { service_gateways_list_all_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientListAllResponse) -> Str? { r.service_gateway_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientListAllResponse ! Str { service_gateways_list_all_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientListAllResponse) -> Str? { r.service_gateway_list_result.next_link }).traced_as("ServiceGatewaysClientListAllResponse"))
 }
 
 /// ServiceGatewaysClientListOptions: the optional parameters of ServiceGatewaysClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: ServiceGatewaysClient) list_create_request(resource_group_name: Str, opti
 /// Gets all the service gateways in a resource group.
 pub fn (c: ServiceGatewaysClient[fx]) new_list_pager(resource_group_name: Str, options: ServiceGatewaysClientListOptions = ServiceGatewaysClientListOptions{}) -> runtime.Pager[ServiceGatewaysClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientListResponse ! Str { service_gateways_list_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientListResponse) -> Str? { r.service_gateway_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientListResponse ! Str { service_gateways_list_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientListResponse) -> Str? { r.service_gateway_list_result.next_link }).traced_as("ServiceGatewaysClientListResponse"))
 }
 
 /// ServiceGatewaysClientGetOptions: the optional parameters of ServiceGatewaysClient.get.
@@ -122,12 +122,15 @@ fn (c: ServiceGatewaysClient) get_create_request(resource_group_name: Str, servi
 
 /// Gets the specified service gateway.
 pub fn (c: ServiceGatewaysClient) get(resource_group_name: Str, service_gateway_name: Str, options: ServiceGatewaysClientGetOptions = ServiceGatewaysClientGetOptions{}) -> ServiceGatewaysClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_gateway_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_gateways_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_gateways_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceGatewaysClientBeginCreateOrUpdateOptions: the optional parameters of ServiceGatewaysClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ServiceGatewaysClient) create_or_update_create_request(resource_group_nam
 /// Creates or updates a service gateway.
 pub fn (c: ServiceGatewaysClient[fx]) begin_create_or_update(resource_group_name: Str, service_gateway_name: Str, parameters: ServiceGateway, options: ServiceGatewaysClientBeginCreateOrUpdateOptions = ServiceGatewaysClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ServiceGatewaysClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceGatewaysClientCreateOrUpdateResponse ! Str { service_gateways_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceGatewaysClientCreateOrUpdateResponse ! Str { service_gateways_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, service_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, service_gateway_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceGatewaysClientCreateOrUpdateResponse ! Str { service_gateways_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceGatewaysClientCreateOrUpdateResponse ! Str { service_gateways_create_or_update_handle(r) }, traced: true)
 }
 
 /// ServiceGatewaysClientUpdateTagsOptions: the optional parameters of ServiceGatewaysClient.update_tags.
@@ -216,12 +221,15 @@ fn (c: ServiceGatewaysClient) update_tags_create_request(resource_group_name: St
 
 /// Updates a service gateway tags.
 pub fn (c: ServiceGatewaysClient) update_tags(resource_group_name: Str, service_gateway_name: Str, parameters: TagsObject, options: ServiceGatewaysClientUpdateTagsOptions = ServiceGatewaysClientUpdateTagsOptions{}) -> ServiceGatewaysClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, service_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, service_gateway_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_gateways_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_gateways_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceGatewaysClientBeginDeleteOptions: the optional parameters of ServiceGatewaysClient.begin_delete.
@@ -260,14 +268,16 @@ fn (c: ServiceGatewaysClient) delete_create_request(resource_group_name: Str, se
 /// Deletes the specified service gateway.
 pub fn (c: ServiceGatewaysClient[fx]) begin_delete(resource_group_name: Str, service_gateway_name: Str, options: ServiceGatewaysClientBeginDeleteOptions = ServiceGatewaysClientBeginDeleteOptions{}) -> runtime.Poller[ServiceGatewaysClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceGatewaysClientDeleteResponse", fn(r: http.Response) -> ServiceGatewaysClientDeleteResponse ! Str { service_gateways_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceGatewaysClientDeleteResponse", fn(r: http.Response) -> ServiceGatewaysClientDeleteResponse ! Str { service_gateways_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, service_gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, service_gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceGatewaysClientDeleteResponse", fn(r: http.Response) -> ServiceGatewaysClientDeleteResponse ! Str { service_gateways_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceGatewaysClientDeleteResponse", fn(r: http.Response) -> ServiceGatewaysClientDeleteResponse ! Str { service_gateways_delete_handle(r) }, traced: true)
 }
 
 /// ServiceGatewaysClientGetAddressLocationsOptions: the optional parameters of ServiceGatewaysClient.new_get_address_locations_pager.
@@ -306,7 +316,7 @@ fn (c: ServiceGatewaysClient) get_address_locations_create_request(resource_grou
 /// Get address locations in service gateway.
 pub fn (c: ServiceGatewaysClient[fx]) new_get_address_locations_pager(resource_group_name: Str, service_gateway_name: Str, options: ServiceGatewaysClientGetAddressLocationsOptions = ServiceGatewaysClientGetAddressLocationsOptions{}) -> runtime.Pager[ServiceGatewaysClientGetAddressLocationsResponse, fx] ! azcore.CallErr {
   let req = c.get_address_locations_create_request(resource_group_name, service_gateway_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientGetAddressLocationsResponse ! Str { service_gateways_get_address_locations_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientGetAddressLocationsResponse) -> Str? { r.get_service_gateway_address_locations_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientGetAddressLocationsResponse ! Str { service_gateways_get_address_locations_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientGetAddressLocationsResponse) -> Str? { r.get_service_gateway_address_locations_result.next_link }).traced_as("ServiceGatewaysClientGetAddressLocationsResponse"))
 }
 
 /// ServiceGatewaysClientGetServicesOptions: the optional parameters of ServiceGatewaysClient.new_get_services_pager.
@@ -345,7 +355,7 @@ fn (c: ServiceGatewaysClient) get_services_create_request(resource_group_name: S
 /// Get Services in service gateway.
 pub fn (c: ServiceGatewaysClient[fx]) new_get_services_pager(resource_group_name: Str, service_gateway_name: Str, options: ServiceGatewaysClientGetServicesOptions = ServiceGatewaysClientGetServicesOptions{}) -> runtime.Pager[ServiceGatewaysClientGetServicesResponse, fx] ! azcore.CallErr {
   let req = c.get_services_create_request(resource_group_name, service_gateway_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientGetServicesResponse ! Str { service_gateways_get_services_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientGetServicesResponse) -> Str? { r.get_service_gateway_services_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceGatewaysClientGetServicesResponse ! Str { service_gateways_get_services_handle(r) }, c.setup.endpoint, fn(r: ServiceGatewaysClientGetServicesResponse) -> Str? { r.get_service_gateway_services_result.next_link }).traced_as("ServiceGatewaysClientGetServicesResponse"))
 }
 
 /// ServiceGatewaysClientUpdateAddressLocationsOptions: the optional parameters of ServiceGatewaysClient.update_address_locations.
@@ -384,12 +394,15 @@ fn (c: ServiceGatewaysClient) update_address_locations_create_request(resource_g
 
 /// Creates or updates address locations within the service gateway.  The request supports both full and partial update modes at two levels: location and address.  Full update replaces all existing data.  Partial update modifies only the specified entries:  For location-level partial updates, if no address is provided, the existing address will be deleted.  For address-level partial updates, if no services are provided, the existing services will be considered for deletion.
 pub fn (c: ServiceGatewaysClient) update_address_locations(resource_group_name: Str, service_gateway_name: Str, parameters: ServiceGatewayUpdateAddressLocationsRequest, options: ServiceGatewaysClientUpdateAddressLocationsOptions = ServiceGatewaysClientUpdateAddressLocationsOptions{}) -> ServiceGatewaysClientUpdateAddressLocationsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_address_locations_create_request(resource_group_name, service_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.UpdateAddressLocations", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_address_locations_create_request(resource_group_name, service_gateway_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_gateways_update_address_locations_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_gateways_update_address_locations_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceGatewaysClientUpdateServicesOptions: the optional parameters of ServiceGatewaysClient.update_services.
@@ -428,10 +441,13 @@ fn (c: ServiceGatewaysClient) update_services_create_request(resource_group_name
 
 /// Creates, updates, or deletes services within the service gateway. The request supports both full and partial update modes at the service level.  Full update replaces all existing services with the new list provided in the request. Partial update modifies only the specified services.
 pub fn (c: ServiceGatewaysClient) update_services(resource_group_name: Str, service_gateway_name: Str, parameters: ServiceGatewayUpdateServicesRequest, options: ServiceGatewaysClientUpdateServicesOptions = ServiceGatewaysClientUpdateServicesOptions{}) -> ServiceGatewaysClientUpdateServicesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_services_create_request(resource_group_name, service_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceGatewaysClient.UpdateServices", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_services_create_request(resource_group_name, service_gateway_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_gateways_update_services_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_gateways_update_services_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -53,7 +53,7 @@ fn (c: ChatTranscriptsClient) list_create_request(support_ticket_name: Str, opti
 /// Lists all chat transcripts for a support ticket under subscription
 pub fn (c: ChatTranscriptsClient[fx]) new_list_pager(support_ticket_name: Str, options: ChatTranscriptsClientListOptions = ChatTranscriptsClientListOptions{}) -> runtime.Pager[ChatTranscriptsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(support_ticket_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ChatTranscriptsClientListResponse ! Str { chat_transcripts_list_handle(r) }, c.setup.endpoint, fn(r: ChatTranscriptsClientListResponse) -> Str? { r.chat_transcripts_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ChatTranscriptsClientListResponse ! Str { chat_transcripts_list_handle(r) }, c.setup.endpoint, fn(r: ChatTranscriptsClientListResponse) -> Str? { r.chat_transcripts_list_result.next_link }).traced_as("ChatTranscriptsClientListResponse"))
 }
 
 /// ChatTranscriptsClientGetOptions: the optional parameters of ChatTranscriptsClient.get.
@@ -91,10 +91,13 @@ fn (c: ChatTranscriptsClient) get_create_request(support_ticket_name: Str, chat_
 
 /// Returns chatTranscript details for a support ticket under a subscription.
 pub fn (c: ChatTranscriptsClient) get(support_ticket_name: Str, chat_transcript_name: Str, options: ChatTranscriptsClientGetOptions = ChatTranscriptsClientGetOptions{}) -> ChatTranscriptsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(support_ticket_name, chat_transcript_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ChatTranscriptsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(support_ticket_name, chat_transcript_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  chat_transcripts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = chat_transcripts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

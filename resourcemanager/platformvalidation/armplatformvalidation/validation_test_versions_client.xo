@@ -59,7 +59,7 @@ fn (c: ValidationTestVersionsClient) list_create_request(validation_test_name: S
 /// List validation test version catalog entries
 pub fn (c: ValidationTestVersionsClient[fx]) new_list_pager(validation_test_name: Str, options: ValidationTestVersionsClientListOptions = ValidationTestVersionsClientListOptions{}) -> runtime.Pager[ValidationTestVersionsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(validation_test_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ValidationTestVersionsClientListResponse ! Str { validation_test_versions_list_handle(r) }, c.setup.endpoint, fn(r: ValidationTestVersionsClientListResponse) -> Str? { r.validation_test_version_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ValidationTestVersionsClientListResponse ! Str { validation_test_versions_list_handle(r) }, c.setup.endpoint, fn(r: ValidationTestVersionsClientListResponse) -> Str? { r.validation_test_version_list_result.next_link }).traced_as("ValidationTestVersionsClientListResponse"))
 }
 
 /// ValidationTestVersionsClientGetOptions: the optional parameters of ValidationTestVersionsClient.get.
@@ -97,10 +97,13 @@ fn (c: ValidationTestVersionsClient) get_create_request(validation_test_name: St
 
 /// Get a validation test version catalog entry
 pub fn (c: ValidationTestVersionsClient) get(validation_test_name: Str, version: Str, options: ValidationTestVersionsClientGetOptions = ValidationTestVersionsClientGetOptions{}) -> ValidationTestVersionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(validation_test_name, version, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ValidationTestVersionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(validation_test_name, version, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  validation_test_versions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = validation_test_versions_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -56,10 +56,13 @@ fn (c: RegisteredIdentitiesClient) delete_create_request(resource_group_name: St
 
 /// Unregisters the given container from your Recovery Services vault.
 pub fn (c: RegisteredIdentitiesClient) delete(resource_group_name: Str, vault_name: Str, identity_name: Str, options: RegisteredIdentitiesClientDeleteOptions = RegisteredIdentitiesClientDeleteOptions{}) -> RegisteredIdentitiesClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, vault_name, identity_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RegisteredIdentitiesClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, vault_name, identity_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  registered_identities_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = registered_identities_delete_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -82,7 +82,7 @@ fn (c: DisksClient) list_create_request(resource_group_name: Str, lab_name: Str,
 /// List disks in a given user profile.
 pub fn (c: DisksClient[fx]) new_list_pager(resource_group_name: Str, lab_name: Str, user_name: Str, options: DisksClientListOptions = DisksClientListOptions{}) -> runtime.Pager[DisksClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, lab_name, user_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DisksClientListResponse ! Str { disks_list_handle(r) }, fn(r: DisksClientListResponse) -> Str? { r.disk_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DisksClientListResponse ! Str { disks_list_handle(r) }, fn(r: DisksClientListResponse) -> Str? { r.disk_list.next_link }).traced_as("DisksClientListResponse"))
 }
 
 /// DisksClientGetOptions: the optional parameters of DisksClient.get.
@@ -134,12 +134,15 @@ fn (c: DisksClient) get_create_request(resource_group_name: Str, lab_name: Str, 
 
 /// Get disk.
 pub fn (c: DisksClient) get(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: DisksClientGetOptions = DisksClientGetOptions{}) -> DisksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  disks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = disks_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DisksClientBeginCreateOrUpdateOptions: the optional parameters of DisksClient.begin_create_or_update.
@@ -190,14 +193,16 @@ fn (c: DisksClient) create_or_update_create_request(resource_group_name: Str, la
 /// Create or replace an existing disk. This operation can take a while to complete.
 pub fn (c: DisksClient[fx]) begin_create_or_update(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, disk: Disk, options: DisksClientBeginCreateOrUpdateOptions = DisksClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DisksClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientCreateOrUpdateResponse", fn(r: http.Response) -> DisksClientCreateOrUpdateResponse ! Str { disks_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientCreateOrUpdateResponse", fn(r: http.Response) -> DisksClientCreateOrUpdateResponse ! Str { disks_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, lab_name, user_name, name, disk, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, lab_name, user_name, name, disk, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientCreateOrUpdateResponse", fn(r: http.Response) -> DisksClientCreateOrUpdateResponse ! Str { disks_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientCreateOrUpdateResponse", fn(r: http.Response) -> DisksClientCreateOrUpdateResponse ! Str { disks_create_or_update_handle(r) }, traced: true)
 }
 
 /// DisksClientBeginDeleteOptions: the optional parameters of DisksClient.begin_delete.
@@ -244,14 +249,16 @@ fn (c: DisksClient) delete_create_request(resource_group_name: Str, lab_name: St
 /// Delete disk. This operation can take a while to complete.
 pub fn (c: DisksClient[fx]) begin_delete(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: DisksClientBeginDeleteOptions = DisksClientBeginDeleteOptions{}) -> runtime.Poller[DisksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientDeleteResponse", fn(r: http.Response) -> DisksClientDeleteResponse ! Str { disks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientDeleteResponse", fn(r: http.Response) -> DisksClientDeleteResponse ! Str { disks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientDeleteResponse", fn(r: http.Response) -> DisksClientDeleteResponse ! Str { disks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientDeleteResponse", fn(r: http.Response) -> DisksClientDeleteResponse ! Str { disks_delete_handle(r) }, traced: true)
 }
 
 /// DisksClientUpdateOptions: the optional parameters of DisksClient.update.
@@ -298,12 +305,15 @@ fn (c: DisksClient) update_create_request(resource_group_name: Str, lab_name: St
 
 /// Allows modifying tags of disks. All other properties will be ignored.
 pub fn (c: DisksClient) update(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, disk: DiskFragment, options: DisksClientUpdateOptions = DisksClientUpdateOptions{}) -> DisksClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, lab_name, user_name, name, disk, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, lab_name, user_name, name, disk, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  disks_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = disks_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DisksClientBeginAttachOptions: the optional parameters of DisksClient.begin_attach.
@@ -351,14 +361,16 @@ fn (c: DisksClient) attach_create_request(resource_group_name: Str, lab_name: St
 /// Attach and create the lease of the disk to the virtual machine. This operation can take a while to complete.
 pub fn (c: DisksClient[fx]) begin_attach(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, attach_disk_properties: AttachDiskProperties, options: DisksClientBeginAttachOptions = DisksClientBeginAttachOptions{}) -> runtime.Poller[DisksClientAttachResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientAttachResponse", fn(r: http.Response) -> DisksClientAttachResponse ! Str { disks_attach_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientAttachResponse", fn(r: http.Response) -> DisksClientAttachResponse ! Str { disks_attach_handle(r) }, traced: true)
   }
-  let req = c.attach_create_request(resource_group_name, lab_name, user_name, name, attach_disk_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.BeginAttach", c.setup.pipeline.tracer)
+  let req = c.attach_create_request(resource_group_name, lab_name, user_name, name, attach_disk_properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientAttachResponse", fn(r: http.Response) -> DisksClientAttachResponse ! Str { disks_attach_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientAttachResponse", fn(r: http.Response) -> DisksClientAttachResponse ! Str { disks_attach_handle(r) }, traced: true)
 }
 
 /// DisksClientBeginDetachOptions: the optional parameters of DisksClient.begin_detach.
@@ -406,12 +418,14 @@ fn (c: DisksClient) detach_create_request(resource_group_name: Str, lab_name: St
 /// Detach and break the lease of the disk attached to the virtual machine. This operation can take a while to complete.
 pub fn (c: DisksClient[fx]) begin_detach(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, detach_disk_properties: DetachDiskProperties, options: DisksClientBeginDetachOptions = DisksClientBeginDetachOptions{}) -> runtime.Poller[DisksClientDetachResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientDetachResponse", fn(r: http.Response) -> DisksClientDetachResponse ! Str { disks_detach_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DisksClientDetachResponse", fn(r: http.Response) -> DisksClientDetachResponse ! Str { disks_detach_handle(r) }, traced: true)
   }
-  let req = c.detach_create_request(resource_group_name, lab_name, user_name, name, detach_disk_properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DisksClient.BeginDetach", c.setup.pipeline.tracer)
+  let req = c.detach_create_request(resource_group_name, lab_name, user_name, name, detach_disk_properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientDetachResponse", fn(r: http.Response) -> DisksClientDetachResponse ! Str { disks_detach_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DisksClientDetachResponse", fn(r: http.Response) -> DisksClientDetachResponse ! Str { disks_detach_handle(r) }, traced: true)
 }

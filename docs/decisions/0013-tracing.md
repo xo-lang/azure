@@ -78,6 +78,46 @@ Two steps, the first independent of std:
    std/trace's `Ring` would keep only names and durations, and is not
    proposed.
 
+## Step 1 as built (2026-11-08)
+
+- `tracing` (a package of the root module) holds Go's
+  tracing package; `runtime/tracing.xo` holds `start_span`, the HTTP
+  trace policy, ARM's namespace policy and Go's URL sanitizer
+  (`allowed_query_params`; any other query value is `REDACTED`).
+- Every generated method opens Go's `<Client>.<Method>` span (BeginX for
+  a long-running one), every generated pager its
+  `Pager[<Response>].NextPage` span, and every generated poller its
+  `Poller[<Response>].PollUntilDone`, `.Poll` and `.Result` spans, a
+  nested one suppressed as Go suppresses it.
+- Which errors a method's span records follows Go's generated code per
+  module, derived by codegen/gorows into the `span_errors` row: "all"
+  (255 modules: status and decode errors too) or "send" (57, Go's older
+  generators, armstorage 4.3.0 among them: only a request's create and
+  send errors). A module whose Go has no spans (azopenai, azsystemevents,
+  armservicefabricmesh, armworkloadmonitor and three more) has no row
+  value and opens none.
+- Checked: armstorage's tracing_test.xo replays a Go program's eight
+  calls (azcore v1.24.0, a recording provider over a fake transport):
+  162 lines, the same but for the differences below. And every span and
+  pager name the generator writes was compared with the names in Go's
+  source of the pinned version: 14,456 names in 312 modules, 95 differ,
+  all in the 31 modules whose client or method names already differ from
+  Go's pinned version (armdashboard's `DashboardsClient.Get` is Go's
+  `ManagedDashboardsClient.Get`, `SapApplication...` is Go's
+  `SAPApplication...`), or a method Go keeps private. The span names
+  follow this port's own names there, until those modules' names do.
+- Known differences from Go: a tracer is named by this module's name and
+  version (`armstorage v0.1.0`), not Go's module path; every HTTP span
+  has `az.client_request_id`, since this SDK sends
+  `x-ms-client-request-id` by default ([0003](0003-core.md)); a
+  transport error's method span names `*url.Error`, the type Go's own
+  transport returns; and a span starts from no parent, Xo having no
+  context to carry one in.
+- Not yet: the hand written data plane clients (azblob, azdatalake,
+  azfile, azqueue, azcosmos, the messaging clients) open no spans yet:
+  their pipelines have the HTTP trace policy, but an HTTP span starts
+  only under a method span, as in Go.
+
 ## Alternatives
 
 - **Keep tracing out.** Every client keeps working; no spans exist.

@@ -57,12 +57,14 @@ fn (c: EndpointsClient) purge_content_create_request(resource_group_name: Str, f
 /// Removes a content from Front Door.
 pub fn (c: EndpointsClient[fx]) begin_purge_content(resource_group_name: Str, front_door_name: Str, content_file_paths: PurgeParameters, options: EndpointsClientBeginPurgeContentOptions = EndpointsClientBeginPurgeContentOptions{}) -> runtime.Poller[EndpointsClientPurgeContentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) }, traced: true)
   }
-  let req = c.purge_content_create_request(resource_group_name, front_door_name, content_file_paths, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.BeginPurgeContent", c.setup.pipeline.tracer)
+  let req = c.purge_content_create_request(resource_group_name, front_door_name, content_file_paths, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EndpointsClientPurgeContentResponse", fn(r: http.Response) -> EndpointsClientPurgeContentResponse ! Str { endpoints_purge_content_handle(r) }, traced: true)
 }

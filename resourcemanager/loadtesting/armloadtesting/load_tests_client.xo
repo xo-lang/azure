@@ -49,7 +49,7 @@ fn (c: LoadTestsClient) list_by_subscription_create_request(options: LoadTestsCl
 /// Lists loadtests resources in a subscription.
 pub fn (c: LoadTestsClient[fx]) new_list_by_subscription_pager(options: LoadTestsClientListBySubscriptionOptions = LoadTestsClientListBySubscriptionOptions{}) -> runtime.Pager[LoadTestsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListBySubscriptionResponse ! Str { load_tests_list_by_subscription_handle(r) }, fn(r: LoadTestsClientListBySubscriptionResponse) -> Str? { r.load_test_resource_page_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListBySubscriptionResponse ! Str { load_tests_list_by_subscription_handle(r) }, fn(r: LoadTestsClientListBySubscriptionResponse) -> Str? { r.load_test_resource_page_list.next_link }).traced_as("LoadTestsClientListBySubscriptionResponse"))
 }
 
 /// LoadTestsClientListByResourceGroupOptions: the optional parameters of LoadTestsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: LoadTestsClient) list_by_resource_group_create_request(resource_group_nam
 /// Lists loadtest resources in a resource group.
 pub fn (c: LoadTestsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: LoadTestsClientListByResourceGroupOptions = LoadTestsClientListByResourceGroupOptions{}) -> runtime.Pager[LoadTestsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListByResourceGroupResponse ! Str { load_tests_list_by_resource_group_handle(r) }, fn(r: LoadTestsClientListByResourceGroupResponse) -> Str? { r.load_test_resource_page_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListByResourceGroupResponse ! Str { load_tests_list_by_resource_group_handle(r) }, fn(r: LoadTestsClientListByResourceGroupResponse) -> Str? { r.load_test_resource_page_list.next_link }).traced_as("LoadTestsClientListByResourceGroupResponse"))
 }
 
 /// LoadTestsClientGetOptions: the optional parameters of LoadTestsClient.get.
@@ -122,12 +122,15 @@ fn (c: LoadTestsClient) get_create_request(resource_group_name: Str, load_test_n
 
 /// Get a LoadTest resource.
 pub fn (c: LoadTestsClient) get(resource_group_name: Str, load_test_name: Str, options: LoadTestsClientGetOptions = LoadTestsClientGetOptions{}) -> LoadTestsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, load_test_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadTestsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, load_test_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_tests_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_tests_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LoadTestsClientBeginCreateOrUpdateOptions: the optional parameters of LoadTestsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: LoadTestsClient) create_or_update_create_request(resource_group_name: Str
 /// Create or update LoadTest resource.
 pub fn (c: LoadTestsClient[fx]) begin_create_or_update(resource_group_name: Str, load_test_name: Str, load_test_resource: LoadTestResource, options: LoadTestsClientBeginCreateOrUpdateOptions = LoadTestsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LoadTestsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadTestsClientCreateOrUpdateResponse ! Str { load_tests_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadTestsClientCreateOrUpdateResponse ! Str { load_tests_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, load_test_name, load_test_resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadTestsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, load_test_name, load_test_resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadTestsClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadTestsClientCreateOrUpdateResponse ! Str { load_tests_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadTestsClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadTestsClientCreateOrUpdateResponse ! Str { load_tests_create_or_update_handle(r) }, traced: true)
 }
 
 /// LoadTestsClientBeginUpdateOptions: the optional parameters of LoadTestsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: LoadTestsClient) update_create_request(resource_group_name: Str, load_tes
 /// Update a loadtest resource.
 pub fn (c: LoadTestsClient[fx]) begin_update(resource_group_name: Str, load_test_name: Str, load_test_resource_patch_request_body: LoadTestResourcePatchRequestBody, options: LoadTestsClientBeginUpdateOptions = LoadTestsClientBeginUpdateOptions{}) -> runtime.Poller[LoadTestsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientUpdateResponse", fn(r: http.Response) -> LoadTestsClientUpdateResponse ! Str { load_tests_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientUpdateResponse", fn(r: http.Response) -> LoadTestsClientUpdateResponse ! Str { load_tests_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, load_test_name, load_test_resource_patch_request_body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadTestsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, load_test_name, load_test_resource_patch_request_body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadTestsClientUpdateResponse", fn(r: http.Response) -> LoadTestsClientUpdateResponse ! Str { load_tests_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "LoadTestsClientUpdateResponse", fn(r: http.Response) -> LoadTestsClientUpdateResponse ! Str { load_tests_update_handle(r) }, traced: true)
 }
 
 /// LoadTestsClientBeginDeleteOptions: the optional parameters of LoadTestsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: LoadTestsClient) delete_create_request(resource_group_name: Str, load_tes
 /// Delete a LoadTest resource.
 pub fn (c: LoadTestsClient[fx]) begin_delete(resource_group_name: Str, load_test_name: Str, options: LoadTestsClientBeginDeleteOptions = LoadTestsClientBeginDeleteOptions{}) -> runtime.Poller[LoadTestsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientDeleteResponse", fn(r: http.Response) -> LoadTestsClientDeleteResponse ! Str { load_tests_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadTestsClientDeleteResponse", fn(r: http.Response) -> LoadTestsClientDeleteResponse ! Str { load_tests_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, load_test_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadTestsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, load_test_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LoadTestsClientDeleteResponse", fn(r: http.Response) -> LoadTestsClientDeleteResponse ! Str { load_tests_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "LoadTestsClientDeleteResponse", fn(r: http.Response) -> LoadTestsClientDeleteResponse ! Str { load_tests_delete_handle(r) }, traced: true)
 }
 
 /// LoadTestsClientListOutboundNetworkDependenciesEndpointsOptions: the optional parameters of LoadTestsClient.new_list_outbound_network_dependencies_endpoints_pager.
@@ -312,5 +321,5 @@ fn (c: LoadTestsClient) list_outbound_network_dependencies_endpoints_create_requ
 /// Lists the endpoints that agents may call as part of load testing.
 pub fn (c: LoadTestsClient[fx]) new_list_outbound_network_dependencies_endpoints_pager(resource_group_name: Str, load_test_name: Str, options: LoadTestsClientListOutboundNetworkDependenciesEndpointsOptions = LoadTestsClientListOutboundNetworkDependenciesEndpointsOptions{}) -> runtime.Pager[LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse, fx] ! azcore.CallErr {
   let req = c.list_outbound_network_dependencies_endpoints_create_request(resource_group_name, load_test_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse ! Str { load_tests_list_outbound_network_dependencies_endpoints_handle(r) }, fn(r: LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse) -> Str? { r.outbound_environment_endpoint_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse ! Str { load_tests_list_outbound_network_dependencies_endpoints_handle(r) }, fn(r: LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse) -> Str? { r.outbound_environment_endpoint_collection.next_link }).traced_as("LoadTestsClientListOutboundNetworkDependenciesEndpointsResponse"))
 }

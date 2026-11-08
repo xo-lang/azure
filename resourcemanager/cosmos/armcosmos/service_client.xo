@@ -57,7 +57,7 @@ fn (c: ServiceClient) list_create_request(resource_group_name: Str, account_name
 /// Gets the status of service.
 pub fn (c: ServiceClient[fx]) new_list_pager(resource_group_name: Str, account_name: Str, options: ServiceClientListOptions = ServiceClientListOptions{}) -> runtime.Pager[ServiceClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceClientListResponse ! Str { service_list_handle(r) }, c.setup.endpoint, fn(r: ServiceClientListResponse) -> Str? { r.service_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceClientListResponse ! Str { service_list_handle(r) }, c.setup.endpoint, fn(r: ServiceClientListResponse) -> Str? { r.service_resource_list_result.next_link }).traced_as("ServiceClientListResponse"))
 }
 
 /// ServiceClientGetOptions: the optional parameters of ServiceClient.get.
@@ -99,12 +99,15 @@ fn (c: ServiceClient) get_create_request(resource_group_name: Str, account_name:
 
 /// Gets the status of service.
 pub fn (c: ServiceClient) get(resource_group_name: Str, account_name: Str, service_name: Str, options: ServiceClientGetOptions = ServiceClientGetOptions{}) -> ServiceClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, service_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceClientBeginCreateOptions: the optional parameters of ServiceClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: ServiceClient) create_create_request(resource_group_name: Str, account_na
 /// Creates a service.
 pub fn (c: ServiceClient[fx]) begin_create(resource_group_name: Str, account_name: Str, service_name: Str, create_update_parameters: ServiceResourceCreateUpdateParameters, options: ServiceClientBeginCreateOptions = ServiceClientBeginCreateOptions{}) -> runtime.Poller[ServiceClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceClientCreateResponse", fn(r: http.Response) -> ServiceClientCreateResponse ! Str { service_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceClientCreateResponse", fn(r: http.Response) -> ServiceClientCreateResponse ! Str { service_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, service_name, create_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, service_name, create_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceClientCreateResponse", fn(r: http.Response) -> ServiceClientCreateResponse ! Str { service_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceClientCreateResponse", fn(r: http.Response) -> ServiceClientCreateResponse ! Str { service_create_handle(r) }, traced: true)
 }
 
 /// ServiceClientBeginDeleteOptions: the optional parameters of ServiceClient.begin_delete.
@@ -201,12 +206,14 @@ fn (c: ServiceClient) delete_create_request(resource_group_name: Str, account_na
 /// Deletes service with the given serviceName.
 pub fn (c: ServiceClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, service_name: Str, options: ServiceClientBeginDeleteOptions = ServiceClientBeginDeleteOptions{}) -> runtime.Poller[ServiceClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceClientDeleteResponse", fn(r: http.Response) -> ServiceClientDeleteResponse ! Str { service_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceClientDeleteResponse", fn(r: http.Response) -> ServiceClientDeleteResponse ! Str { service_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, service_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceClientDeleteResponse", fn(r: http.Response) -> ServiceClientDeleteResponse ! Str { service_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceClientDeleteResponse", fn(r: http.Response) -> ServiceClientDeleteResponse ! Str { service_delete_handle(r) }, traced: true)
 }

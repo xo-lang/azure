@@ -63,7 +63,7 @@ fn (c: ReplicationEventsClient) list_create_request(resource_group_name: Str, re
 /// Gets the list of Azure Site Recovery events for the vault.
 pub fn (c: ReplicationEventsClient[fx]) new_list_pager(resource_group_name: Str, resource_name: Str, options: ReplicationEventsClientListOptions = ReplicationEventsClientListOptions{}) -> runtime.Pager[ReplicationEventsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, resource_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationEventsClientListResponse ! Str { replication_events_list_handle(r) }, c.setup.endpoint, fn(r: ReplicationEventsClientListResponse) -> Str? { r.event_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReplicationEventsClientListResponse ! Str { replication_events_list_handle(r) }, c.setup.endpoint, fn(r: ReplicationEventsClientListResponse) -> Str? { r.event_collection.next_link }).traced_as("ReplicationEventsClientListResponse"))
 }
 
 /// ReplicationEventsClientGetOptions: the optional parameters of ReplicationEventsClient.get.
@@ -105,10 +105,13 @@ fn (c: ReplicationEventsClient) get_create_request(resource_group_name: Str, res
 
 /// The operation to get the details of an Azure Site recovery event.
 pub fn (c: ReplicationEventsClient) get(resource_group_name: Str, resource_name: Str, event_name: Str, options: ReplicationEventsClientGetOptions = ReplicationEventsClientGetOptions{}) -> ReplicationEventsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, resource_name, event_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReplicationEventsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, resource_name, event_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  replication_events_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = replication_events_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

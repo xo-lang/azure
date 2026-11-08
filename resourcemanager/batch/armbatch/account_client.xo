@@ -49,7 +49,7 @@ fn (c: AccountClient) list_create_request(options: AccountClientListOptions) -> 
 /// Gets information about the Batch accounts associated with the subscription.
 pub fn (c: AccountClient[fx]) new_list_pager(options: AccountClientListOptions = AccountClientListOptions{}) -> runtime.Pager[AccountClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListResponse ! Str { account_list_handle(r) }, c.setup.endpoint, fn(r: AccountClientListResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListResponse ! Str { account_list_handle(r) }, c.setup.endpoint, fn(r: AccountClientListResponse) -> Str? { r.account_list_result.next_link }).traced_as("AccountClientListResponse"))
 }
 
 /// AccountClientListByResourceGroupOptions: the optional parameters of AccountClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: AccountClient) list_by_resource_group_create_request(resource_group_name:
 /// Gets information about the Batch accounts associated with the specified resource group.
 pub fn (c: AccountClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: AccountClientListByResourceGroupOptions = AccountClientListByResourceGroupOptions{}) -> runtime.Pager[AccountClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListByResourceGroupResponse ! Str { account_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AccountClientListByResourceGroupResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListByResourceGroupResponse ! Str { account_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: AccountClientListByResourceGroupResponse) -> Str? { r.account_list_result.next_link }).traced_as("AccountClientListByResourceGroupResponse"))
 }
 
 /// AccountClientGetOptions: the optional parameters of AccountClient.get.
@@ -122,12 +122,15 @@ fn (c: AccountClient) get_create_request(resource_group_name: Str, account_name:
 
 /// Gets information about the specified Batch account.
 pub fn (c: AccountClient) get(resource_group_name: Str, account_name: Str, options: AccountClientGetOptions = AccountClientGetOptions{}) -> AccountClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountClientBeginCreateOptions: the optional parameters of AccountClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: AccountClient) create_create_request(resource_group_name: Str, account_na
 /// Creates a new Batch account with the specified parameters. Existing accounts cannot be updated with this API and should instead be updated with the Update Batch Account API.
 pub fn (c: AccountClient[fx]) begin_create(resource_group_name: Str, account_name: Str, parameters: AccountCreateParameters, options: AccountClientBeginCreateOptions = AccountClientBeginCreateOptions{}) -> runtime.Poller[AccountClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountClientCreateResponse", fn(r: http.Response) -> AccountClientCreateResponse ! Str { account_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountClientCreateResponse", fn(r: http.Response) -> AccountClientCreateResponse ! Str { account_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountClientCreateResponse", fn(r: http.Response) -> AccountClientCreateResponse ! Str { account_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountClientCreateResponse", fn(r: http.Response) -> AccountClientCreateResponse ! Str { account_create_handle(r) }, traced: true)
 }
 
 /// AccountClientUpdateOptions: the optional parameters of AccountClient.update.
@@ -216,12 +221,15 @@ fn (c: AccountClient) update_create_request(resource_group_name: Str, account_na
 
 /// Updates the properties of an existing Batch account.
 pub fn (c: AccountClient) update(resource_group_name: Str, account_name: Str, parameters: AccountUpdateParameters, options: AccountClientUpdateOptions = AccountClientUpdateOptions{}) -> AccountClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, account_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountClientBeginDeleteOptions: the optional parameters of AccountClient.begin_delete.
@@ -260,14 +268,16 @@ fn (c: AccountClient) delete_create_request(resource_group_name: Str, account_na
 /// Deletes the specified Batch account.
 pub fn (c: AccountClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, options: AccountClientBeginDeleteOptions = AccountClientBeginDeleteOptions{}) -> runtime.Poller[AccountClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountClientDeleteResponse", fn(r: http.Response) -> AccountClientDeleteResponse ! Str { account_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AccountClientDeleteResponse", fn(r: http.Response) -> AccountClientDeleteResponse ! Str { account_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountClientDeleteResponse", fn(r: http.Response) -> AccountClientDeleteResponse ! Str { account_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AccountClientDeleteResponse", fn(r: http.Response) -> AccountClientDeleteResponse ! Str { account_delete_handle(r) }, traced: true)
 }
 
 /// AccountClientListDetectorsOptions: the optional parameters of AccountClient.new_list_detectors_pager.
@@ -306,7 +316,7 @@ fn (c: AccountClient) list_detectors_create_request(resource_group_name: Str, ac
 /// Gets information about the detectors available for a given Batch account.
 pub fn (c: AccountClient[fx]) new_list_detectors_pager(resource_group_name: Str, account_name: Str, options: AccountClientListDetectorsOptions = AccountClientListDetectorsOptions{}) -> runtime.Pager[AccountClientListDetectorsResponse, fx] ! azcore.CallErr {
   let req = c.list_detectors_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListDetectorsResponse ! Str { account_list_detectors_handle(r) }, c.setup.endpoint, fn(r: AccountClientListDetectorsResponse) -> Str? { r.detector_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListDetectorsResponse ! Str { account_list_detectors_handle(r) }, c.setup.endpoint, fn(r: AccountClientListDetectorsResponse) -> Str? { r.detector_list_result.next_link }).traced_as("AccountClientListDetectorsResponse"))
 }
 
 /// AccountClientGetDetectorOptions: the optional parameters of AccountClient.get_detector.
@@ -348,12 +358,15 @@ fn (c: AccountClient) get_detector_create_request(resource_group_name: Str, acco
 
 /// Gets information about the given detector for a given Batch account.
 pub fn (c: AccountClient) get_detector(resource_group_name: Str, account_name: Str, detector_id: Str, options: AccountClientGetDetectorOptions = AccountClientGetDetectorOptions{}) -> AccountClientGetDetectorResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_detector_create_request(resource_group_name, account_name, detector_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.GetDetector", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_detector_create_request(resource_group_name, account_name, detector_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_get_detector_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_get_detector_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountClientGetKeysOptions: the optional parameters of AccountClient.get_keys.
@@ -391,12 +404,15 @@ fn (c: AccountClient) get_keys_create_request(resource_group_name: Str, account_
 
 /// This operation applies only to Batch accounts with allowedAuthenticationModes containing 'SharedKey'. If the Batch account doesn't contain 'SharedKey' in its allowedAuthenticationMode, clients cannot use shared keys to authenticate, and must use another allowedAuthenticationModes instead. In this case, getting the keys will fail.
 pub fn (c: AccountClient) get_keys(resource_group_name: Str, account_name: Str, options: AccountClientGetKeysOptions = AccountClientGetKeysOptions{}) -> AccountClientGetKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_keys_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.GetKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_keys_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_get_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_get_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountClientListOutboundNetworkDependenciesEndpointsOptions: the optional parameters of AccountClient.new_list_outbound_network_dependencies_endpoints_pager.
@@ -435,7 +451,7 @@ fn (c: AccountClient) list_outbound_network_dependencies_endpoints_create_reques
 /// Lists the endpoints that a Batch Compute Node under this Batch Account may call as part of Batch service administration. If you are deploying a Pool inside of a virtual network that you specify, you must make sure your network allows outbound access to these endpoints. Failure to allow access to these endpoints may cause Batch to mark the affected nodes as unusable. For more information about creating a pool inside of a virtual network, see https://learn.microsoft.com/azure/batch/batch-virtual-network.
 pub fn (c: AccountClient[fx]) new_list_outbound_network_dependencies_endpoints_pager(resource_group_name: Str, account_name: Str, options: AccountClientListOutboundNetworkDependenciesEndpointsOptions = AccountClientListOutboundNetworkDependenciesEndpointsOptions{}) -> runtime.Pager[AccountClientListOutboundNetworkDependenciesEndpointsResponse, fx] ! azcore.CallErr {
   let req = c.list_outbound_network_dependencies_endpoints_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListOutboundNetworkDependenciesEndpointsResponse ! Str { account_list_outbound_network_dependencies_endpoints_handle(r) }, c.setup.endpoint, fn(r: AccountClientListOutboundNetworkDependenciesEndpointsResponse) -> Str? { r.outbound_environment_endpoint_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AccountClientListOutboundNetworkDependenciesEndpointsResponse ! Str { account_list_outbound_network_dependencies_endpoints_handle(r) }, c.setup.endpoint, fn(r: AccountClientListOutboundNetworkDependenciesEndpointsResponse) -> Str? { r.outbound_environment_endpoint_collection.next_link }).traced_as("AccountClientListOutboundNetworkDependenciesEndpointsResponse"))
 }
 
 /// AccountClientRegenerateKeyOptions: the optional parameters of AccountClient.regenerate_key.
@@ -474,12 +490,15 @@ fn (c: AccountClient) regenerate_key_create_request(resource_group_name: Str, ac
 
 /// This operation applies only to Batch accounts with allowedAuthenticationModes containing 'SharedKey'. If the Batch account doesn't contain 'SharedKey' in its allowedAuthenticationMode, clients cannot use shared keys to authenticate, and must use another allowedAuthenticationModes instead. In this case, regenerating the keys will fail.
 pub fn (c: AccountClient) regenerate_key(resource_group_name: Str, account_name: Str, parameters: AccountRegenerateKeyParameters, options: AccountClientRegenerateKeyOptions = AccountClientRegenerateKeyOptions{}) -> AccountClientRegenerateKeyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.regenerate_key_create_request(resource_group_name, account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.RegenerateKey", c.setup.pipeline.tracer)
+  let req = sp.on(c.regenerate_key_create_request(resource_group_name, account_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_regenerate_key_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_regenerate_key_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AccountClientSynchronizeAutoStorageKeysOptions: the optional parameters of AccountClient.synchronize_auto_storage_keys.
@@ -514,10 +533,13 @@ fn (c: AccountClient) synchronize_auto_storage_keys_create_request(resource_grou
 
 /// Synchronizes access keys for the auto-storage account configured for the specified Batch account, only if storage key authentication is being used.
 pub fn (c: AccountClient) synchronize_auto_storage_keys(resource_group_name: Str, account_name: Str, options: AccountClientSynchronizeAutoStorageKeysOptions = AccountClientSynchronizeAutoStorageKeysOptions{}) -> AccountClientSynchronizeAutoStorageKeysResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.synchronize_auto_storage_keys_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AccountClient.SynchronizeAutoStorageKeys", c.setup.pipeline.tracer)
+  let req = sp.on(c.synchronize_auto_storage_keys_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  account_synchronize_auto_storage_keys_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = account_synchronize_auto_storage_keys_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

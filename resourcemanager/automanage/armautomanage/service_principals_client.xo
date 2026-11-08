@@ -49,7 +49,7 @@ fn (c: ServicePrincipalsClient) list_by_subscription_create_request(options: Ser
 /// Get the Automanage AAD first party Application Service Principal details for the subscription id.
 pub fn (c: ServicePrincipalsClient[fx]) new_list_by_subscription_pager(options: ServicePrincipalsClientListBySubscriptionOptions = ServicePrincipalsClientListBySubscriptionOptions{}) -> runtime.Pager[ServicePrincipalsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicePrincipalsClientListBySubscriptionResponse ! Str { service_principals_list_by_subscription_handle(r) }, fn(r: ServicePrincipalsClientListBySubscriptionResponse) -> Str? { None }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicePrincipalsClientListBySubscriptionResponse ! Str { service_principals_list_by_subscription_handle(r) }, fn(r: ServicePrincipalsClientListBySubscriptionResponse) -> Str? { None }).traced_as("ServicePrincipalsClientListBySubscriptionResponse"))
 }
 
 /// ServicePrincipalsClientGetOptions: the optional parameters of ServicePrincipalsClient.get.
@@ -79,10 +79,13 @@ fn (c: ServicePrincipalsClient) get_create_request(options: ServicePrincipalsCli
 
 /// Get the Automanage AAD first party Application Service Principal details for the subscription id.
 pub fn (c: ServicePrincipalsClient) get(options: ServicePrincipalsClientGetOptions = ServicePrincipalsClientGetOptions{}) -> ServicePrincipalsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicePrincipalsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_principals_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_principals_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -55,7 +55,7 @@ fn (c: PrivateZonesClient) list_create_request(options: PrivateZonesClientListOp
 /// Lists the Private DNS zones in all resource groups in a subscription.
 pub fn (c: PrivateZonesClient[fx]) new_list_pager(options: PrivateZonesClientListOptions = PrivateZonesClientListOptions{}) -> runtime.Pager[PrivateZonesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateZonesClientListResponse ! Str { private_zones_list_handle(r) }, c.setup.endpoint, fn(r: PrivateZonesClientListResponse) -> Str? { r.private_zone_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateZonesClientListResponse ! Str { private_zones_list_handle(r) }, c.setup.endpoint, fn(r: PrivateZonesClientListResponse) -> Str? { r.private_zone_list_result.next_link }).traced_as("PrivateZonesClientListResponse"))
 }
 
 /// PrivateZonesClientListByResourceGroupOptions: the optional parameters of PrivateZonesClient.new_list_by_resource_group_pager.
@@ -96,7 +96,7 @@ fn (c: PrivateZonesClient) list_by_resource_group_create_request(resource_group_
 /// Lists the Private DNS zones within a resource group.
 pub fn (c: PrivateZonesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: PrivateZonesClientListByResourceGroupOptions = PrivateZonesClientListByResourceGroupOptions{}) -> runtime.Pager[PrivateZonesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateZonesClientListByResourceGroupResponse ! Str { private_zones_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PrivateZonesClientListByResourceGroupResponse) -> Str? { r.private_zone_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateZonesClientListByResourceGroupResponse ! Str { private_zones_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: PrivateZonesClientListByResourceGroupResponse) -> Str? { r.private_zone_list_result.next_link }).traced_as("PrivateZonesClientListByResourceGroupResponse"))
 }
 
 /// PrivateZonesClientGetOptions: the optional parameters of PrivateZonesClient.get.
@@ -134,12 +134,15 @@ fn (c: PrivateZonesClient) get_create_request(resource_group_name: Str, private_
 
 /// Gets a Private DNS zone. Retrieves the zone properties, but not the virtual networks links or the record sets within the zone.
 pub fn (c: PrivateZonesClient) get(resource_group_name: Str, private_zone_name: Str, options: PrivateZonesClientGetOptions = PrivateZonesClientGetOptions{}) -> PrivateZonesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_zone_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateZonesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_zone_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  private_zones_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = private_zones_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PrivateZonesClientBeginCreateOrUpdateOptions: the optional parameters of PrivateZonesClient.begin_create_or_update.
@@ -192,14 +195,16 @@ fn (c: PrivateZonesClient) create_or_update_create_request(resource_group_name: 
 /// Creates or updates a Private DNS zone. Does not modify Links to virtual networks or DNS records within the zone.
 pub fn (c: PrivateZonesClient[fx]) begin_create_or_update(resource_group_name: Str, private_zone_name: Str, parameters: PrivateZone, options: PrivateZonesClientBeginCreateOrUpdateOptions = PrivateZonesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[PrivateZonesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateZonesClientCreateOrUpdateResponse ! Str { private_zones_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateZonesClientCreateOrUpdateResponse ! Str { private_zones_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, private_zone_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateZonesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, private_zone_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateZonesClientCreateOrUpdateResponse ! Str { private_zones_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateZonesClientCreateOrUpdateResponse ! Str { private_zones_create_or_update_handle(r) }, traced: true)
 }
 
 /// PrivateZonesClientBeginUpdateOptions: the optional parameters of PrivateZonesClient.begin_update.
@@ -247,14 +252,16 @@ fn (c: PrivateZonesClient) update_create_request(resource_group_name: Str, priva
 /// Updates a Private DNS zone. Does not modify virtual network links or DNS records within the zone.
 pub fn (c: PrivateZonesClient[fx]) begin_update(resource_group_name: Str, private_zone_name: Str, parameters: PrivateZone, options: PrivateZonesClientBeginUpdateOptions = PrivateZonesClientBeginUpdateOptions{}) -> runtime.Poller[PrivateZonesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientUpdateResponse", fn(r: http.Response) -> PrivateZonesClientUpdateResponse ! Str { private_zones_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientUpdateResponse", fn(r: http.Response) -> PrivateZonesClientUpdateResponse ! Str { private_zones_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, private_zone_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateZonesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, private_zone_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientUpdateResponse", fn(r: http.Response) -> PrivateZonesClientUpdateResponse ! Str { private_zones_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientUpdateResponse", fn(r: http.Response) -> PrivateZonesClientUpdateResponse ! Str { private_zones_update_handle(r) }, traced: true)
 }
 
 /// PrivateZonesClientBeginDeleteOptions: the optional parameters of PrivateZonesClient.begin_delete.
@@ -298,12 +305,14 @@ fn (c: PrivateZonesClient) delete_create_request(resource_group_name: Str, priva
 /// Deletes a Private DNS zone. WARNING: All DNS records in the zone will also be deleted. This operation cannot be undone. Private DNS zone cannot be deleted unless all virtual network links to it are removed.
 pub fn (c: PrivateZonesClient[fx]) begin_delete(resource_group_name: Str, private_zone_name: Str, options: PrivateZonesClientBeginDeleteOptions = PrivateZonesClientBeginDeleteOptions{}) -> runtime.Poller[PrivateZonesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientDeleteResponse", fn(r: http.Response) -> PrivateZonesClientDeleteResponse ! Str { private_zones_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateZonesClientDeleteResponse", fn(r: http.Response) -> PrivateZonesClientDeleteResponse ! Str { private_zones_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, private_zone_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateZonesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, private_zone_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientDeleteResponse", fn(r: http.Response) -> PrivateZonesClientDeleteResponse ! Str { private_zones_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateZonesClientDeleteResponse", fn(r: http.Response) -> PrivateZonesClientDeleteResponse ! Str { private_zones_delete_handle(r) }, traced: true)
 }

@@ -60,12 +60,15 @@ fn (c: WaitStatisticsClient) get_create_request(resource_group_name: Str, server
 
 /// Retrieve wait statistics for specified identifier.
 pub fn (c: WaitStatisticsClient) get(resource_group_name: Str, server_name: Str, wait_statistics_id: Str, options: WaitStatisticsClientGetOptions = WaitStatisticsClientGetOptions{}) -> WaitStatisticsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, wait_statistics_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "WaitStatisticsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, wait_statistics_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  wait_statistics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = wait_statistics_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// WaitStatisticsClientListByServerOptions: the optional parameters of WaitStatisticsClient.new_list_by_server_pager.
@@ -105,5 +108,5 @@ fn (c: WaitStatisticsClient) list_by_server_create_request(resource_group_name: 
 /// Retrieve wait statistics for specified aggregation window.
 pub fn (c: WaitStatisticsClient[fx]) new_list_by_server_pager(resource_group_name: Str, server_name: Str, parameters: WaitStatisticsInput, options: WaitStatisticsClientListByServerOptions = WaitStatisticsClientListByServerOptions{}) -> runtime.Pager[WaitStatisticsClientListByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_by_server_create_request(resource_group_name, server_name, parameters, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> WaitStatisticsClientListByServerResponse ! Str { wait_statistics_list_by_server_handle(r) }, fn(r: WaitStatisticsClientListByServerResponse) -> Str? { r.wait_statistics_result_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> WaitStatisticsClientListByServerResponse ! Str { wait_statistics_list_by_server_handle(r) }, fn(r: WaitStatisticsClientListByServerResponse) -> Str? { r.wait_statistics_result_list.next_link }).traced_as("WaitStatisticsClientListByServerResponse"))
 }

@@ -49,7 +49,7 @@ fn (c: DeletedAccountsClient) list_create_request(options: DeletedAccountsClient
 /// Lists deleted accounts under the subscription.
 pub fn (c: DeletedAccountsClient[fx]) new_list_pager(options: DeletedAccountsClientListOptions = DeletedAccountsClientListOptions{}) -> runtime.Pager[DeletedAccountsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeletedAccountsClientListResponse ! Str { deleted_accounts_list_handle(r) }, c.setup.endpoint, fn(r: DeletedAccountsClientListResponse) -> Str? { r.deleted_account_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeletedAccountsClientListResponse ! Str { deleted_accounts_list_handle(r) }, c.setup.endpoint, fn(r: DeletedAccountsClientListResponse) -> Str? { r.deleted_account_list_result.next_link }).traced_as("DeletedAccountsClientListResponse"))
 }
 
 /// DeletedAccountsClientGetOptions: the optional parameters of DeletedAccountsClient.get.
@@ -87,10 +87,13 @@ fn (c: DeletedAccountsClient) get_create_request(deleted_account_name: Str, loca
 
 /// Get properties of specified deleted account resource.
 pub fn (c: DeletedAccountsClient) get(deleted_account_name: Str, location: Str, options: DeletedAccountsClientGetOptions = DeletedAccountsClientGetOptions{}) -> DeletedAccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(deleted_account_name, location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeletedAccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(deleted_account_name, location, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deleted_accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deleted_accounts_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

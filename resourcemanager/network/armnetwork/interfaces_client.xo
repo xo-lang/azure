@@ -49,7 +49,7 @@ fn (c: InterfacesClient) list_all_create_request(options: InterfacesClientListAl
 /// Gets all network interfaces in a subscription.
 pub fn (c: InterfacesClient[fx]) new_list_all_pager(options: InterfacesClientListAllOptions = InterfacesClientListAllOptions{}) -> runtime.Pager[InterfacesClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListAllResponse ! Str { interfaces_list_all_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListAllResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListAllResponse ! Str { interfaces_list_all_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListAllResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListAllResponse"))
 }
 
 /// InterfacesClientListOptions: the optional parameters of InterfacesClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: InterfacesClient) list_create_request(resource_group_name: Str, options: 
 /// Gets all network interfaces in a resource group.
 pub fn (c: InterfacesClient[fx]) new_list_pager(resource_group_name: Str, options: InterfacesClientListOptions = InterfacesClientListOptions{}) -> runtime.Pager[InterfacesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListResponse ! Str { interfaces_list_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListResponse ! Str { interfaces_list_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListResponse"))
 }
 
 /// InterfacesClientGetOptions: the optional parameters of InterfacesClient.get.
@@ -128,12 +128,15 @@ fn (c: InterfacesClient) get_create_request(resource_group_name: Str, network_in
 
 /// Gets information about the specified network interface.
 pub fn (c: InterfacesClient) get(resource_group_name: Str, network_interface_name: Str, options: InterfacesClientGetOptions = InterfacesClientGetOptions{}) -> InterfacesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interfaces_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interfaces_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InterfacesClientBeginCreateOrUpdateOptions: the optional parameters of InterfacesClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: InterfacesClient) create_or_update_create_request(resource_group_name: St
 /// Creates or updates a network interface.
 pub fn (c: InterfacesClient[fx]) begin_create_or_update(resource_group_name: Str, network_interface_name: Str, parameters: Interface, options: InterfacesClientBeginCreateOrUpdateOptions = InterfacesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[InterfacesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> InterfacesClientCreateOrUpdateResponse ! Str { interfaces_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> InterfacesClientCreateOrUpdateResponse ! Str { interfaces_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, network_interface_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, network_interface_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> InterfacesClientCreateOrUpdateResponse ! Str { interfaces_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientCreateOrUpdateResponse", fn(r: http.Response) -> InterfacesClientCreateOrUpdateResponse ! Str { interfaces_create_or_update_handle(r) }, traced: true)
 }
 
 /// InterfacesClientUpdateTagsOptions: the optional parameters of InterfacesClient.update_tags.
@@ -222,12 +227,15 @@ fn (c: InterfacesClient) update_tags_create_request(resource_group_name: Str, ne
 
 /// Updates a network interface tags.
 pub fn (c: InterfacesClient) update_tags(resource_group_name: Str, network_interface_name: Str, parameters: TagsObject, options: InterfacesClientUpdateTagsOptions = InterfacesClientUpdateTagsOptions{}) -> InterfacesClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, network_interface_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, network_interface_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interfaces_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interfaces_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InterfacesClientBeginDeleteOptions: the optional parameters of InterfacesClient.begin_delete.
@@ -266,14 +274,16 @@ fn (c: InterfacesClient) delete_create_request(resource_group_name: Str, network
 /// Deletes the specified network interface.
 pub fn (c: InterfacesClient[fx]) begin_delete(resource_group_name: Str, network_interface_name: Str, options: InterfacesClientBeginDeleteOptions = InterfacesClientBeginDeleteOptions{}) -> runtime.Poller[InterfacesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientDeleteResponse", fn(r: http.Response) -> InterfacesClientDeleteResponse ! Str { interfaces_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientDeleteResponse", fn(r: http.Response) -> InterfacesClientDeleteResponse ! Str { interfaces_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientDeleteResponse", fn(r: http.Response) -> InterfacesClientDeleteResponse ! Str { interfaces_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientDeleteResponse", fn(r: http.Response) -> InterfacesClientDeleteResponse ! Str { interfaces_delete_handle(r) }, traced: true)
 }
 
 /// InterfacesClientBeginListEffectiveNetworkSecurityGroupsOptions: the optional parameters of InterfacesClient.begin_list_effective_network_security_groups.
@@ -315,14 +325,16 @@ fn (c: InterfacesClient) list_effective_network_security_groups_create_request(r
 /// Gets all network security groups applied to a network interface.
 pub fn (c: InterfacesClient[fx]) begin_list_effective_network_security_groups(resource_group_name: Str, network_interface_name: Str, options: InterfacesClientBeginListEffectiveNetworkSecurityGroupsOptions = InterfacesClientBeginListEffectiveNetworkSecurityGroupsOptions{}) -> runtime.Poller[InterfacesClientListEffectiveNetworkSecurityGroupsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientListEffectiveNetworkSecurityGroupsResponse", fn(r: http.Response) -> InterfacesClientListEffectiveNetworkSecurityGroupsResponse ! Str { interfaces_list_effective_network_security_groups_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientListEffectiveNetworkSecurityGroupsResponse", fn(r: http.Response) -> InterfacesClientListEffectiveNetworkSecurityGroupsResponse ! Str { interfaces_list_effective_network_security_groups_handle(r) }, traced: true)
   }
-  let req = c.list_effective_network_security_groups_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.BeginListEffectiveNetworkSecurityGroups", c.setup.pipeline.tracer)
+  let req = c.list_effective_network_security_groups_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientListEffectiveNetworkSecurityGroupsResponse", fn(r: http.Response) -> InterfacesClientListEffectiveNetworkSecurityGroupsResponse ! Str { interfaces_list_effective_network_security_groups_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientListEffectiveNetworkSecurityGroupsResponse", fn(r: http.Response) -> InterfacesClientListEffectiveNetworkSecurityGroupsResponse ! Str { interfaces_list_effective_network_security_groups_handle(r) }, traced: true)
 }
 
 /// InterfacesClientBeginGetEffectiveRouteTableOptions: the optional parameters of InterfacesClient.begin_get_effective_route_table.
@@ -364,14 +376,16 @@ fn (c: InterfacesClient) get_effective_route_table_create_request(resource_group
 /// Gets all route tables applied to a network interface.
 pub fn (c: InterfacesClient[fx]) begin_get_effective_route_table(resource_group_name: Str, network_interface_name: Str, options: InterfacesClientBeginGetEffectiveRouteTableOptions = InterfacesClientBeginGetEffectiveRouteTableOptions{}) -> runtime.Poller[InterfacesClientGetEffectiveRouteTableResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientGetEffectiveRouteTableResponse", fn(r: http.Response) -> InterfacesClientGetEffectiveRouteTableResponse ! Str { interfaces_get_effective_route_table_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InterfacesClientGetEffectiveRouteTableResponse", fn(r: http.Response) -> InterfacesClientGetEffectiveRouteTableResponse ! Str { interfaces_get_effective_route_table_handle(r) }, traced: true)
   }
-  let req = c.get_effective_route_table_create_request(resource_group_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.BeginGetEffectiveRouteTable", c.setup.pipeline.tracer)
+  let req = c.get_effective_route_table_create_request(resource_group_name, network_interface_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientGetEffectiveRouteTableResponse", fn(r: http.Response) -> InterfacesClientGetEffectiveRouteTableResponse ! Str { interfaces_get_effective_route_table_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "InterfacesClientGetEffectiveRouteTableResponse", fn(r: http.Response) -> InterfacesClientGetEffectiveRouteTableResponse ! Str { interfaces_get_effective_route_table_handle(r) }, traced: true)
 }
 
 /// InterfacesClientListCloudServiceNetworkInterfacesOptions: the optional parameters of InterfacesClient.new_list_cloud_service_network_interfaces_pager.
@@ -410,7 +424,7 @@ fn (c: InterfacesClient) list_cloud_service_network_interfaces_create_request(re
 /// Gets all network interfaces in a cloud service.
 pub fn (c: InterfacesClient[fx]) new_list_cloud_service_network_interfaces_pager(resource_group_name: Str, cloud_service_name: Str, options: InterfacesClientListCloudServiceNetworkInterfacesOptions = InterfacesClientListCloudServiceNetworkInterfacesOptions{}) -> runtime.Pager[InterfacesClientListCloudServiceNetworkInterfacesResponse, fx] ! azcore.CallErr {
   let req = c.list_cloud_service_network_interfaces_create_request(resource_group_name, cloud_service_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListCloudServiceNetworkInterfacesResponse ! Str { interfaces_list_cloud_service_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListCloudServiceNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListCloudServiceNetworkInterfacesResponse ! Str { interfaces_list_cloud_service_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListCloudServiceNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListCloudServiceNetworkInterfacesResponse"))
 }
 
 /// InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesOptions: the optional parameters of InterfacesClient.new_list_cloud_service_role_instance_network_interfaces_pager.
@@ -453,7 +467,7 @@ fn (c: InterfacesClient) list_cloud_service_role_instance_network_interfaces_cre
 /// Gets information about all network interfaces in a role instance in a cloud service.
 pub fn (c: InterfacesClient[fx]) new_list_cloud_service_role_instance_network_interfaces_pager(resource_group_name: Str, cloud_service_name: Str, role_instance_name: Str, options: InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesOptions = InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesOptions{}) -> runtime.Pager[InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse, fx] ! azcore.CallErr {
   let req = c.list_cloud_service_role_instance_network_interfaces_create_request(resource_group_name, cloud_service_name, role_instance_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse ! Str { interfaces_list_cloud_service_role_instance_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse ! Str { interfaces_list_cloud_service_role_instance_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListCloudServiceRoleInstanceNetworkInterfacesResponse"))
 }
 
 /// InterfacesClientGetCloudServiceNetworkInterfaceOptions: the optional parameters of InterfacesClient.get_cloud_service_network_interface.
@@ -505,12 +519,15 @@ fn (c: InterfacesClient) get_cloud_service_network_interface_create_request(reso
 
 /// Get the specified network interface in a cloud service.
 pub fn (c: InterfacesClient) get_cloud_service_network_interface(resource_group_name: Str, cloud_service_name: Str, role_instance_name: Str, network_interface_name: Str, options: InterfacesClientGetCloudServiceNetworkInterfaceOptions = InterfacesClientGetCloudServiceNetworkInterfaceOptions{}) -> InterfacesClientGetCloudServiceNetworkInterfaceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cloud_service_network_interface_create_request(resource_group_name, cloud_service_name, role_instance_name, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.GetCloudServiceNetworkInterface", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cloud_service_network_interface_create_request(resource_group_name, cloud_service_name, role_instance_name, network_interface_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interfaces_get_cloud_service_network_interface_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interfaces_get_cloud_service_network_interface_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InterfacesClientListVirtualMachineScaleSetNetworkInterfacesOptions: the optional parameters of InterfacesClient.new_list_virtual_machine_scale_set_network_interfaces_pager.
@@ -549,7 +566,7 @@ fn (c: InterfacesClient) list_virtual_machine_scale_set_network_interfaces_creat
 /// Gets all network interfaces in a virtual machine scale set.
 pub fn (c: InterfacesClient[fx]) new_list_virtual_machine_scale_set_network_interfaces_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, options: InterfacesClientListVirtualMachineScaleSetNetworkInterfacesOptions = InterfacesClientListVirtualMachineScaleSetNetworkInterfacesOptions{}) -> runtime.Pager[InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_set_network_interfaces_create_request(resource_group_name, virtual_machine_scale_set_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse ! Str { interfaces_list_virtual_machine_scale_set_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse ! Str { interfaces_list_virtual_machine_scale_set_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListVirtualMachineScaleSetNetworkInterfacesResponse"))
 }
 
 /// InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesOptions: the optional parameters of InterfacesClient.new_list_virtual_machine_scale_set_vm_network_interfaces_pager.
@@ -592,7 +609,7 @@ fn (c: InterfacesClient) list_virtual_machine_scale_set_vm_network_interfaces_cr
 /// Gets information about all network interfaces in a virtual machine in a virtual machine scale set.
 pub fn (c: InterfacesClient[fx]) new_list_virtual_machine_scale_set_vm_network_interfaces_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, options: InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesOptions = InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesOptions{}) -> runtime.Pager[InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_set_vm_network_interfaces_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse ! Str { interfaces_list_virtual_machine_scale_set_vm_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse ! Str { interfaces_list_virtual_machine_scale_set_vm_network_interfaces_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse) -> Str? { r.interface_list_result.next_link }).traced_as("InterfacesClientListVirtualMachineScaleSetVMNetworkInterfacesResponse"))
 }
 
 /// InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions: the optional parameters of InterfacesClient.get_virtual_machine_scale_set_network_interface.
@@ -644,12 +661,15 @@ fn (c: InterfacesClient) get_virtual_machine_scale_set_network_interface_create_
 
 /// Get the specified network interface in a virtual machine scale set.
 pub fn (c: InterfacesClient) get_virtual_machine_scale_set_network_interface(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, network_interface_name: Str, options: InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions = InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions{}) -> InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_virtual_machine_scale_set_network_interface_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.GetVirtualMachineScaleSetNetworkInterface", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_virtual_machine_scale_set_network_interface_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interfaces_get_virtual_machine_scale_set_network_interface_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interfaces_get_virtual_machine_scale_set_network_interface_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InterfacesClientGetVirtualMachineScaleSetIPConfigurationOptions: the optional parameters of InterfacesClient.get_virtual_machine_scale_set_ip_configuration.
@@ -705,12 +725,15 @@ fn (c: InterfacesClient) get_virtual_machine_scale_set_ip_configuration_create_r
 
 /// Get the specified network interface ip configuration in a virtual machine scale set.
 pub fn (c: InterfacesClient) get_virtual_machine_scale_set_ip_configuration(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, network_interface_name: Str, ip_configuration_name: Str, options: InterfacesClientGetVirtualMachineScaleSetIPConfigurationOptions = InterfacesClientGetVirtualMachineScaleSetIPConfigurationOptions{}) -> InterfacesClientGetVirtualMachineScaleSetIPConfigurationResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_virtual_machine_scale_set_ip_configuration_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, ip_configuration_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfacesClient.GetVirtualMachineScaleSetIPConfiguration", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_virtual_machine_scale_set_ip_configuration_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, ip_configuration_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interfaces_get_virtual_machine_scale_set_ip_configuration_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interfaces_get_virtual_machine_scale_set_ip_configuration_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InterfacesClientListVirtualMachineScaleSetIPConfigurationsOptions: the optional parameters of InterfacesClient.new_list_virtual_machine_scale_set_ip_configurations_pager.
@@ -763,5 +786,5 @@ fn (c: InterfacesClient) list_virtual_machine_scale_set_ip_configurations_create
 /// Get the specified network interface ip configuration in a virtual machine scale set.
 pub fn (c: InterfacesClient[fx]) new_list_virtual_machine_scale_set_ip_configurations_pager(resource_group_name: Str, virtual_machine_scale_set_name: Str, virtualmachine_index: Str, network_interface_name: Str, options: InterfacesClientListVirtualMachineScaleSetIPConfigurationsOptions = InterfacesClientListVirtualMachineScaleSetIPConfigurationsOptions{}) -> runtime.Pager[InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_set_ip_configurations_create_request(resource_group_name, virtual_machine_scale_set_name, virtualmachine_index, network_interface_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse ! Str { interfaces_list_virtual_machine_scale_set_ip_configurations_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse) -> Str? { r.interface_ip_configuration_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse ! Str { interfaces_list_virtual_machine_scale_set_ip_configurations_handle(r) }, c.setup.endpoint, fn(r: InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse) -> Str? { r.interface_ip_configuration_list_result.next_link }).traced_as("InterfacesClientListVirtualMachineScaleSetIPConfigurationsResponse"))
 }

@@ -60,12 +60,15 @@ fn (c: QueryTextsClient) get_create_request(resource_group_name: Str, server_nam
 
 /// Retrieve the Query-Store query texts for the queryId.
 pub fn (c: QueryTextsClient) get(resource_group_name: Str, server_name: Str, query_id: Str, options: QueryTextsClientGetOptions = QueryTextsClientGetOptions{}) -> QueryTextsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, query_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "QueryTextsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, query_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  query_texts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = query_texts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// QueryTextsClientListByServerOptions: the optional parameters of QueryTextsClient.new_list_by_server_pager.
@@ -107,5 +110,5 @@ fn (c: QueryTextsClient) list_by_server_create_request(resource_group_name: Str,
 /// Retrieve the Query-Store query texts for specified queryIds.
 pub fn (c: QueryTextsClient[fx]) new_list_by_server_pager(resource_group_name: Str, server_name: Str, query_ids: List[Str], options: QueryTextsClientListByServerOptions = QueryTextsClientListByServerOptions{}) -> runtime.Pager[QueryTextsClientListByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_by_server_create_request(resource_group_name, server_name, query_ids, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> QueryTextsClientListByServerResponse ! Str { query_texts_list_by_server_handle(r) }, fn(r: QueryTextsClientListByServerResponse) -> Str? { r.query_texts_result_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> QueryTextsClientListByServerResponse ! Str { query_texts_list_by_server_handle(r) }, fn(r: QueryTextsClientListByServerResponse) -> Str? { r.query_texts_result_list.next_link }).traced_as("QueryTextsClientListByServerResponse"))
 }

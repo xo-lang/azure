@@ -44,7 +44,7 @@ fn (c: EmergingIssuesClient) list_create_request(options: EmergingIssuesClientLi
 /// Lists Azure services' emerging issues.
 pub fn (c: EmergingIssuesClient[fx]) new_list_pager(options: EmergingIssuesClientListOptions = EmergingIssuesClientListOptions{}) -> runtime.Pager[EmergingIssuesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EmergingIssuesClientListResponse ! Str { emerging_issues_list_handle(r) }, c.setup.endpoint, fn(r: EmergingIssuesClientListResponse) -> Str? { r.emerging_issue_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EmergingIssuesClientListResponse ! Str { emerging_issues_list_handle(r) }, c.setup.endpoint, fn(r: EmergingIssuesClientListResponse) -> Str? { r.emerging_issue_list_result.next_link }).traced_as("EmergingIssuesClientListResponse"))
 }
 
 /// EmergingIssuesClientGetOptions: the optional parameters of EmergingIssuesClient.get.
@@ -74,10 +74,13 @@ fn (c: EmergingIssuesClient) get_create_request(issue_name: IssueNameParameter, 
 
 /// Gets Azure services' emerging issues.
 pub fn (c: EmergingIssuesClient) get(issue_name: IssueNameParameter, options: EmergingIssuesClientGetOptions = EmergingIssuesClientGetOptions{}) -> EmergingIssuesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(issue_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EmergingIssuesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(issue_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  emerging_issues_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = emerging_issues_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

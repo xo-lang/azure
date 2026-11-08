@@ -53,7 +53,7 @@ fn (c: DNSPrivateZonesClient) list_by_location_create_request(location: Str, opt
 /// List DnsPrivateZone resources by SubscriptionLocationResource
 pub fn (c: DNSPrivateZonesClient[fx]) new_list_by_location_pager(location: Str, options: DNSPrivateZonesClientListByLocationOptions = DNSPrivateZonesClientListByLocationOptions{}) -> runtime.Pager[DNSPrivateZonesClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DNSPrivateZonesClientListByLocationResponse ! Str { dns_private_zones_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DNSPrivateZonesClientListByLocationResponse) -> Str? { r.dns_private_zone_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DNSPrivateZonesClientListByLocationResponse ! Str { dns_private_zones_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DNSPrivateZonesClientListByLocationResponse) -> Str? { r.dns_private_zone_list_result.next_link }).traced_as("DNSPrivateZonesClientListByLocationResponse"))
 }
 
 /// DNSPrivateZonesClientGetOptions: the optional parameters of DNSPrivateZonesClient.get.
@@ -91,10 +91,13 @@ fn (c: DNSPrivateZonesClient) get_create_request(location: Str, dnsprivatezonena
 
 /// Get a DnsPrivateZone
 pub fn (c: DNSPrivateZonesClient) get(location: Str, dnsprivatezonename: Str, options: DNSPrivateZonesClientGetOptions = DNSPrivateZonesClientGetOptions{}) -> DNSPrivateZonesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, dnsprivatezonename, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DNSPrivateZonesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, dnsprivatezonename, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dns_private_zones_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dns_private_zones_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

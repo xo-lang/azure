@@ -61,7 +61,7 @@ fn (c: RecoveryPointClient) list_create_request(resource_group_name: Str, vault_
 /// Gets the list of recovery points of the given protected item.
 pub fn (c: RecoveryPointClient[fx]) new_list_pager(resource_group_name: Str, vault_name: Str, protected_item_name: Str, options: RecoveryPointClientListOptions = RecoveryPointClientListOptions{}) -> runtime.Pager[RecoveryPointClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, vault_name, protected_item_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RecoveryPointClientListResponse ! Str { recovery_point_list_handle(r) }, c.setup.endpoint, fn(r: RecoveryPointClientListResponse) -> Str? { r.recovery_point_model_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RecoveryPointClientListResponse ! Str { recovery_point_list_handle(r) }, c.setup.endpoint, fn(r: RecoveryPointClientListResponse) -> Str? { r.recovery_point_model_list_result.next_link }).traced_as("RecoveryPointClientListResponse"))
 }
 
 /// RecoveryPointClientGetOptions: the optional parameters of RecoveryPointClient.get.
@@ -107,10 +107,13 @@ fn (c: RecoveryPointClient) get_create_request(resource_group_name: Str, vault_n
 
 /// Gets the details of the recovery point of a protected item.
 pub fn (c: RecoveryPointClient) get(resource_group_name: Str, vault_name: Str, protected_item_name: Str, recovery_point_name: Str, options: RecoveryPointClientGetOptions = RecoveryPointClientGetOptions{}) -> RecoveryPointClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vault_name, protected_item_name, recovery_point_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RecoveryPointClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vault_name, protected_item_name, recovery_point_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  recovery_point_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = recovery_point_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

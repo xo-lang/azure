@@ -70,7 +70,7 @@ fn (c: LabsClient) list_by_subscription_create_request(options: LabsClientListBy
 /// List labs in a subscription.
 pub fn (c: LabsClient[fx]) new_list_by_subscription_pager(options: LabsClientListBySubscriptionOptions = LabsClientListBySubscriptionOptions{}) -> runtime.Pager[LabsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListBySubscriptionResponse ! Str { labs_list_by_subscription_handle(r) }, fn(r: LabsClientListBySubscriptionResponse) -> Str? { r.lab_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListBySubscriptionResponse ! Str { labs_list_by_subscription_handle(r) }, fn(r: LabsClientListBySubscriptionResponse) -> Str? { r.lab_list.next_link }).traced_as("LabsClientListBySubscriptionResponse"))
 }
 
 /// LabsClientListByResourceGroupOptions: the optional parameters of LabsClient.new_list_by_resource_group_pager.
@@ -126,7 +126,7 @@ fn (c: LabsClient) list_by_resource_group_create_request(resource_group_name: St
 /// List labs in a resource group.
 pub fn (c: LabsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: LabsClientListByResourceGroupOptions = LabsClientListByResourceGroupOptions{}) -> runtime.Pager[LabsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListByResourceGroupResponse ! Str { labs_list_by_resource_group_handle(r) }, fn(r: LabsClientListByResourceGroupResponse) -> Str? { r.lab_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListByResourceGroupResponse ! Str { labs_list_by_resource_group_handle(r) }, fn(r: LabsClientListByResourceGroupResponse) -> Str? { r.lab_list.next_link }).traced_as("LabsClientListByResourceGroupResponse"))
 }
 
 /// LabsClientGetOptions: the optional parameters of LabsClient.get.
@@ -170,12 +170,15 @@ fn (c: LabsClient) get_create_request(resource_group_name: Str, name: Str, optio
 
 /// Get lab.
 pub fn (c: LabsClient) get(resource_group_name: Str, name: Str, options: LabsClientGetOptions = LabsClientGetOptions{}) -> LabsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  labs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = labs_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LabsClientBeginCreateOrUpdateOptions: the optional parameters of LabsClient.begin_create_or_update.
@@ -218,14 +221,16 @@ fn (c: LabsClient) create_or_update_create_request(resource_group_name: Str, nam
 /// Create or replace an existing lab. This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_create_or_update(resource_group_name: Str, name: Str, lab: Lab, options: LabsClientBeginCreateOrUpdateOptions = LabsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LabsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientCreateOrUpdateResponse", fn(r: http.Response) -> LabsClientCreateOrUpdateResponse ! Str { labs_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientCreateOrUpdateResponse", fn(r: http.Response) -> LabsClientCreateOrUpdateResponse ! Str { labs_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, name, lab, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, name, lab, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientCreateOrUpdateResponse", fn(r: http.Response) -> LabsClientCreateOrUpdateResponse ! Str { labs_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientCreateOrUpdateResponse", fn(r: http.Response) -> LabsClientCreateOrUpdateResponse ! Str { labs_create_or_update_handle(r) }, traced: true)
 }
 
 /// LabsClientBeginDeleteOptions: the optional parameters of LabsClient.begin_delete.
@@ -264,14 +269,16 @@ fn (c: LabsClient) delete_create_request(resource_group_name: Str, name: Str, op
 /// Delete lab. This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_delete(resource_group_name: Str, name: Str, options: LabsClientBeginDeleteOptions = LabsClientBeginDeleteOptions{}) -> runtime.Poller[LabsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientDeleteResponse", fn(r: http.Response) -> LabsClientDeleteResponse ! Str { labs_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientDeleteResponse", fn(r: http.Response) -> LabsClientDeleteResponse ! Str { labs_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientDeleteResponse", fn(r: http.Response) -> LabsClientDeleteResponse ! Str { labs_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientDeleteResponse", fn(r: http.Response) -> LabsClientDeleteResponse ! Str { labs_delete_handle(r) }, traced: true)
 }
 
 /// LabsClientUpdateOptions: the optional parameters of LabsClient.update.
@@ -310,12 +317,15 @@ fn (c: LabsClient) update_create_request(resource_group_name: Str, name: Str, la
 
 /// Allows modifying tags of labs. All other properties will be ignored.
 pub fn (c: LabsClient) update(resource_group_name: Str, name: Str, lab: LabFragment, options: LabsClientUpdateOptions = LabsClientUpdateOptions{}) -> LabsClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, name, lab, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, name, lab, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  labs_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = labs_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LabsClientBeginClaimAnyVMOptions: the optional parameters of LabsClient.begin_claim_any_vm.
@@ -354,14 +364,16 @@ fn (c: LabsClient) claim_any_vm_create_request(resource_group_name: Str, name: S
 /// Claim a random claimable virtual machine in the lab. This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_claim_any_vm(resource_group_name: Str, name: Str, options: LabsClientBeginClaimAnyVMOptions = LabsClientBeginClaimAnyVMOptions{}) -> runtime.Poller[LabsClientClaimAnyVMResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientClaimAnyVMResponse", fn(r: http.Response) -> LabsClientClaimAnyVMResponse ! Str { labs_claim_any_vm_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientClaimAnyVMResponse", fn(r: http.Response) -> LabsClientClaimAnyVMResponse ! Str { labs_claim_any_vm_handle(r) }, traced: true)
   }
-  let req = c.claim_any_vm_create_request(resource_group_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginClaimAnyVM", c.setup.pipeline.tracer)
+  let req = c.claim_any_vm_create_request(resource_group_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientClaimAnyVMResponse", fn(r: http.Response) -> LabsClientClaimAnyVMResponse ! Str { labs_claim_any_vm_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientClaimAnyVMResponse", fn(r: http.Response) -> LabsClientClaimAnyVMResponse ! Str { labs_claim_any_vm_handle(r) }, traced: true)
 }
 
 /// LabsClientBeginCreateEnvironmentOptions: the optional parameters of LabsClient.begin_create_environment.
@@ -401,14 +413,16 @@ fn (c: LabsClient) create_environment_create_request(resource_group_name: Str, n
 /// Create virtual machines in a lab. This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_create_environment(resource_group_name: Str, name: Str, lab_virtual_machine_creation_parameter: LabVirtualMachineCreationParameter, options: LabsClientBeginCreateEnvironmentOptions = LabsClientBeginCreateEnvironmentOptions{}) -> runtime.Poller[LabsClientCreateEnvironmentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientCreateEnvironmentResponse", fn(r: http.Response) -> LabsClientCreateEnvironmentResponse ! Str { labs_create_environment_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientCreateEnvironmentResponse", fn(r: http.Response) -> LabsClientCreateEnvironmentResponse ! Str { labs_create_environment_handle(r) }, traced: true)
   }
-  let req = c.create_environment_create_request(resource_group_name, name, lab_virtual_machine_creation_parameter, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginCreateEnvironment", c.setup.pipeline.tracer)
+  let req = c.create_environment_create_request(resource_group_name, name, lab_virtual_machine_creation_parameter, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientCreateEnvironmentResponse", fn(r: http.Response) -> LabsClientCreateEnvironmentResponse ! Str { labs_create_environment_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientCreateEnvironmentResponse", fn(r: http.Response) -> LabsClientCreateEnvironmentResponse ! Str { labs_create_environment_handle(r) }, traced: true)
 }
 
 /// LabsClientBeginExportResourceUsageOptions: the optional parameters of LabsClient.begin_export_resource_usage.
@@ -448,14 +462,16 @@ fn (c: LabsClient) export_resource_usage_create_request(resource_group_name: Str
 /// Exports the lab resource usage into a storage account This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_export_resource_usage(resource_group_name: Str, name: Str, export_resource_usage_parameters: ExportResourceUsageParameters, options: LabsClientBeginExportResourceUsageOptions = LabsClientBeginExportResourceUsageOptions{}) -> runtime.Poller[LabsClientExportResourceUsageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientExportResourceUsageResponse", fn(r: http.Response) -> LabsClientExportResourceUsageResponse ! Str { labs_export_resource_usage_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientExportResourceUsageResponse", fn(r: http.Response) -> LabsClientExportResourceUsageResponse ! Str { labs_export_resource_usage_handle(r) }, traced: true)
   }
-  let req = c.export_resource_usage_create_request(resource_group_name, name, export_resource_usage_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginExportResourceUsage", c.setup.pipeline.tracer)
+  let req = c.export_resource_usage_create_request(resource_group_name, name, export_resource_usage_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientExportResourceUsageResponse", fn(r: http.Response) -> LabsClientExportResourceUsageResponse ! Str { labs_export_resource_usage_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientExportResourceUsageResponse", fn(r: http.Response) -> LabsClientExportResourceUsageResponse ! Str { labs_export_resource_usage_handle(r) }, traced: true)
 }
 
 /// LabsClientGenerateUploadURIOptions: the optional parameters of LabsClient.generate_upload_uri.
@@ -494,12 +510,15 @@ fn (c: LabsClient) generate_upload_uri_create_request(resource_group_name: Str, 
 
 /// Generate a URI for uploading custom disk images to a Lab.
 pub fn (c: LabsClient) generate_upload_uri(resource_group_name: Str, name: Str, generate_upload_uri_parameter: GenerateUploadURIParameter, options: LabsClientGenerateUploadURIOptions = LabsClientGenerateUploadURIOptions{}) -> LabsClientGenerateUploadURIResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.generate_upload_uri_create_request(resource_group_name, name, generate_upload_uri_parameter, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.GenerateUploadURI", c.setup.pipeline.tracer)
+  let req = sp.on(c.generate_upload_uri_create_request(resource_group_name, name, generate_upload_uri_parameter, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  labs_generate_upload_uri_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = labs_generate_upload_uri_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LabsClientBeginImportVirtualMachineOptions: the optional parameters of LabsClient.begin_import_virtual_machine.
@@ -539,14 +558,16 @@ fn (c: LabsClient) import_virtual_machine_create_request(resource_group_name: St
 /// Import a virtual machine into a different lab. This operation can take a while to complete.
 pub fn (c: LabsClient[fx]) begin_import_virtual_machine(resource_group_name: Str, name: Str, import_lab_virtual_machine_request: ImportLabVirtualMachineRequest, options: LabsClientBeginImportVirtualMachineOptions = LabsClientBeginImportVirtualMachineOptions{}) -> runtime.Poller[LabsClientImportVirtualMachineResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientImportVirtualMachineResponse", fn(r: http.Response) -> LabsClientImportVirtualMachineResponse ! Str { labs_import_virtual_machine_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LabsClientImportVirtualMachineResponse", fn(r: http.Response) -> LabsClientImportVirtualMachineResponse ! Str { labs_import_virtual_machine_handle(r) }, traced: true)
   }
-  let req = c.import_virtual_machine_create_request(resource_group_name, name, import_lab_virtual_machine_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LabsClient.BeginImportVirtualMachine", c.setup.pipeline.tracer)
+  let req = c.import_virtual_machine_create_request(resource_group_name, name, import_lab_virtual_machine_request, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientImportVirtualMachineResponse", fn(r: http.Response) -> LabsClientImportVirtualMachineResponse ! Str { labs_import_virtual_machine_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LabsClientImportVirtualMachineResponse", fn(r: http.Response) -> LabsClientImportVirtualMachineResponse ! Str { labs_import_virtual_machine_handle(r) }, traced: true)
 }
 
 /// LabsClientListVhdsOptions: the optional parameters of LabsClient.new_list_vhds_pager.
@@ -585,5 +606,5 @@ fn (c: LabsClient) list_vhds_create_request(resource_group_name: Str, name: Str,
 /// List disk images available for custom image creation.
 pub fn (c: LabsClient[fx]) new_list_vhds_pager(resource_group_name: Str, name: Str, options: LabsClientListVhdsOptions = LabsClientListVhdsOptions{}) -> runtime.Pager[LabsClientListVhdsResponse, fx] ! azcore.CallErr {
   let req = c.list_vhds_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListVhdsResponse ! Str { labs_list_vhds_handle(r) }, fn(r: LabsClientListVhdsResponse) -> Str? { r.lab_vhd_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> LabsClientListVhdsResponse ! Str { labs_list_vhds_handle(r) }, fn(r: LabsClientListVhdsResponse) -> Str? { r.lab_vhd_list.next_link }).traced_as("LabsClientListVhdsResponse"))
 }

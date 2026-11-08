@@ -49,7 +49,7 @@ fn (c: ReservationsClient) list_by_subscription_create_request(options: Reservat
 /// List reservations by Azure subscription ID
 pub fn (c: ReservationsClient[fx]) new_list_by_subscription_pager(options: ReservationsClientListBySubscriptionOptions = ReservationsClientListBySubscriptionOptions{}) -> runtime.Pager[ReservationsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReservationsClientListBySubscriptionResponse ! Str { reservations_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ReservationsClientListBySubscriptionResponse) -> Str? { r.reservation_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReservationsClientListBySubscriptionResponse ! Str { reservations_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ReservationsClientListBySubscriptionResponse) -> Str? { r.reservation_list_result.next_link }).traced_as("ReservationsClientListBySubscriptionResponse"))
 }
 
 /// ReservationsClientListByResourceGroupOptions: the optional parameters of ReservationsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ReservationsClient) list_by_resource_group_create_request(resource_group_
 /// List reservations by resource group
 pub fn (c: ReservationsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ReservationsClientListByResourceGroupOptions = ReservationsClientListByResourceGroupOptions{}) -> runtime.Pager[ReservationsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReservationsClientListByResourceGroupResponse ! Str { reservations_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ReservationsClientListByResourceGroupResponse) -> Str? { r.reservation_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ReservationsClientListByResourceGroupResponse ! Str { reservations_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ReservationsClientListByResourceGroupResponse) -> Str? { r.reservation_list_result.next_link }).traced_as("ReservationsClientListByResourceGroupResponse"))
 }
 
 /// ReservationsClientGetOptions: the optional parameters of ReservationsClient.get.
@@ -122,12 +122,15 @@ fn (c: ReservationsClient) get_create_request(resource_group_name: Str, reservat
 
 /// Get a reservation
 pub fn (c: ReservationsClient) get(resource_group_name: Str, reservation_name: Str, options: ReservationsClientGetOptions = ReservationsClientGetOptions{}) -> ReservationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, reservation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, reservation_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  reservations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = reservations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReservationsClientBeginCreateOptions: the optional parameters of ReservationsClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: ReservationsClient) create_create_request(resource_group_name: Str, reser
 /// Create a reservation
 pub fn (c: ReservationsClient[fx]) begin_create(resource_group_name: Str, reservation_name: Str, resource: Reservation, options: ReservationsClientBeginCreateOptions = ReservationsClientBeginCreateOptions{}) -> runtime.Poller[ReservationsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientCreateResponse", fn(r: http.Response) -> ReservationsClientCreateResponse ! Str { reservations_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientCreateResponse", fn(r: http.Response) -> ReservationsClientCreateResponse ! Str { reservations_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, reservation_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, reservation_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientCreateResponse", fn(r: http.Response) -> ReservationsClientCreateResponse ! Str { reservations_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientCreateResponse", fn(r: http.Response) -> ReservationsClientCreateResponse ! Str { reservations_create_handle(r) }, traced: true)
 }
 
 /// ReservationsClientBeginUpdateOptions: the optional parameters of ReservationsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ReservationsClient) update_create_request(resource_group_name: Str, reser
 /// Update a reservation
 pub fn (c: ReservationsClient[fx]) begin_update(resource_group_name: Str, reservation_name: Str, properties: ReservationUpdate, options: ReservationsClientBeginUpdateOptions = ReservationsClientBeginUpdateOptions{}) -> runtime.Poller[ReservationsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientUpdateResponse", fn(r: http.Response) -> ReservationsClientUpdateResponse ! Str { reservations_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientUpdateResponse", fn(r: http.Response) -> ReservationsClientUpdateResponse ! Str { reservations_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, reservation_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, reservation_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientUpdateResponse", fn(r: http.Response) -> ReservationsClientUpdateResponse ! Str { reservations_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientUpdateResponse", fn(r: http.Response) -> ReservationsClientUpdateResponse ! Str { reservations_update_handle(r) }, traced: true)
 }
 
 /// ReservationsClientBeginDeleteOptions: the optional parameters of ReservationsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: ReservationsClient) delete_create_request(resource_group_name: Str, reser
 /// Delete a reservation
 pub fn (c: ReservationsClient[fx]) begin_delete(resource_group_name: Str, reservation_name: Str, options: ReservationsClientBeginDeleteOptions = ReservationsClientBeginDeleteOptions{}) -> runtime.Poller[ReservationsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientDeleteResponse", fn(r: http.Response) -> ReservationsClientDeleteResponse ! Str { reservations_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ReservationsClientDeleteResponse", fn(r: http.Response) -> ReservationsClientDeleteResponse ! Str { reservations_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, reservation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, reservation_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientDeleteResponse", fn(r: http.Response) -> ReservationsClientDeleteResponse ! Str { reservations_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ReservationsClientDeleteResponse", fn(r: http.Response) -> ReservationsClientDeleteResponse ! Str { reservations_delete_handle(r) }, traced: true)
 }
 
 /// ReservationsClientGetBillingReportOptions: the optional parameters of ReservationsClient.get_billing_report.
@@ -311,12 +320,15 @@ fn (c: ReservationsClient) get_billing_report_create_request(resource_group_name
 
 /// Provides a summarized report along with actions for resources billed via given reservation
 pub fn (c: ReservationsClient) get_billing_report(resource_group_name: Str, reservation_name: Str, options: ReservationsClientGetBillingReportOptions = ReservationsClientGetBillingReportOptions{}) -> ReservationsClientGetBillingReportResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_billing_report_create_request(resource_group_name, reservation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.GetBillingReport", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_billing_report_create_request(resource_group_name, reservation_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  reservations_get_billing_report_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = reservations_get_billing_report_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReservationsClientGetBillingStatusOptions: the optional parameters of ReservationsClient.get_billing_status.
@@ -354,12 +366,15 @@ fn (c: ReservationsClient) get_billing_status_create_request(resource_group_name
 
 /// Provides various statistics about resources billed via given reservation.
 pub fn (c: ReservationsClient) get_billing_status(resource_group_name: Str, reservation_name: Str, options: ReservationsClientGetBillingStatusOptions = ReservationsClientGetBillingStatusOptions{}) -> ReservationsClientGetBillingStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_billing_status_create_request(resource_group_name, reservation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.GetBillingStatus", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_billing_status_create_request(resource_group_name, reservation_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  reservations_get_billing_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = reservations_get_billing_status_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ReservationsClientGetResourceLimitsOptions: the optional parameters of ReservationsClient.get_resource_limits.
@@ -397,10 +412,13 @@ fn (c: ReservationsClient) get_resource_limits_create_request(resource_group_nam
 
 /// Limits constraining certain resource properties.
 pub fn (c: ReservationsClient) get_resource_limits(resource_group_name: Str, reservation_name: Str, options: ReservationsClientGetResourceLimitsOptions = ReservationsClientGetResourceLimitsOptions{}) -> ReservationsClientGetResourceLimitsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_resource_limits_create_request(resource_group_name, reservation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ReservationsClient.GetResourceLimits", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_resource_limits_create_request(resource_group_name, reservation_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  reservations_get_resource_limits_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = reservations_get_resource_limits_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

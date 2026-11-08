@@ -64,7 +64,7 @@ fn (c: DbSystemShapesClient) list_by_location_create_request(location: Str, opti
 /// List DbSystemShape resources by SubscriptionLocationResource
 pub fn (c: DbSystemShapesClient[fx]) new_list_by_location_pager(location: Str, options: DbSystemShapesClientListByLocationOptions = DbSystemShapesClientListByLocationOptions{}) -> runtime.Pager[DbSystemShapesClientListByLocationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_location_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DbSystemShapesClientListByLocationResponse ! Str { db_system_shapes_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DbSystemShapesClientListByLocationResponse) -> Str? { r.db_system_shape_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DbSystemShapesClientListByLocationResponse ! Str { db_system_shapes_list_by_location_handle(r) }, c.setup.endpoint, fn(r: DbSystemShapesClientListByLocationResponse) -> Str? { r.db_system_shape_list_result.next_link }).traced_as("DbSystemShapesClientListByLocationResponse"))
 }
 
 /// DbSystemShapesClientGetOptions: the optional parameters of DbSystemShapesClient.get.
@@ -102,10 +102,13 @@ fn (c: DbSystemShapesClient) get_create_request(location: Str, dbsystemshapename
 
 /// Get a DbSystemShape
 pub fn (c: DbSystemShapesClient) get(location: Str, dbsystemshapename: Str, options: DbSystemShapesClientGetOptions = DbSystemShapesClientGetOptions{}) -> DbSystemShapesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, dbsystemshapename, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DbSystemShapesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, dbsystemshapename, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  db_system_shapes_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = db_system_shapes_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

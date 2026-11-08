@@ -35,6 +35,9 @@ pub struct Pager[T, fx: Effects] {
   /// For `new_next_link_pager`: the client endpoint a next link is sent
   /// against (azcore's NewRequestForNextLink).
   link_endpoint: Str? = None
+  /// The page type's Go name, for the NextPage span
+  /// (`Pager[<name>].NextPage`); "" opens no span.
+  pub type_name: Str = ""
 }
 
 /// The pager with `page` as its first page, fetched by its first
@@ -107,6 +110,12 @@ pub fn new_marker_pager[T, fx: Effects](pipeline: Pipeline[fx], first: policy.Re
   })
 }
 
+/// The pager opening Go's `Pager[<type_name>].NextPage` span around
+/// each fetch (a module whose Go passes its tracer to the pager).
+pub fn (p: Pager[T, fx]) traced_as(type_name: Str) -> Pager[T, fx] {
+  p with {type_name: type_name}
+}
+
 /// Whether another page can be fetched: false once a fetch failed.
 pub fn (p: Pager[T, fx]) more() -> Bool {
   p.failed.is_none() && (!p.started || p.pending.is_some())
@@ -126,9 +135,21 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
       return Ok(page)
     }
   }
-  var req = if !p.started { p.first } else {
+  let req = if !p.started { p.first } else {
     p.pending ?? return Err(azcore.CallErr.InvalidInput("no more pages"))
   }
+  // Go's Pager.NextPage opens its span after these checks, around the
+  // fetch (FetcherForNextLink makes the next request inside it).
+  let sp = if p.type_name == "" { ActiveSpan{values: req.values} } else {
+    start_span(req.values, "Pager[${p.type_name}].NextPage", p.pipeline.tracer)
+  }
+  let r = p.fetch_next(req, sp)
+  sp.end_with(r)
+  r
+}
+
+fn (var p: Pager[T, fx]) fetch_next(first: policy.Request, sp: ActiveSpan) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  var req = first
   if p.started {
     if let Some(ep) = p.link_endpoint {
       req = new_request_for_next_link(req.method, ep, req.url) ?? e => {
@@ -138,7 +159,7 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
       }
     }
   }
-  let page = match p.fetch(req) {
+  let page = match p.fetch(sp.on(req)) {
     Ok(v) => v
     Err(e) => {
       p.failed = Some(e)
@@ -146,6 +167,7 @@ pub fn (var p: Pager[T, fx]) next_page() -> T ! azcore.CallErr uses (net.dial, c
     }
   }
   p.started = true
+  // the next request starts from this one's values, without the span's
   p.pending = (p.next)(req, page)
   Ok(page)
 }

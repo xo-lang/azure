@@ -57,7 +57,7 @@ fn (c: ResourceQuotaLimitsAccountClient) list_create_request(resource_group_name
 /// Gets a list of quota limits for all quotas that are under account. Currently PoolsPerAccount is the only one.
 pub fn (c: ResourceQuotaLimitsAccountClient[fx]) new_list_pager(resource_group_name: Str, account_name: Str, options: ResourceQuotaLimitsAccountClientListOptions = ResourceQuotaLimitsAccountClientListOptions{}) -> runtime.Pager[ResourceQuotaLimitsAccountClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourceQuotaLimitsAccountClientListResponse ! Str { resource_quota_limits_account_list_handle(r) }, c.setup.endpoint, fn(r: ResourceQuotaLimitsAccountClientListResponse) -> Str? { r.subscription_quota_item_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourceQuotaLimitsAccountClientListResponse ! Str { resource_quota_limits_account_list_handle(r) }, c.setup.endpoint, fn(r: ResourceQuotaLimitsAccountClientListResponse) -> Str? { r.subscription_quota_item_list.next_link }).traced_as("ResourceQuotaLimitsAccountClientListResponse"))
 }
 
 /// ResourceQuotaLimitsAccountClientGetOptions: the optional parameters of ResourceQuotaLimitsAccountClient.get.
@@ -99,10 +99,13 @@ fn (c: ResourceQuotaLimitsAccountClient) get_create_request(resource_group_name:
 
 /// Get the default, current and usages account quota limit
 pub fn (c: ResourceQuotaLimitsAccountClient) get(resource_group_name: Str, account_name: Str, quota_limit_name: Str, options: ResourceQuotaLimitsAccountClientGetOptions = ResourceQuotaLimitsAccountClientGetOptions{}) -> ResourceQuotaLimitsAccountClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, quota_limit_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourceQuotaLimitsAccountClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, quota_limit_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  resource_quota_limits_account_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = resource_quota_limits_account_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

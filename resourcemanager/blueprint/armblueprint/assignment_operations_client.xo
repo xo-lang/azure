@@ -49,7 +49,7 @@ fn (c: AssignmentOperationsClient) list_create_request(resource_scope: Str, assi
 /// List operations for given blueprint assignment within a subscription or a management group.
 pub fn (c: AssignmentOperationsClient[fx]) new_list_pager(resource_scope: Str, assignment_name: Str, options: AssignmentOperationsClientListOptions = AssignmentOperationsClientListOptions{}) -> runtime.Pager[AssignmentOperationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_scope, assignment_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AssignmentOperationsClientListResponse ! Str { assignment_operations_list_handle(r) }, fn(r: AssignmentOperationsClientListResponse) -> Str? { r.assignment_operation_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AssignmentOperationsClientListResponse ! Str { assignment_operations_list_handle(r) }, fn(r: AssignmentOperationsClientListResponse) -> Str? { r.assignment_operation_list.next_link }).traced_as("AssignmentOperationsClientListResponse"))
 }
 
 /// AssignmentOperationsClientGetOptions: the optional parameters of AssignmentOperationsClient.get.
@@ -84,10 +84,13 @@ fn (c: AssignmentOperationsClient) get_create_request(resource_scope: Str, assig
 
 /// Get a blueprint assignment operation.
 pub fn (c: AssignmentOperationsClient) get(resource_scope: Str, assignment_name: Str, assignment_operation_name: Str, options: AssignmentOperationsClientGetOptions = AssignmentOperationsClientGetOptions{}) -> AssignmentOperationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_scope, assignment_name, assignment_operation_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AssignmentOperationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_scope, assignment_name, assignment_operation_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  assignment_operations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = assignment_operations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

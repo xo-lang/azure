@@ -58,7 +58,7 @@ fn (c: VirtualNetworksClient) list_create_request(region_id: Str, pc_name: Str, 
 /// Return list of virtual networks in location for private cloud
 pub fn (c: VirtualNetworksClient[fx]) new_list_pager(region_id: Str, pc_name: Str, resource_pool_name: Str, options: VirtualNetworksClientListOptions = VirtualNetworksClientListOptions{}) -> runtime.Pager[VirtualNetworksClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(region_id, pc_name, resource_pool_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualNetworksClientListResponse ! Str { virtual_networks_list_handle(r) }, fn(r: VirtualNetworksClientListResponse) -> Str? { r.virtual_network_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualNetworksClientListResponse ! Str { virtual_networks_list_handle(r) }, fn(r: VirtualNetworksClientListResponse) -> Str? { r.virtual_network_list_response.next_link }).traced_as("VirtualNetworksClientListResponse"))
 }
 
 /// VirtualNetworksClientGetOptions: the optional parameters of VirtualNetworksClient.get.
@@ -100,10 +100,13 @@ fn (c: VirtualNetworksClient) get_create_request(region_id: Str, pc_name: Str, v
 
 /// Return virtual network by its name
 pub fn (c: VirtualNetworksClient) get(region_id: Str, pc_name: Str, virtual_network_name: Str, options: VirtualNetworksClientGetOptions = VirtualNetworksClientGetOptions{}) -> VirtualNetworksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(region_id, pc_name, virtual_network_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualNetworksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(region_id, pc_name, virtual_network_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_networks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_networks_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -57,7 +57,7 @@ fn (c: LoadBalancerProbesClient) list_create_request(resource_group_name: Str, l
 /// Gets all the load balancer probes.
 pub fn (c: LoadBalancerProbesClient[fx]) new_list_pager(resource_group_name: Str, load_balancer_name: Str, options: LoadBalancerProbesClientListOptions = LoadBalancerProbesClientListOptions{}) -> runtime.Pager[LoadBalancerProbesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, load_balancer_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancerProbesClientListResponse ! Str { load_balancer_probes_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancerProbesClientListResponse) -> Str? { r.load_balancer_probe_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancerProbesClientListResponse ! Str { load_balancer_probes_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancerProbesClientListResponse) -> Str? { r.load_balancer_probe_list_result.next_link }).traced_as("LoadBalancerProbesClientListResponse"))
 }
 
 /// LoadBalancerProbesClientGetOptions: the optional parameters of LoadBalancerProbesClient.get.
@@ -99,10 +99,13 @@ fn (c: LoadBalancerProbesClient) get_create_request(resource_group_name: Str, lo
 
 /// Gets load balancer probe.
 pub fn (c: LoadBalancerProbesClient) get(resource_group_name: Str, load_balancer_name: Str, probe_name: Str, options: LoadBalancerProbesClientGetOptions = LoadBalancerProbesClientGetOptions{}) -> LoadBalancerProbesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, load_balancer_name, probe_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancerProbesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, load_balancer_name, probe_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancer_probes_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancer_probes_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -49,7 +49,7 @@ fn (c: VaultsClient) list_by_subscription_id_create_request(options: VaultsClien
 /// Fetches all the resources of the specified type in the subscription.
 pub fn (c: VaultsClient[fx]) new_list_by_subscription_id_pager(options: VaultsClientListBySubscriptionIDOptions = VaultsClientListBySubscriptionIDOptions{}) -> runtime.Pager[VaultsClientListBySubscriptionIDResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_id_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListBySubscriptionIDResponse ! Str { vaults_list_by_subscription_id_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListBySubscriptionIDResponse) -> Str? { r.vault_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListBySubscriptionIDResponse ! Str { vaults_list_by_subscription_id_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListBySubscriptionIDResponse) -> Str? { r.vault_list.next_link }).traced_as("VaultsClientListBySubscriptionIDResponse"))
 }
 
 /// VaultsClientListByResourceGroupOptions: the optional parameters of VaultsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VaultsClient) list_by_resource_group_create_request(resource_group_name: 
 /// Retrieve a list of Vaults.
 pub fn (c: VaultsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VaultsClientListByResourceGroupOptions = VaultsClientListByResourceGroupOptions{}) -> runtime.Pager[VaultsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListByResourceGroupResponse ! Str { vaults_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListByResourceGroupResponse) -> Str? { r.vault_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VaultsClientListByResourceGroupResponse ! Str { vaults_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VaultsClientListByResourceGroupResponse) -> Str? { r.vault_list.next_link }).traced_as("VaultsClientListByResourceGroupResponse"))
 }
 
 /// VaultsClientGetOptions: the optional parameters of VaultsClient.get.
@@ -122,12 +122,15 @@ fn (c: VaultsClient) get_create_request(resource_group_name: Str, vault_name: St
 
 /// Get the Vault details.
 pub fn (c: VaultsClient) get(resource_group_name: Str, vault_name: Str, options: VaultsClientGetOptions = VaultsClientGetOptions{}) -> VaultsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vault_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vault_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vaults_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vaults_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VaultsClientBeginCreateOrUpdateOptions: the optional parameters of VaultsClient.begin_create_or_update.
@@ -174,14 +177,16 @@ fn (c: VaultsClient) create_or_update_create_request(resource_group_name: Str, v
 /// Creates or updates a Recovery Services vault.
 pub fn (c: VaultsClient[fx]) begin_create_or_update(resource_group_name: Str, vault_name: Str, vault: Vault, options: VaultsClientBeginCreateOrUpdateOptions = VaultsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VaultsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, vault_name, vault, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, vault_name, vault, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientCreateOrUpdateResponse", fn(r: http.Response) -> VaultsClientCreateOrUpdateResponse ! Str { vaults_create_or_update_handle(r) }, traced: true)
 }
 
 /// VaultsClientBeginUpdateOptions: the optional parameters of VaultsClient.begin_update.
@@ -228,14 +233,16 @@ fn (c: VaultsClient) update_create_request(resource_group_name: Str, vault_name:
 /// Updates the vault.
 pub fn (c: VaultsClient[fx]) begin_update(resource_group_name: Str, vault_name: Str, vault: PatchVault, options: VaultsClientBeginUpdateOptions = VaultsClientBeginUpdateOptions{}) -> runtime.Poller[VaultsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientUpdateResponse", fn(r: http.Response) -> VaultsClientUpdateResponse ! Str { vaults_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientUpdateResponse", fn(r: http.Response) -> VaultsClientUpdateResponse ! Str { vaults_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, vault_name, vault, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, vault_name, vault, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientUpdateResponse", fn(r: http.Response) -> VaultsClientUpdateResponse ! Str { vaults_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientUpdateResponse", fn(r: http.Response) -> VaultsClientUpdateResponse ! Str { vaults_update_handle(r) }, traced: true)
 }
 
 /// VaultsClientBeginDeleteOptions: the optional parameters of VaultsClient.begin_delete.
@@ -274,12 +281,14 @@ fn (c: VaultsClient) delete_create_request(resource_group_name: Str, vault_name:
 /// Deletes a vault.
 pub fn (c: VaultsClient[fx]) begin_delete(resource_group_name: Str, vault_name: Str, options: VaultsClientBeginDeleteOptions = VaultsClientBeginDeleteOptions{}) -> runtime.Poller[VaultsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientDeleteResponse", fn(r: http.Response) -> VaultsClientDeleteResponse ! Str { vaults_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VaultsClientDeleteResponse", fn(r: http.Response) -> VaultsClientDeleteResponse ! Str { vaults_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, vault_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, vault_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientDeleteResponse", fn(r: http.Response) -> VaultsClientDeleteResponse ! Str { vaults_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VaultsClientDeleteResponse", fn(r: http.Response) -> VaultsClientDeleteResponse ! Str { vaults_delete_handle(r) }, traced: true)
 }

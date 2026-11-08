@@ -57,7 +57,7 @@ fn (c: EndpointsClient) list_create_request(resource_group_name: Str, cluster_na
 /// Lists the service-generated Endpoints in a cluster. The collection contains the Cluster-scoped Endpoint named cluster and one Pool-scoped Endpoint for each pool.
 pub fn (c: EndpointsClient[fx]) new_list_pager(resource_group_name: Str, cluster_name: Str, options: EndpointsClientListOptions = EndpointsClientListOptions{}) -> runtime.Pager[EndpointsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListResponse ! Str { endpoints_list_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListResponse) -> Str? { r.endpoint_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EndpointsClientListResponse ! Str { endpoints_list_handle(r) }, c.setup.endpoint, fn(r: EndpointsClientListResponse) -> Str? { r.endpoint_list_result.next_link }).traced_as("EndpointsClientListResponse"))
 }
 
 /// EndpointsClientGetOptions: the optional parameters of EndpointsClient.get.
@@ -99,10 +99,13 @@ fn (c: EndpointsClient) get_create_request(resource_group_name: Str, cluster_nam
 
 /// Gets information about a service-generated HorizonDB Cluster- or Pool-scoped Endpoint.
 pub fn (c: EndpointsClient) get(resource_group_name: Str, cluster_name: Str, endpoint_name: Str, options: EndpointsClientGetOptions = EndpointsClientGetOptions{}) -> EndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

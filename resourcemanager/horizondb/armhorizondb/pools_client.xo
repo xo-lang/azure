@@ -57,7 +57,7 @@ fn (c: PoolsClient) list_create_request(resource_group_name: Str, cluster_name: 
 /// Lists all HorizonDB pools in a cluster.
 pub fn (c: PoolsClient[fx]) new_list_pager(resource_group_name: Str, cluster_name: Str, options: PoolsClientListOptions = PoolsClientListOptions{}) -> runtime.Pager[PoolsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, cluster_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PoolsClientListResponse ! Str { pools_list_handle(r) }, c.setup.endpoint, fn(r: PoolsClientListResponse) -> Str? { r.pool_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PoolsClientListResponse ! Str { pools_list_handle(r) }, c.setup.endpoint, fn(r: PoolsClientListResponse) -> Str? { r.pool_list_result.next_link }).traced_as("PoolsClientListResponse"))
 }
 
 /// PoolsClientGetOptions: the optional parameters of PoolsClient.get.
@@ -99,12 +99,15 @@ fn (c: PoolsClient) get_create_request(resource_group_name: Str, cluster_name: S
 
 /// Gets information about a HorizonDB pool.
 pub fn (c: PoolsClient) get(resource_group_name: Str, cluster_name: Str, pool_name: Str, options: PoolsClientGetOptions = PoolsClientGetOptions{}) -> PoolsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, pool_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  pools_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = pools_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PoolsClientBeginCreateOrReplaceOptions: the optional parameters of PoolsClient.begin_create_or_replace.
@@ -151,14 +154,16 @@ fn (c: PoolsClient) create_or_replace_create_request(resource_group_name: Str, c
 /// Creates a new HorizonDB pool or replaces an existing pool, including its node allocation, compute model, high-availability configuration, or associated parameter group. nodeCount and highAvailability.mode are required and have no service defaults. nodeCount must be 1 through 16. Disabled is valid only when nodeCount is 1. AnyZone and ZoneRedundant are valid only when nodeCount is 2 through 16. AnyZone permits same-zone or cross-zone placement, while ZoneRedundant requires nodes to be allocated across availability zones. Node allocation and high-availability reconfiguration are atomic: if all requested nodes or the required zonal topology cannot be provisioned, the long-running operation fails and the previous resource state is preserved. A pool name must differ from its parent cluster name because the Cluster-scoped ReadWrite Endpoint is named after the Cluster and the Pool-scoped ReadOnly Endpoint is named after the Pool; the service rejects a request whose names would collide. Creating a pool also creates exactly one service-managed Pool-scoped ReadOnly Endpoint representing that Pool and its network boundary. The Endpoint's associatedResourceId identifies the Pool, and the Endpoint cannot outlive or be deleted independently from it. When the first pool is created, the service automatically designates it to host the cluster's read-write node when an eligible node is available. A Cluster must contain at least one Pool before a private endpoint connection can be created or approved. This API version supports at most one pool per cluster; an attempt to create another pool is rejected with 409 Conflict. parameterGroup, parameterGroupResourceId, and applyMethod are required. When creating a new pool in this API version, parameterGroupResourceId must identify the corresponding default parameter group; a customer-created parameter group is rejected. When replacing an existing pool, the request can switch its association in either direction between the corresponding default parameter group and a customer-created parameter group. applyMethod controls when dynamic parameter changes become effective. Static parameter changes always require a customer-initiated Restart; Stop followed by Start and scheduled maintenance do not apply pending changes. Subtype-specific compute constraints are validated before the resource is changed.
 pub fn (c: PoolsClient[fx]) begin_create_or_replace(resource_group_name: Str, cluster_name: Str, pool_name: Str, resource: Pool, options: PoolsClientBeginCreateOrReplaceOptions = PoolsClientBeginCreateOrReplaceOptions{}) -> runtime.Poller[PoolsClientCreateOrReplaceResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientCreateOrReplaceResponse", fn(r: http.Response) -> PoolsClientCreateOrReplaceResponse ! Str { pools_create_or_replace_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientCreateOrReplaceResponse", fn(r: http.Response) -> PoolsClientCreateOrReplaceResponse ! Str { pools_create_or_replace_handle(r) }, traced: true)
   }
-  let req = c.create_or_replace_create_request(resource_group_name, cluster_name, pool_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginCreateOrReplace", c.setup.pipeline.tracer)
+  let req = c.create_or_replace_create_request(resource_group_name, cluster_name, pool_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientCreateOrReplaceResponse", fn(r: http.Response) -> PoolsClientCreateOrReplaceResponse ! Str { pools_create_or_replace_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientCreateOrReplaceResponse", fn(r: http.Response) -> PoolsClientCreateOrReplaceResponse ! Str { pools_create_or_replace_handle(r) }, traced: true)
 }
 
 /// PoolsClientBeginUpdateOptions: the optional parameters of PoolsClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: PoolsClient) update_create_request(resource_group_name: Str, cluster_name
 /// Updates an existing HorizonDB pool, including its node allocation, selected compute model properties, compute model type, high-availability configuration, or associated parameter group. Omitted nodeCount and highAvailability.mode values preserve their existing values; the service recursively merges the PATCH before atomically validating the effective tuple. nodeCount, when supplied, must be 1 through 16. Disabled is valid only when the effective nodeCount is 1. AnyZone and ZoneRedundant are valid only when the effective nodeCount is 2 through 16. Therefore, crossing between those node-count ranges requires nodeCount and highAvailability.mode to be changed together. AnyZone permits same-zone or cross-zone placement. Changing from AnyZone to ZoneRedundant may allocate a replacement node in another availability zone and replace a read-only node, disconnecting connections to the replaced node. If all requested nodes or the required zonal topology cannot be provisioned, the long-running operation fails and the previous resource state is preserved. To deallocate runtime compute without changing the configured nodeCount, use the Pool stop action. When parameterGroup is supplied, both parameterGroupResourceId and applyMethod are required. The pool can switch its association in either direction between the corresponding default parameter group and a customer-created parameter group. applyMethod controls when dynamic parameter changes become effective. Static parameter changes always require a customer-initiated Restart; Stop followed by Start and scheduled maintenance do not apply pending changes. Subtype-specific compute constraints are validated against the recursively merged configuration.
 pub fn (c: PoolsClient[fx]) begin_update(resource_group_name: Str, cluster_name: Str, pool_name: Str, properties: PoolForPatchUpdate, options: PoolsClientBeginUpdateOptions = PoolsClientBeginUpdateOptions{}) -> runtime.Poller[PoolsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientUpdateResponse", fn(r: http.Response) -> PoolsClientUpdateResponse ! Str { pools_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientUpdateResponse", fn(r: http.Response) -> PoolsClientUpdateResponse ! Str { pools_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cluster_name, pool_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cluster_name, pool_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientUpdateResponse", fn(r: http.Response) -> PoolsClientUpdateResponse ! Str { pools_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientUpdateResponse", fn(r: http.Response) -> PoolsClientUpdateResponse ! Str { pools_update_handle(r) }, traced: true)
 }
 
 /// PoolsClientBeginDeleteOptions: the optional parameters of PoolsClient.begin_delete.
@@ -255,14 +262,16 @@ fn (c: PoolsClient) delete_create_request(resource_group_name: Str, cluster_name
 /// Deletes a HorizonDB pool together with the Pool-scoped Endpoint whose associatedResourceId identifies that Pool and all FirewallRule children of that Endpoint. The Endpoint cannot outlive or be deleted independently from its Pool. When this is the Cluster's last surviving Pool, the service also disconnects every existing private endpoint connection associated with the Cluster by setting its privateLinkServiceConnectionState.status to Rejected and providing a description that the last Pool was deleted. The HorizonDB private endpoint connection resources remain available for inspection and cleanup, and customer-owned Microsoft.Network/privateEndpoints resources are not deleted. The delete long-running operation completes only after all required private endpoint disconnections have completed.
 pub fn (c: PoolsClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, pool_name: Str, options: PoolsClientBeginDeleteOptions = PoolsClientBeginDeleteOptions{}) -> runtime.Poller[PoolsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientDeleteResponse", fn(r: http.Response) -> PoolsClientDeleteResponse ! Str { pools_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientDeleteResponse", fn(r: http.Response) -> PoolsClientDeleteResponse ! Str { pools_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientDeleteResponse", fn(r: http.Response) -> PoolsClientDeleteResponse ! Str { pools_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientDeleteResponse", fn(r: http.Response) -> PoolsClientDeleteResponse ! Str { pools_delete_handle(r) }, traced: true)
 }
 
 /// PoolsClientBeginRestartOptions: the optional parameters of PoolsClient.begin_restart.
@@ -308,14 +317,16 @@ fn (c: PoolsClient) restart_create_request(resource_group_name: Str, cluster_nam
 /// Restarts the PostgreSQL container on all allocated nodes in a ready HorizonDB pool and applies pending dynamic and static parameter changes. This customer-initiated Restart is the only operation that applies static parameter changes or dynamic parameter changes requested with PendingReboot; Stop followed by Start and scheduled maintenance do not apply them. Power operations are supported only at pool scope in this API version; there is no cluster-level restart action. When the pool has no allocated nodes, the operation succeeds without restarting any nodes, pending changes are considered applied, parameterGroup.syncStatus becomes InSync, and the resulting configuration applies to nodes allocated later. The request fails with 409 Conflict when another operation is in progress or the pool is in any other incompatible state.
 pub fn (c: PoolsClient[fx]) begin_restart(resource_group_name: Str, cluster_name: Str, pool_name: Str, options: PoolsClientBeginRestartOptions = PoolsClientBeginRestartOptions{}) -> runtime.Poller[PoolsClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientRestartResponse", fn(r: http.Response) -> PoolsClientRestartResponse ! Str { pools_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientRestartResponse", fn(r: http.Response) -> PoolsClientRestartResponse ! Str { pools_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, cluster_name, pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, cluster_name, pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientRestartResponse", fn(r: http.Response) -> PoolsClientRestartResponse ! Str { pools_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientRestartResponse", fn(r: http.Response) -> PoolsClientRestartResponse ! Str { pools_restart_handle(r) }, traced: true)
 }
 
 /// PoolsClientBeginStartOptions: the optional parameters of PoolsClient.begin_start.
@@ -361,14 +372,16 @@ fn (c: PoolsClient) start_create_request(resource_group_name: Str, cluster_name:
 /// Starts a stopped HorizonDB pool. Power operations are supported only at pool scope in this API version; there is no cluster-level start action. Start does not apply pending dynamic or static parameter changes; parameterGroup.syncStatus remains PendingReboot until a customer-initiated Restart. When the pool is already Ready, the operation succeeds as a true idempotent no-op and likewise leaves pending parameter changes pending. The operation is allowed when the pool has no allocated nodes. After the Pool is running, its Pool-scoped ReadOnly Endpoint routes only when at least one allocated node is not currently playing the read-write role. The request fails with 409 Conflict when another operation is in progress or the pool is in any other incompatible state.
 pub fn (c: PoolsClient[fx]) begin_start(resource_group_name: Str, cluster_name: Str, pool_name: Str, options: PoolsClientBeginStartOptions = PoolsClientBeginStartOptions{}) -> runtime.Poller[PoolsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientStartResponse", fn(r: http.Response) -> PoolsClientStartResponse ! Str { pools_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientStartResponse", fn(r: http.Response) -> PoolsClientStartResponse ! Str { pools_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, cluster_name, pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, cluster_name, pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientStartResponse", fn(r: http.Response) -> PoolsClientStartResponse ! Str { pools_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientStartResponse", fn(r: http.Response) -> PoolsClientStartResponse ! Str { pools_start_handle(r) }, traced: true)
 }
 
 /// PoolsClientBeginStopOptions: the optional parameters of PoolsClient.begin_stop.
@@ -414,12 +427,14 @@ fn (c: PoolsClient) stop_create_request(resource_group_name: Str, cluster_name: 
 /// Stops a running HorizonDB pool and deallocates compute. Power operations are supported only at pool scope in this API version; there is no cluster-level stop action. Stop does not apply pending dynamic or static parameter changes; parameterGroup.syncStatus remains PendingReboot. A subsequent Start also preserves those pending changes. The operation succeeds as an idempotent no-op when the pool is already Stopped. It is allowed when the pool has no allocated nodes. The Pool-scoped ReadOnly Endpoint remains discoverable but has no routing destination while the Pool is Stopped. The request fails with 409 Conflict when another operation is in progress or the pool is in any other incompatible state.
 pub fn (c: PoolsClient[fx]) begin_stop(resource_group_name: Str, cluster_name: Str, pool_name: Str, options: PoolsClientBeginStopOptions = PoolsClientBeginStopOptions{}) -> runtime.Poller[PoolsClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientStopResponse", fn(r: http.Response) -> PoolsClientStopResponse ! Str { pools_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PoolsClientStopResponse", fn(r: http.Response) -> PoolsClientStopResponse ! Str { pools_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, cluster_name, pool_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PoolsClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, cluster_name, pool_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientStopResponse", fn(r: http.Response) -> PoolsClientStopResponse ! Str { pools_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PoolsClientStopResponse", fn(r: http.Response) -> PoolsClientStopResponse ! Str { pools_stop_handle(r) }, traced: true)
 }

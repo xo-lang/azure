@@ -1,0 +1,233 @@
+// Distributed tracing as azcore's tracing package (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md), decision 0013 step 1: a Provider
+// makes one Tracer per module and version, a Tracer starts Spans, and a
+// Span records attributes, events and a status until it ends. Plain
+// values over closures: an adapter (an OpenTelemetry bridge, a test's
+// recorder) supplies the closures; with none, nothing is recorded and
+// nothing costs.
+//
+// Go's spans travel in a context.Context; Xo has none, so a span's
+// context is a Map[Str, Str] (`Context`): the tracer keeps what it needs
+// to find the span in progress (its own keys) and returns the map a
+// child span starts from. The pipeline carries it in policy.Request's
+// values (runtime.start_span).
+
+/// The kind of a span (Go's tracing.SpanKind).
+pub enum SpanKind {
+  Internal
+  Server
+  Client
+  Producer
+  Consumer
+}
+
+/// Go's number for the kind (SpanKindInternal is 1).
+pub fn (k: SpanKind) code() -> Int {
+  match k {
+    Internal => 1
+    Server => 2
+    Client => 3
+    Producer => 4
+    Consumer => 5
+  }
+}
+
+/// The kind of Go's number `n`; None for another number.
+pub fn span_kind_of(n: Int) -> SpanKind? {
+  match n {
+    1 => Some(SpanKind.Internal)
+    2 => Some(SpanKind.Server)
+    3 => Some(SpanKind.Client)
+    4 => Some(SpanKind.Producer)
+    5 => Some(SpanKind.Consumer)
+    _ => None
+  }
+}
+
+/// A span's status (Go's tracing.SpanStatus).
+pub enum SpanStatus {
+  Unset
+  Error
+  Ok
+}
+
+/// Go's number for the status (SpanStatusUnset is 0).
+pub fn (s: SpanStatus) code() -> Int {
+  match s {
+    Unset => 0
+    Error => 1
+    Ok => 2
+  }
+}
+
+/// An attribute's value: Go's `any`, as azcore sets it (strings and
+/// ints) and as an adapter converts it.
+pub enum Value {
+  Str(v: Str)
+  Int(v: Int)
+  Float(v: Float)
+  Bool(v: Bool)
+}
+
+/// The value's text, as Go's `%v` prints it.
+pub fn (v: Value) display() -> Str {
+  match v {
+    Str(s) => s
+    Int(i) => "${i}"
+    Float(f) => "${f}"
+    Bool(b) => if b { "true" } else { "false" }
+  }
+}
+
+/// A key and its value (Go's tracing.Attribute).
+pub struct Attribute {
+  pub key: Str
+  pub value: Value
+}
+
+/// An attribute of text `v`.
+pub fn str_attr(key: Str, v: Str) -> Attribute {
+  Attribute{key: key, value: Value.Str(v)}
+}
+
+/// An attribute of number `v`.
+pub fn int_attr(key: Str, v: Int) -> Attribute {
+  Attribute{key: key, value: Value.Int(v)}
+}
+
+/// The context a span starts from or leaves: the tracer's own values for
+/// the span in progress (Go's context.Context, as tracing sees it).
+pub struct Context {
+  pub values: Map[Str, Str] = {}
+}
+
+/// What a new span starts with (Go's tracing.SpanOptions).
+pub struct SpanOptions {
+  pub kind: SpanKind = SpanKind.Internal
+  pub attributes: List[Attribute] = []
+}
+
+/// What a span does (Go's tracing.SpanImpl); a missing function does
+/// nothing.
+pub struct SpanImpl {
+  pub end: (fn())? = None
+  pub set_attributes: (fn(List[Attribute]))? = None
+  pub add_event: (fn(Str, List[Attribute]))? = None
+  pub set_status: (fn(SpanStatus, Str))? = None
+}
+
+/// A span in progress (Go's tracing.Span); the zero Span does nothing.
+pub struct Span {
+  impl: SpanImpl = SpanImpl{}
+}
+
+/// A span doing what `impl` says (Go's tracing.NewSpan).
+pub fn new_span(impl: SpanImpl) -> Span {
+  Span{impl: impl}
+}
+
+/// Ends the span.
+pub fn (s: Span) end() {
+  if let Some(f) = s.impl.end {
+    f()
+  }
+}
+
+/// Sets attributes on the span.
+pub fn (s: Span) set_attributes(attrs: List[Attribute]) {
+  if let Some(f) = s.impl.set_attributes {
+    f(attrs)
+  }
+}
+
+/// Adds an event named `name` with `attrs`.
+pub fn (s: Span) add_event(name: Str, attrs: List[Attribute] = []) {
+  if let Some(f) = s.impl.add_event {
+    f(name, attrs)
+  }
+}
+
+/// Sets the span's status and its description.
+pub fn (s: Span) set_status(code: SpanStatus, desc: Str) {
+  if let Some(f) = s.impl.set_status {
+    f(code, desc)
+  }
+}
+
+/// Starts spans for one module (Go's tracing.Tracer); the zero Tracer is
+/// disabled and starts spans that do nothing.
+pub struct Tracer {
+  attrs: List[Attribute] = []
+  start_fn: (fn(Context, Str, SpanOptions) -> (Context, Span))? = None
+  span_from_context_fn: (fn(Context) -> Span)? = None
+}
+
+/// A tracer starting spans with `start` (Go's tracing.NewTracer):
+/// `start` gets the context the span starts from, its name and options,
+/// and returns the context its children start from and the span.
+/// `span_from_context` finds the span in progress of a context (None:
+/// a span that does nothing).
+pub fn new_tracer(start: fn(Context, Str, SpanOptions) -> (Context, Span), span_from_context: (fn(Context) -> Span)? = None) -> Tracer {
+  Tracer{start_fn: Some(start), span_from_context_fn: span_from_context}
+}
+
+/// `t` wrapped by `wrap` (Go's tracing.WrapTracer): the wrapper gets `t`
+/// without its attributes, and the result keeps `t`'s attributes first,
+/// then the wrapper's, and finds no span from a context when `t` finds
+/// none.
+pub fn wrap_tracer(t: Tracer, wrap: fn(Tracer) -> Tracer) -> Tracer {
+  let w = wrap(t with {attrs: []})
+  let sfc = match t.span_from_context_fn {
+    Some(_) => w.span_from_context_fn
+    None => None
+  }
+  w with {attrs: t.attrs + w.attrs, span_from_context_fn: sfc}
+}
+
+/// Starts span `name` from `ctx`, with the tracer's attributes after the
+/// options' (Go's Tracer.Start).
+pub fn (t: Tracer) start(ctx: Context, name: Str, opts: SpanOptions = SpanOptions{}) -> (Context, Span) {
+  match t.start_fn {
+    Some(f) => f(ctx, name, opts with {attributes: opts.attributes + t.attrs})
+    None => (ctx, Span{})
+  }
+}
+
+/// `t` with `attrs` added to every span it starts (Go's
+/// Tracer.SetAttributes).
+pub fn (t: Tracer) with_attributes(attrs: List[Attribute]) -> Tracer {
+  t with {attrs: t.attrs + attrs}
+}
+
+/// Whether the tracer starts spans (Go's Tracer.Enabled).
+pub fn (t: Tracer) enabled() -> Bool {
+  t.start_fn.is_some()
+}
+
+/// The span in progress in `ctx` (Go's Tracer.SpanFromContext).
+pub fn (t: Tracer) span_from_context(ctx: Context) -> Span {
+  match t.span_from_context_fn {
+    Some(f) => f(ctx)
+    None => Span{}
+  }
+}
+
+/// Makes a Tracer per module and version (Go's tracing.Provider); the
+/// zero Provider makes disabled tracers.
+pub struct Provider {
+  new_tracer_fn: (fn(Str, Str) -> Tracer)? = None
+}
+
+/// A provider making tracers with `f(module, version)` (Go's
+/// tracing.NewProvider).
+pub fn new_provider(f: fn(Str, Str) -> Tracer) -> Provider {
+  Provider{new_tracer_fn: Some(f)}
+}
+
+/// The tracer of `module` at `version`.
+pub fn (p: Provider) new_tracer(module: Str, version: Str) -> Tracer {
+  match p.new_tracer_fn {
+    Some(f) => f(module, version)
+    None => Tracer{}
+  }
+}

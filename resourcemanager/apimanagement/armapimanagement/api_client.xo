@@ -83,7 +83,7 @@ fn (c: APIClient) list_by_service_create_request(resource_group_name: Str, servi
 /// Lists all APIs of the API Management service instance.
 pub fn (c: APIClient[fx]) new_list_by_service_pager(resource_group_name: Str, service_name: Str, options: APIClientListByServiceOptions = APIClientListByServiceOptions{}) -> runtime.Pager[APIClientListByServiceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_service_create_request(resource_group_name, service_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APIClientListByServiceResponse ! Str { api_list_by_service_handle(r) }, fn(r: APIClientListByServiceResponse) -> Str? { r.api_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APIClientListByServiceResponse ! Str { api_list_by_service_handle(r) }, fn(r: APIClientListByServiceResponse) -> Str? { r.api_collection.next_link }).traced_as("APIClientListByServiceResponse"))
 }
 
 /// APIClientGetEntityTagOptions: the optional parameters of APIClient.get_entity_tag.
@@ -127,12 +127,15 @@ fn (c: APIClient) get_entity_tag_create_request(resource_group_name: Str, servic
 
 /// Gets the entity state (Etag) version of the API specified by its identifier.
 pub fn (c: APIClient) get_entity_tag(resource_group_name: Str, service_name: Str, api_id: Str, options: APIClientGetEntityTagOptions = APIClientGetEntityTagOptions{}) -> APIClientGetEntityTagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_entity_tag_create_request(resource_group_name, service_name, api_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIClient.GetEntityTag", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_entity_tag_create_request(resource_group_name, service_name, api_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_get_entity_tag_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_get_entity_tag_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// APIClientGetOptions: the optional parameters of APIClient.get.
@@ -176,12 +179,15 @@ fn (c: APIClient) get_create_request(resource_group_name: Str, service_name: Str
 
 /// Gets the details of the API specified by its identifier.
 pub fn (c: APIClient) get(resource_group_name: Str, service_name: Str, api_id: Str, options: APIClientGetOptions = APIClientGetOptions{}) -> APIClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, api_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, api_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// APIClientBeginCreateOrUpdateOptions: the optional parameters of APIClient.begin_create_or_update.
@@ -233,14 +239,16 @@ fn (c: APIClient) create_or_update_create_request(resource_group_name: Str, serv
 /// Creates new or updates existing specified API of the API Management service instance.
 pub fn (c: APIClient[fx]) begin_create_or_update(resource_group_name: Str, service_name: Str, api_id: Str, parameters: APICreateOrUpdateParameter, options: APIClientBeginCreateOrUpdateOptions = APIClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[APIClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APIClientCreateOrUpdateResponse", fn(r: http.Response) -> APIClientCreateOrUpdateResponse ! Str { api_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APIClientCreateOrUpdateResponse", fn(r: http.Response) -> APIClientCreateOrUpdateResponse ! Str { api_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, service_name, api_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, service_name, api_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APIClientCreateOrUpdateResponse", fn(r: http.Response) -> APIClientCreateOrUpdateResponse ! Str { api_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APIClientCreateOrUpdateResponse", fn(r: http.Response) -> APIClientCreateOrUpdateResponse ! Str { api_create_or_update_handle(r) }, traced: true)
 }
 
 /// APIClientUpdateOptions: the optional parameters of APIClient.update.
@@ -286,12 +294,15 @@ fn (c: APIClient) update_create_request(resource_group_name: Str, service_name: 
 
 /// Updates the specified API of the API Management service instance.
 pub fn (c: APIClient) update(resource_group_name: Str, service_name: Str, api_id: Str, if_match: Str, parameters: APIUpdateContract, options: APIClientUpdateOptions = APIClientUpdateOptions{}) -> APIClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, service_name, api_id, if_match, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, service_name, api_id, if_match, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// APIClientBeginDeleteOptions: the optional parameters of APIClient.begin_delete.
@@ -340,14 +351,16 @@ fn (c: APIClient) delete_create_request(resource_group_name: Str, service_name: 
 /// Deletes the specified API of the API Management service instance.
 pub fn (c: APIClient[fx]) begin_delete(resource_group_name: Str, service_name: Str, api_id: Str, if_match: Str, options: APIClientBeginDeleteOptions = APIClientBeginDeleteOptions{}) -> runtime.Poller[APIClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APIClientDeleteResponse", fn(r: http.Response) -> APIClientDeleteResponse ! Str { api_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APIClientDeleteResponse", fn(r: http.Response) -> APIClientDeleteResponse ! Str { api_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, service_name, api_id, if_match, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APIClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, service_name, api_id, if_match, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APIClientDeleteResponse", fn(r: http.Response) -> APIClientDeleteResponse ! Str { api_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APIClientDeleteResponse", fn(r: http.Response) -> APIClientDeleteResponse ! Str { api_delete_handle(r) }, traced: true)
 }
 
 /// APIClientListByTagsOptions: the optional parameters of APIClient.new_list_by_tags_pager.
@@ -407,5 +420,5 @@ fn (c: APIClient) list_by_tags_create_request(resource_group_name: Str, service_
 /// Lists a collection of apis associated with tags.
 pub fn (c: APIClient[fx]) new_list_by_tags_pager(resource_group_name: Str, service_name: Str, options: APIClientListByTagsOptions = APIClientListByTagsOptions{}) -> runtime.Pager[APIClientListByTagsResponse, fx] ! azcore.CallErr {
   let req = c.list_by_tags_create_request(resource_group_name, service_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APIClientListByTagsResponse ! Str { api_list_by_tags_handle(r) }, fn(r: APIClientListByTagsResponse) -> Str? { r.tag_resource_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APIClientListByTagsResponse ! Str { api_list_by_tags_handle(r) }, fn(r: APIClientListByTagsResponse) -> Str? { r.tag_resource_collection.next_link }).traced_as("APIClientListByTagsResponse"))
 }

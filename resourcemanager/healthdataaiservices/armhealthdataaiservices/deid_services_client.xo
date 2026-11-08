@@ -49,7 +49,7 @@ fn (c: DeidServicesClient) list_by_subscription_create_request(options: DeidServ
 /// List DeidService resources by subscription ID
 pub fn (c: DeidServicesClient[fx]) new_list_by_subscription_pager(options: DeidServicesClientListBySubscriptionOptions = DeidServicesClientListBySubscriptionOptions{}) -> runtime.Pager[DeidServicesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeidServicesClientListBySubscriptionResponse ! Str { deid_services_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DeidServicesClientListBySubscriptionResponse) -> Str? { r.deid_service_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeidServicesClientListBySubscriptionResponse ! Str { deid_services_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DeidServicesClientListBySubscriptionResponse) -> Str? { r.deid_service_list_result.next_link }).traced_as("DeidServicesClientListBySubscriptionResponse"))
 }
 
 /// DeidServicesClientListByResourceGroupOptions: the optional parameters of DeidServicesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: DeidServicesClient) list_by_resource_group_create_request(resource_group_
 /// List DeidService resources by resource group
 pub fn (c: DeidServicesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: DeidServicesClientListByResourceGroupOptions = DeidServicesClientListByResourceGroupOptions{}) -> runtime.Pager[DeidServicesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeidServicesClientListByResourceGroupResponse ! Str { deid_services_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DeidServicesClientListByResourceGroupResponse) -> Str? { r.deid_service_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeidServicesClientListByResourceGroupResponse ! Str { deid_services_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DeidServicesClientListByResourceGroupResponse) -> Str? { r.deid_service_list_result.next_link }).traced_as("DeidServicesClientListByResourceGroupResponse"))
 }
 
 /// DeidServicesClientGetOptions: the optional parameters of DeidServicesClient.get.
@@ -122,12 +122,15 @@ fn (c: DeidServicesClient) get_create_request(resource_group_name: Str, deid_ser
 
 /// Get a DeidService
 pub fn (c: DeidServicesClient) get(resource_group_name: Str, deid_service_name: Str, options: DeidServicesClientGetOptions = DeidServicesClientGetOptions{}) -> DeidServicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, deid_service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeidServicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, deid_service_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deid_services_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deid_services_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeidServicesClientBeginCreateOptions: the optional parameters of DeidServicesClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: DeidServicesClient) create_create_request(resource_group_name: Str, deid_
 /// Create a DeidService
 pub fn (c: DeidServicesClient[fx]) begin_create(resource_group_name: Str, deid_service_name: Str, resource: DeidService, options: DeidServicesClientBeginCreateOptions = DeidServicesClientBeginCreateOptions{}) -> runtime.Poller[DeidServicesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientCreateResponse", fn(r: http.Response) -> DeidServicesClientCreateResponse ! Str { deid_services_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientCreateResponse", fn(r: http.Response) -> DeidServicesClientCreateResponse ! Str { deid_services_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, deid_service_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeidServicesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, deid_service_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientCreateResponse", fn(r: http.Response) -> DeidServicesClientCreateResponse ! Str { deid_services_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientCreateResponse", fn(r: http.Response) -> DeidServicesClientCreateResponse ! Str { deid_services_create_handle(r) }, traced: true)
 }
 
 /// DeidServicesClientBeginUpdateOptions: the optional parameters of DeidServicesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: DeidServicesClient) update_create_request(resource_group_name: Str, deid_
 /// Update a DeidService
 pub fn (c: DeidServicesClient[fx]) begin_update(resource_group_name: Str, deid_service_name: Str, properties: DeidUpdate, options: DeidServicesClientBeginUpdateOptions = DeidServicesClientBeginUpdateOptions{}) -> runtime.Poller[DeidServicesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientUpdateResponse", fn(r: http.Response) -> DeidServicesClientUpdateResponse ! Str { deid_services_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientUpdateResponse", fn(r: http.Response) -> DeidServicesClientUpdateResponse ! Str { deid_services_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, deid_service_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeidServicesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, deid_service_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientUpdateResponse", fn(r: http.Response) -> DeidServicesClientUpdateResponse ! Str { deid_services_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientUpdateResponse", fn(r: http.Response) -> DeidServicesClientUpdateResponse ! Str { deid_services_update_handle(r) }, traced: true)
 }
 
 /// DeidServicesClientBeginDeleteOptions: the optional parameters of DeidServicesClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: DeidServicesClient) delete_create_request(resource_group_name: Str, deid_
 /// Delete a DeidService
 pub fn (c: DeidServicesClient[fx]) begin_delete(resource_group_name: Str, deid_service_name: Str, options: DeidServicesClientBeginDeleteOptions = DeidServicesClientBeginDeleteOptions{}) -> runtime.Poller[DeidServicesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientDeleteResponse", fn(r: http.Response) -> DeidServicesClientDeleteResponse ! Str { deid_services_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeidServicesClientDeleteResponse", fn(r: http.Response) -> DeidServicesClientDeleteResponse ! Str { deid_services_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, deid_service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeidServicesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, deid_service_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientDeleteResponse", fn(r: http.Response) -> DeidServicesClientDeleteResponse ! Str { deid_services_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeidServicesClientDeleteResponse", fn(r: http.Response) -> DeidServicesClientDeleteResponse ! Str { deid_services_delete_handle(r) }, traced: true)
 }

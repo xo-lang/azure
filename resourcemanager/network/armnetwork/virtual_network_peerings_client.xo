@@ -57,7 +57,7 @@ fn (c: VirtualNetworkPeeringsClient) list_create_request(resource_group_name: St
 /// Gets all virtual network peerings in a virtual network.
 pub fn (c: VirtualNetworkPeeringsClient[fx]) new_list_pager(resource_group_name: Str, virtual_network_name: Str, options: VirtualNetworkPeeringsClientListOptions = VirtualNetworkPeeringsClientListOptions{}) -> runtime.Pager[VirtualNetworkPeeringsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, virtual_network_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualNetworkPeeringsClientListResponse ! Str { virtual_network_peerings_list_handle(r) }, c.setup.endpoint, fn(r: VirtualNetworkPeeringsClientListResponse) -> Str? { r.virtual_network_peering_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualNetworkPeeringsClientListResponse ! Str { virtual_network_peerings_list_handle(r) }, c.setup.endpoint, fn(r: VirtualNetworkPeeringsClientListResponse) -> Str? { r.virtual_network_peering_list_result.next_link }).traced_as("VirtualNetworkPeeringsClientListResponse"))
 }
 
 /// VirtualNetworkPeeringsClientGetOptions: the optional parameters of VirtualNetworkPeeringsClient.get.
@@ -99,12 +99,15 @@ fn (c: VirtualNetworkPeeringsClient) get_create_request(resource_group_name: Str
 
 /// Gets the specified virtual network peering.
 pub fn (c: VirtualNetworkPeeringsClient) get(resource_group_name: Str, virtual_network_name: Str, virtual_network_peering_name: Str, options: VirtualNetworkPeeringsClientGetOptions = VirtualNetworkPeeringsClientGetOptions{}) -> VirtualNetworkPeeringsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualNetworkPeeringsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_network_peerings_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_network_peerings_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualNetworkPeeringsClientBeginCreateOrUpdateOptions: the optional parameters of VirtualNetworkPeeringsClient.begin_create_or_update.
@@ -156,14 +159,16 @@ fn (c: VirtualNetworkPeeringsClient) create_or_update_create_request(resource_gr
 /// Creates or updates a peering in the specified virtual network.
 pub fn (c: VirtualNetworkPeeringsClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_network_name: Str, virtual_network_peering_name: Str, virtual_network_peering_parameters: VirtualNetworkPeering, options: VirtualNetworkPeeringsClientBeginCreateOrUpdateOptions = VirtualNetworkPeeringsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualNetworkPeeringsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualNetworkPeeringsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientCreateOrUpdateResponse ! Str { virtual_network_peerings_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualNetworkPeeringsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientCreateOrUpdateResponse ! Str { virtual_network_peerings_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, virtual_network_peering_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualNetworkPeeringsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, virtual_network_peering_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualNetworkPeeringsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientCreateOrUpdateResponse ! Str { virtual_network_peerings_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualNetworkPeeringsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientCreateOrUpdateResponse ! Str { virtual_network_peerings_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualNetworkPeeringsClientBeginDeleteOptions: the optional parameters of VirtualNetworkPeeringsClient.begin_delete.
@@ -206,12 +211,14 @@ fn (c: VirtualNetworkPeeringsClient) delete_create_request(resource_group_name: 
 /// Deletes the specified virtual network peering.
 pub fn (c: VirtualNetworkPeeringsClient[fx]) begin_delete(resource_group_name: Str, virtual_network_name: Str, virtual_network_peering_name: Str, options: VirtualNetworkPeeringsClientBeginDeleteOptions = VirtualNetworkPeeringsClientBeginDeleteOptions{}) -> runtime.Poller[VirtualNetworkPeeringsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualNetworkPeeringsClientDeleteResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientDeleteResponse ! Str { virtual_network_peerings_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualNetworkPeeringsClientDeleteResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientDeleteResponse ! Str { virtual_network_peerings_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualNetworkPeeringsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_network_name, virtual_network_peering_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualNetworkPeeringsClientDeleteResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientDeleteResponse ! Str { virtual_network_peerings_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualNetworkPeeringsClientDeleteResponse", fn(r: http.Response) -> VirtualNetworkPeeringsClientDeleteResponse ! Str { virtual_network_peerings_delete_handle(r) }, traced: true)
 }

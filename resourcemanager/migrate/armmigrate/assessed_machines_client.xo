@@ -67,7 +67,7 @@ fn (c: AssessedMachinesClient) list_by_assessment_create_request(resource_group_
 /// Get list of machines that assessed as part of the specified assessment. Returns a json array of objects of type 'assessedMachine' as specified in the Models section.  Whenever an assessment is created or updated, it goes under computation. During this phase, the 'status' field of Assessment object reports 'Computing'. During the period when the assessment is under computation, the list of assessed machines is empty and no assessed machines are returned by this call.
 pub fn (c: AssessedMachinesClient[fx]) new_list_by_assessment_pager(resource_group_name: Str, project_name: Str, group_name: Str, assessment_name: Str, options: AssessedMachinesClientListByAssessmentOptions = AssessedMachinesClientListByAssessmentOptions{}) -> runtime.Pager[AssessedMachinesClientListByAssessmentResponse, fx] ! azcore.CallErr {
   let req = c.list_by_assessment_create_request(resource_group_name, project_name, group_name, assessment_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AssessedMachinesClientListByAssessmentResponse ! Str { assessed_machines_list_by_assessment_handle(r) }, fn(r: AssessedMachinesClientListByAssessmentResponse) -> Str? { r.assessed_machine_result_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AssessedMachinesClientListByAssessmentResponse ! Str { assessed_machines_list_by_assessment_handle(r) }, fn(r: AssessedMachinesClientListByAssessmentResponse) -> Str? { r.assessed_machine_result_list.next_link }).traced_as("AssessedMachinesClientListByAssessmentResponse"))
 }
 
 /// AssessedMachinesClientGetOptions: the optional parameters of AssessedMachinesClient.get.
@@ -119,10 +119,13 @@ fn (c: AssessedMachinesClient) get_create_request(resource_group_name: Str, proj
 
 /// Get an assessed machine with its size & cost estimate that was evaluated in the specified assessment.
 pub fn (c: AssessedMachinesClient) get(resource_group_name: Str, project_name: Str, group_name: Str, assessment_name: Str, assessed_machine_name: Str, options: AssessedMachinesClientGetOptions = AssessedMachinesClientGetOptions{}) -> AssessedMachinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, project_name, group_name, assessment_name, assessed_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AssessedMachinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, project_name, group_name, assessment_name, assessed_machine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  assessed_machines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = assessed_machines_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

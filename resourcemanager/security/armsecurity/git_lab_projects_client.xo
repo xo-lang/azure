@@ -61,7 +61,7 @@ fn (c: GitLabProjectsClient) list_create_request(resource_group_name: Str, secur
 /// Gets a list of GitLab projects that are directly owned by given group and onboarded to the connector.
 pub fn (c: GitLabProjectsClient[fx]) new_list_pager(resource_group_name: Str, security_connector_name: Str, group_fq_name: Str, options: GitLabProjectsClientListOptions = GitLabProjectsClientListOptions{}) -> runtime.Pager[GitLabProjectsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, security_connector_name, group_fq_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GitLabProjectsClientListResponse ! Str { git_lab_projects_list_handle(r) }, c.setup.endpoint, fn(r: GitLabProjectsClientListResponse) -> Str? { r.git_lab_project_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GitLabProjectsClientListResponse ! Str { git_lab_projects_list_handle(r) }, c.setup.endpoint, fn(r: GitLabProjectsClientListResponse) -> Str? { r.git_lab_project_list_response.next_link }).traced_as("GitLabProjectsClientListResponse"))
 }
 
 /// GitLabProjectsClientGetOptions: the optional parameters of GitLabProjectsClient.get.
@@ -107,10 +107,13 @@ fn (c: GitLabProjectsClient) get_create_request(resource_group_name: Str, securi
 
 /// Returns a monitored GitLab Project resource for a given fully-qualified group name and project name.
 pub fn (c: GitLabProjectsClient) get(resource_group_name: Str, security_connector_name: Str, group_fq_name: Str, project_name: Str, options: GitLabProjectsClientGetOptions = GitLabProjectsClientGetOptions{}) -> GitLabProjectsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, security_connector_name, group_fq_name, project_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GitLabProjectsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, security_connector_name, group_fq_name, project_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  git_lab_projects_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = git_lab_projects_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

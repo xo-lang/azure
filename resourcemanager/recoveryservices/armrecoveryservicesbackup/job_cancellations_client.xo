@@ -56,10 +56,13 @@ fn (c: JobCancellationsClient) trigger_create_request(vault_name: Str, resource_
 
 /// Cancels a job. This is an asynchronous operation. To know the status of the cancellation, call GetCancelOperationResult API.
 pub fn (c: JobCancellationsClient) trigger(vault_name: Str, resource_group_name: Str, job_name: Str, options: JobCancellationsClientTriggerOptions = JobCancellationsClientTriggerOptions{}) -> JobCancellationsClientTriggerResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.trigger_create_request(vault_name, resource_group_name, job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobCancellationsClient.Trigger", c.setup.pipeline.tracer)
+  let req = sp.on(c.trigger_create_request(vault_name, resource_group_name, job_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  job_cancellations_trigger_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = job_cancellations_trigger_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

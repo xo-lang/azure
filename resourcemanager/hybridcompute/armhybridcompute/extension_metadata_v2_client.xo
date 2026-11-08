@@ -56,7 +56,7 @@ fn (c: ExtensionMetadataV2Client) list_create_request(location: Str, publisher: 
 /// Gets all Extension versions based on location, publisher, extensionType
 pub fn (c: ExtensionMetadataV2Client[fx]) new_list_pager(location: Str, publisher: Str, extension_type: Str, options: ExtensionMetadataV2ClientListOptions = ExtensionMetadataV2ClientListOptions{}) -> runtime.Pager[ExtensionMetadataV2ClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, publisher, extension_type, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ExtensionMetadataV2ClientListResponse ! Str { extension_metadata_v2_list_handle(r) }, c.setup.endpoint, fn(r: ExtensionMetadataV2ClientListResponse) -> Str? { r.extension_value_list_result_v2.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ExtensionMetadataV2ClientListResponse ! Str { extension_metadata_v2_list_handle(r) }, c.setup.endpoint, fn(r: ExtensionMetadataV2ClientListResponse) -> Str? { r.extension_value_list_result_v2.next_link }).traced_as("ExtensionMetadataV2ClientListResponse"))
 }
 
 /// ExtensionMetadataV2ClientGetOptions: the optional parameters of ExtensionMetadataV2Client.get.
@@ -98,10 +98,13 @@ fn (c: ExtensionMetadataV2Client) get_create_request(location: Str, publisher: S
 
 /// Gets an Extension Metadata based on location, publisher, extensionType and version
 pub fn (c: ExtensionMetadataV2Client) get(location: Str, publisher: Str, extension_type: Str, version: Str, options: ExtensionMetadataV2ClientGetOptions = ExtensionMetadataV2ClientGetOptions{}) -> ExtensionMetadataV2ClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, publisher, extension_type, version, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ExtensionMetadataV2Client.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, publisher, extension_type, version, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  extension_metadata_v2_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = extension_metadata_v2_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

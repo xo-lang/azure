@@ -57,7 +57,7 @@ fn (c: MaintenancesClient) list_create_request(resource_group_name: Str, server_
 /// List maintenances.
 pub fn (c: MaintenancesClient[fx]) new_list_pager(resource_group_name: Str, server_name: Str, options: MaintenancesClientListOptions = MaintenancesClientListOptions{}) -> runtime.Pager[MaintenancesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MaintenancesClientListResponse ! Str { maintenances_list_handle(r) }, c.setup.endpoint, fn(r: MaintenancesClientListResponse) -> Str? { r.maintenance_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> MaintenancesClientListResponse ! Str { maintenances_list_handle(r) }, c.setup.endpoint, fn(r: MaintenancesClientListResponse) -> Str? { r.maintenance_list_result.next_link }).traced_as("MaintenancesClientListResponse"))
 }
 
 /// MaintenancesClientReadOptions: the optional parameters of MaintenancesClient.read.
@@ -99,12 +99,15 @@ fn (c: MaintenancesClient) read_create_request(resource_group_name: Str, server_
 
 /// Read maintenance.
 pub fn (c: MaintenancesClient) read(resource_group_name: Str, server_name: Str, maintenance_name: Str, options: MaintenancesClientReadOptions = MaintenancesClientReadOptions{}) -> MaintenancesClientReadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.read_create_request(resource_group_name, server_name, maintenance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MaintenancesClient.Read", c.setup.pipeline.tracer)
+  let req = sp.on(c.read_create_request(resource_group_name, server_name, maintenance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  maintenances_read_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = maintenances_read_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// MaintenancesClientBeginUpdateOptions: the optional parameters of MaintenancesClient.begin_update.
@@ -151,12 +154,14 @@ fn (c: MaintenancesClient) update_create_request(resource_group_name: Str, serve
 /// Update maintenances.
 pub fn (c: MaintenancesClient[fx]) begin_update(resource_group_name: Str, server_name: Str, maintenance_name: Str, parameters: MaintenanceUpdate, options: MaintenancesClientBeginUpdateOptions = MaintenancesClientBeginUpdateOptions{}) -> runtime.Poller[MaintenancesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenancesClientUpdateResponse", fn(r: http.Response) -> MaintenancesClientUpdateResponse ! Str { maintenances_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "MaintenancesClientUpdateResponse", fn(r: http.Response) -> MaintenancesClientUpdateResponse ! Str { maintenances_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, server_name, maintenance_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MaintenancesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, server_name, maintenance_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "MaintenancesClientUpdateResponse", fn(r: http.Response) -> MaintenancesClientUpdateResponse ! Str { maintenances_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "original-uri", "MaintenancesClientUpdateResponse", fn(r: http.Response) -> MaintenancesClientUpdateResponse ! Str { maintenances_update_handle(r) }, traced: true)
 }

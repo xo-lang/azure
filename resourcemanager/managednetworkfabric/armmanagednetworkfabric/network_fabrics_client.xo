@@ -49,7 +49,7 @@ fn (c: NetworkFabricsClient) list_by_subscription_create_request(options: Networ
 /// List all the Network Fabric resources in the given subscription.
 pub fn (c: NetworkFabricsClient[fx]) new_list_by_subscription_pager(options: NetworkFabricsClientListBySubscriptionOptions = NetworkFabricsClientListBySubscriptionOptions{}) -> runtime.Pager[NetworkFabricsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkFabricsClientListBySubscriptionResponse ! Str { network_fabrics_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: NetworkFabricsClientListBySubscriptionResponse) -> Str? { r.network_fabrics_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkFabricsClientListBySubscriptionResponse ! Str { network_fabrics_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: NetworkFabricsClientListBySubscriptionResponse) -> Str? { r.network_fabrics_list_result.next_link }).traced_as("NetworkFabricsClientListBySubscriptionResponse"))
 }
 
 /// NetworkFabricsClientListByResourceGroupOptions: the optional parameters of NetworkFabricsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: NetworkFabricsClient) list_by_resource_group_create_request(resource_grou
 /// List all the Network Fabric resources in the given resource group.
 pub fn (c: NetworkFabricsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: NetworkFabricsClientListByResourceGroupOptions = NetworkFabricsClientListByResourceGroupOptions{}) -> runtime.Pager[NetworkFabricsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkFabricsClientListByResourceGroupResponse ! Str { network_fabrics_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkFabricsClientListByResourceGroupResponse) -> Str? { r.network_fabrics_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NetworkFabricsClientListByResourceGroupResponse ! Str { network_fabrics_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: NetworkFabricsClientListByResourceGroupResponse) -> Str? { r.network_fabrics_list_result.next_link }).traced_as("NetworkFabricsClientListByResourceGroupResponse"))
 }
 
 /// NetworkFabricsClientGetOptions: the optional parameters of NetworkFabricsClient.get.
@@ -122,12 +122,15 @@ fn (c: NetworkFabricsClient) get_create_request(resource_group_name: Str, networ
 
 /// Get Network Fabric resource details.
 pub fn (c: NetworkFabricsClient) get(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientGetOptions = NetworkFabricsClientGetOptions{}) -> NetworkFabricsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  network_fabrics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = network_fabrics_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NetworkFabricsClientBeginCreateOptions: the optional parameters of NetworkFabricsClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: NetworkFabricsClient) create_create_request(resource_group_name: Str, net
 /// Create Network Fabric resource.
 pub fn (c: NetworkFabricsClient[fx]) begin_create(resource_group_name: Str, network_fabric_name: Str, body: NetworkFabric, options: NetworkFabricsClientBeginCreateOptions = NetworkFabricsClientBeginCreateOptions{}) -> runtime.Poller[NetworkFabricsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCreateResponse", fn(r: http.Response) -> NetworkFabricsClientCreateResponse ! Str { network_fabrics_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCreateResponse", fn(r: http.Response) -> NetworkFabricsClientCreateResponse ! Str { network_fabrics_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCreateResponse", fn(r: http.Response) -> NetworkFabricsClientCreateResponse ! Str { network_fabrics_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCreateResponse", fn(r: http.Response) -> NetworkFabricsClientCreateResponse ! Str { network_fabrics_create_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginUpdateOptions: the optional parameters of NetworkFabricsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: NetworkFabricsClient) update_create_request(resource_group_name: Str, net
 /// Update certain properties of the Network Fabric resource.
 pub fn (c: NetworkFabricsClient[fx]) begin_update(resource_group_name: Str, network_fabric_name: Str, body: NetworkFabricPatch, options: NetworkFabricsClientBeginUpdateOptions = NetworkFabricsClientBeginUpdateOptions{}) -> runtime.Poller[NetworkFabricsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateResponse ! Str { network_fabrics_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateResponse ! Str { network_fabrics_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateResponse ! Str { network_fabrics_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateResponse ! Str { network_fabrics_update_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginDeleteOptions: the optional parameters of NetworkFabricsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: NetworkFabricsClient) delete_create_request(resource_group_name: Str, net
 /// Delete Network Fabric resource.
 pub fn (c: NetworkFabricsClient[fx]) begin_delete(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginDeleteOptions = NetworkFabricsClientBeginDeleteOptions{}) -> runtime.Poller[NetworkFabricsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDeleteResponse", fn(r: http.Response) -> NetworkFabricsClientDeleteResponse ! Str { network_fabrics_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDeleteResponse", fn(r: http.Response) -> NetworkFabricsClientDeleteResponse ! Str { network_fabrics_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDeleteResponse", fn(r: http.Response) -> NetworkFabricsClientDeleteResponse ! Str { network_fabrics_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDeleteResponse", fn(r: http.Response) -> NetworkFabricsClientDeleteResponse ! Str { network_fabrics_delete_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginArmConfigurationDiffOptions: the optional parameters of NetworkFabricsClient.begin_arm_configuration_diff.
@@ -315,14 +324,16 @@ fn (c: NetworkFabricsClient) arm_configuration_diff_create_request(resource_grou
 /// Post action: Triggers diff of NetworkFabric ARM Configuration.
 pub fn (c: NetworkFabricsClient[fx]) begin_arm_configuration_diff(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginArmConfigurationDiffOptions = NetworkFabricsClientBeginArmConfigurationDiffOptions{}) -> runtime.Poller[NetworkFabricsClientArmConfigurationDiffResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientArmConfigurationDiffResponse", fn(r: http.Response) -> NetworkFabricsClientArmConfigurationDiffResponse ! Str { network_fabrics_arm_configuration_diff_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientArmConfigurationDiffResponse", fn(r: http.Response) -> NetworkFabricsClientArmConfigurationDiffResponse ! Str { network_fabrics_arm_configuration_diff_handle(r) }, traced: true)
   }
-  let req = c.arm_configuration_diff_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginArmConfigurationDiff", c.setup.pipeline.tracer)
+  let req = c.arm_configuration_diff_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientArmConfigurationDiffResponse", fn(r: http.Response) -> NetworkFabricsClientArmConfigurationDiffResponse ! Str { network_fabrics_arm_configuration_diff_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientArmConfigurationDiffResponse", fn(r: http.Response) -> NetworkFabricsClientArmConfigurationDiffResponse ! Str { network_fabrics_arm_configuration_diff_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginCommitBatchStatusOptions: the optional parameters of NetworkFabricsClient.begin_commit_batch_status.
@@ -365,14 +376,16 @@ fn (c: NetworkFabricsClient) commit_batch_status_create_request(resource_group_n
 /// Post action: Returns a status of commit batch operation.
 pub fn (c: NetworkFabricsClient[fx]) begin_commit_batch_status(resource_group_name: Str, network_fabric_name: Str, body: CommitBatchStatusRequest, options: NetworkFabricsClientBeginCommitBatchStatusOptions = NetworkFabricsClientBeginCommitBatchStatusOptions{}) -> runtime.Poller[NetworkFabricsClientCommitBatchStatusResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCommitBatchStatusResponse", fn(r: http.Response) -> NetworkFabricsClientCommitBatchStatusResponse ! Str { network_fabrics_commit_batch_status_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCommitBatchStatusResponse", fn(r: http.Response) -> NetworkFabricsClientCommitBatchStatusResponse ! Str { network_fabrics_commit_batch_status_handle(r) }, traced: true)
   }
-  let req = c.commit_batch_status_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginCommitBatchStatus", c.setup.pipeline.tracer)
+  let req = c.commit_batch_status_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCommitBatchStatusResponse", fn(r: http.Response) -> NetworkFabricsClientCommitBatchStatusResponse ! Str { network_fabrics_commit_batch_status_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCommitBatchStatusResponse", fn(r: http.Response) -> NetworkFabricsClientCommitBatchStatusResponse ! Str { network_fabrics_commit_batch_status_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginCommitConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_commit_configuration.
@@ -421,14 +434,16 @@ fn (c: NetworkFabricsClient) commit_configuration_create_request(resource_group_
 /// Atomic update of the given Network Fabric instance. Sync update of NFA resources at Fabric level.
 pub fn (c: NetworkFabricsClient[fx]) begin_commit_configuration(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginCommitConfigurationOptions = NetworkFabricsClientBeginCommitConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientCommitConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCommitConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientCommitConfigurationResponse ! Str { network_fabrics_commit_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientCommitConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientCommitConfigurationResponse ! Str { network_fabrics_commit_configuration_handle(r) }, traced: true)
   }
-  let req = c.commit_configuration_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginCommitConfiguration", c.setup.pipeline.tracer)
+  let req = c.commit_configuration_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCommitConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientCommitConfigurationResponse ! Str { network_fabrics_commit_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientCommitConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientCommitConfigurationResponse ! Str { network_fabrics_commit_configuration_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginDeprovisionOptions: the optional parameters of NetworkFabricsClient.begin_deprovision.
@@ -470,14 +485,16 @@ fn (c: NetworkFabricsClient) deprovision_create_request(resource_group_name: Str
 /// Deprovisions the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_deprovision(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginDeprovisionOptions = NetworkFabricsClientBeginDeprovisionOptions{}) -> runtime.Poller[NetworkFabricsClientDeprovisionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDeprovisionResponse", fn(r: http.Response) -> NetworkFabricsClientDeprovisionResponse ! Str { network_fabrics_deprovision_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDeprovisionResponse", fn(r: http.Response) -> NetworkFabricsClientDeprovisionResponse ! Str { network_fabrics_deprovision_handle(r) }, traced: true)
   }
-  let req = c.deprovision_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginDeprovision", c.setup.pipeline.tracer)
+  let req = c.deprovision_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDeprovisionResponse", fn(r: http.Response) -> NetworkFabricsClientDeprovisionResponse ! Str { network_fabrics_deprovision_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDeprovisionResponse", fn(r: http.Response) -> NetworkFabricsClientDeprovisionResponse ! Str { network_fabrics_deprovision_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginDiscardCommitBatchOptions: the optional parameters of NetworkFabricsClient.begin_discard_commit_batch.
@@ -520,14 +537,16 @@ fn (c: NetworkFabricsClient) discard_commit_batch_create_request(resource_group_
 /// Post action: Discards a Batch operation in progress.
 pub fn (c: NetworkFabricsClient[fx]) begin_discard_commit_batch(resource_group_name: Str, network_fabric_name: Str, body: DiscardCommitBatchRequest, options: NetworkFabricsClientBeginDiscardCommitBatchOptions = NetworkFabricsClientBeginDiscardCommitBatchOptions{}) -> runtime.Poller[NetworkFabricsClientDiscardCommitBatchResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDiscardCommitBatchResponse", fn(r: http.Response) -> NetworkFabricsClientDiscardCommitBatchResponse ! Str { network_fabrics_discard_commit_batch_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientDiscardCommitBatchResponse", fn(r: http.Response) -> NetworkFabricsClientDiscardCommitBatchResponse ! Str { network_fabrics_discard_commit_batch_handle(r) }, traced: true)
   }
-  let req = c.discard_commit_batch_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginDiscardCommitBatch", c.setup.pipeline.tracer)
+  let req = c.discard_commit_batch_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDiscardCommitBatchResponse", fn(r: http.Response) -> NetworkFabricsClientDiscardCommitBatchResponse ! Str { network_fabrics_discard_commit_batch_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientDiscardCommitBatchResponse", fn(r: http.Response) -> NetworkFabricsClientDiscardCommitBatchResponse ! Str { network_fabrics_discard_commit_batch_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginGetTopologyOptions: the optional parameters of NetworkFabricsClient.begin_get_topology.
@@ -569,14 +588,16 @@ fn (c: NetworkFabricsClient) get_topology_create_request(resource_group_name: St
 /// Gets Topology of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_get_topology(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginGetTopologyOptions = NetworkFabricsClientBeginGetTopologyOptions{}) -> runtime.Poller[NetworkFabricsClientGetTopologyResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientGetTopologyResponse", fn(r: http.Response) -> NetworkFabricsClientGetTopologyResponse ! Str { network_fabrics_get_topology_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientGetTopologyResponse", fn(r: http.Response) -> NetworkFabricsClientGetTopologyResponse ! Str { network_fabrics_get_topology_handle(r) }, traced: true)
   }
-  let req = c.get_topology_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginGetTopology", c.setup.pipeline.tracer)
+  let req = c.get_topology_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientGetTopologyResponse", fn(r: http.Response) -> NetworkFabricsClientGetTopologyResponse ! Str { network_fabrics_get_topology_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientGetTopologyResponse", fn(r: http.Response) -> NetworkFabricsClientGetTopologyResponse ! Str { network_fabrics_get_topology_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginLockFabricOptions: the optional parameters of NetworkFabricsClient.begin_lock_fabric.
@@ -619,14 +640,16 @@ fn (c: NetworkFabricsClient) lock_fabric_create_request(resource_group_name: Str
 /// Post action: Triggers network fabric lock operation.
 pub fn (c: NetworkFabricsClient[fx]) begin_lock_fabric(resource_group_name: Str, network_fabric_name: Str, body: NetworkFabricLockRequest, options: NetworkFabricsClientBeginLockFabricOptions = NetworkFabricsClientBeginLockFabricOptions{}) -> runtime.Poller[NetworkFabricsClientLockFabricResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientLockFabricResponse", fn(r: http.Response) -> NetworkFabricsClientLockFabricResponse ! Str { network_fabrics_lock_fabric_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientLockFabricResponse", fn(r: http.Response) -> NetworkFabricsClientLockFabricResponse ! Str { network_fabrics_lock_fabric_handle(r) }, traced: true)
   }
-  let req = c.lock_fabric_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginLockFabric", c.setup.pipeline.tracer)
+  let req = c.lock_fabric_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientLockFabricResponse", fn(r: http.Response) -> NetworkFabricsClientLockFabricResponse ! Str { network_fabrics_lock_fabric_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientLockFabricResponse", fn(r: http.Response) -> NetworkFabricsClientLockFabricResponse ! Str { network_fabrics_lock_fabric_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginProvisionOptions: the optional parameters of NetworkFabricsClient.begin_provision.
@@ -668,14 +691,16 @@ fn (c: NetworkFabricsClient) provision_create_request(resource_group_name: Str, 
 /// Provisions the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_provision(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginProvisionOptions = NetworkFabricsClientBeginProvisionOptions{}) -> runtime.Poller[NetworkFabricsClientProvisionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientProvisionResponse", fn(r: http.Response) -> NetworkFabricsClientProvisionResponse ! Str { network_fabrics_provision_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientProvisionResponse", fn(r: http.Response) -> NetworkFabricsClientProvisionResponse ! Str { network_fabrics_provision_handle(r) }, traced: true)
   }
-  let req = c.provision_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginProvision", c.setup.pipeline.tracer)
+  let req = c.provision_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientProvisionResponse", fn(r: http.Response) -> NetworkFabricsClientProvisionResponse ! Str { network_fabrics_provision_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientProvisionResponse", fn(r: http.Response) -> NetworkFabricsClientProvisionResponse ! Str { network_fabrics_provision_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginRefreshConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_refresh_configuration.
@@ -717,14 +742,16 @@ fn (c: NetworkFabricsClient) refresh_configuration_create_request(resource_group
 /// Refreshes the configuration of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_refresh_configuration(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginRefreshConfigurationOptions = NetworkFabricsClientBeginRefreshConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientRefreshConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRefreshConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientRefreshConfigurationResponse ! Str { network_fabrics_refresh_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRefreshConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientRefreshConfigurationResponse ! Str { network_fabrics_refresh_configuration_handle(r) }, traced: true)
   }
-  let req = c.refresh_configuration_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginRefreshConfiguration", c.setup.pipeline.tracer)
+  let req = c.refresh_configuration_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRefreshConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientRefreshConfigurationResponse ! Str { network_fabrics_refresh_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRefreshConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientRefreshConfigurationResponse ! Str { network_fabrics_refresh_configuration_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginResyncCertificatesOptions: the optional parameters of NetworkFabricsClient.begin_resync_certificates.
@@ -766,14 +793,16 @@ fn (c: NetworkFabricsClient) resync_certificates_create_request(resource_group_n
 /// Updates all Network Devices to use the latest certificates. Does not generate new certificates. Allows network devices missed during a previous certificate rotation to be brought back into sync.
 pub fn (c: NetworkFabricsClient[fx]) begin_resync_certificates(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginResyncCertificatesOptions = NetworkFabricsClientBeginResyncCertificatesOptions{}) -> runtime.Poller[NetworkFabricsClientResyncCertificatesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientResyncCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientResyncCertificatesResponse ! Str { network_fabrics_resync_certificates_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientResyncCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientResyncCertificatesResponse ! Str { network_fabrics_resync_certificates_handle(r) }, traced: true)
   }
-  let req = c.resync_certificates_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginResyncCertificates", c.setup.pipeline.tracer)
+  let req = c.resync_certificates_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientResyncCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientResyncCertificatesResponse ! Str { network_fabrics_resync_certificates_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientResyncCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientResyncCertificatesResponse ! Str { network_fabrics_resync_certificates_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginResyncPasswordsOptions: the optional parameters of NetworkFabricsClient.begin_resync_passwords.
@@ -815,14 +844,16 @@ fn (c: NetworkFabricsClient) resync_passwords_create_request(resource_group_name
 /// Updates the Terminal Server and all Network Devices to use the latest passwords. Does not generate new passwords.  Allows devices to be brought back in sync after a partially successful password rotation.
 pub fn (c: NetworkFabricsClient[fx]) begin_resync_passwords(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginResyncPasswordsOptions = NetworkFabricsClientBeginResyncPasswordsOptions{}) -> runtime.Poller[NetworkFabricsClientResyncPasswordsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientResyncPasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientResyncPasswordsResponse ! Str { network_fabrics_resync_passwords_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientResyncPasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientResyncPasswordsResponse ! Str { network_fabrics_resync_passwords_handle(r) }, traced: true)
   }
-  let req = c.resync_passwords_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginResyncPasswords", c.setup.pipeline.tracer)
+  let req = c.resync_passwords_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientResyncPasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientResyncPasswordsResponse ! Str { network_fabrics_resync_passwords_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientResyncPasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientResyncPasswordsResponse ! Str { network_fabrics_resync_passwords_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginRotateCertificatesOptions: the optional parameters of NetworkFabricsClient.begin_rotate_certificates.
@@ -864,14 +895,16 @@ fn (c: NetworkFabricsClient) rotate_certificates_create_request(resource_group_n
 /// Creates new certificates, then updates the Network Devices to use the new certificates. Note that disabled devices cannot be updated and must be resynchronized with the new certificates once they are enabled.
 pub fn (c: NetworkFabricsClient[fx]) begin_rotate_certificates(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginRotateCertificatesOptions = NetworkFabricsClientBeginRotateCertificatesOptions{}) -> runtime.Poller[NetworkFabricsClientRotateCertificatesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRotateCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientRotateCertificatesResponse ! Str { network_fabrics_rotate_certificates_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRotateCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientRotateCertificatesResponse ! Str { network_fabrics_rotate_certificates_handle(r) }, traced: true)
   }
-  let req = c.rotate_certificates_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginRotateCertificates", c.setup.pipeline.tracer)
+  let req = c.rotate_certificates_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRotateCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientRotateCertificatesResponse ! Str { network_fabrics_rotate_certificates_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRotateCertificatesResponse", fn(r: http.Response) -> NetworkFabricsClientRotateCertificatesResponse ! Str { network_fabrics_rotate_certificates_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginRotatePasswordsOptions: the optional parameters of NetworkFabricsClient.begin_rotate_passwords.
@@ -913,14 +946,16 @@ fn (c: NetworkFabricsClient) rotate_passwords_create_request(resource_group_name
 /// Creates new passwords, then updates the Terminal Server and Network Devices to use the new passwords.  Note that disabled devices cannot be updated and must be resynchronized with the new passwords once they are enabled.  Fails if any of the devices could not be updated with the new password. Failed devices should be resynchronized with the new passwords once possible.
 pub fn (c: NetworkFabricsClient[fx]) begin_rotate_passwords(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginRotatePasswordsOptions = NetworkFabricsClientBeginRotatePasswordsOptions{}) -> runtime.Poller[NetworkFabricsClientRotatePasswordsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRotatePasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientRotatePasswordsResponse ! Str { network_fabrics_rotate_passwords_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientRotatePasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientRotatePasswordsResponse ! Str { network_fabrics_rotate_passwords_handle(r) }, traced: true)
   }
-  let req = c.rotate_passwords_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginRotatePasswords", c.setup.pipeline.tracer)
+  let req = c.rotate_passwords_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRotatePasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientRotatePasswordsResponse ! Str { network_fabrics_rotate_passwords_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientRotatePasswordsResponse", fn(r: http.Response) -> NetworkFabricsClientRotatePasswordsResponse ! Str { network_fabrics_rotate_passwords_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginUpdateInfraManagementBfdConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_update_infra_management_bfd_configuration.
@@ -963,14 +998,16 @@ fn (c: NetworkFabricsClient) update_infra_management_bfd_configuration_create_re
 /// Updates the Infra Management BFD Configuration of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_update_infra_management_bfd_configuration(resource_group_name: Str, network_fabric_name: Str, body: UpdateAdministrativeState, options: NetworkFabricsClientBeginUpdateInfraManagementBfdConfigurationOptions = NetworkFabricsClientBeginUpdateInfraManagementBfdConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse ! Str { network_fabrics_update_infra_management_bfd_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse ! Str { network_fabrics_update_infra_management_bfd_configuration_handle(r) }, traced: true)
   }
-  let req = c.update_infra_management_bfd_configuration_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginUpdateInfraManagementBfdConfiguration", c.setup.pipeline.tracer)
+  let req = c.update_infra_management_bfd_configuration_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse ! Str { network_fabrics_update_infra_management_bfd_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateInfraManagementBfdConfigurationResponse ! Str { network_fabrics_update_infra_management_bfd_configuration_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginUpdateWorkloadManagementBfdConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_update_workload_management_bfd_configuration.
@@ -1013,14 +1050,16 @@ fn (c: NetworkFabricsClient) update_workload_management_bfd_configuration_create
 /// Updates the Workload Management BFD Configuration of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_update_workload_management_bfd_configuration(resource_group_name: Str, network_fabric_name: Str, body: UpdateAdministrativeState, options: NetworkFabricsClientBeginUpdateWorkloadManagementBfdConfigurationOptions = NetworkFabricsClientBeginUpdateWorkloadManagementBfdConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse ! Str { network_fabrics_update_workload_management_bfd_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse ! Str { network_fabrics_update_workload_management_bfd_configuration_handle(r) }, traced: true)
   }
-  let req = c.update_workload_management_bfd_configuration_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginUpdateWorkloadManagementBfdConfiguration", c.setup.pipeline.tracer)
+  let req = c.update_workload_management_bfd_configuration_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse ! Str { network_fabrics_update_workload_management_bfd_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientUpdateWorkloadManagementBfdConfigurationResponse ! Str { network_fabrics_update_workload_management_bfd_configuration_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginUpgradeOptions: the optional parameters of NetworkFabricsClient.begin_upgrade.
@@ -1063,14 +1102,16 @@ fn (c: NetworkFabricsClient) upgrade_create_request(resource_group_name: Str, ne
 /// Upgrades the version of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_upgrade(resource_group_name: Str, network_fabric_name: Str, body: UpgradeNetworkFabricProperties, options: NetworkFabricsClientBeginUpgradeOptions = NetworkFabricsClientBeginUpgradeOptions{}) -> runtime.Poller[NetworkFabricsClientUpgradeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpgradeResponse", fn(r: http.Response) -> NetworkFabricsClientUpgradeResponse ! Str { network_fabrics_upgrade_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientUpgradeResponse", fn(r: http.Response) -> NetworkFabricsClientUpgradeResponse ! Str { network_fabrics_upgrade_handle(r) }, traced: true)
   }
-  let req = c.upgrade_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginUpgrade", c.setup.pipeline.tracer)
+  let req = c.upgrade_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpgradeResponse", fn(r: http.Response) -> NetworkFabricsClientUpgradeResponse ! Str { network_fabrics_upgrade_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientUpgradeResponse", fn(r: http.Response) -> NetworkFabricsClientUpgradeResponse ! Str { network_fabrics_upgrade_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginValidateConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_validate_configuration.
@@ -1113,14 +1154,16 @@ fn (c: NetworkFabricsClient) validate_configuration_create_request(resource_grou
 /// Validates the configuration of the underlying resources in the given Network Fabric instance.
 pub fn (c: NetworkFabricsClient[fx]) begin_validate_configuration(resource_group_name: Str, network_fabric_name: Str, body: ValidateConfigurationProperties, options: NetworkFabricsClientBeginValidateConfigurationOptions = NetworkFabricsClientBeginValidateConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientValidateConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientValidateConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientValidateConfigurationResponse ! Str { network_fabrics_validate_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientValidateConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientValidateConfigurationResponse ! Str { network_fabrics_validate_configuration_handle(r) }, traced: true)
   }
-  let req = c.validate_configuration_create_request(resource_group_name, network_fabric_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginValidateConfiguration", c.setup.pipeline.tracer)
+  let req = c.validate_configuration_create_request(resource_group_name, network_fabric_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientValidateConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientValidateConfigurationResponse ! Str { network_fabrics_validate_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientValidateConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientValidateConfigurationResponse ! Str { network_fabrics_validate_configuration_handle(r) }, traced: true)
 }
 
 /// NetworkFabricsClientBeginViewDeviceConfigurationOptions: the optional parameters of NetworkFabricsClient.begin_view_device_configuration.
@@ -1162,12 +1205,14 @@ fn (c: NetworkFabricsClient) view_device_configuration_create_request(resource_g
 /// Post action: Triggers view of network fabric configuration.
 pub fn (c: NetworkFabricsClient[fx]) begin_view_device_configuration(resource_group_name: Str, network_fabric_name: Str, options: NetworkFabricsClientBeginViewDeviceConfigurationOptions = NetworkFabricsClientBeginViewDeviceConfigurationOptions{}) -> runtime.Poller[NetworkFabricsClientViewDeviceConfigurationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientViewDeviceConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientViewDeviceConfigurationResponse ! Str { network_fabrics_view_device_configuration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NetworkFabricsClientViewDeviceConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientViewDeviceConfigurationResponse ! Str { network_fabrics_view_device_configuration_handle(r) }, traced: true)
   }
-  let req = c.view_device_configuration_create_request(resource_group_name, network_fabric_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NetworkFabricsClient.BeginViewDeviceConfiguration", c.setup.pipeline.tracer)
+  let req = c.view_device_configuration_create_request(resource_group_name, network_fabric_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientViewDeviceConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientViewDeviceConfigurationResponse ! Str { network_fabrics_view_device_configuration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NetworkFabricsClientViewDeviceConfigurationResponse", fn(r: http.Response) -> NetworkFabricsClientViewDeviceConfigurationResponse ! Str { network_fabrics_view_device_configuration_handle(r) }, traced: true)
 }

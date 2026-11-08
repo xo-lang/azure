@@ -47,12 +47,15 @@ fn (c: AzureReservationAPIClient) get_applied_reservation_list_create_request(su
 
 /// Get applicable `Reservation`s that are applied to this subscription or a resource group under this subscription.
 pub fn (c: AzureReservationAPIClient) get_applied_reservation_list(subscription_id: Str, options: AzureReservationAPIClientGetAppliedReservationListOptions = AzureReservationAPIClientGetAppliedReservationListOptions{}) -> AzureReservationAPIClientGetAppliedReservationListResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_applied_reservation_list_create_request(subscription_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureReservationAPIClient.GetAppliedReservationList", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_applied_reservation_list_create_request(subscription_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  azure_reservation_api_get_applied_reservation_list_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = azure_reservation_api_get_applied_reservation_list_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AzureReservationAPIClientGetCatalogOptions: the optional parameters of AzureReservationAPIClient.new_get_catalog_pager.
@@ -124,5 +127,5 @@ fn (c: AzureReservationAPIClient) get_catalog_create_request(subscription_id: St
 /// Get the regions and skus that are available for RI purchase for the specified Azure subscription.
 pub fn (c: AzureReservationAPIClient[fx]) new_get_catalog_pager(subscription_id: Str, options: AzureReservationAPIClientGetCatalogOptions = AzureReservationAPIClientGetCatalogOptions{}) -> runtime.Pager[AzureReservationAPIClientGetCatalogResponse, fx] ! azcore.CallErr {
   let req = c.get_catalog_create_request(subscription_id, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureReservationAPIClientGetCatalogResponse ! Str { azure_reservation_api_get_catalog_handle(r) }, c.setup.endpoint, fn(r: AzureReservationAPIClientGetCatalogResponse) -> Str? { r.catalogs_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureReservationAPIClientGetCatalogResponse ! Str { azure_reservation_api_get_catalog_handle(r) }, c.setup.endpoint, fn(r: AzureReservationAPIClientGetCatalogResponse) -> Str? { r.catalogs_result.next_link }).traced_as("AzureReservationAPIClientGetCatalogResponse"))
 }

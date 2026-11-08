@@ -82,7 +82,7 @@ fn (c: JobsClient) list_create_request(resource_group_name: Str, workspace_name:
 
 pub fn (c: JobsClient[fx]) new_list_pager(resource_group_name: Str, workspace_name: Str, options: JobsClientListOptions = JobsClientListOptions{}) -> runtime.Pager[JobsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, workspace_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListResponse ! Str { jobs_list_handle(r) }, fn(r: JobsClientListResponse) -> Str? { r.job_base_resource_arm_paginated_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListResponse ! Str { jobs_list_handle(r) }, fn(r: JobsClientListResponse) -> Str? { r.job_base_resource_arm_paginated_result.next_link }).traced_as("JobsClientListResponse"))
 }
 
 /// JobsClientBeginDeleteOptions: the optional parameters of JobsClient.begin_delete.
@@ -124,14 +124,16 @@ fn (c: JobsClient) delete_create_request(resource_group_name: Str, workspace_nam
 
 pub fn (c: JobsClient[fx]) begin_delete(resource_group_name: Str, workspace_name: Str, id: Str, options: JobsClientBeginDeleteOptions = JobsClientBeginDeleteOptions{}) -> runtime.Poller[JobsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, workspace_name, id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, workspace_name, id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "JobsClientDeleteResponse", fn(r: http.Response) -> JobsClientDeleteResponse ! Str { jobs_delete_handle(r) }, traced: true)
 }
 
 /// JobsClientGetOptions: the optional parameters of JobsClient.get.
@@ -172,12 +174,15 @@ fn (c: JobsClient) get_create_request(resource_group_name: Str, workspace_name: 
 }
 
 pub fn (c: JobsClient) get(resource_group_name: Str, workspace_name: Str, id: Str, options: JobsClientGetOptions = JobsClientGetOptions{}) -> JobsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, workspace_name, id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, workspace_name, id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientCreateOrUpdateOptions: the optional parameters of JobsClient.create_or_update.
@@ -219,12 +224,15 @@ fn (c: JobsClient) create_or_update_create_request(resource_group_name: Str, wor
 }
 
 pub fn (c: JobsClient) create_or_update(resource_group_name: Str, workspace_name: Str, id: Str, body: JobBase, options: JobsClientCreateOrUpdateOptions = JobsClientCreateOrUpdateOptions{}) -> JobsClientCreateOrUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_or_update_create_request(resource_group_name, workspace_name, id, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.CreateOrUpdate", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_or_update_create_request(resource_group_name, workspace_name, id, body, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_create_or_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_create_or_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// JobsClientBeginCancelOptions: the optional parameters of JobsClient.begin_cancel.
@@ -266,12 +274,14 @@ fn (c: JobsClient) cancel_create_request(resource_group_name: Str, workspace_nam
 
 pub fn (c: JobsClient[fx]) begin_cancel(resource_group_name: Str, workspace_name: Str, id: Str, options: JobsClientBeginCancelOptions = JobsClientBeginCancelOptions{}) -> runtime.Poller[JobsClientCancelResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientCancelResponse", fn(r: http.Response) -> JobsClientCancelResponse ! Str { jobs_cancel_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "JobsClientCancelResponse", fn(r: http.Response) -> JobsClientCancelResponse ! Str { jobs_cancel_handle(r) }, traced: true)
   }
-  let req = c.cancel_create_request(resource_group_name, workspace_name, id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.BeginCancel", c.setup.pipeline.tracer)
+  let req = c.cancel_create_request(resource_group_name, workspace_name, id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "JobsClientCancelResponse", fn(r: http.Response) -> JobsClientCancelResponse ! Str { jobs_cancel_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "JobsClientCancelResponse", fn(r: http.Response) -> JobsClientCancelResponse ! Str { jobs_cancel_handle(r) }, traced: true)
 }

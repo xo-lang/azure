@@ -57,7 +57,7 @@ fn (c: CassandraResourcesClient) list_cassandra_keyspaces_create_request(resourc
 /// Lists the Cassandra keyspaces under an existing Azure Cosmos DB database account.
 pub fn (c: CassandraResourcesClient[fx]) new_list_cassandra_keyspaces_pager(resource_group_name: Str, account_name: Str, options: CassandraResourcesClientListCassandraKeyspacesOptions = CassandraResourcesClientListCassandraKeyspacesOptions{}) -> runtime.Pager[CassandraResourcesClientListCassandraKeyspacesResponse, fx] ! azcore.CallErr {
   let req = c.list_cassandra_keyspaces_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraKeyspacesResponse ! Str { cassandra_resources_list_cassandra_keyspaces_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraKeyspacesResponse) -> Str? { r.cassandra_keyspace_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraKeyspacesResponse ! Str { cassandra_resources_list_cassandra_keyspaces_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraKeyspacesResponse) -> Str? { r.cassandra_keyspace_list_result.next_link }).traced_as("CassandraResourcesClientListCassandraKeyspacesResponse"))
 }
 
 /// CassandraResourcesClientGetCassandraKeyspaceOptions: the optional parameters of CassandraResourcesClient.get_cassandra_keyspace.
@@ -99,12 +99,15 @@ fn (c: CassandraResourcesClient) get_cassandra_keyspace_create_request(resource_
 
 /// Gets the Cassandra keyspaces under an existing Azure Cosmos DB database account with the provided name.
 pub fn (c: CassandraResourcesClient) get_cassandra_keyspace(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientGetCassandraKeyspaceOptions = CassandraResourcesClientGetCassandraKeyspaceOptions{}) -> CassandraResourcesClientGetCassandraKeyspaceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraKeyspace", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_keyspace_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_keyspace_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginCreateUpdateCassandraKeyspaceOptions: the optional parameters of CassandraResourcesClient.begin_create_update_cassandra_keyspace.
@@ -151,14 +154,16 @@ fn (c: CassandraResourcesClient) create_update_cassandra_keyspace_create_request
 /// Create or update an Azure Cosmos DB Cassandra keyspace
 pub fn (c: CassandraResourcesClient[fx]) begin_create_update_cassandra_keyspace(resource_group_name: Str, account_name: Str, keyspace_name: Str, create_update_cassandra_keyspace_parameters: CassandraKeyspaceCreateUpdateParameters, options: CassandraResourcesClientBeginCreateUpdateCassandraKeyspaceOptions = CassandraResourcesClientBeginCreateUpdateCassandraKeyspaceOptions{}) -> runtime.Poller[CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse ! Str { cassandra_resources_create_update_cassandra_keyspace_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse ! Str { cassandra_resources_create_update_cassandra_keyspace_handle(r) }, traced: true)
   }
-  let req = c.create_update_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, create_update_cassandra_keyspace_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginCreateUpdateCassandraKeyspace", c.setup.pipeline.tracer)
+  let req = c.create_update_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, create_update_cassandra_keyspace_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse ! Str { cassandra_resources_create_update_cassandra_keyspace_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraKeyspaceResponse ! Str { cassandra_resources_create_update_cassandra_keyspace_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginDeleteCassandraKeyspaceOptions: the optional parameters of CassandraResourcesClient.begin_delete_cassandra_keyspace.
@@ -201,14 +206,16 @@ fn (c: CassandraResourcesClient) delete_cassandra_keyspace_create_request(resour
 /// Deletes an existing Azure Cosmos DB Cassandra keyspace.
 pub fn (c: CassandraResourcesClient[fx]) begin_delete_cassandra_keyspace(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientBeginDeleteCassandraKeyspaceOptions = CassandraResourcesClientBeginDeleteCassandraKeyspaceOptions{}) -> runtime.Poller[CassandraResourcesClientDeleteCassandraKeyspaceResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraKeyspaceResponse ! Str { cassandra_resources_delete_cassandra_keyspace_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraKeyspaceResponse ! Str { cassandra_resources_delete_cassandra_keyspace_handle(r) }, traced: true)
   }
-  let req = c.delete_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginDeleteCassandraKeyspace", c.setup.pipeline.tracer)
+  let req = c.delete_cassandra_keyspace_create_request(resource_group_name, account_name, keyspace_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraKeyspaceResponse ! Str { cassandra_resources_delete_cassandra_keyspace_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraKeyspaceResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraKeyspaceResponse ! Str { cassandra_resources_delete_cassandra_keyspace_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientListCassandraTablesOptions: the optional parameters of CassandraResourcesClient.new_list_cassandra_tables_pager.
@@ -251,7 +258,7 @@ fn (c: CassandraResourcesClient) list_cassandra_tables_create_request(resource_g
 /// Lists the Cassandra table under an existing Azure Cosmos DB database account.
 pub fn (c: CassandraResourcesClient[fx]) new_list_cassandra_tables_pager(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientListCassandraTablesOptions = CassandraResourcesClientListCassandraTablesOptions{}) -> runtime.Pager[CassandraResourcesClientListCassandraTablesResponse, fx] ! azcore.CallErr {
   let req = c.list_cassandra_tables_create_request(resource_group_name, account_name, keyspace_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraTablesResponse ! Str { cassandra_resources_list_cassandra_tables_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraTablesResponse) -> Str? { r.cassandra_table_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraTablesResponse ! Str { cassandra_resources_list_cassandra_tables_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraTablesResponse) -> Str? { r.cassandra_table_list_result.next_link }).traced_as("CassandraResourcesClientListCassandraTablesResponse"))
 }
 
 /// CassandraResourcesClientGetCassandraTableOptions: the optional parameters of CassandraResourcesClient.get_cassandra_table.
@@ -297,12 +304,15 @@ fn (c: CassandraResourcesClient) get_cassandra_table_create_request(resource_gro
 
 /// Gets the Cassandra table under an existing Azure Cosmos DB database account.
 pub fn (c: CassandraResourcesClient) get_cassandra_table(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, options: CassandraResourcesClientGetCassandraTableOptions = CassandraResourcesClientGetCassandraTableOptions{}) -> CassandraResourcesClientGetCassandraTableResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraTable", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_table_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_table_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginCreateUpdateCassandraTableOptions: the optional parameters of CassandraResourcesClient.begin_create_update_cassandra_table.
@@ -353,14 +363,16 @@ fn (c: CassandraResourcesClient) create_update_cassandra_table_create_request(re
 /// Create or update an Azure Cosmos DB Cassandra Table
 pub fn (c: CassandraResourcesClient[fx]) begin_create_update_cassandra_table(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, create_update_cassandra_table_parameters: CassandraTableCreateUpdateParameters, options: CassandraResourcesClientBeginCreateUpdateCassandraTableOptions = CassandraResourcesClientBeginCreateUpdateCassandraTableOptions{}) -> runtime.Poller[CassandraResourcesClientCreateUpdateCassandraTableResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraTableResponse ! Str { cassandra_resources_create_update_cassandra_table_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraTableResponse ! Str { cassandra_resources_create_update_cassandra_table_handle(r) }, traced: true)
   }
-  let req = c.create_update_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, create_update_cassandra_table_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginCreateUpdateCassandraTable", c.setup.pipeline.tracer)
+  let req = c.create_update_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, create_update_cassandra_table_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraTableResponse ! Str { cassandra_resources_create_update_cassandra_table_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraTableResponse ! Str { cassandra_resources_create_update_cassandra_table_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginDeleteCassandraTableOptions: the optional parameters of CassandraResourcesClient.begin_delete_cassandra_table.
@@ -407,14 +419,16 @@ fn (c: CassandraResourcesClient) delete_cassandra_table_create_request(resource_
 /// Deletes an existing Azure Cosmos DB Cassandra table.
 pub fn (c: CassandraResourcesClient[fx]) begin_delete_cassandra_table(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, options: CassandraResourcesClientBeginDeleteCassandraTableOptions = CassandraResourcesClientBeginDeleteCassandraTableOptions{}) -> runtime.Poller[CassandraResourcesClientDeleteCassandraTableResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraTableResponse ! Str { cassandra_resources_delete_cassandra_table_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraTableResponse ! Str { cassandra_resources_delete_cassandra_table_handle(r) }, traced: true)
   }
-  let req = c.delete_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginDeleteCassandraTable", c.setup.pipeline.tracer)
+  let req = c.delete_cassandra_table_create_request(resource_group_name, account_name, keyspace_name, table_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraTableResponse ! Str { cassandra_resources_delete_cassandra_table_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraTableResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraTableResponse ! Str { cassandra_resources_delete_cassandra_table_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientGetCassandraTableThroughputOptions: the optional parameters of CassandraResourcesClient.get_cassandra_table_throughput.
@@ -460,12 +474,15 @@ fn (c: CassandraResourcesClient) get_cassandra_table_throughput_create_request(r
 
 /// Gets the RUs per second of the Cassandra table under an existing Azure Cosmos DB database account with the provided name.
 pub fn (c: CassandraResourcesClient) get_cassandra_table_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, options: CassandraResourcesClientGetCassandraTableThroughputOptions = CassandraResourcesClientGetCassandraTableThroughputOptions{}) -> CassandraResourcesClientGetCassandraTableThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_table_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraTableThroughput", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_table_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_table_throughput_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_table_throughput_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginUpdateCassandraTableThroughputOptions: the optional parameters of CassandraResourcesClient.begin_update_cassandra_table_throughput.
@@ -516,14 +533,16 @@ fn (c: CassandraResourcesClient) update_cassandra_table_throughput_create_reques
 /// Update RUs per second of an Azure Cosmos DB Cassandra table
 pub fn (c: CassandraResourcesClient[fx]) begin_update_cassandra_table_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, update_throughput_parameters: ThroughputSettingsUpdateParameters, options: CassandraResourcesClientBeginUpdateCassandraTableThroughputOptions = CassandraResourcesClientBeginUpdateCassandraTableThroughputOptions{}) -> runtime.Poller[CassandraResourcesClientUpdateCassandraTableThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientUpdateCassandraTableThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraTableThroughputResponse ! Str { cassandra_resources_update_cassandra_table_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientUpdateCassandraTableThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraTableThroughputResponse ! Str { cassandra_resources_update_cassandra_table_throughput_handle(r) }, traced: true)
   }
-  let req = c.update_cassandra_table_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, update_throughput_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginUpdateCassandraTableThroughput", c.setup.pipeline.tracer)
+  let req = c.update_cassandra_table_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, update_throughput_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientUpdateCassandraTableThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraTableThroughputResponse ! Str { cassandra_resources_update_cassandra_table_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientUpdateCassandraTableThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraTableThroughputResponse ! Str { cassandra_resources_update_cassandra_table_throughput_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginMigrateCassandraTableToAutoscaleOptions: the optional parameters of CassandraResourcesClient.begin_migrate_cassandra_table_to_autoscale.
@@ -573,14 +592,16 @@ fn (c: CassandraResourcesClient) migrate_cassandra_table_to_autoscale_create_req
 /// Migrate an Azure Cosmos DB Cassandra table from manual throughput to autoscale
 pub fn (c: CassandraResourcesClient[fx]) begin_migrate_cassandra_table_to_autoscale(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, options: CassandraResourcesClientBeginMigrateCassandraTableToAutoscaleOptions = CassandraResourcesClientBeginMigrateCassandraTableToAutoscaleOptions{}) -> runtime.Poller[CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_table_to_autoscale_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_table_to_autoscale_handle(r) }, traced: true)
   }
-  let req = c.migrate_cassandra_table_to_autoscale_create_request(resource_group_name, account_name, keyspace_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginMigrateCassandraTableToAutoscale", c.setup.pipeline.tracer)
+  let req = c.migrate_cassandra_table_to_autoscale_create_request(resource_group_name, account_name, keyspace_name, table_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_table_to_autoscale_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_table_to_autoscale_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginMigrateCassandraTableToManualThroughputOptions: the optional parameters of CassandraResourcesClient.begin_migrate_cassandra_table_to_manual_throughput.
@@ -630,14 +651,16 @@ fn (c: CassandraResourcesClient) migrate_cassandra_table_to_manual_throughput_cr
 /// Migrate an Azure Cosmos DB Cassandra table from autoscale to manual throughput
 pub fn (c: CassandraResourcesClient[fx]) begin_migrate_cassandra_table_to_manual_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, table_name: Str, options: CassandraResourcesClientBeginMigrateCassandraTableToManualThroughputOptions = CassandraResourcesClientBeginMigrateCassandraTableToManualThroughputOptions{}) -> runtime.Poller[CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_table_to_manual_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_table_to_manual_throughput_handle(r) }, traced: true)
   }
-  let req = c.migrate_cassandra_table_to_manual_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginMigrateCassandraTableToManualThroughput", c.setup.pipeline.tracer)
+  let req = c.migrate_cassandra_table_to_manual_throughput_create_request(resource_group_name, account_name, keyspace_name, table_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_table_to_manual_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraTableToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_table_to_manual_throughput_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientGetCassandraKeyspaceThroughputOptions: the optional parameters of CassandraResourcesClient.get_cassandra_keyspace_throughput.
@@ -679,12 +702,15 @@ fn (c: CassandraResourcesClient) get_cassandra_keyspace_throughput_create_reques
 
 /// Gets the RUs per second of the Cassandra Keyspace under an existing Azure Cosmos DB database account with the provided name.
 pub fn (c: CassandraResourcesClient) get_cassandra_keyspace_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientGetCassandraKeyspaceThroughputOptions = CassandraResourcesClientGetCassandraKeyspaceThroughputOptions{}) -> CassandraResourcesClientGetCassandraKeyspaceThroughputResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_keyspace_throughput_create_request(resource_group_name, account_name, keyspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraKeyspaceThroughput", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_keyspace_throughput_create_request(resource_group_name, account_name, keyspace_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_keyspace_throughput_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_keyspace_throughput_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginUpdateCassandraKeyspaceThroughputOptions: the optional parameters of CassandraResourcesClient.begin_update_cassandra_keyspace_throughput.
@@ -731,14 +757,16 @@ fn (c: CassandraResourcesClient) update_cassandra_keyspace_throughput_create_req
 /// Update RUs per second of an Azure Cosmos DB Cassandra Keyspace
 pub fn (c: CassandraResourcesClient[fx]) begin_update_cassandra_keyspace_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, update_throughput_parameters: ThroughputSettingsUpdateParameters, options: CassandraResourcesClientBeginUpdateCassandraKeyspaceThroughputOptions = CassandraResourcesClientBeginUpdateCassandraKeyspaceThroughputOptions{}) -> runtime.Poller[CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse ! Str { cassandra_resources_update_cassandra_keyspace_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse ! Str { cassandra_resources_update_cassandra_keyspace_throughput_handle(r) }, traced: true)
   }
-  let req = c.update_cassandra_keyspace_throughput_create_request(resource_group_name, account_name, keyspace_name, update_throughput_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginUpdateCassandraKeyspaceThroughput", c.setup.pipeline.tracer)
+  let req = c.update_cassandra_keyspace_throughput_create_request(resource_group_name, account_name, keyspace_name, update_throughput_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse ! Str { cassandra_resources_update_cassandra_keyspace_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientUpdateCassandraKeyspaceThroughputResponse ! Str { cassandra_resources_update_cassandra_keyspace_throughput_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginMigrateCassandraKeyspaceToAutoscaleOptions: the optional parameters of CassandraResourcesClient.begin_migrate_cassandra_keyspace_to_autoscale.
@@ -784,14 +812,16 @@ fn (c: CassandraResourcesClient) migrate_cassandra_keyspace_to_autoscale_create_
 /// Migrate an Azure Cosmos DB Cassandra Keyspace from manual throughput to autoscale
 pub fn (c: CassandraResourcesClient[fx]) begin_migrate_cassandra_keyspace_to_autoscale(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientBeginMigrateCassandraKeyspaceToAutoscaleOptions = CassandraResourcesClientBeginMigrateCassandraKeyspaceToAutoscaleOptions{}) -> runtime.Poller[CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_autoscale_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_autoscale_handle(r) }, traced: true)
   }
-  let req = c.migrate_cassandra_keyspace_to_autoscale_create_request(resource_group_name, account_name, keyspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginMigrateCassandraKeyspaceToAutoscale", c.setup.pipeline.tracer)
+  let req = c.migrate_cassandra_keyspace_to_autoscale_create_request(resource_group_name, account_name, keyspace_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_autoscale_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToAutoscaleResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_autoscale_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginMigrateCassandraKeyspaceToManualThroughputOptions: the optional parameters of CassandraResourcesClient.begin_migrate_cassandra_keyspace_to_manual_throughput.
@@ -837,14 +867,16 @@ fn (c: CassandraResourcesClient) migrate_cassandra_keyspace_to_manual_throughput
 /// Migrate an Azure Cosmos DB Cassandra Keyspace from autoscale to manual throughput
 pub fn (c: CassandraResourcesClient[fx]) begin_migrate_cassandra_keyspace_to_manual_throughput(resource_group_name: Str, account_name: Str, keyspace_name: Str, options: CassandraResourcesClientBeginMigrateCassandraKeyspaceToManualThroughputOptions = CassandraResourcesClientBeginMigrateCassandraKeyspaceToManualThroughputOptions{}) -> runtime.Poller[CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_manual_throughput_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_manual_throughput_handle(r) }, traced: true)
   }
-  let req = c.migrate_cassandra_keyspace_to_manual_throughput_create_request(resource_group_name, account_name, keyspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginMigrateCassandraKeyspaceToManualThroughput", c.setup.pipeline.tracer)
+  let req = c.migrate_cassandra_keyspace_to_manual_throughput_create_request(resource_group_name, account_name, keyspace_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_manual_throughput_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse", fn(r: http.Response) -> CassandraResourcesClientMigrateCassandraKeyspaceToManualThroughputResponse ! Str { cassandra_resources_migrate_cassandra_keyspace_to_manual_throughput_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientListCassandraRoleAssignmentsOptions: the optional parameters of CassandraResourcesClient.new_list_cassandra_role_assignments_pager.
@@ -883,7 +915,7 @@ fn (c: CassandraResourcesClient) list_cassandra_role_assignments_create_request(
 /// Retrieves the list of all Azure Cosmos DB Cassandra Role Assignments.
 pub fn (c: CassandraResourcesClient[fx]) new_list_cassandra_role_assignments_pager(resource_group_name: Str, account_name: Str, options: CassandraResourcesClientListCassandraRoleAssignmentsOptions = CassandraResourcesClientListCassandraRoleAssignmentsOptions{}) -> runtime.Pager[CassandraResourcesClientListCassandraRoleAssignmentsResponse, fx] ! azcore.CallErr {
   let req = c.list_cassandra_role_assignments_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraRoleAssignmentsResponse ! Str { cassandra_resources_list_cassandra_role_assignments_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraRoleAssignmentsResponse) -> Str? { r.cassandra_role_assignment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraRoleAssignmentsResponse ! Str { cassandra_resources_list_cassandra_role_assignments_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraRoleAssignmentsResponse) -> Str? { r.cassandra_role_assignment_list_result.next_link }).traced_as("CassandraResourcesClientListCassandraRoleAssignmentsResponse"))
 }
 
 /// CassandraResourcesClientGetCassandraRoleAssignmentOptions: the optional parameters of CassandraResourcesClient.get_cassandra_role_assignment.
@@ -925,12 +957,15 @@ fn (c: CassandraResourcesClient) get_cassandra_role_assignment_create_request(re
 
 /// Retrieves the properties of an existing Azure Cosmos DB Cassandra Role Assignment with the given Id.
 pub fn (c: CassandraResourcesClient) get_cassandra_role_assignment(resource_group_name: Str, account_name: Str, role_assignment_id: Str, options: CassandraResourcesClientGetCassandraRoleAssignmentOptions = CassandraResourcesClientGetCassandraRoleAssignmentOptions{}) -> CassandraResourcesClientGetCassandraRoleAssignmentResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraRoleAssignment", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_role_assignment_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_role_assignment_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginCreateUpdateCassandraRoleAssignmentOptions: the optional parameters of CassandraResourcesClient.begin_create_update_cassandra_role_assignment.
@@ -977,14 +1012,16 @@ fn (c: CassandraResourcesClient) create_update_cassandra_role_assignment_create_
 /// Creates or updates an Azure Cosmos DB Cassandra Role Assignment.
 pub fn (c: CassandraResourcesClient[fx]) begin_create_update_cassandra_role_assignment(resource_group_name: Str, account_name: Str, role_assignment_id: Str, create_update_cassandra_role_assignment_parameters: CassandraRoleAssignmentResource, options: CassandraResourcesClientBeginCreateUpdateCassandraRoleAssignmentOptions = CassandraResourcesClientBeginCreateUpdateCassandraRoleAssignmentOptions{}) -> runtime.Poller[CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse ! Str { cassandra_resources_create_update_cassandra_role_assignment_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse ! Str { cassandra_resources_create_update_cassandra_role_assignment_handle(r) }, traced: true)
   }
-  let req = c.create_update_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, create_update_cassandra_role_assignment_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginCreateUpdateCassandraRoleAssignment", c.setup.pipeline.tracer)
+  let req = c.create_update_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, create_update_cassandra_role_assignment_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse ! Str { cassandra_resources_create_update_cassandra_role_assignment_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleAssignmentResponse ! Str { cassandra_resources_create_update_cassandra_role_assignment_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginDeleteCassandraRoleAssignmentOptions: the optional parameters of CassandraResourcesClient.begin_delete_cassandra_role_assignment.
@@ -1027,14 +1064,16 @@ fn (c: CassandraResourcesClient) delete_cassandra_role_assignment_create_request
 /// Deletes an existing Azure Cosmos DB Cassandra Role Assignment.
 pub fn (c: CassandraResourcesClient[fx]) begin_delete_cassandra_role_assignment(resource_group_name: Str, account_name: Str, role_assignment_id: Str, options: CassandraResourcesClientBeginDeleteCassandraRoleAssignmentOptions = CassandraResourcesClientBeginDeleteCassandraRoleAssignmentOptions{}) -> runtime.Poller[CassandraResourcesClientDeleteCassandraRoleAssignmentResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleAssignmentResponse ! Str { cassandra_resources_delete_cassandra_role_assignment_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleAssignmentResponse ! Str { cassandra_resources_delete_cassandra_role_assignment_handle(r) }, traced: true)
   }
-  let req = c.delete_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginDeleteCassandraRoleAssignment", c.setup.pipeline.tracer)
+  let req = c.delete_cassandra_role_assignment_create_request(resource_group_name, account_name, role_assignment_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleAssignmentResponse ! Str { cassandra_resources_delete_cassandra_role_assignment_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraRoleAssignmentResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleAssignmentResponse ! Str { cassandra_resources_delete_cassandra_role_assignment_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientListCassandraRoleDefinitionsOptions: the optional parameters of CassandraResourcesClient.new_list_cassandra_role_definitions_pager.
@@ -1073,7 +1112,7 @@ fn (c: CassandraResourcesClient) list_cassandra_role_definitions_create_request(
 /// Retrieves the list of all Azure Cosmos DB Cassandra Role Definitions.
 pub fn (c: CassandraResourcesClient[fx]) new_list_cassandra_role_definitions_pager(resource_group_name: Str, account_name: Str, options: CassandraResourcesClientListCassandraRoleDefinitionsOptions = CassandraResourcesClientListCassandraRoleDefinitionsOptions{}) -> runtime.Pager[CassandraResourcesClientListCassandraRoleDefinitionsResponse, fx] ! azcore.CallErr {
   let req = c.list_cassandra_role_definitions_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraRoleDefinitionsResponse ! Str { cassandra_resources_list_cassandra_role_definitions_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraRoleDefinitionsResponse) -> Str? { r.cassandra_role_definition_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraResourcesClientListCassandraRoleDefinitionsResponse ! Str { cassandra_resources_list_cassandra_role_definitions_handle(r) }, c.setup.endpoint, fn(r: CassandraResourcesClientListCassandraRoleDefinitionsResponse) -> Str? { r.cassandra_role_definition_list_result.next_link }).traced_as("CassandraResourcesClientListCassandraRoleDefinitionsResponse"))
 }
 
 /// CassandraResourcesClientGetCassandraRoleDefinitionOptions: the optional parameters of CassandraResourcesClient.get_cassandra_role_definition.
@@ -1115,12 +1154,15 @@ fn (c: CassandraResourcesClient) get_cassandra_role_definition_create_request(re
 
 /// Retrieves the properties of an existing Azure Cosmos DB Cassandra Role Definition with the given Id.
 pub fn (c: CassandraResourcesClient) get_cassandra_role_definition(resource_group_name: Str, account_name: Str, role_definition_id: Str, options: CassandraResourcesClientGetCassandraRoleDefinitionOptions = CassandraResourcesClientGetCassandraRoleDefinitionOptions{}) -> CassandraResourcesClientGetCassandraRoleDefinitionResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.GetCassandraRoleDefinition", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_resources_get_cassandra_role_definition_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_resources_get_cassandra_role_definition_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraResourcesClientBeginCreateUpdateCassandraRoleDefinitionOptions: the optional parameters of CassandraResourcesClient.begin_create_update_cassandra_role_definition.
@@ -1167,14 +1209,16 @@ fn (c: CassandraResourcesClient) create_update_cassandra_role_definition_create_
 /// Creates or updates an Azure Cosmos DB Cassandra Role Definition.
 pub fn (c: CassandraResourcesClient[fx]) begin_create_update_cassandra_role_definition(resource_group_name: Str, account_name: Str, role_definition_id: Str, create_update_cassandra_role_definition_parameters: CassandraRoleDefinitionResource, options: CassandraResourcesClientBeginCreateUpdateCassandraRoleDefinitionOptions = CassandraResourcesClientBeginCreateUpdateCassandraRoleDefinitionOptions{}) -> runtime.Poller[CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse ! Str { cassandra_resources_create_update_cassandra_role_definition_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse ! Str { cassandra_resources_create_update_cassandra_role_definition_handle(r) }, traced: true)
   }
-  let req = c.create_update_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, create_update_cassandra_role_definition_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginCreateUpdateCassandraRoleDefinition", c.setup.pipeline.tracer)
+  let req = c.create_update_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, create_update_cassandra_role_definition_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse ! Str { cassandra_resources_create_update_cassandra_role_definition_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientCreateUpdateCassandraRoleDefinitionResponse ! Str { cassandra_resources_create_update_cassandra_role_definition_handle(r) }, traced: true)
 }
 
 /// CassandraResourcesClientBeginDeleteCassandraRoleDefinitionOptions: the optional parameters of CassandraResourcesClient.begin_delete_cassandra_role_definition.
@@ -1217,12 +1261,14 @@ fn (c: CassandraResourcesClient) delete_cassandra_role_definition_create_request
 /// Deletes an existing Azure Cosmos DB Cassandra Role Definition.
 pub fn (c: CassandraResourcesClient[fx]) begin_delete_cassandra_role_definition(resource_group_name: Str, account_name: Str, role_definition_id: Str, options: CassandraResourcesClientBeginDeleteCassandraRoleDefinitionOptions = CassandraResourcesClientBeginDeleteCassandraRoleDefinitionOptions{}) -> runtime.Poller[CassandraResourcesClientDeleteCassandraRoleDefinitionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleDefinitionResponse ! Str { cassandra_resources_delete_cassandra_role_definition_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraResourcesClientDeleteCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleDefinitionResponse ! Str { cassandra_resources_delete_cassandra_role_definition_handle(r) }, traced: true)
   }
-  let req = c.delete_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraResourcesClient.BeginDeleteCassandraRoleDefinition", c.setup.pipeline.tracer)
+  let req = c.delete_cassandra_role_definition_create_request(resource_group_name, account_name, role_definition_id, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleDefinitionResponse ! Str { cassandra_resources_delete_cassandra_role_definition_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraResourcesClientDeleteCassandraRoleDefinitionResponse", fn(r: http.Response) -> CassandraResourcesClientDeleteCassandraRoleDefinitionResponse ! Str { cassandra_resources_delete_cassandra_role_definition_handle(r) }, traced: true)
 }

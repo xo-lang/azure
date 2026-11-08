@@ -49,7 +49,7 @@ fn (c: LoadBalancersClient) list_all_create_request(options: LoadBalancersClient
 /// Gets all the load balancers in a subscription.
 pub fn (c: LoadBalancersClient[fx]) new_list_all_pager(options: LoadBalancersClientListAllOptions = LoadBalancersClientListAllOptions{}) -> runtime.Pager[LoadBalancersClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListAllResponse ! Str { load_balancers_list_all_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListAllResponse) -> Str? { r.load_balancer_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListAllResponse ! Str { load_balancers_list_all_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListAllResponse) -> Str? { r.load_balancer_list_result.next_link }).traced_as("LoadBalancersClientListAllResponse"))
 }
 
 /// LoadBalancersClientBeginSwapPublicIPAddressesOptions: the optional parameters of LoadBalancersClient.begin_swap_public_ip_addresses.
@@ -85,14 +85,16 @@ fn (c: LoadBalancersClient) swap_public_ip_addresses_create_request(location: St
 /// Swaps VIPs between two load balancers.
 pub fn (c: LoadBalancersClient[fx]) begin_swap_public_ip_addresses(location: Str, parameters: LoadBalancerVipSwapRequest, options: LoadBalancersClientBeginSwapPublicIPAddressesOptions = LoadBalancersClientBeginSwapPublicIPAddressesOptions{}) -> runtime.Poller[LoadBalancersClientSwapPublicIPAddressesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientSwapPublicIPAddressesResponse", fn(r: http.Response) -> LoadBalancersClientSwapPublicIPAddressesResponse ! Str { load_balancers_swap_public_ip_addresses_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientSwapPublicIPAddressesResponse", fn(r: http.Response) -> LoadBalancersClientSwapPublicIPAddressesResponse ! Str { load_balancers_swap_public_ip_addresses_handle(r) }, traced: true)
   }
-  let req = c.swap_public_ip_addresses_create_request(location, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.BeginSwapPublicIPAddresses", c.setup.pipeline.tracer)
+  let req = c.swap_public_ip_addresses_create_request(location, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientSwapPublicIPAddressesResponse", fn(r: http.Response) -> LoadBalancersClientSwapPublicIPAddressesResponse ! Str { load_balancers_swap_public_ip_addresses_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientSwapPublicIPAddressesResponse", fn(r: http.Response) -> LoadBalancersClientSwapPublicIPAddressesResponse ! Str { load_balancers_swap_public_ip_addresses_handle(r) }, traced: true)
 }
 
 /// LoadBalancersClientListOptions: the optional parameters of LoadBalancersClient.new_list_pager.
@@ -127,7 +129,7 @@ fn (c: LoadBalancersClient) list_create_request(resource_group_name: Str, option
 /// Gets all the load balancers in a resource group.
 pub fn (c: LoadBalancersClient[fx]) new_list_pager(resource_group_name: Str, options: LoadBalancersClientListOptions = LoadBalancersClientListOptions{}) -> runtime.Pager[LoadBalancersClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListResponse ! Str { load_balancers_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListResponse) -> Str? { r.load_balancer_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LoadBalancersClientListResponse ! Str { load_balancers_list_handle(r) }, c.setup.endpoint, fn(r: LoadBalancersClientListResponse) -> Str? { r.load_balancer_list_result.next_link }).traced_as("LoadBalancersClientListResponse"))
 }
 
 /// LoadBalancersClientGetOptions: the optional parameters of LoadBalancersClient.get.
@@ -176,12 +178,15 @@ fn (c: LoadBalancersClient) get_create_request(resource_group_name: Str, load_ba
 
 /// Gets the specified load balancer.
 pub fn (c: LoadBalancersClient) get(resource_group_name: Str, load_balancer_name: Str, options: LoadBalancersClientGetOptions = LoadBalancersClientGetOptions{}) -> LoadBalancersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, load_balancer_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, load_balancer_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancers_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancers_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LoadBalancersClientBeginCreateOrUpdateOptions: the optional parameters of LoadBalancersClient.begin_create_or_update.
@@ -224,14 +229,16 @@ fn (c: LoadBalancersClient) create_or_update_create_request(resource_group_name:
 /// Creates or updates a load balancer.
 pub fn (c: LoadBalancersClient[fx]) begin_create_or_update(resource_group_name: Str, load_balancer_name: Str, parameters: LoadBalancer, options: LoadBalancersClientBeginCreateOrUpdateOptions = LoadBalancersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[LoadBalancersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, load_balancer_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, load_balancer_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientCreateOrUpdateResponse", fn(r: http.Response) -> LoadBalancersClientCreateOrUpdateResponse ! Str { load_balancers_create_or_update_handle(r) }, traced: true)
 }
 
 /// LoadBalancersClientUpdateTagsOptions: the optional parameters of LoadBalancersClient.update_tags.
@@ -270,12 +277,15 @@ fn (c: LoadBalancersClient) update_tags_create_request(resource_group_name: Str,
 
 /// Updates a load balancer tags.
 pub fn (c: LoadBalancersClient) update_tags(resource_group_name: Str, load_balancer_name: Str, parameters: TagsObject, options: LoadBalancersClientUpdateTagsOptions = LoadBalancersClientUpdateTagsOptions{}) -> LoadBalancersClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, load_balancer_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, load_balancer_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancers_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancers_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// LoadBalancersClientBeginDeleteOptions: the optional parameters of LoadBalancersClient.begin_delete.
@@ -314,14 +324,16 @@ fn (c: LoadBalancersClient) delete_create_request(resource_group_name: Str, load
 /// Deletes the specified load balancer.
 pub fn (c: LoadBalancersClient[fx]) begin_delete(resource_group_name: Str, load_balancer_name: Str, options: LoadBalancersClientBeginDeleteOptions = LoadBalancersClientBeginDeleteOptions{}) -> runtime.Poller[LoadBalancersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientDeleteResponse", fn(r: http.Response) -> LoadBalancersClientDeleteResponse ! Str { load_balancers_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientDeleteResponse", fn(r: http.Response) -> LoadBalancersClientDeleteResponse ! Str { load_balancers_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, load_balancer_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, load_balancer_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientDeleteResponse", fn(r: http.Response) -> LoadBalancersClientDeleteResponse ! Str { load_balancers_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientDeleteResponse", fn(r: http.Response) -> LoadBalancersClientDeleteResponse ! Str { load_balancers_delete_handle(r) }, traced: true)
 }
 
 /// LoadBalancersClientBeginListInboundNatRulePortMappingsOptions: the optional parameters of LoadBalancersClient.begin_list_inbound_nat_rule_port_mappings.
@@ -368,14 +380,16 @@ fn (c: LoadBalancersClient) list_inbound_nat_rule_port_mappings_create_request(g
 /// List of inbound NAT rule port mappings.
 pub fn (c: LoadBalancersClient[fx]) begin_list_inbound_nat_rule_port_mappings(group_name: Str, load_balancer_name: Str, backend_pool_name: Str, parameters: QueryInboundNatRulePortMappingRequest, options: LoadBalancersClientBeginListInboundNatRulePortMappingsOptions = LoadBalancersClientBeginListInboundNatRulePortMappingsOptions{}) -> runtime.Poller[LoadBalancersClientListInboundNatRulePortMappingsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientListInboundNatRulePortMappingsResponse", fn(r: http.Response) -> LoadBalancersClientListInboundNatRulePortMappingsResponse ! Str { load_balancers_list_inbound_nat_rule_port_mappings_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "LoadBalancersClientListInboundNatRulePortMappingsResponse", fn(r: http.Response) -> LoadBalancersClientListInboundNatRulePortMappingsResponse ! Str { load_balancers_list_inbound_nat_rule_port_mappings_handle(r) }, traced: true)
   }
-  let req = c.list_inbound_nat_rule_port_mappings_create_request(group_name, load_balancer_name, backend_pool_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.BeginListInboundNatRulePortMappings", c.setup.pipeline.tracer)
+  let req = c.list_inbound_nat_rule_port_mappings_create_request(group_name, load_balancer_name, backend_pool_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientListInboundNatRulePortMappingsResponse", fn(r: http.Response) -> LoadBalancersClientListInboundNatRulePortMappingsResponse ! Str { load_balancers_list_inbound_nat_rule_port_mappings_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "LoadBalancersClientListInboundNatRulePortMappingsResponse", fn(r: http.Response) -> LoadBalancersClientListInboundNatRulePortMappingsResponse ! Str { load_balancers_list_inbound_nat_rule_port_mappings_handle(r) }, traced: true)
 }
 
 /// LoadBalancersClientMigrateToIPBasedOptions: the optional parameters of LoadBalancersClient.migrate_to_ip_based.
@@ -421,10 +435,13 @@ fn (c: LoadBalancersClient) migrate_to_ip_based_create_request(group_name: Str, 
 
 /// Migrate load balancer to IP Based
 pub fn (c: LoadBalancersClient) migrate_to_ip_based(group_name: Str, load_balancer_name: Str, options: LoadBalancersClientMigrateToIPBasedOptions = LoadBalancersClientMigrateToIPBasedOptions{}) -> LoadBalancersClientMigrateToIPBasedResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.migrate_to_ip_based_create_request(group_name, load_balancer_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LoadBalancersClient.MigrateToIPBased", c.setup.pipeline.tracer)
+  let req = sp.on(c.migrate_to_ip_based_create_request(group_name, load_balancer_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  load_balancers_migrate_to_ip_based_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = load_balancers_migrate_to_ip_based_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

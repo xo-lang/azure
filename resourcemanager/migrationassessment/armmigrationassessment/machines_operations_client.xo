@@ -78,7 +78,7 @@ fn (c: MachinesOperationsClient) list_by_assessment_project_create_request(resou
 /// List Machine resources by AssessmentProject
 pub fn (c: MachinesOperationsClient[fx]) new_list_by_assessment_project_pager(resource_group_name: Str, project_name: Str, options: MachinesOperationsClientListByAssessmentProjectOptions = MachinesOperationsClientListByAssessmentProjectOptions{}) -> runtime.Pager[MachinesOperationsClientListByAssessmentProjectResponse, fx] ! azcore.CallErr {
   let req = c.list_by_assessment_project_create_request(resource_group_name, project_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MachinesOperationsClientListByAssessmentProjectResponse ! Str { machines_operations_list_by_assessment_project_handle(r) }, fn(r: MachinesOperationsClientListByAssessmentProjectResponse) -> Str? { r.machine_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> MachinesOperationsClientListByAssessmentProjectResponse ! Str { machines_operations_list_by_assessment_project_handle(r) }, fn(r: MachinesOperationsClientListByAssessmentProjectResponse) -> Str? { r.machine_list_result.next_link }).traced_as("MachinesOperationsClientListByAssessmentProjectResponse"))
 }
 
 /// MachinesOperationsClientGetOptions: the optional parameters of MachinesOperationsClient.get.
@@ -120,10 +120,13 @@ fn (c: MachinesOperationsClient) get_create_request(resource_group_name: Str, pr
 
 /// Get a Machine
 pub fn (c: MachinesOperationsClient) get(resource_group_name: Str, project_name: Str, machine_name: Str, options: MachinesOperationsClientGetOptions = MachinesOperationsClientGetOptions{}) -> MachinesOperationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, project_name, machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "MachinesOperationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, project_name, machine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  machines_operations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = machines_operations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -58,7 +58,7 @@ fn (c: VirtualMachineTemplatesClient) list_create_request(pc_name: Str, region_i
 /// Returns list of virtual machine templates in region for private cloud
 pub fn (c: VirtualMachineTemplatesClient[fx]) new_list_pager(pc_name: Str, region_id: Str, resource_pool_name: Str, options: VirtualMachineTemplatesClientListOptions = VirtualMachineTemplatesClientListOptions{}) -> runtime.Pager[VirtualMachineTemplatesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(pc_name, region_id, resource_pool_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachineTemplatesClientListResponse ! Str { virtual_machine_templates_list_handle(r) }, fn(r: VirtualMachineTemplatesClientListResponse) -> Str? { r.virtual_machine_template_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachineTemplatesClientListResponse ! Str { virtual_machine_templates_list_handle(r) }, fn(r: VirtualMachineTemplatesClientListResponse) -> Str? { r.virtual_machine_template_list_response.next_link }).traced_as("VirtualMachineTemplatesClientListResponse"))
 }
 
 /// VirtualMachineTemplatesClientGetOptions: the optional parameters of VirtualMachineTemplatesClient.get.
@@ -100,10 +100,13 @@ fn (c: VirtualMachineTemplatesClient) get_create_request(region_id: Str, pc_name
 
 /// Returns virtual machine templates by its name
 pub fn (c: VirtualMachineTemplatesClient) get(region_id: Str, pc_name: Str, virtual_machine_template_name: Str, options: VirtualMachineTemplatesClientGetOptions = VirtualMachineTemplatesClientGetOptions{}) -> VirtualMachineTemplatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(region_id, pc_name, virtual_machine_template_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachineTemplatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(region_id, pc_name, virtual_machine_template_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machine_templates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machine_templates_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

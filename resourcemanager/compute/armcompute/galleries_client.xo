@@ -49,7 +49,7 @@ fn (c: GalleriesClient) list_create_request(options: GalleriesClientListOptions)
 /// List galleries under a subscription.
 pub fn (c: GalleriesClient[fx]) new_list_pager(options: GalleriesClientListOptions = GalleriesClientListOptions{}) -> runtime.Pager[GalleriesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GalleriesClientListResponse ! Str { galleries_list_handle(r) }, c.setup.endpoint, fn(r: GalleriesClientListResponse) -> Str? { r.gallery_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GalleriesClientListResponse ! Str { galleries_list_handle(r) }, c.setup.endpoint, fn(r: GalleriesClientListResponse) -> Str? { r.gallery_list.next_link }).traced_as("GalleriesClientListResponse"))
 }
 
 /// GalleriesClientListByResourceGroupOptions: the optional parameters of GalleriesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: GalleriesClient) list_by_resource_group_create_request(resource_group_nam
 /// List galleries under a resource group.
 pub fn (c: GalleriesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: GalleriesClientListByResourceGroupOptions = GalleriesClientListByResourceGroupOptions{}) -> runtime.Pager[GalleriesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GalleriesClientListByResourceGroupResponse ! Str { galleries_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GalleriesClientListByResourceGroupResponse) -> Str? { r.gallery_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GalleriesClientListByResourceGroupResponse ! Str { galleries_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GalleriesClientListByResourceGroupResponse) -> Str? { r.gallery_list.next_link }).traced_as("GalleriesClientListByResourceGroupResponse"))
 }
 
 /// GalleriesClientGetOptions: the optional parameters of GalleriesClient.get.
@@ -133,12 +133,15 @@ fn (c: GalleriesClient) get_create_request(resource_group_name: Str, gallery_nam
 
 /// Retrieves information about a Shared Image Gallery.
 pub fn (c: GalleriesClient) get(resource_group_name: Str, gallery_name: Str, options: GalleriesClientGetOptions = GalleriesClientGetOptions{}) -> GalleriesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, gallery_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GalleriesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, gallery_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  galleries_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = galleries_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// GalleriesClientBeginCreateOrUpdateOptions: the optional parameters of GalleriesClient.begin_create_or_update.
@@ -181,14 +184,16 @@ fn (c: GalleriesClient) create_or_update_create_request(resource_group_name: Str
 /// Create or update a Shared Image Gallery.
 pub fn (c: GalleriesClient[fx]) begin_create_or_update(resource_group_name: Str, gallery_name: Str, gallery: Gallery, options: GalleriesClientBeginCreateOrUpdateOptions = GalleriesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[GalleriesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientCreateOrUpdateResponse", fn(r: http.Response) -> GalleriesClientCreateOrUpdateResponse ! Str { galleries_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientCreateOrUpdateResponse", fn(r: http.Response) -> GalleriesClientCreateOrUpdateResponse ! Str { galleries_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, gallery_name, gallery, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GalleriesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, gallery_name, gallery, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientCreateOrUpdateResponse", fn(r: http.Response) -> GalleriesClientCreateOrUpdateResponse ! Str { galleries_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientCreateOrUpdateResponse", fn(r: http.Response) -> GalleriesClientCreateOrUpdateResponse ! Str { galleries_create_or_update_handle(r) }, traced: true)
 }
 
 /// GalleriesClientBeginUpdateOptions: the optional parameters of GalleriesClient.begin_update.
@@ -231,14 +236,16 @@ fn (c: GalleriesClient) update_create_request(resource_group_name: Str, gallery_
 /// Update a Shared Image Gallery.
 pub fn (c: GalleriesClient[fx]) begin_update(resource_group_name: Str, gallery_name: Str, gallery: GalleryUpdate, options: GalleriesClientBeginUpdateOptions = GalleriesClientBeginUpdateOptions{}) -> runtime.Poller[GalleriesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientUpdateResponse", fn(r: http.Response) -> GalleriesClientUpdateResponse ! Str { galleries_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientUpdateResponse", fn(r: http.Response) -> GalleriesClientUpdateResponse ! Str { galleries_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, gallery_name, gallery, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GalleriesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, gallery_name, gallery, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientUpdateResponse", fn(r: http.Response) -> GalleriesClientUpdateResponse ! Str { galleries_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientUpdateResponse", fn(r: http.Response) -> GalleriesClientUpdateResponse ! Str { galleries_update_handle(r) }, traced: true)
 }
 
 /// GalleriesClientBeginDeleteOptions: the optional parameters of GalleriesClient.begin_delete.
@@ -277,12 +284,14 @@ fn (c: GalleriesClient) delete_create_request(resource_group_name: Str, gallery_
 /// Delete a Shared Image Gallery.
 pub fn (c: GalleriesClient[fx]) begin_delete(resource_group_name: Str, gallery_name: Str, options: GalleriesClientBeginDeleteOptions = GalleriesClientBeginDeleteOptions{}) -> runtime.Poller[GalleriesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientDeleteResponse", fn(r: http.Response) -> GalleriesClientDeleteResponse ! Str { galleries_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GalleriesClientDeleteResponse", fn(r: http.Response) -> GalleriesClientDeleteResponse ! Str { galleries_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, gallery_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GalleriesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, gallery_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientDeleteResponse", fn(r: http.Response) -> GalleriesClientDeleteResponse ! Str { galleries_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GalleriesClientDeleteResponse", fn(r: http.Response) -> GalleriesClientDeleteResponse ! Str { galleries_delete_handle(r) }, traced: true)
 }

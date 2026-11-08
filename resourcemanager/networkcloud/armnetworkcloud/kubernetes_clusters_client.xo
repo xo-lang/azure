@@ -60,7 +60,7 @@ fn (c: KubernetesClustersClient) list_by_subscription_create_request(options: Ku
 /// Get a list of Kubernetes clusters in the provided subscription.
 pub fn (c: KubernetesClustersClient[fx]) new_list_by_subscription_pager(options: KubernetesClustersClientListBySubscriptionOptions = KubernetesClustersClientListBySubscriptionOptions{}) -> runtime.Pager[KubernetesClustersClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesClustersClientListBySubscriptionResponse ! Str { kubernetes_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: KubernetesClustersClientListBySubscriptionResponse) -> Str? { r.kubernetes_cluster_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesClustersClientListBySubscriptionResponse ! Str { kubernetes_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: KubernetesClustersClientListBySubscriptionResponse) -> Str? { r.kubernetes_cluster_list.next_link }).traced_as("KubernetesClustersClientListBySubscriptionResponse"))
 }
 
 /// KubernetesClustersClientListByResourceGroupOptions: the optional parameters of KubernetesClustersClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: KubernetesClustersClient) list_by_resource_group_create_request(resource_
 /// Get a list of Kubernetes clusters in the provided resource group.
 pub fn (c: KubernetesClustersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: KubernetesClustersClientListByResourceGroupOptions = KubernetesClustersClientListByResourceGroupOptions{}) -> runtime.Pager[KubernetesClustersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesClustersClientListByResourceGroupResponse ! Str { kubernetes_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: KubernetesClustersClientListByResourceGroupResponse) -> Str? { r.kubernetes_cluster_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesClustersClientListByResourceGroupResponse ! Str { kubernetes_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: KubernetesClustersClientListByResourceGroupResponse) -> Str? { r.kubernetes_cluster_list.next_link }).traced_as("KubernetesClustersClientListByResourceGroupResponse"))
 }
 
 /// KubernetesClustersClientGetOptions: the optional parameters of KubernetesClustersClient.get.
@@ -144,12 +144,15 @@ fn (c: KubernetesClustersClient) get_create_request(resource_group_name: Str, ku
 
 /// Get properties of the provided the Kubernetes cluster.
 pub fn (c: KubernetesClustersClient) get(resource_group_name: Str, kubernetes_cluster_name: Str, options: KubernetesClustersClientGetOptions = KubernetesClustersClientGetOptions{}) -> KubernetesClustersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, kubernetes_cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesClustersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, kubernetes_cluster_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  kubernetes_clusters_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = kubernetes_clusters_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// KubernetesClustersClientBeginCreateOrUpdateOptions: the optional parameters of KubernetesClustersClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: KubernetesClustersClient) create_or_update_create_request(resource_group_
 /// Create a new Kubernetes cluster or update the properties of the existing one.
 pub fn (c: KubernetesClustersClient[fx]) begin_create_or_update(resource_group_name: Str, kubernetes_cluster_name: Str, kubernetes_cluster_parameters: KubernetesCluster, options: KubernetesClustersClientBeginCreateOrUpdateOptions = KubernetesClustersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[KubernetesClustersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientCreateOrUpdateResponse ! Str { kubernetes_clusters_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientCreateOrUpdateResponse ! Str { kubernetes_clusters_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesClustersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientCreateOrUpdateResponse ! Str { kubernetes_clusters_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientCreateOrUpdateResponse ! Str { kubernetes_clusters_create_or_update_handle(r) }, traced: true)
 }
 
 /// KubernetesClustersClientBeginUpdateOptions: the optional parameters of KubernetesClustersClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: KubernetesClustersClient) update_create_request(resource_group_name: Str,
 /// Patch the properties of the provided Kubernetes cluster, or update the tags associated with the Kubernetes cluster. Properties and tag updates can be done independently.
 pub fn (c: KubernetesClustersClient[fx]) begin_update(resource_group_name: Str, kubernetes_cluster_name: Str, kubernetes_cluster_update_parameters: KubernetesClusterPatchParameters, options: KubernetesClustersClientBeginUpdateOptions = KubernetesClustersClientBeginUpdateOptions{}) -> runtime.Poller[KubernetesClustersClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientUpdateResponse ! Str { kubernetes_clusters_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientUpdateResponse ! Str { kubernetes_clusters_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesClustersClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientUpdateResponse ! Str { kubernetes_clusters_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientUpdateResponse", fn(r: http.Response) -> KubernetesClustersClientUpdateResponse ! Str { kubernetes_clusters_update_handle(r) }, traced: true)
 }
 
 /// KubernetesClustersClientBeginDeleteOptions: the optional parameters of KubernetesClustersClient.begin_delete.
@@ -321,14 +328,16 @@ fn (c: KubernetesClustersClient) delete_create_request(resource_group_name: Str,
 /// Delete the provided Kubernetes cluster.
 pub fn (c: KubernetesClustersClient[fx]) begin_delete(resource_group_name: Str, kubernetes_cluster_name: Str, options: KubernetesClustersClientBeginDeleteOptions = KubernetesClustersClientBeginDeleteOptions{}) -> runtime.Poller[KubernetesClustersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientDeleteResponse", fn(r: http.Response) -> KubernetesClustersClientDeleteResponse ! Str { kubernetes_clusters_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientDeleteResponse", fn(r: http.Response) -> KubernetesClustersClientDeleteResponse ! Str { kubernetes_clusters_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, kubernetes_cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesClustersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, kubernetes_cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientDeleteResponse", fn(r: http.Response) -> KubernetesClustersClientDeleteResponse ! Str { kubernetes_clusters_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientDeleteResponse", fn(r: http.Response) -> KubernetesClustersClientDeleteResponse ! Str { kubernetes_clusters_delete_handle(r) }, traced: true)
 }
 
 /// KubernetesClustersClientBeginRestartNodeOptions: the optional parameters of KubernetesClustersClient.begin_restart_node.
@@ -371,12 +380,14 @@ fn (c: KubernetesClustersClient) restart_node_create_request(resource_group_name
 /// Restart a targeted node of a Kubernetes cluster.
 pub fn (c: KubernetesClustersClient[fx]) begin_restart_node(resource_group_name: Str, kubernetes_cluster_name: Str, kubernetes_cluster_restart_node_parameters: KubernetesClusterRestartNodeParameters, options: KubernetesClustersClientBeginRestartNodeOptions = KubernetesClustersClientBeginRestartNodeOptions{}) -> runtime.Poller[KubernetesClustersClientRestartNodeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientRestartNodeResponse", fn(r: http.Response) -> KubernetesClustersClientRestartNodeResponse ! Str { kubernetes_clusters_restart_node_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesClustersClientRestartNodeResponse", fn(r: http.Response) -> KubernetesClustersClientRestartNodeResponse ! Str { kubernetes_clusters_restart_node_handle(r) }, traced: true)
   }
-  let req = c.restart_node_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_restart_node_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesClustersClient.BeginRestartNode", c.setup.pipeline.tracer)
+  let req = c.restart_node_create_request(resource_group_name, kubernetes_cluster_name, kubernetes_cluster_restart_node_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientRestartNodeResponse", fn(r: http.Response) -> KubernetesClustersClientRestartNodeResponse ! Str { kubernetes_clusters_restart_node_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesClustersClientRestartNodeResponse", fn(r: http.Response) -> KubernetesClustersClientRestartNodeResponse ! Str { kubernetes_clusters_restart_node_handle(r) }, traced: true)
 }

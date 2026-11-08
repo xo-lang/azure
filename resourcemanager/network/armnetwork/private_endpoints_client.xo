@@ -49,7 +49,7 @@ fn (c: PrivateEndpointsClient) list_by_subscription_create_request(options: Priv
 /// Gets all private endpoints in a subscription.
 pub fn (c: PrivateEndpointsClient[fx]) new_list_by_subscription_pager(options: PrivateEndpointsClientListBySubscriptionOptions = PrivateEndpointsClientListBySubscriptionOptions{}) -> runtime.Pager[PrivateEndpointsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateEndpointsClientListBySubscriptionResponse ! Str { private_endpoints_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PrivateEndpointsClientListBySubscriptionResponse) -> Str? { r.private_endpoint_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateEndpointsClientListBySubscriptionResponse ! Str { private_endpoints_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: PrivateEndpointsClientListBySubscriptionResponse) -> Str? { r.private_endpoint_list_result.next_link }).traced_as("PrivateEndpointsClientListBySubscriptionResponse"))
 }
 
 /// PrivateEndpointsClientListOptions: the optional parameters of PrivateEndpointsClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: PrivateEndpointsClient) list_create_request(resource_group_name: Str, opt
 /// Gets all private endpoints in a resource group.
 pub fn (c: PrivateEndpointsClient[fx]) new_list_pager(resource_group_name: Str, options: PrivateEndpointsClientListOptions = PrivateEndpointsClientListOptions{}) -> runtime.Pager[PrivateEndpointsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateEndpointsClientListResponse ! Str { private_endpoints_list_handle(r) }, c.setup.endpoint, fn(r: PrivateEndpointsClientListResponse) -> Str? { r.private_endpoint_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PrivateEndpointsClientListResponse ! Str { private_endpoints_list_handle(r) }, c.setup.endpoint, fn(r: PrivateEndpointsClientListResponse) -> Str? { r.private_endpoint_list_result.next_link }).traced_as("PrivateEndpointsClientListResponse"))
 }
 
 /// PrivateEndpointsClientGetOptions: the optional parameters of PrivateEndpointsClient.get.
@@ -128,12 +128,15 @@ fn (c: PrivateEndpointsClient) get_create_request(resource_group_name: Str, priv
 
 /// Gets the specified private endpoint by resource group.
 pub fn (c: PrivateEndpointsClient) get(resource_group_name: Str, private_endpoint_name: Str, options: PrivateEndpointsClientGetOptions = PrivateEndpointsClientGetOptions{}) -> PrivateEndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, private_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateEndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, private_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  private_endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = private_endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// PrivateEndpointsClientBeginCreateOrUpdateOptions: the optional parameters of PrivateEndpointsClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: PrivateEndpointsClient) create_or_update_create_request(resource_group_na
 /// Creates or updates an private endpoint in the specified resource group.
 pub fn (c: PrivateEndpointsClient[fx]) begin_create_or_update(resource_group_name: Str, private_endpoint_name: Str, parameters: PrivateEndpoint, options: PrivateEndpointsClientBeginCreateOrUpdateOptions = PrivateEndpointsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[PrivateEndpointsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateEndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateEndpointsClientCreateOrUpdateResponse ! Str { private_endpoints_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateEndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateEndpointsClientCreateOrUpdateResponse ! Str { private_endpoints_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, private_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateEndpointsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, private_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateEndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateEndpointsClientCreateOrUpdateResponse ! Str { private_endpoints_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateEndpointsClientCreateOrUpdateResponse", fn(r: http.Response) -> PrivateEndpointsClientCreateOrUpdateResponse ! Str { private_endpoints_create_or_update_handle(r) }, traced: true)
 }
 
 /// PrivateEndpointsClientBeginDeleteOptions: the optional parameters of PrivateEndpointsClient.begin_delete.
@@ -222,12 +227,14 @@ fn (c: PrivateEndpointsClient) delete_create_request(resource_group_name: Str, p
 /// Deletes the specified private endpoint.
 pub fn (c: PrivateEndpointsClient[fx]) begin_delete(resource_group_name: Str, private_endpoint_name: Str, options: PrivateEndpointsClientBeginDeleteOptions = PrivateEndpointsClientBeginDeleteOptions{}) -> runtime.Poller[PrivateEndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateEndpointsClientDeleteResponse", fn(r: http.Response) -> PrivateEndpointsClientDeleteResponse ! Str { private_endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "PrivateEndpointsClientDeleteResponse", fn(r: http.Response) -> PrivateEndpointsClientDeleteResponse ! Str { private_endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, private_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PrivateEndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, private_endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateEndpointsClientDeleteResponse", fn(r: http.Response) -> PrivateEndpointsClientDeleteResponse ! Str { private_endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "PrivateEndpointsClientDeleteResponse", fn(r: http.Response) -> PrivateEndpointsClientDeleteResponse ! Str { private_endpoints_delete_handle(r) }, traced: true)
 }

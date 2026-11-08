@@ -82,7 +82,7 @@ fn (c: ServiceFabricsClient) list_create_request(resource_group_name: Str, lab_n
 /// List service fabrics in a given user profile.
 pub fn (c: ServiceFabricsClient[fx]) new_list_pager(resource_group_name: Str, lab_name: Str, user_name: Str, options: ServiceFabricsClientListOptions = ServiceFabricsClientListOptions{}) -> runtime.Pager[ServiceFabricsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, lab_name, user_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceFabricsClientListResponse ! Str { service_fabrics_list_handle(r) }, fn(r: ServiceFabricsClientListResponse) -> Str? { r.service_fabric_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServiceFabricsClientListResponse ! Str { service_fabrics_list_handle(r) }, fn(r: ServiceFabricsClientListResponse) -> Str? { r.service_fabric_list.next_link }).traced_as("ServiceFabricsClientListResponse"))
 }
 
 /// ServiceFabricsClientGetOptions: the optional parameters of ServiceFabricsClient.get.
@@ -134,12 +134,15 @@ fn (c: ServiceFabricsClient) get_create_request(resource_group_name: Str, lab_na
 
 /// Get service fabric.
 pub fn (c: ServiceFabricsClient) get(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: ServiceFabricsClientGetOptions = ServiceFabricsClientGetOptions{}) -> ServiceFabricsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_fabrics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_fabrics_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceFabricsClientBeginCreateOrUpdateOptions: the optional parameters of ServiceFabricsClient.begin_create_or_update.
@@ -190,14 +193,16 @@ fn (c: ServiceFabricsClient) create_or_update_create_request(resource_group_name
 /// Create or replace an existing service fabric. This operation can take a while to complete.
 pub fn (c: ServiceFabricsClient[fx]) begin_create_or_update(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, service_fabric: ServiceFabric, options: ServiceFabricsClientBeginCreateOrUpdateOptions = ServiceFabricsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ServiceFabricsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceFabricsClientCreateOrUpdateResponse ! Str { service_fabrics_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceFabricsClientCreateOrUpdateResponse ! Str { service_fabrics_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, lab_name, user_name, name, service_fabric, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, lab_name, user_name, name, service_fabric, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceFabricsClientCreateOrUpdateResponse ! Str { service_fabrics_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientCreateOrUpdateResponse", fn(r: http.Response) -> ServiceFabricsClientCreateOrUpdateResponse ! Str { service_fabrics_create_or_update_handle(r) }, traced: true)
 }
 
 /// ServiceFabricsClientBeginDeleteOptions: the optional parameters of ServiceFabricsClient.begin_delete.
@@ -244,14 +249,16 @@ fn (c: ServiceFabricsClient) delete_create_request(resource_group_name: Str, lab
 /// Delete service fabric. This operation can take a while to complete.
 pub fn (c: ServiceFabricsClient[fx]) begin_delete(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: ServiceFabricsClientBeginDeleteOptions = ServiceFabricsClientBeginDeleteOptions{}) -> runtime.Poller[ServiceFabricsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientDeleteResponse", fn(r: http.Response) -> ServiceFabricsClientDeleteResponse ! Str { service_fabrics_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientDeleteResponse", fn(r: http.Response) -> ServiceFabricsClientDeleteResponse ! Str { service_fabrics_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientDeleteResponse", fn(r: http.Response) -> ServiceFabricsClientDeleteResponse ! Str { service_fabrics_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientDeleteResponse", fn(r: http.Response) -> ServiceFabricsClientDeleteResponse ! Str { service_fabrics_delete_handle(r) }, traced: true)
 }
 
 /// ServiceFabricsClientUpdateOptions: the optional parameters of ServiceFabricsClient.update.
@@ -298,12 +305,15 @@ fn (c: ServiceFabricsClient) update_create_request(resource_group_name: Str, lab
 
 /// Allows modifying tags of service fabrics. All other properties will be ignored.
 pub fn (c: ServiceFabricsClient) update(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, service_fabric: ServiceFabricFragment, options: ServiceFabricsClientUpdateOptions = ServiceFabricsClientUpdateOptions{}) -> ServiceFabricsClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, lab_name, user_name, name, service_fabric, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, lab_name, user_name, name, service_fabric, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_fabrics_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_fabrics_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceFabricsClientListApplicableSchedulesOptions: the optional parameters of ServiceFabricsClient.list_applicable_schedules.
@@ -349,12 +359,15 @@ fn (c: ServiceFabricsClient) list_applicable_schedules_create_request(resource_g
 
 /// Lists the applicable start/stop schedules, if any.
 pub fn (c: ServiceFabricsClient) list_applicable_schedules(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: ServiceFabricsClientListApplicableSchedulesOptions = ServiceFabricsClientListApplicableSchedulesOptions{}) -> ServiceFabricsClientListApplicableSchedulesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_applicable_schedules_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.ListApplicableSchedules", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_applicable_schedules_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  service_fabrics_list_applicable_schedules_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = service_fabrics_list_applicable_schedules_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServiceFabricsClientBeginStartOptions: the optional parameters of ServiceFabricsClient.begin_start.
@@ -401,14 +414,16 @@ fn (c: ServiceFabricsClient) start_create_request(resource_group_name: Str, lab_
 /// Start a service fabric. This operation can take a while to complete.
 pub fn (c: ServiceFabricsClient[fx]) begin_start(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: ServiceFabricsClientBeginStartOptions = ServiceFabricsClientBeginStartOptions{}) -> runtime.Poller[ServiceFabricsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientStartResponse", fn(r: http.Response) -> ServiceFabricsClientStartResponse ! Str { service_fabrics_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientStartResponse", fn(r: http.Response) -> ServiceFabricsClientStartResponse ! Str { service_fabrics_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientStartResponse", fn(r: http.Response) -> ServiceFabricsClientStartResponse ! Str { service_fabrics_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientStartResponse", fn(r: http.Response) -> ServiceFabricsClientStartResponse ! Str { service_fabrics_start_handle(r) }, traced: true)
 }
 
 /// ServiceFabricsClientBeginStopOptions: the optional parameters of ServiceFabricsClient.begin_stop.
@@ -455,12 +470,14 @@ fn (c: ServiceFabricsClient) stop_create_request(resource_group_name: Str, lab_n
 /// Stop a service fabric This operation can take a while to complete.
 pub fn (c: ServiceFabricsClient[fx]) begin_stop(resource_group_name: Str, lab_name: Str, user_name: Str, name: Str, options: ServiceFabricsClientBeginStopOptions = ServiceFabricsClientBeginStopOptions{}) -> runtime.Poller[ServiceFabricsClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientStopResponse", fn(r: http.Response) -> ServiceFabricsClientStopResponse ! Str { service_fabrics_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServiceFabricsClientStopResponse", fn(r: http.Response) -> ServiceFabricsClientStopResponse ! Str { service_fabrics_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, lab_name, user_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServiceFabricsClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, lab_name, user_name, name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientStopResponse", fn(r: http.Response) -> ServiceFabricsClientStopResponse ! Str { service_fabrics_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServiceFabricsClientStopResponse", fn(r: http.Response) -> ServiceFabricsClientStopResponse ! Str { service_fabrics_stop_handle(r) }, traced: true)
 }

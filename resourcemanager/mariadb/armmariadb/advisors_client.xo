@@ -60,12 +60,15 @@ fn (c: AdvisorsClient) get_create_request(resource_group_name: Str, server_name:
 
 /// Get a recommendation action advisor.
 pub fn (c: AdvisorsClient) get(resource_group_name: Str, server_name: Str, advisor_name: Str, options: AdvisorsClientGetOptions = AdvisorsClientGetOptions{}) -> AdvisorsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, advisor_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AdvisorsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, advisor_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  advisors_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = advisors_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AdvisorsClientListByServerOptions: the optional parameters of AdvisorsClient.new_list_by_server_pager.
@@ -104,5 +107,5 @@ fn (c: AdvisorsClient) list_by_server_create_request(resource_group_name: Str, s
 /// List recommendation action advisors.
 pub fn (c: AdvisorsClient[fx]) new_list_by_server_pager(resource_group_name: Str, server_name: Str, options: AdvisorsClientListByServerOptions = AdvisorsClientListByServerOptions{}) -> runtime.Pager[AdvisorsClientListByServerResponse, fx] ! azcore.CallErr {
   let req = c.list_by_server_create_request(resource_group_name, server_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AdvisorsClientListByServerResponse ! Str { advisors_list_by_server_handle(r) }, fn(r: AdvisorsClientListByServerResponse) -> Str? { r.advisors_result_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> AdvisorsClientListByServerResponse ! Str { advisors_list_by_server_handle(r) }, fn(r: AdvisorsClientListByServerResponse) -> Str? { r.advisors_result_list.next_link }).traced_as("AdvisorsClientListByServerResponse"))
 }

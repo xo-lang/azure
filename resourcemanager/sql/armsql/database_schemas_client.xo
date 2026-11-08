@@ -67,7 +67,7 @@ fn (c: DatabaseSchemasClient) list_by_database_create_request(resource_group_nam
 /// List database schemas
 pub fn (c: DatabaseSchemasClient[fx]) new_list_by_database_pager(resource_group_name: Str, server_name: Str, database_name: Str, options: DatabaseSchemasClientListByDatabaseOptions = DatabaseSchemasClientListByDatabaseOptions{}) -> runtime.Pager[DatabaseSchemasClientListByDatabaseResponse, fx] ! azcore.CallErr {
   let req = c.list_by_database_create_request(resource_group_name, server_name, database_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseSchemasClientListByDatabaseResponse ! Str { database_schemas_list_by_database_handle(r) }, fn(r: DatabaseSchemasClientListByDatabaseResponse) -> Str? { r.database_schema_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DatabaseSchemasClientListByDatabaseResponse ! Str { database_schemas_list_by_database_handle(r) }, fn(r: DatabaseSchemasClientListByDatabaseResponse) -> Str? { r.database_schema_list_result.next_link }).traced_as("DatabaseSchemasClientListByDatabaseResponse"))
 }
 
 /// DatabaseSchemasClientGetOptions: the optional parameters of DatabaseSchemasClient.get.
@@ -113,10 +113,13 @@ fn (c: DatabaseSchemasClient) get_create_request(resource_group_name: Str, serve
 
 /// Get database schema
 pub fn (c: DatabaseSchemasClient) get(resource_group_name: Str, server_name: Str, database_name: Str, schema_name: Str, options: DatabaseSchemasClientGetOptions = DatabaseSchemasClientGetOptions{}) -> DatabaseSchemasClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, server_name, database_name, schema_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DatabaseSchemasClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, server_name, database_name, schema_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  database_schemas_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = database_schemas_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

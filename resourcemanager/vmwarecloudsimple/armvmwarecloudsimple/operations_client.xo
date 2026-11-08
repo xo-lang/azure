@@ -45,7 +45,7 @@ fn (c: OperationsClient) list_create_request(options: OperationsClientListOption
 /// Return list of operations
 pub fn (c: OperationsClient[fx]) new_list_pager(options: OperationsClientListOptions = OperationsClientListOptions{}) -> runtime.Pager[OperationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> OperationsClientListResponse ! Str { operations_list_handle(r) }, fn(r: OperationsClientListResponse) -> Str? { r.available_operations_list_response.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> OperationsClientListResponse ! Str { operations_list_handle(r) }, fn(r: OperationsClientListResponse) -> Str? { r.available_operations_list_response.next_link }).traced_as("OperationsClientListResponse"))
 }
 
 /// OperationsClientGetOptions: the optional parameters of OperationsClient.get.
@@ -92,10 +92,13 @@ fn (c: OperationsClient) get_create_request(region_id: Str, referer: Str, operat
 
 /// Return an async operation
 pub fn (c: OperationsClient) get(region_id: Str, referer: Str, operation_id: Str, options: OperationsClientGetOptions = OperationsClientGetOptions{}) -> OperationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(region_id, referer, operation_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OperationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(region_id, referer, operation_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  operations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = operations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

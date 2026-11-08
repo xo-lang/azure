@@ -49,7 +49,7 @@ fn (c: VirtualAppliancesClient) list_create_request(options: VirtualAppliancesCl
 /// Gets all Network Virtual Appliances in a subscription.
 pub fn (c: VirtualAppliancesClient[fx]) new_list_pager(options: VirtualAppliancesClientListOptions = VirtualAppliancesClientListOptions{}) -> runtime.Pager[VirtualAppliancesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualAppliancesClientListResponse ! Str { virtual_appliances_list_handle(r) }, c.setup.endpoint, fn(r: VirtualAppliancesClientListResponse) -> Str? { r.virtual_appliance_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualAppliancesClientListResponse ! Str { virtual_appliances_list_handle(r) }, c.setup.endpoint, fn(r: VirtualAppliancesClientListResponse) -> Str? { r.virtual_appliance_list_result.next_link }).traced_as("VirtualAppliancesClientListResponse"))
 }
 
 /// VirtualAppliancesClientListByResourceGroupOptions: the optional parameters of VirtualAppliancesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VirtualAppliancesClient) list_by_resource_group_create_request(resource_g
 /// Lists all Network Virtual Appliances in a resource group.
 pub fn (c: VirtualAppliancesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VirtualAppliancesClientListByResourceGroupOptions = VirtualAppliancesClientListByResourceGroupOptions{}) -> runtime.Pager[VirtualAppliancesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualAppliancesClientListByResourceGroupResponse ! Str { virtual_appliances_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualAppliancesClientListByResourceGroupResponse) -> Str? { r.virtual_appliance_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualAppliancesClientListByResourceGroupResponse ! Str { virtual_appliances_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualAppliancesClientListByResourceGroupResponse) -> Str? { r.virtual_appliance_list_result.next_link }).traced_as("VirtualAppliancesClientListByResourceGroupResponse"))
 }
 
 /// VirtualAppliancesClientGetOptions: the optional parameters of VirtualAppliancesClient.get.
@@ -128,12 +128,15 @@ fn (c: VirtualAppliancesClient) get_create_request(resource_group_name: Str, net
 
 /// Gets the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient) get(resource_group_name: Str, network_virtual_appliance_name: Str, options: VirtualAppliancesClientGetOptions = VirtualAppliancesClientGetOptions{}) -> VirtualAppliancesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_virtual_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_virtual_appliance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_appliances_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_appliances_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualAppliancesClientBeginCreateOrUpdateOptions: the optional parameters of VirtualAppliancesClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: VirtualAppliancesClient) create_or_update_create_request(resource_group_n
 /// Creates or updates the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient[fx]) begin_create_or_update(resource_group_name: Str, network_virtual_appliance_name: Str, parameters: VirtualAppliance, options: VirtualAppliancesClientBeginCreateOrUpdateOptions = VirtualAppliancesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualAppliancesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualAppliancesClientCreateOrUpdateResponse ! Str { virtual_appliances_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualAppliancesClientCreateOrUpdateResponse ! Str { virtual_appliances_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, network_virtual_appliance_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, network_virtual_appliance_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "VirtualAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualAppliancesClientCreateOrUpdateResponse ! Str { virtual_appliances_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "VirtualAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualAppliancesClientCreateOrUpdateResponse ! Str { virtual_appliances_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientUpdateTagsOptions: the optional parameters of VirtualAppliancesClient.update_tags.
@@ -222,12 +227,15 @@ fn (c: VirtualAppliancesClient) update_tags_create_request(resource_group_name: 
 
 /// Updates a Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient) update_tags(resource_group_name: Str, network_virtual_appliance_name: Str, parameters: TagsObject, options: VirtualAppliancesClientUpdateTagsOptions = VirtualAppliancesClientUpdateTagsOptions{}) -> VirtualAppliancesClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, network_virtual_appliance_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, network_virtual_appliance_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_appliances_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_appliances_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualAppliancesClientBeginDeleteOptions: the optional parameters of VirtualAppliancesClient.begin_delete.
@@ -266,14 +274,16 @@ fn (c: VirtualAppliancesClient) delete_create_request(resource_group_name: Str, 
 /// Deletes the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient[fx]) begin_delete(resource_group_name: Str, network_virtual_appliance_name: Str, options: VirtualAppliancesClientBeginDeleteOptions = VirtualAppliancesClientBeginDeleteOptions{}) -> runtime.Poller[VirtualAppliancesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientDeleteResponse", fn(r: http.Response) -> VirtualAppliancesClientDeleteResponse ! Str { virtual_appliances_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientDeleteResponse", fn(r: http.Response) -> VirtualAppliancesClientDeleteResponse ! Str { virtual_appliances_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_virtual_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_virtual_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientDeleteResponse", fn(r: http.Response) -> VirtualAppliancesClientDeleteResponse ! Str { virtual_appliances_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientDeleteResponse", fn(r: http.Response) -> VirtualAppliancesClientDeleteResponse ! Str { virtual_appliances_delete_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginAbortMigrationOptions: the optional parameters of VirtualAppliancesClient.begin_abort_migration.
@@ -312,14 +322,16 @@ fn (c: VirtualAppliancesClient) abort_migration_create_request(resource_group_na
 /// Aborts an in-progress migration of the specified Network Virtual Appliance and rolls back to the previous state.
 pub fn (c: VirtualAppliancesClient[fx]) begin_abort_migration(resource_group_name: Str, network_virtual_appliance_name: Str, options: VirtualAppliancesClientBeginAbortMigrationOptions = VirtualAppliancesClientBeginAbortMigrationOptions{}) -> runtime.Poller[VirtualAppliancesClientAbortMigrationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientAbortMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientAbortMigrationResponse ! Str { virtual_appliances_abort_migration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientAbortMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientAbortMigrationResponse ! Str { virtual_appliances_abort_migration_handle(r) }, traced: true)
   }
-  let req = c.abort_migration_create_request(resource_group_name, network_virtual_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginAbortMigration", c.setup.pipeline.tracer)
+  let req = c.abort_migration_create_request(resource_group_name, network_virtual_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientAbortMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientAbortMigrationResponse ! Str { virtual_appliances_abort_migration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientAbortMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientAbortMigrationResponse ! Str { virtual_appliances_abort_migration_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginCommitMigrationOptions: the optional parameters of VirtualAppliancesClient.begin_commit_migration.
@@ -359,14 +371,16 @@ fn (c: VirtualAppliancesClient) commit_migration_create_request(resource_group_n
 /// Commits the migration of the specified Network Virtual Appliance. This finalizes a previously executed migration workflow.
 pub fn (c: VirtualAppliancesClient[fx]) begin_commit_migration(resource_group_name: Str, network_virtual_appliance_name: Str, body: VirtualApplianceCommitMigrationRequest, options: VirtualAppliancesClientBeginCommitMigrationOptions = VirtualAppliancesClientBeginCommitMigrationOptions{}) -> runtime.Poller[VirtualAppliancesClientCommitMigrationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientCommitMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientCommitMigrationResponse ! Str { virtual_appliances_commit_migration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientCommitMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientCommitMigrationResponse ! Str { virtual_appliances_commit_migration_handle(r) }, traced: true)
   }
-  let req = c.commit_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginCommitMigration", c.setup.pipeline.tracer)
+  let req = c.commit_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientCommitMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientCommitMigrationResponse ! Str { virtual_appliances_commit_migration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientCommitMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientCommitMigrationResponse ! Str { virtual_appliances_commit_migration_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginExecuteMigrationOptions: the optional parameters of VirtualAppliancesClient.begin_execute_migration.
@@ -406,14 +420,16 @@ fn (c: VirtualAppliancesClient) execute_migration_create_request(resource_group_
 /// Executes the migration of the specified Network Virtual Appliance. This step performs the migration workflow that was previously prepared.
 pub fn (c: VirtualAppliancesClient[fx]) begin_execute_migration(resource_group_name: Str, network_virtual_appliance_name: Str, body: VirtualApplianceExecuteMigrationRequest, options: VirtualAppliancesClientBeginExecuteMigrationOptions = VirtualAppliancesClientBeginExecuteMigrationOptions{}) -> runtime.Poller[VirtualAppliancesClientExecuteMigrationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientExecuteMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientExecuteMigrationResponse ! Str { virtual_appliances_execute_migration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientExecuteMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientExecuteMigrationResponse ! Str { virtual_appliances_execute_migration_handle(r) }, traced: true)
   }
-  let req = c.execute_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginExecuteMigration", c.setup.pipeline.tracer)
+  let req = c.execute_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientExecuteMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientExecuteMigrationResponse ! Str { virtual_appliances_execute_migration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientExecuteMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientExecuteMigrationResponse ! Str { virtual_appliances_execute_migration_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginGetBootDiagnosticLogsOptions: the optional parameters of VirtualAppliancesClient.begin_get_boot_diagnostic_logs.
@@ -456,14 +472,16 @@ fn (c: VirtualAppliancesClient) get_boot_diagnostic_logs_create_request(resource
 /// Retrieves the boot diagnostic logs for a VM instance belonging to the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient[fx]) begin_get_boot_diagnostic_logs(resource_group_name: Str, network_virtual_appliance_name: Str, request: VirtualApplianceBootDiagnosticParameters, options: VirtualAppliancesClientBeginGetBootDiagnosticLogsOptions = VirtualAppliancesClientBeginGetBootDiagnosticLogsOptions{}) -> runtime.Poller[VirtualAppliancesClientGetBootDiagnosticLogsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientGetBootDiagnosticLogsResponse", fn(r: http.Response) -> VirtualAppliancesClientGetBootDiagnosticLogsResponse ! Str { virtual_appliances_get_boot_diagnostic_logs_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientGetBootDiagnosticLogsResponse", fn(r: http.Response) -> VirtualAppliancesClientGetBootDiagnosticLogsResponse ! Str { virtual_appliances_get_boot_diagnostic_logs_handle(r) }, traced: true)
   }
-  let req = c.get_boot_diagnostic_logs_create_request(resource_group_name, network_virtual_appliance_name, request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginGetBootDiagnosticLogs", c.setup.pipeline.tracer)
+  let req = c.get_boot_diagnostic_logs_create_request(resource_group_name, network_virtual_appliance_name, request, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientGetBootDiagnosticLogsResponse", fn(r: http.Response) -> VirtualAppliancesClientGetBootDiagnosticLogsResponse ! Str { virtual_appliances_get_boot_diagnostic_logs_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientGetBootDiagnosticLogsResponse", fn(r: http.Response) -> VirtualAppliancesClientGetBootDiagnosticLogsResponse ! Str { virtual_appliances_get_boot_diagnostic_logs_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginPrepareMigrationOptions: the optional parameters of VirtualAppliancesClient.begin_prepare_migration.
@@ -503,14 +521,16 @@ fn (c: VirtualAppliancesClient) prepare_migration_create_request(resource_group_
 /// Prepares the migration of the specified Network Virtual Appliance. This is the first step of a migration workflow, such as migrating to a new OS version or to the new internal load balancer architecture.
 pub fn (c: VirtualAppliancesClient[fx]) begin_prepare_migration(resource_group_name: Str, network_virtual_appliance_name: Str, body: VirtualAppliancePrepareMigrationRequest, options: VirtualAppliancesClientBeginPrepareMigrationOptions = VirtualAppliancesClientBeginPrepareMigrationOptions{}) -> runtime.Poller[VirtualAppliancesClientPrepareMigrationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientPrepareMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientPrepareMigrationResponse ! Str { virtual_appliances_prepare_migration_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientPrepareMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientPrepareMigrationResponse ! Str { virtual_appliances_prepare_migration_handle(r) }, traced: true)
   }
-  let req = c.prepare_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginPrepareMigration", c.setup.pipeline.tracer)
+  let req = c.prepare_migration_create_request(resource_group_name, network_virtual_appliance_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientPrepareMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientPrepareMigrationResponse ! Str { virtual_appliances_prepare_migration_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientPrepareMigrationResponse", fn(r: http.Response) -> VirtualAppliancesClientPrepareMigrationResponse ! Str { virtual_appliances_prepare_migration_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginReimageOptions: the optional parameters of VirtualAppliancesClient.begin_reimage.
@@ -559,14 +579,16 @@ fn (c: VirtualAppliancesClient) reimage_create_request(resource_group_name: Str,
 /// Reimages one VM belonging to the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient[fx]) begin_reimage(resource_group_name: Str, network_virtual_appliance_name: Str, options: VirtualAppliancesClientBeginReimageOptions = VirtualAppliancesClientBeginReimageOptions{}) -> runtime.Poller[VirtualAppliancesClientReimageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientReimageResponse", fn(r: http.Response) -> VirtualAppliancesClientReimageResponse ! Str { virtual_appliances_reimage_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientReimageResponse", fn(r: http.Response) -> VirtualAppliancesClientReimageResponse ! Str { virtual_appliances_reimage_handle(r) }, traced: true)
   }
-  let req = c.reimage_create_request(resource_group_name, network_virtual_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginReimage", c.setup.pipeline.tracer)
+  let req = c.reimage_create_request(resource_group_name, network_virtual_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientReimageResponse", fn(r: http.Response) -> VirtualAppliancesClientReimageResponse ! Str { virtual_appliances_reimage_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientReimageResponse", fn(r: http.Response) -> VirtualAppliancesClientReimageResponse ! Str { virtual_appliances_reimage_handle(r) }, traced: true)
 }
 
 /// VirtualAppliancesClientBeginRestartOptions: the optional parameters of VirtualAppliancesClient.begin_restart.
@@ -615,12 +637,14 @@ fn (c: VirtualAppliancesClient) restart_create_request(resource_group_name: Str,
 /// Restarts one or more VMs belonging to the specified Network Virtual Appliance.
 pub fn (c: VirtualAppliancesClient[fx]) begin_restart(resource_group_name: Str, network_virtual_appliance_name: Str, options: VirtualAppliancesClientBeginRestartOptions = VirtualAppliancesClientBeginRestartOptions{}) -> runtime.Poller[VirtualAppliancesClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientRestartResponse", fn(r: http.Response) -> VirtualAppliancesClientRestartResponse ! Str { virtual_appliances_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualAppliancesClientRestartResponse", fn(r: http.Response) -> VirtualAppliancesClientRestartResponse ! Str { virtual_appliances_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, network_virtual_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualAppliancesClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, network_virtual_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientRestartResponse", fn(r: http.Response) -> VirtualAppliancesClientRestartResponse ! Str { virtual_appliances_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualAppliancesClientRestartResponse", fn(r: http.Response) -> VirtualAppliancesClientRestartResponse ! Str { virtual_appliances_restart_handle(r) }, traced: true)
 }

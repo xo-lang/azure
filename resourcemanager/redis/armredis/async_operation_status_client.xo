@@ -56,10 +56,13 @@ fn (c: AsyncOperationStatusClient) get_create_request(location: Str, operation_i
 
 /// For checking the ongoing status of an operation
 pub fn (c: AsyncOperationStatusClient) get(location: Str, operation_id: Str, options: AsyncOperationStatusClientGetOptions = AsyncOperationStatusClientGetOptions{}) -> AsyncOperationStatusClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, operation_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AsyncOperationStatusClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, operation_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  async_operation_status_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = async_operation_status_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

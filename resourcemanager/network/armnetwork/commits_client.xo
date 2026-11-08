@@ -68,7 +68,7 @@ fn (c: CommitsClient) list_create_request(resource_group_name: Str, network_mana
 /// Lists all commits for the specified network manager.
 pub fn (c: CommitsClient[fx]) new_list_pager(resource_group_name: Str, network_manager_name: Str, options: CommitsClientListOptions = CommitsClientListOptions{}) -> runtime.Pager[CommitsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, network_manager_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CommitsClientListResponse ! Str { commits_list_handle(r) }, c.setup.endpoint, fn(r: CommitsClientListResponse) -> Str? { r.commit_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CommitsClientListResponse ! Str { commits_list_handle(r) }, c.setup.endpoint, fn(r: CommitsClientListResponse) -> Str? { r.commit_list_result.next_link }).traced_as("CommitsClientListResponse"))
 }
 
 /// CommitsClientGetOptions: the optional parameters of CommitsClient.get.
@@ -110,12 +110,15 @@ fn (c: CommitsClient) get_create_request(resource_group_name: Str, network_manag
 
 /// Gets the specified commit.
 pub fn (c: CommitsClient) get(resource_group_name: Str, network_manager_name: Str, commit_name: Str, options: CommitsClientGetOptions = CommitsClientGetOptions{}) -> CommitsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_manager_name, commit_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CommitsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_manager_name, commit_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  commits_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = commits_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CommitsClientBeginCreateOrUpdateOptions: the optional parameters of CommitsClient.begin_create_or_update.
@@ -162,14 +165,16 @@ fn (c: CommitsClient) create_or_update_create_request(resource_group_name: Str, 
 /// Creates or updates a commit.
 pub fn (c: CommitsClient[fx]) begin_create_or_update(resource_group_name: Str, network_manager_name: Str, commit_name: Str, resource: Commit, options: CommitsClientBeginCreateOrUpdateOptions = CommitsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[CommitsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CommitsClientCreateOrUpdateResponse", fn(r: http.Response) -> CommitsClientCreateOrUpdateResponse ! Str { commits_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CommitsClientCreateOrUpdateResponse", fn(r: http.Response) -> CommitsClientCreateOrUpdateResponse ! Str { commits_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, network_manager_name, commit_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CommitsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, network_manager_name, commit_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CommitsClientCreateOrUpdateResponse", fn(r: http.Response) -> CommitsClientCreateOrUpdateResponse ! Str { commits_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CommitsClientCreateOrUpdateResponse", fn(r: http.Response) -> CommitsClientCreateOrUpdateResponse ! Str { commits_create_or_update_handle(r) }, traced: true)
 }
 
 /// CommitsClientBeginDeleteOptions: the optional parameters of CommitsClient.begin_delete.
@@ -212,12 +217,14 @@ fn (c: CommitsClient) delete_create_request(resource_group_name: Str, network_ma
 /// Deletes a commit.
 pub fn (c: CommitsClient[fx]) begin_delete(resource_group_name: Str, network_manager_name: Str, commit_name: Str, options: CommitsClientBeginDeleteOptions = CommitsClientBeginDeleteOptions{}) -> runtime.Poller[CommitsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CommitsClientDeleteResponse", fn(r: http.Response) -> CommitsClientDeleteResponse ! Str { commits_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CommitsClientDeleteResponse", fn(r: http.Response) -> CommitsClientDeleteResponse ! Str { commits_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, network_manager_name, commit_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CommitsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, network_manager_name, commit_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CommitsClientDeleteResponse", fn(r: http.Response) -> CommitsClientDeleteResponse ! Str { commits_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CommitsClientDeleteResponse", fn(r: http.Response) -> CommitsClientDeleteResponse ! Str { commits_delete_handle(r) }, traced: true)
 }

@@ -57,7 +57,7 @@ fn (c: UsageMetricsClient) list_by_workspace_create_request(resource_group_name:
 /// Lists monthly usage information for a workspace.
 pub fn (c: UsageMetricsClient[fx]) new_list_by_workspace_pager(resource_group_name: Str, workspace_name: Str, options: UsageMetricsClientListByWorkspaceOptions = UsageMetricsClientListByWorkspaceOptions{}) -> runtime.Pager[UsageMetricsClientListByWorkspaceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_workspace_create_request(resource_group_name, workspace_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> UsageMetricsClientListByWorkspaceResponse ! Str { usage_metrics_list_by_workspace_handle(r) }, c.setup.endpoint, fn(r: UsageMetricsClientListByWorkspaceResponse) -> Str? { r.usage_metric_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> UsageMetricsClientListByWorkspaceResponse ! Str { usage_metrics_list_by_workspace_handle(r) }, c.setup.endpoint, fn(r: UsageMetricsClientListByWorkspaceResponse) -> Str? { r.usage_metric_list_result.next_link }).traced_as("UsageMetricsClientListByWorkspaceResponse"))
 }
 
 /// UsageMetricsClientGetOptions: the optional parameters of UsageMetricsClient.get.
@@ -99,10 +99,13 @@ fn (c: UsageMetricsClient) get_create_request(resource_group_name: Str, workspac
 
 /// Gets monthly usage information for a workspace.
 pub fn (c: UsageMetricsClient) get(resource_group_name: Str, workspace_name: Str, name: Str, options: UsageMetricsClientGetOptions = UsageMetricsClientGetOptions{}) -> UsageMetricsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, workspace_name, name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "UsageMetricsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, workspace_name, name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  usage_metrics_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = usage_metrics_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

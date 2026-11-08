@@ -49,7 +49,7 @@ fn (c: GrafanaClient) list_create_request(options: GrafanaClientListOptions) -> 
 /// List all resources of workspaces for Grafana under the specified subscription.
 pub fn (c: GrafanaClient[fx]) new_list_pager(options: GrafanaClientListOptions = GrafanaClientListOptions{}) -> runtime.Pager[GrafanaClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GrafanaClientListResponse ! Str { grafana_list_handle(r) }, c.setup.endpoint, fn(r: GrafanaClientListResponse) -> Str? { r.managed_grafana_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GrafanaClientListResponse ! Str { grafana_list_handle(r) }, c.setup.endpoint, fn(r: GrafanaClientListResponse) -> Str? { r.managed_grafana_list_response.next_link }).traced_as("GrafanaClientListResponse"))
 }
 
 /// GrafanaClientListByResourceGroupOptions: the optional parameters of GrafanaClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: GrafanaClient) list_by_resource_group_create_request(resource_group_name:
 /// List all resources of workspaces for Grafana under the specified resource group.
 pub fn (c: GrafanaClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: GrafanaClientListByResourceGroupOptions = GrafanaClientListByResourceGroupOptions{}) -> runtime.Pager[GrafanaClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GrafanaClientListByResourceGroupResponse ! Str { grafana_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GrafanaClientListByResourceGroupResponse) -> Str? { r.managed_grafana_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> GrafanaClientListByResourceGroupResponse ! Str { grafana_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: GrafanaClientListByResourceGroupResponse) -> Str? { r.managed_grafana_list_response.next_link }).traced_as("GrafanaClientListByResourceGroupResponse"))
 }
 
 /// GrafanaClientGetOptions: the optional parameters of GrafanaClient.get.
@@ -122,12 +122,15 @@ fn (c: GrafanaClient) get_create_request(resource_group_name: Str, workspace_nam
 
 /// Get the properties of a specific workspace for Grafana resource.
 pub fn (c: GrafanaClient) get(resource_group_name: Str, workspace_name: Str, options: GrafanaClientGetOptions = GrafanaClientGetOptions{}) -> GrafanaClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, workspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, workspace_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  grafana_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = grafana_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// GrafanaClientBeginCreateOptions: the optional parameters of GrafanaClient.begin_create.
@@ -170,14 +173,16 @@ fn (c: GrafanaClient) create_create_request(resource_group_name: Str, workspace_
 /// Create or update a workspace for Grafana resource. This API is idempotent, so user can either create a new grafana or update an existing grafana.
 pub fn (c: GrafanaClient[fx]) begin_create(resource_group_name: Str, workspace_name: Str, request_body_parameters: ManagedGrafana, options: GrafanaClientBeginCreateOptions = GrafanaClientBeginCreateOptions{}) -> runtime.Poller[GrafanaClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientCreateResponse", fn(r: http.Response) -> GrafanaClientCreateResponse ! Str { grafana_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientCreateResponse", fn(r: http.Response) -> GrafanaClientCreateResponse ! Str { grafana_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, workspace_name, request_body_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, workspace_name, request_body_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientCreateResponse", fn(r: http.Response) -> GrafanaClientCreateResponse ! Str { grafana_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientCreateResponse", fn(r: http.Response) -> GrafanaClientCreateResponse ! Str { grafana_create_handle(r) }, traced: true)
 }
 
 /// GrafanaClientBeginUpdateOptions: the optional parameters of GrafanaClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: GrafanaClient) update_create_request(resource_group_name: Str, workspace_
 /// Update a workspace for Grafana resource.
 pub fn (c: GrafanaClient[fx]) begin_update(resource_group_name: Str, workspace_name: Str, request_body_parameters: ManagedGrafanaUpdateParameters, options: GrafanaClientBeginUpdateOptions = GrafanaClientBeginUpdateOptions{}) -> runtime.Poller[GrafanaClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientUpdateResponse", fn(r: http.Response) -> GrafanaClientUpdateResponse ! Str { grafana_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientUpdateResponse", fn(r: http.Response) -> GrafanaClientUpdateResponse ! Str { grafana_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, workspace_name, request_body_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, workspace_name, request_body_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientUpdateResponse", fn(r: http.Response) -> GrafanaClientUpdateResponse ! Str { grafana_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientUpdateResponse", fn(r: http.Response) -> GrafanaClientUpdateResponse ! Str { grafana_update_handle(r) }, traced: true)
 }
 
 /// GrafanaClientBeginDeleteOptions: the optional parameters of GrafanaClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: GrafanaClient) delete_create_request(resource_group_name: Str, workspace_
 /// Delete a workspace for Grafana resource.
 pub fn (c: GrafanaClient[fx]) begin_delete(resource_group_name: Str, workspace_name: Str, options: GrafanaClientBeginDeleteOptions = GrafanaClientBeginDeleteOptions{}) -> runtime.Poller[GrafanaClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientDeleteResponse", fn(r: http.Response) -> GrafanaClientDeleteResponse ! Str { grafana_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GrafanaClientDeleteResponse", fn(r: http.Response) -> GrafanaClientDeleteResponse ! Str { grafana_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, workspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, workspace_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientDeleteResponse", fn(r: http.Response) -> GrafanaClientDeleteResponse ! Str { grafana_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GrafanaClientDeleteResponse", fn(r: http.Response) -> GrafanaClientDeleteResponse ! Str { grafana_delete_handle(r) }, traced: true)
 }
 
 /// GrafanaClientCheckEnterpriseDetailsOptions: the optional parameters of GrafanaClient.check_enterprise_details.
@@ -311,12 +320,15 @@ fn (c: GrafanaClient) check_enterprise_details_create_request(resource_group_nam
 
 /// Retrieve enterprise add-on details information
 pub fn (c: GrafanaClient) check_enterprise_details(resource_group_name: Str, workspace_name: Str, options: GrafanaClientCheckEnterpriseDetailsOptions = GrafanaClientCheckEnterpriseDetailsOptions{}) -> GrafanaClientCheckEnterpriseDetailsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_enterprise_details_create_request(resource_group_name, workspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.CheckEnterpriseDetails", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_enterprise_details_create_request(resource_group_name, workspace_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  grafana_check_enterprise_details_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = grafana_check_enterprise_details_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// GrafanaClientFetchAvailablePluginsOptions: the optional parameters of GrafanaClient.fetch_available_plugins.
@@ -354,10 +366,13 @@ fn (c: GrafanaClient) fetch_available_plugins_create_request(resource_group_name
 
 /// A synchronous resource action.
 pub fn (c: GrafanaClient) fetch_available_plugins(resource_group_name: Str, workspace_name: Str, options: GrafanaClientFetchAvailablePluginsOptions = GrafanaClientFetchAvailablePluginsOptions{}) -> GrafanaClientFetchAvailablePluginsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.fetch_available_plugins_create_request(resource_group_name, workspace_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GrafanaClient.FetchAvailablePlugins", c.setup.pipeline.tracer)
+  let req = sp.on(c.fetch_available_plugins_create_request(resource_group_name, workspace_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  grafana_fetch_available_plugins_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = grafana_fetch_available_plugins_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

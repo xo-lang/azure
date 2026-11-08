@@ -49,7 +49,7 @@ fn (c: CassandraClustersClient) list_by_subscription_create_request(options: Cas
 /// List all managed Cassandra clusters in this subscription.
 pub fn (c: CassandraClustersClient[fx]) new_list_by_subscription_pager(options: CassandraClustersClientListBySubscriptionOptions = CassandraClustersClientListBySubscriptionOptions{}) -> runtime.Pager[CassandraClustersClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraClustersClientListBySubscriptionResponse ! Str { cassandra_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: CassandraClustersClientListBySubscriptionResponse) -> Str? { r.list_clusters.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraClustersClientListBySubscriptionResponse ! Str { cassandra_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: CassandraClustersClientListBySubscriptionResponse) -> Str? { r.list_clusters.next_link }).traced_as("CassandraClustersClientListBySubscriptionResponse"))
 }
 
 /// CassandraClustersClientListByResourceGroupOptions: the optional parameters of CassandraClustersClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: CassandraClustersClient) list_by_resource_group_create_request(resource_g
 /// List all managed Cassandra clusters in this resource group.
 pub fn (c: CassandraClustersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: CassandraClustersClientListByResourceGroupOptions = CassandraClustersClientListByResourceGroupOptions{}) -> runtime.Pager[CassandraClustersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraClustersClientListByResourceGroupResponse ! Str { cassandra_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: CassandraClustersClientListByResourceGroupResponse) -> Str? { r.list_clusters.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> CassandraClustersClientListByResourceGroupResponse ! Str { cassandra_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: CassandraClustersClientListByResourceGroupResponse) -> Str? { r.list_clusters.next_link }).traced_as("CassandraClustersClientListByResourceGroupResponse"))
 }
 
 /// CassandraClustersClientGetOptions: the optional parameters of CassandraClustersClient.get.
@@ -122,12 +122,15 @@ fn (c: CassandraClustersClient) get_create_request(resource_group_name: Str, clu
 
 /// Get the properties of a managed Cassandra cluster.
 pub fn (c: CassandraClustersClient) get(resource_group_name: Str, cluster_name: Str, options: CassandraClustersClientGetOptions = CassandraClustersClientGetOptions{}) -> CassandraClustersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_clusters_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_clusters_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// CassandraClustersClientBeginCreateUpdateOptions: the optional parameters of CassandraClustersClient.begin_create_update.
@@ -170,14 +173,16 @@ fn (c: CassandraClustersClient) create_update_create_request(resource_group_name
 /// Create or update a managed Cassandra cluster. When updating, you must specify all writable properties. To update only some properties, use PATCH.
 pub fn (c: CassandraClustersClient[fx]) begin_create_update(resource_group_name: Str, cluster_name: Str, body: ClusterResource, options: CassandraClustersClientBeginCreateUpdateOptions = CassandraClustersClientBeginCreateUpdateOptions{}) -> runtime.Poller[CassandraClustersClientCreateUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientCreateUpdateResponse", fn(r: http.Response) -> CassandraClustersClientCreateUpdateResponse ! Str { cassandra_clusters_create_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientCreateUpdateResponse", fn(r: http.Response) -> CassandraClustersClientCreateUpdateResponse ! Str { cassandra_clusters_create_update_handle(r) }, traced: true)
   }
-  let req = c.create_update_create_request(resource_group_name, cluster_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginCreateUpdate", c.setup.pipeline.tracer)
+  let req = c.create_update_create_request(resource_group_name, cluster_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientCreateUpdateResponse", fn(r: http.Response) -> CassandraClustersClientCreateUpdateResponse ! Str { cassandra_clusters_create_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientCreateUpdateResponse", fn(r: http.Response) -> CassandraClustersClientCreateUpdateResponse ! Str { cassandra_clusters_create_update_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientBeginUpdateOptions: the optional parameters of CassandraClustersClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: CassandraClustersClient) update_create_request(resource_group_name: Str, 
 /// Updates some of the properties of a managed Cassandra cluster.
 pub fn (c: CassandraClustersClient[fx]) begin_update(resource_group_name: Str, cluster_name: Str, body: ClusterResource, options: CassandraClustersClientBeginUpdateOptions = CassandraClustersClientBeginUpdateOptions{}) -> runtime.Poller[CassandraClustersClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientUpdateResponse", fn(r: http.Response) -> CassandraClustersClientUpdateResponse ! Str { cassandra_clusters_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientUpdateResponse", fn(r: http.Response) -> CassandraClustersClientUpdateResponse ! Str { cassandra_clusters_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cluster_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cluster_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientUpdateResponse", fn(r: http.Response) -> CassandraClustersClientUpdateResponse ! Str { cassandra_clusters_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientUpdateResponse", fn(r: http.Response) -> CassandraClustersClientUpdateResponse ! Str { cassandra_clusters_update_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientBeginDeleteOptions: the optional parameters of CassandraClustersClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: CassandraClustersClient) delete_create_request(resource_group_name: Str, 
 /// Deletes a managed Cassandra cluster.
 pub fn (c: CassandraClustersClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, options: CassandraClustersClientBeginDeleteOptions = CassandraClustersClientBeginDeleteOptions{}) -> runtime.Poller[CassandraClustersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientDeleteResponse", fn(r: http.Response) -> CassandraClustersClientDeleteResponse ! Str { cassandra_clusters_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientDeleteResponse", fn(r: http.Response) -> CassandraClustersClientDeleteResponse ! Str { cassandra_clusters_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientDeleteResponse", fn(r: http.Response) -> CassandraClustersClientDeleteResponse ! Str { cassandra_clusters_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientDeleteResponse", fn(r: http.Response) -> CassandraClustersClientDeleteResponse ! Str { cassandra_clusters_delete_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientBeginDeallocateOptions: the optional parameters of CassandraClustersClient.begin_deallocate.
@@ -317,14 +326,16 @@ fn (c: CassandraClustersClient) deallocate_create_request(resource_group_name: S
 /// Deallocate the Managed Cassandra Cluster and Associated Data Centers. Deallocation will deallocate the host virtual machine of this cluster, and reserved the data disk. This won't do anything on an already deallocated cluster. Use Start to restart the cluster.
 pub fn (c: CassandraClustersClient[fx]) begin_deallocate(resource_group_name: Str, cluster_name: Str, options: CassandraClustersClientBeginDeallocateOptions = CassandraClustersClientBeginDeallocateOptions{}) -> runtime.Poller[CassandraClustersClientDeallocateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientDeallocateResponse", fn(r: http.Response) -> CassandraClustersClientDeallocateResponse ! Str { cassandra_clusters_deallocate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientDeallocateResponse", fn(r: http.Response) -> CassandraClustersClientDeallocateResponse ! Str { cassandra_clusters_deallocate_handle(r) }, traced: true)
   }
-  let req = c.deallocate_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginDeallocate", c.setup.pipeline.tracer)
+  let req = c.deallocate_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientDeallocateResponse", fn(r: http.Response) -> CassandraClustersClientDeallocateResponse ! Str { cassandra_clusters_deallocate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientDeallocateResponse", fn(r: http.Response) -> CassandraClustersClientDeallocateResponse ! Str { cassandra_clusters_deallocate_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientBeginInvokeCommandOptions: the optional parameters of CassandraClustersClient.begin_invoke_command.
@@ -367,14 +378,16 @@ fn (c: CassandraClustersClient) invoke_command_create_request(resource_group_nam
 /// Invoke a command like nodetool for cassandra maintenance
 pub fn (c: CassandraClustersClient[fx]) begin_invoke_command(resource_group_name: Str, cluster_name: Str, body: CommandPostBody, options: CassandraClustersClientBeginInvokeCommandOptions = CassandraClustersClientBeginInvokeCommandOptions{}) -> runtime.Poller[CassandraClustersClientInvokeCommandResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientInvokeCommandResponse", fn(r: http.Response) -> CassandraClustersClientInvokeCommandResponse ! Str { cassandra_clusters_invoke_command_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientInvokeCommandResponse", fn(r: http.Response) -> CassandraClustersClientInvokeCommandResponse ! Str { cassandra_clusters_invoke_command_handle(r) }, traced: true)
   }
-  let req = c.invoke_command_create_request(resource_group_name, cluster_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginInvokeCommand", c.setup.pipeline.tracer)
+  let req = c.invoke_command_create_request(resource_group_name, cluster_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientInvokeCommandResponse", fn(r: http.Response) -> CassandraClustersClientInvokeCommandResponse ! Str { cassandra_clusters_invoke_command_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientInvokeCommandResponse", fn(r: http.Response) -> CassandraClustersClientInvokeCommandResponse ! Str { cassandra_clusters_invoke_command_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientBeginStartOptions: the optional parameters of CassandraClustersClient.begin_start.
@@ -413,14 +426,16 @@ fn (c: CassandraClustersClient) start_create_request(resource_group_name: Str, c
 /// Start the Managed Cassandra Cluster and Associated Data Centers. Start will start the host virtual machine of this cluster with reserved data disk. This won't do anything on an already running cluster. Use Deallocate to deallocate the cluster.
 pub fn (c: CassandraClustersClient[fx]) begin_start(resource_group_name: Str, cluster_name: Str, options: CassandraClustersClientBeginStartOptions = CassandraClustersClientBeginStartOptions{}) -> runtime.Poller[CassandraClustersClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientStartResponse", fn(r: http.Response) -> CassandraClustersClientStartResponse ! Str { cassandra_clusters_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "CassandraClustersClientStartResponse", fn(r: http.Response) -> CassandraClustersClientStartResponse ! Str { cassandra_clusters_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientStartResponse", fn(r: http.Response) -> CassandraClustersClientStartResponse ! Str { cassandra_clusters_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "CassandraClustersClientStartResponse", fn(r: http.Response) -> CassandraClustersClientStartResponse ! Str { cassandra_clusters_start_handle(r) }, traced: true)
 }
 
 /// CassandraClustersClientStatusOptions: the optional parameters of CassandraClustersClient.status.
@@ -458,10 +473,13 @@ fn (c: CassandraClustersClient) status_create_request(resource_group_name: Str, 
 
 /// Gets the CPU, memory, and disk usage statistics for each Cassandra node in a cluster.
 pub fn (c: CassandraClustersClient) status(resource_group_name: Str, cluster_name: Str, options: CassandraClustersClientStatusOptions = CassandraClustersClientStatusOptions{}) -> CassandraClustersClientStatusResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.status_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "CassandraClustersClient.Status", c.setup.pipeline.tracer)
+  let req = sp.on(c.status_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  cassandra_clusters_status_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = cassandra_clusters_status_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

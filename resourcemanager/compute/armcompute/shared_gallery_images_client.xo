@@ -63,7 +63,7 @@ fn (c: SharedGalleryImagesClient) list_create_request(location: Str, gallery_uni
 /// List shared gallery images by subscription id or tenant id.
 pub fn (c: SharedGalleryImagesClient[fx]) new_list_pager(location: Str, gallery_unique_name: Str, options: SharedGalleryImagesClientListOptions = SharedGalleryImagesClientListOptions{}) -> runtime.Pager[SharedGalleryImagesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(location, gallery_unique_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharedGalleryImagesClientListResponse ! Str { shared_gallery_images_list_handle(r) }, c.setup.endpoint, fn(r: SharedGalleryImagesClientListResponse) -> Str? { r.shared_gallery_image_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SharedGalleryImagesClientListResponse ! Str { shared_gallery_images_list_handle(r) }, c.setup.endpoint, fn(r: SharedGalleryImagesClientListResponse) -> Str? { r.shared_gallery_image_list.next_link }).traced_as("SharedGalleryImagesClientListResponse"))
 }
 
 /// SharedGalleryImagesClientGetOptions: the optional parameters of SharedGalleryImagesClient.get.
@@ -105,10 +105,13 @@ fn (c: SharedGalleryImagesClient) get_create_request(location: Str, gallery_uniq
 
 /// Get a shared gallery image by subscription id or tenant id.
 pub fn (c: SharedGalleryImagesClient) get(location: Str, gallery_unique_name: Str, gallery_image_name: Str, options: SharedGalleryImagesClientGetOptions = SharedGalleryImagesClientGetOptions{}) -> SharedGalleryImagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, gallery_unique_name, gallery_image_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SharedGalleryImagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, gallery_unique_name, gallery_image_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  shared_gallery_images_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = shared_gallery_images_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

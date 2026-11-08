@@ -57,7 +57,7 @@ fn (c: DeploymentsClient) list_at_scope_create_request(scope: Str, options: Depl
 /// Get all the deployments at the given scope.
 pub fn (c: DeploymentsClient[fx]) new_list_at_scope_pager(scope: Str, options: DeploymentsClientListAtScopeOptions = DeploymentsClientListAtScopeOptions{}) -> runtime.Pager[DeploymentsClientListAtScopeResponse, fx] ! azcore.CallErr {
   let req = c.list_at_scope_create_request(scope, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtScopeResponse ! Str { deployments_list_at_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtScopeResponse) -> Str? { r.deployment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtScopeResponse ! Str { deployments_list_at_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtScopeResponse) -> Str? { r.deployment_list_result.next_link }).traced_as("DeploymentsClientListAtScopeResponse"))
 }
 
 /// DeploymentsClientGetAtScopeOptions: the optional parameters of DeploymentsClient.get_at_scope.
@@ -88,12 +88,15 @@ fn (c: DeploymentsClient) get_at_scope_create_request(scope: Str, deployment_nam
 
 /// Gets a deployment.
 pub fn (c: DeploymentsClient) get_at_scope(scope: Str, deployment_name: Str, options: DeploymentsClientGetAtScopeOptions = DeploymentsClientGetAtScopeOptions{}) -> DeploymentsClientGetAtScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_at_scope_create_request(scope, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.GetAtScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_at_scope_create_request(scope, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_get_at_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_get_at_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginCreateOrUpdateAtScopeOptions: the optional parameters of DeploymentsClient.begin_create_or_update_at_scope.
@@ -129,14 +132,16 @@ fn (c: DeploymentsClient) create_or_update_at_scope_create_request(scope: Str, d
 /// You can provide the template and parameters directly in the request or link to JSON files.
 pub fn (c: DeploymentsClient[fx]) begin_create_or_update_at_scope(scope: Str, deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginCreateOrUpdateAtScopeOptions = DeploymentsClientBeginCreateOrUpdateAtScopeOptions{}) -> runtime.Poller[DeploymentsClientCreateOrUpdateAtScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtScopeResponse ! Str { deployments_create_or_update_at_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtScopeResponse ! Str { deployments_create_or_update_at_scope_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_at_scope_create_request(scope, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginCreateOrUpdateAtScope", c.setup.pipeline.tracer)
+  let req = c.create_or_update_at_scope_create_request(scope, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtScopeResponse ! Str { deployments_create_or_update_at_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtScopeResponse ! Str { deployments_create_or_update_at_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginDeleteAtScopeOptions: the optional parameters of DeploymentsClient.begin_delete_at_scope.
@@ -168,14 +173,16 @@ fn (c: DeploymentsClient) delete_at_scope_create_request(scope: Str, deployment_
 /// A template deployment that is currently running cannot be deleted. Deleting a template deployment removes the associated deployment operations. This is an asynchronous operation that returns a status of 202 until the template deployment is successfully deleted. The Location response header contains the URI that is used to obtain the status of the process. While the process is running, a call to the URI in the Location header returns a status of 202. When the process finishes, the URI in the Location header returns a status of 204 on success. If the asynchronous request failed, the URI in the Location header returns an error-level status code.
 pub fn (c: DeploymentsClient[fx]) begin_delete_at_scope(scope: Str, deployment_name: Str, options: DeploymentsClientBeginDeleteAtScopeOptions = DeploymentsClientBeginDeleteAtScopeOptions{}) -> runtime.Poller[DeploymentsClientDeleteAtScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtScopeResponse ! Str { deployments_delete_at_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtScopeResponse ! Str { deployments_delete_at_scope_handle(r) }, traced: true)
   }
-  let req = c.delete_at_scope_create_request(scope, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginDeleteAtScope", c.setup.pipeline.tracer)
+  let req = c.delete_at_scope_create_request(scope, deployment_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtScopeResponse ! Str { deployments_delete_at_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtScopeResponse ! Str { deployments_delete_at_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCheckExistenceAtScopeOptions: the optional parameters of DeploymentsClient.check_existence_at_scope.
@@ -206,12 +213,15 @@ fn (c: DeploymentsClient) check_existence_at_scope_create_request(scope: Str, de
 
 /// Checks whether the deployment exists.
 pub fn (c: DeploymentsClient) check_existence_at_scope(scope: Str, deployment_name: Str, options: DeploymentsClientCheckExistenceAtScopeOptions = DeploymentsClientCheckExistenceAtScopeOptions{}) -> DeploymentsClientCheckExistenceAtScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_existence_at_scope_create_request(scope, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CheckExistenceAtScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_existence_at_scope_create_request(scope, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_check_existence_at_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_check_existence_at_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientCancelAtScopeOptions: the optional parameters of DeploymentsClient.cancel_at_scope.
@@ -239,12 +249,15 @@ fn (c: DeploymentsClient) cancel_at_scope_create_request(scope: Str, deployment_
 
 /// You can cancel a deployment only if the provisioningState is Accepted or Running. After the deployment is canceled, the provisioningState is set to Canceled. Canceling a template deployment stops the currently running template deployment and leaves the resources partially deployed.
 pub fn (c: DeploymentsClient) cancel_at_scope(scope: Str, deployment_name: Str, options: DeploymentsClientCancelAtScopeOptions = DeploymentsClientCancelAtScopeOptions{}) -> DeploymentsClientCancelAtScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_at_scope_create_request(scope, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CancelAtScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_at_scope_create_request(scope, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_cancel_at_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_cancel_at_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientExportTemplateAtScopeOptions: the optional parameters of DeploymentsClient.export_template_at_scope.
@@ -275,12 +288,15 @@ fn (c: DeploymentsClient) export_template_at_scope_create_request(scope: Str, de
 
 /// Exports the template used for specified deployment.
 pub fn (c: DeploymentsClient) export_template_at_scope(scope: Str, deployment_name: Str, options: DeploymentsClientExportTemplateAtScopeOptions = DeploymentsClientExportTemplateAtScopeOptions{}) -> DeploymentsClientExportTemplateAtScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.export_template_at_scope_create_request(scope, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.ExportTemplateAtScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.export_template_at_scope_create_request(scope, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_export_template_at_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_export_template_at_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginValidateAtScopeOptions: the optional parameters of DeploymentsClient.begin_validate_at_scope.
@@ -316,14 +332,16 @@ fn (c: DeploymentsClient) validate_at_scope_create_request(scope: Str, deploymen
 /// Validates whether the specified template is syntactically correct and will be accepted by Azure Resource Manager..
 pub fn (c: DeploymentsClient[fx]) begin_validate_at_scope(scope: Str, deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginValidateAtScopeOptions = DeploymentsClientBeginValidateAtScopeOptions{}) -> runtime.Poller[DeploymentsClientValidateAtScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtScopeResponse ! Str { deployments_validate_at_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtScopeResponse ! Str { deployments_validate_at_scope_handle(r) }, traced: true)
   }
-  let req = c.validate_at_scope_create_request(scope, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginValidateAtScope", c.setup.pipeline.tracer)
+  let req = c.validate_at_scope_create_request(scope, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 400].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtScopeResponse ! Str { deployments_validate_at_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtScopeResponse ! Str { deployments_validate_at_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientListAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.new_list_at_management_group_scope_pager.
@@ -365,7 +383,7 @@ fn (c: DeploymentsClient) list_at_management_group_scope_create_request(group_id
 /// Get all the deployments for a management group.
 pub fn (c: DeploymentsClient[fx]) new_list_at_management_group_scope_pager(group_id: Str, options: DeploymentsClientListAtManagementGroupScopeOptions = DeploymentsClientListAtManagementGroupScopeOptions{}) -> runtime.Pager[DeploymentsClientListAtManagementGroupScopeResponse, fx] ! azcore.CallErr {
   let req = c.list_at_management_group_scope_create_request(group_id, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtManagementGroupScopeResponse ! Str { deployments_list_at_management_group_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtManagementGroupScopeResponse) -> Str? { r.deployment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtManagementGroupScopeResponse ! Str { deployments_list_at_management_group_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtManagementGroupScopeResponse) -> Str? { r.deployment_list_result.next_link }).traced_as("DeploymentsClientListAtManagementGroupScopeResponse"))
 }
 
 /// DeploymentsClientGetAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.get_at_management_group_scope.
@@ -399,12 +417,15 @@ fn (c: DeploymentsClient) get_at_management_group_scope_create_request(group_id:
 
 /// Gets a deployment.
 pub fn (c: DeploymentsClient) get_at_management_group_scope(group_id: Str, deployment_name: Str, options: DeploymentsClientGetAtManagementGroupScopeOptions = DeploymentsClientGetAtManagementGroupScopeOptions{}) -> DeploymentsClientGetAtManagementGroupScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_at_management_group_scope_create_request(group_id, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.GetAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_at_management_group_scope_create_request(group_id, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_get_at_management_group_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_get_at_management_group_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginCreateOrUpdateAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.begin_create_or_update_at_management_group_scope.
@@ -443,14 +464,16 @@ fn (c: DeploymentsClient) create_or_update_at_management_group_scope_create_requ
 /// You can provide the template and parameters directly in the request or link to JSON files.
 pub fn (c: DeploymentsClient[fx]) begin_create_or_update_at_management_group_scope(group_id: Str, deployment_name: Str, parameters: ScopedDeployment, options: DeploymentsClientBeginCreateOrUpdateAtManagementGroupScopeOptions = DeploymentsClientBeginCreateOrUpdateAtManagementGroupScopeOptions{}) -> runtime.Poller[DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse ! Str { deployments_create_or_update_at_management_group_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse ! Str { deployments_create_or_update_at_management_group_scope_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_at_management_group_scope_create_request(group_id, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginCreateOrUpdateAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = c.create_or_update_at_management_group_scope_create_request(group_id, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse ! Str { deployments_create_or_update_at_management_group_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtManagementGroupScopeResponse ! Str { deployments_create_or_update_at_management_group_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginDeleteAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.begin_delete_at_management_group_scope.
@@ -485,14 +508,16 @@ fn (c: DeploymentsClient) delete_at_management_group_scope_create_request(group_
 /// A template deployment that is currently running cannot be deleted. Deleting a template deployment removes the associated deployment operations. This is an asynchronous operation that returns a status of 202 until the template deployment is successfully deleted. The Location response header contains the URI that is used to obtain the status of the process. While the process is running, a call to the URI in the Location header returns a status of 202. When the process finishes, the URI in the Location header returns a status of 204 on success. If the asynchronous request failed, the URI in the Location header returns an error-level status code.
 pub fn (c: DeploymentsClient[fx]) begin_delete_at_management_group_scope(group_id: Str, deployment_name: Str, options: DeploymentsClientBeginDeleteAtManagementGroupScopeOptions = DeploymentsClientBeginDeleteAtManagementGroupScopeOptions{}) -> runtime.Poller[DeploymentsClientDeleteAtManagementGroupScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtManagementGroupScopeResponse ! Str { deployments_delete_at_management_group_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtManagementGroupScopeResponse ! Str { deployments_delete_at_management_group_scope_handle(r) }, traced: true)
   }
-  let req = c.delete_at_management_group_scope_create_request(group_id, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginDeleteAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = c.delete_at_management_group_scope_create_request(group_id, deployment_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtManagementGroupScopeResponse ! Str { deployments_delete_at_management_group_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtManagementGroupScopeResponse ! Str { deployments_delete_at_management_group_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCheckExistenceAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.check_existence_at_management_group_scope.
@@ -526,12 +551,15 @@ fn (c: DeploymentsClient) check_existence_at_management_group_scope_create_reque
 
 /// Checks whether the deployment exists.
 pub fn (c: DeploymentsClient) check_existence_at_management_group_scope(group_id: Str, deployment_name: Str, options: DeploymentsClientCheckExistenceAtManagementGroupScopeOptions = DeploymentsClientCheckExistenceAtManagementGroupScopeOptions{}) -> DeploymentsClientCheckExistenceAtManagementGroupScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_existence_at_management_group_scope_create_request(group_id, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CheckExistenceAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_existence_at_management_group_scope_create_request(group_id, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_check_existence_at_management_group_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_check_existence_at_management_group_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientCancelAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.cancel_at_management_group_scope.
@@ -562,12 +590,15 @@ fn (c: DeploymentsClient) cancel_at_management_group_scope_create_request(group_
 
 /// You can cancel a deployment only if the provisioningState is Accepted or Running. After the deployment is canceled, the provisioningState is set to Canceled. Canceling a template deployment stops the currently running template deployment and leaves the resources partially deployed.
 pub fn (c: DeploymentsClient) cancel_at_management_group_scope(group_id: Str, deployment_name: Str, options: DeploymentsClientCancelAtManagementGroupScopeOptions = DeploymentsClientCancelAtManagementGroupScopeOptions{}) -> DeploymentsClientCancelAtManagementGroupScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_at_management_group_scope_create_request(group_id, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CancelAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_at_management_group_scope_create_request(group_id, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_cancel_at_management_group_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_cancel_at_management_group_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientExportTemplateAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.export_template_at_management_group_scope.
@@ -601,12 +632,15 @@ fn (c: DeploymentsClient) export_template_at_management_group_scope_create_reque
 
 /// Exports the template used for specified deployment.
 pub fn (c: DeploymentsClient) export_template_at_management_group_scope(group_id: Str, deployment_name: Str, options: DeploymentsClientExportTemplateAtManagementGroupScopeOptions = DeploymentsClientExportTemplateAtManagementGroupScopeOptions{}) -> DeploymentsClientExportTemplateAtManagementGroupScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.export_template_at_management_group_scope_create_request(group_id, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.ExportTemplateAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.export_template_at_management_group_scope_create_request(group_id, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_export_template_at_management_group_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_export_template_at_management_group_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginValidateAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.begin_validate_at_management_group_scope.
@@ -645,14 +679,16 @@ fn (c: DeploymentsClient) validate_at_management_group_scope_create_request(grou
 /// Validates whether the specified template is syntactically correct and will be accepted by Azure Resource Manager..
 pub fn (c: DeploymentsClient[fx]) begin_validate_at_management_group_scope(group_id: Str, deployment_name: Str, parameters: ScopedDeployment, options: DeploymentsClientBeginValidateAtManagementGroupScopeOptions = DeploymentsClientBeginValidateAtManagementGroupScopeOptions{}) -> runtime.Poller[DeploymentsClientValidateAtManagementGroupScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtManagementGroupScopeResponse ! Str { deployments_validate_at_management_group_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtManagementGroupScopeResponse ! Str { deployments_validate_at_management_group_scope_handle(r) }, traced: true)
   }
-  let req = c.validate_at_management_group_scope_create_request(group_id, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginValidateAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = c.validate_at_management_group_scope_create_request(group_id, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 400].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtManagementGroupScopeResponse ! Str { deployments_validate_at_management_group_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtManagementGroupScopeResponse ! Str { deployments_validate_at_management_group_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginWhatIfAtManagementGroupScopeOptions: the optional parameters of DeploymentsClient.begin_what_if_at_management_group_scope.
@@ -691,14 +727,16 @@ fn (c: DeploymentsClient) what_if_at_management_group_scope_create_request(group
 /// Returns changes that will be made by the deployment if executed at the scope of the management group.
 pub fn (c: DeploymentsClient[fx]) begin_what_if_at_management_group_scope(group_id: Str, deployment_name: Str, parameters: ScopedDeploymentWhatIf, options: DeploymentsClientBeginWhatIfAtManagementGroupScopeOptions = DeploymentsClientBeginWhatIfAtManagementGroupScopeOptions{}) -> runtime.Poller[DeploymentsClientWhatIfAtManagementGroupScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtManagementGroupScopeResponse ! Str { deployments_what_if_at_management_group_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtManagementGroupScopeResponse ! Str { deployments_what_if_at_management_group_scope_handle(r) }, traced: true)
   }
-  let req = c.what_if_at_management_group_scope_create_request(group_id, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginWhatIfAtManagementGroupScope", c.setup.pipeline.tracer)
+  let req = c.what_if_at_management_group_scope_create_request(group_id, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtManagementGroupScopeResponse ! Str { deployments_what_if_at_management_group_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtManagementGroupScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtManagementGroupScopeResponse ! Str { deployments_what_if_at_management_group_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCalculateTemplateHashOptions: the optional parameters of DeploymentsClient.calculate_template_hash.
@@ -725,12 +763,15 @@ fn (c: DeploymentsClient) calculate_template_hash_create_request(template: json.
 
 /// Calculate the hash of the given template.
 pub fn (c: DeploymentsClient) calculate_template_hash(template: json.Value, options: DeploymentsClientCalculateTemplateHashOptions = DeploymentsClientCalculateTemplateHashOptions{}) -> DeploymentsClientCalculateTemplateHashResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.calculate_template_hash_create_request(template, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CalculateTemplateHash", c.setup.pipeline.tracer)
+  let req = sp.on(c.calculate_template_hash_create_request(template, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_calculate_template_hash_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_calculate_template_hash_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientListAtTenantScopeOptions: the optional parameters of DeploymentsClient.new_list_at_tenant_scope_pager.
@@ -768,7 +809,7 @@ fn (c: DeploymentsClient) list_at_tenant_scope_create_request(options: Deploymen
 /// Get all the deployments at the tenant scope.
 pub fn (c: DeploymentsClient[fx]) new_list_at_tenant_scope_pager(options: DeploymentsClientListAtTenantScopeOptions = DeploymentsClientListAtTenantScopeOptions{}) -> runtime.Pager[DeploymentsClientListAtTenantScopeResponse, fx] ! azcore.CallErr {
   let req = c.list_at_tenant_scope_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtTenantScopeResponse ! Str { deployments_list_at_tenant_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtTenantScopeResponse) -> Str? { r.deployment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtTenantScopeResponse ! Str { deployments_list_at_tenant_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtTenantScopeResponse) -> Str? { r.deployment_list_result.next_link }).traced_as("DeploymentsClientListAtTenantScopeResponse"))
 }
 
 /// DeploymentsClientGetAtTenantScopeOptions: the optional parameters of DeploymentsClient.get_at_tenant_scope.
@@ -798,12 +839,15 @@ fn (c: DeploymentsClient) get_at_tenant_scope_create_request(deployment_name: St
 
 /// Gets a deployment.
 pub fn (c: DeploymentsClient) get_at_tenant_scope(deployment_name: Str, options: DeploymentsClientGetAtTenantScopeOptions = DeploymentsClientGetAtTenantScopeOptions{}) -> DeploymentsClientGetAtTenantScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_at_tenant_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.GetAtTenantScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_at_tenant_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_get_at_tenant_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_get_at_tenant_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginCreateOrUpdateAtTenantScopeOptions: the optional parameters of DeploymentsClient.begin_create_or_update_at_tenant_scope.
@@ -838,14 +882,16 @@ fn (c: DeploymentsClient) create_or_update_at_tenant_scope_create_request(deploy
 /// You can provide the template and parameters directly in the request or link to JSON files.
 pub fn (c: DeploymentsClient[fx]) begin_create_or_update_at_tenant_scope(deployment_name: Str, parameters: ScopedDeployment, options: DeploymentsClientBeginCreateOrUpdateAtTenantScopeOptions = DeploymentsClientBeginCreateOrUpdateAtTenantScopeOptions{}) -> runtime.Poller[DeploymentsClientCreateOrUpdateAtTenantScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtTenantScopeResponse ! Str { deployments_create_or_update_at_tenant_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtTenantScopeResponse ! Str { deployments_create_or_update_at_tenant_scope_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_at_tenant_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginCreateOrUpdateAtTenantScope", c.setup.pipeline.tracer)
+  let req = c.create_or_update_at_tenant_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtTenantScopeResponse ! Str { deployments_create_or_update_at_tenant_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtTenantScopeResponse ! Str { deployments_create_or_update_at_tenant_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginDeleteAtTenantScopeOptions: the optional parameters of DeploymentsClient.begin_delete_at_tenant_scope.
@@ -876,14 +922,16 @@ fn (c: DeploymentsClient) delete_at_tenant_scope_create_request(deployment_name:
 /// A template deployment that is currently running cannot be deleted. Deleting a template deployment removes the associated deployment operations. This is an asynchronous operation that returns a status of 202 until the template deployment is successfully deleted. The Location response header contains the URI that is used to obtain the status of the process. While the process is running, a call to the URI in the Location header returns a status of 202. When the process finishes, the URI in the Location header returns a status of 204 on success. If the asynchronous request failed, the URI in the Location header returns an error-level status code.
 pub fn (c: DeploymentsClient[fx]) begin_delete_at_tenant_scope(deployment_name: Str, options: DeploymentsClientBeginDeleteAtTenantScopeOptions = DeploymentsClientBeginDeleteAtTenantScopeOptions{}) -> runtime.Poller[DeploymentsClientDeleteAtTenantScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtTenantScopeResponse ! Str { deployments_delete_at_tenant_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtTenantScopeResponse ! Str { deployments_delete_at_tenant_scope_handle(r) }, traced: true)
   }
-  let req = c.delete_at_tenant_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginDeleteAtTenantScope", c.setup.pipeline.tracer)
+  let req = c.delete_at_tenant_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtTenantScopeResponse ! Str { deployments_delete_at_tenant_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtTenantScopeResponse ! Str { deployments_delete_at_tenant_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCheckExistenceAtTenantScopeOptions: the optional parameters of DeploymentsClient.check_existence_at_tenant_scope.
@@ -913,12 +961,15 @@ fn (c: DeploymentsClient) check_existence_at_tenant_scope_create_request(deploym
 
 /// Checks whether the deployment exists.
 pub fn (c: DeploymentsClient) check_existence_at_tenant_scope(deployment_name: Str, options: DeploymentsClientCheckExistenceAtTenantScopeOptions = DeploymentsClientCheckExistenceAtTenantScopeOptions{}) -> DeploymentsClientCheckExistenceAtTenantScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_existence_at_tenant_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CheckExistenceAtTenantScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_existence_at_tenant_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_check_existence_at_tenant_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_check_existence_at_tenant_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientCancelAtTenantScopeOptions: the optional parameters of DeploymentsClient.cancel_at_tenant_scope.
@@ -945,12 +996,15 @@ fn (c: DeploymentsClient) cancel_at_tenant_scope_create_request(deployment_name:
 
 /// You can cancel a deployment only if the provisioningState is Accepted or Running. After the deployment is canceled, the provisioningState is set to Canceled. Canceling a template deployment stops the currently running template deployment and leaves the resources partially deployed.
 pub fn (c: DeploymentsClient) cancel_at_tenant_scope(deployment_name: Str, options: DeploymentsClientCancelAtTenantScopeOptions = DeploymentsClientCancelAtTenantScopeOptions{}) -> DeploymentsClientCancelAtTenantScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_at_tenant_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CancelAtTenantScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_at_tenant_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_cancel_at_tenant_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_cancel_at_tenant_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientExportTemplateAtTenantScopeOptions: the optional parameters of DeploymentsClient.export_template_at_tenant_scope.
@@ -980,12 +1034,15 @@ fn (c: DeploymentsClient) export_template_at_tenant_scope_create_request(deploym
 
 /// Exports the template used for specified deployment.
 pub fn (c: DeploymentsClient) export_template_at_tenant_scope(deployment_name: Str, options: DeploymentsClientExportTemplateAtTenantScopeOptions = DeploymentsClientExportTemplateAtTenantScopeOptions{}) -> DeploymentsClientExportTemplateAtTenantScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.export_template_at_tenant_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.ExportTemplateAtTenantScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.export_template_at_tenant_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_export_template_at_tenant_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_export_template_at_tenant_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginValidateAtTenantScopeOptions: the optional parameters of DeploymentsClient.begin_validate_at_tenant_scope.
@@ -1020,14 +1077,16 @@ fn (c: DeploymentsClient) validate_at_tenant_scope_create_request(deployment_nam
 /// Validates whether the specified template is syntactically correct and will be accepted by Azure Resource Manager..
 pub fn (c: DeploymentsClient[fx]) begin_validate_at_tenant_scope(deployment_name: Str, parameters: ScopedDeployment, options: DeploymentsClientBeginValidateAtTenantScopeOptions = DeploymentsClientBeginValidateAtTenantScopeOptions{}) -> runtime.Poller[DeploymentsClientValidateAtTenantScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtTenantScopeResponse ! Str { deployments_validate_at_tenant_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtTenantScopeResponse ! Str { deployments_validate_at_tenant_scope_handle(r) }, traced: true)
   }
-  let req = c.validate_at_tenant_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginValidateAtTenantScope", c.setup.pipeline.tracer)
+  let req = c.validate_at_tenant_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 400].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtTenantScopeResponse ! Str { deployments_validate_at_tenant_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtTenantScopeResponse ! Str { deployments_validate_at_tenant_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginWhatIfAtTenantScopeOptions: the optional parameters of DeploymentsClient.begin_what_if_at_tenant_scope.
@@ -1062,14 +1121,16 @@ fn (c: DeploymentsClient) what_if_at_tenant_scope_create_request(deployment_name
 /// Returns changes that will be made by the deployment if executed at the scope of the tenant group.
 pub fn (c: DeploymentsClient[fx]) begin_what_if_at_tenant_scope(deployment_name: Str, parameters: ScopedDeploymentWhatIf, options: DeploymentsClientBeginWhatIfAtTenantScopeOptions = DeploymentsClientBeginWhatIfAtTenantScopeOptions{}) -> runtime.Poller[DeploymentsClientWhatIfAtTenantScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtTenantScopeResponse ! Str { deployments_what_if_at_tenant_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtTenantScopeResponse ! Str { deployments_what_if_at_tenant_scope_handle(r) }, traced: true)
   }
-  let req = c.what_if_at_tenant_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginWhatIfAtTenantScope", c.setup.pipeline.tracer)
+  let req = c.what_if_at_tenant_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtTenantScopeResponse ! Str { deployments_what_if_at_tenant_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtTenantScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtTenantScopeResponse ! Str { deployments_what_if_at_tenant_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientListAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.new_list_at_subscription_scope_pager.
@@ -1111,7 +1172,7 @@ fn (c: DeploymentsClient) list_at_subscription_scope_create_request(options: Dep
 /// Get all the deployments for a subscription.
 pub fn (c: DeploymentsClient[fx]) new_list_at_subscription_scope_pager(options: DeploymentsClientListAtSubscriptionScopeOptions = DeploymentsClientListAtSubscriptionScopeOptions{}) -> runtime.Pager[DeploymentsClientListAtSubscriptionScopeResponse, fx] ! azcore.CallErr {
   let req = c.list_at_subscription_scope_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtSubscriptionScopeResponse ! Str { deployments_list_at_subscription_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtSubscriptionScopeResponse) -> Str? { r.deployment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListAtSubscriptionScopeResponse ! Str { deployments_list_at_subscription_scope_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListAtSubscriptionScopeResponse) -> Str? { r.deployment_list_result.next_link }).traced_as("DeploymentsClientListAtSubscriptionScopeResponse"))
 }
 
 /// DeploymentsClientGetAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.get_at_subscription_scope.
@@ -1145,12 +1206,15 @@ fn (c: DeploymentsClient) get_at_subscription_scope_create_request(deployment_na
 
 /// Gets a deployment.
 pub fn (c: DeploymentsClient) get_at_subscription_scope(deployment_name: Str, options: DeploymentsClientGetAtSubscriptionScopeOptions = DeploymentsClientGetAtSubscriptionScopeOptions{}) -> DeploymentsClientGetAtSubscriptionScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_at_subscription_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.GetAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_at_subscription_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_get_at_subscription_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_get_at_subscription_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginCreateOrUpdateAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.begin_create_or_update_at_subscription_scope.
@@ -1189,14 +1253,16 @@ fn (c: DeploymentsClient) create_or_update_at_subscription_scope_create_request(
 /// You can provide the template and parameters directly in the request or link to JSON files.
 pub fn (c: DeploymentsClient[fx]) begin_create_or_update_at_subscription_scope(deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginCreateOrUpdateAtSubscriptionScopeOptions = DeploymentsClientBeginCreateOrUpdateAtSubscriptionScopeOptions{}) -> runtime.Poller[DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse ! Str { deployments_create_or_update_at_subscription_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse ! Str { deployments_create_or_update_at_subscription_scope_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_at_subscription_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginCreateOrUpdateAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = c.create_or_update_at_subscription_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse ! Str { deployments_create_or_update_at_subscription_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateAtSubscriptionScopeResponse ! Str { deployments_create_or_update_at_subscription_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginDeleteAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.begin_delete_at_subscription_scope.
@@ -1231,14 +1297,16 @@ fn (c: DeploymentsClient) delete_at_subscription_scope_create_request(deployment
 /// A template deployment that is currently running cannot be deleted. Deleting a template deployment removes the associated deployment operations. This is an asynchronous operation that returns a status of 202 until the template deployment is successfully deleted. The Location response header contains the URI that is used to obtain the status of the process. While the process is running, a call to the URI in the Location header returns a status of 202. When the process finishes, the URI in the Location header returns a status of 204 on success. If the asynchronous request failed, the URI in the Location header returns an error-level status code.
 pub fn (c: DeploymentsClient[fx]) begin_delete_at_subscription_scope(deployment_name: Str, options: DeploymentsClientBeginDeleteAtSubscriptionScopeOptions = DeploymentsClientBeginDeleteAtSubscriptionScopeOptions{}) -> runtime.Poller[DeploymentsClientDeleteAtSubscriptionScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtSubscriptionScopeResponse ! Str { deployments_delete_at_subscription_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtSubscriptionScopeResponse ! Str { deployments_delete_at_subscription_scope_handle(r) }, traced: true)
   }
-  let req = c.delete_at_subscription_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginDeleteAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = c.delete_at_subscription_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtSubscriptionScopeResponse ! Str { deployments_delete_at_subscription_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientDeleteAtSubscriptionScopeResponse ! Str { deployments_delete_at_subscription_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCheckExistenceAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.check_existence_at_subscription_scope.
@@ -1272,12 +1340,15 @@ fn (c: DeploymentsClient) check_existence_at_subscription_scope_create_request(d
 
 /// Checks whether the deployment exists.
 pub fn (c: DeploymentsClient) check_existence_at_subscription_scope(deployment_name: Str, options: DeploymentsClientCheckExistenceAtSubscriptionScopeOptions = DeploymentsClientCheckExistenceAtSubscriptionScopeOptions{}) -> DeploymentsClientCheckExistenceAtSubscriptionScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_existence_at_subscription_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CheckExistenceAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_existence_at_subscription_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_check_existence_at_subscription_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_check_existence_at_subscription_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientCancelAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.cancel_at_subscription_scope.
@@ -1308,12 +1379,15 @@ fn (c: DeploymentsClient) cancel_at_subscription_scope_create_request(deployment
 
 /// You can cancel a deployment only if the provisioningState is Accepted or Running. After the deployment is canceled, the provisioningState is set to Canceled. Canceling a template deployment stops the currently running template deployment and leaves the resources partially deployed.
 pub fn (c: DeploymentsClient) cancel_at_subscription_scope(deployment_name: Str, options: DeploymentsClientCancelAtSubscriptionScopeOptions = DeploymentsClientCancelAtSubscriptionScopeOptions{}) -> DeploymentsClientCancelAtSubscriptionScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_at_subscription_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CancelAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_at_subscription_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_cancel_at_subscription_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_cancel_at_subscription_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientExportTemplateAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.export_template_at_subscription_scope.
@@ -1347,12 +1421,15 @@ fn (c: DeploymentsClient) export_template_at_subscription_scope_create_request(d
 
 /// Exports the template used for specified deployment.
 pub fn (c: DeploymentsClient) export_template_at_subscription_scope(deployment_name: Str, options: DeploymentsClientExportTemplateAtSubscriptionScopeOptions = DeploymentsClientExportTemplateAtSubscriptionScopeOptions{}) -> DeploymentsClientExportTemplateAtSubscriptionScopeResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.export_template_at_subscription_scope_create_request(deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.ExportTemplateAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = sp.on(c.export_template_at_subscription_scope_create_request(deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_export_template_at_subscription_scope_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_export_template_at_subscription_scope_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginValidateAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.begin_validate_at_subscription_scope.
@@ -1391,14 +1468,16 @@ fn (c: DeploymentsClient) validate_at_subscription_scope_create_request(deployme
 /// Validates whether the specified template is syntactically correct and will be accepted by Azure Resource Manager..
 pub fn (c: DeploymentsClient[fx]) begin_validate_at_subscription_scope(deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginValidateAtSubscriptionScopeOptions = DeploymentsClientBeginValidateAtSubscriptionScopeOptions{}) -> runtime.Poller[DeploymentsClientValidateAtSubscriptionScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtSubscriptionScopeResponse ! Str { deployments_validate_at_subscription_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtSubscriptionScopeResponse ! Str { deployments_validate_at_subscription_scope_handle(r) }, traced: true)
   }
-  let req = c.validate_at_subscription_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginValidateAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = c.validate_at_subscription_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 400].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtSubscriptionScopeResponse ! Str { deployments_validate_at_subscription_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientValidateAtSubscriptionScopeResponse ! Str { deployments_validate_at_subscription_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginWhatIfAtSubscriptionScopeOptions: the optional parameters of DeploymentsClient.begin_what_if_at_subscription_scope.
@@ -1437,14 +1516,16 @@ fn (c: DeploymentsClient) what_if_at_subscription_scope_create_request(deploymen
 /// Returns changes that will be made by the deployment if executed at the scope of the subscription.
 pub fn (c: DeploymentsClient[fx]) begin_what_if_at_subscription_scope(deployment_name: Str, parameters: DeploymentWhatIf, options: DeploymentsClientBeginWhatIfAtSubscriptionScopeOptions = DeploymentsClientBeginWhatIfAtSubscriptionScopeOptions{}) -> runtime.Poller[DeploymentsClientWhatIfAtSubscriptionScopeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtSubscriptionScopeResponse ! Str { deployments_what_if_at_subscription_scope_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtSubscriptionScopeResponse ! Str { deployments_what_if_at_subscription_scope_handle(r) }, traced: true)
   }
-  let req = c.what_if_at_subscription_scope_create_request(deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginWhatIfAtSubscriptionScope", c.setup.pipeline.tracer)
+  let req = c.what_if_at_subscription_scope_create_request(deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtSubscriptionScopeResponse ! Str { deployments_what_if_at_subscription_scope_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfAtSubscriptionScopeResponse", fn(r: http.Response) -> DeploymentsClientWhatIfAtSubscriptionScopeResponse ! Str { deployments_what_if_at_subscription_scope_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientListByResourceGroupOptions: the optional parameters of DeploymentsClient.new_list_by_resource_group_pager.
@@ -1490,7 +1571,7 @@ fn (c: DeploymentsClient) list_by_resource_group_create_request(resource_group_n
 /// Get all the deployments for a resource group.
 pub fn (c: DeploymentsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: DeploymentsClientListByResourceGroupOptions = DeploymentsClientListByResourceGroupOptions{}) -> runtime.Pager[DeploymentsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListByResourceGroupResponse ! Str { deployments_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListByResourceGroupResponse) -> Str? { r.deployment_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeploymentsClientListByResourceGroupResponse ! Str { deployments_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: DeploymentsClientListByResourceGroupResponse) -> Str? { r.deployment_list_result.next_link }).traced_as("DeploymentsClientListByResourceGroupResponse"))
 }
 
 /// DeploymentsClientGetOptions: the optional parameters of DeploymentsClient.get.
@@ -1528,12 +1609,15 @@ fn (c: DeploymentsClient) get_create_request(resource_group_name: Str, deploymen
 
 /// Gets a deployment.
 pub fn (c: DeploymentsClient) get(resource_group_name: Str, deployment_name: Str, options: DeploymentsClientGetOptions = DeploymentsClientGetOptions{}) -> DeploymentsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginCreateOrUpdateOptions: the optional parameters of DeploymentsClient.begin_create_or_update.
@@ -1576,14 +1660,16 @@ fn (c: DeploymentsClient) create_or_update_create_request(resource_group_name: S
 /// You can provide the template and parameters directly in the request or link to JSON files.
 pub fn (c: DeploymentsClient[fx]) begin_create_or_update(resource_group_name: Str, deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginCreateOrUpdateOptions = DeploymentsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[DeploymentsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateResponse ! Str { deployments_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientCreateOrUpdateResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateResponse ! Str { deployments_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateResponse ! Str { deployments_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientCreateOrUpdateResponse", fn(r: http.Response) -> DeploymentsClientCreateOrUpdateResponse ! Str { deployments_create_or_update_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginDeleteOptions: the optional parameters of DeploymentsClient.begin_delete.
@@ -1622,14 +1708,16 @@ fn (c: DeploymentsClient) delete_create_request(resource_group_name: Str, deploy
 /// A template deployment that is currently running cannot be deleted. Deleting a template deployment removes the associated deployment operations. Deleting a template deployment does not affect the state of the resource group. This is an asynchronous operation that returns a status of 202 until the template deployment is successfully deleted. The Location response header contains the URI that is used to obtain the status of the process. While the process is running, a call to the URI in the Location header returns a status of 202. When the process finishes, the URI in the Location header returns a status of 204 on success. If the asynchronous request failed, the URI in the Location header returns an error-level status code.
 pub fn (c: DeploymentsClient[fx]) begin_delete(resource_group_name: Str, deployment_name: Str, options: DeploymentsClientBeginDeleteOptions = DeploymentsClientBeginDeleteOptions{}) -> runtime.Poller[DeploymentsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteResponse", fn(r: http.Response) -> DeploymentsClientDeleteResponse ! Str { deployments_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientDeleteResponse", fn(r: http.Response) -> DeploymentsClientDeleteResponse ! Str { deployments_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, deployment_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteResponse", fn(r: http.Response) -> DeploymentsClientDeleteResponse ! Str { deployments_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientDeleteResponse", fn(r: http.Response) -> DeploymentsClientDeleteResponse ! Str { deployments_delete_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientCheckExistenceOptions: the optional parameters of DeploymentsClient.check_existence.
@@ -1667,12 +1755,15 @@ fn (c: DeploymentsClient) check_existence_create_request(resource_group_name: St
 
 /// Checks whether the deployment exists.
 pub fn (c: DeploymentsClient) check_existence(resource_group_name: Str, deployment_name: Str, options: DeploymentsClientCheckExistenceOptions = DeploymentsClientCheckExistenceOptions{}) -> DeploymentsClientCheckExistenceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.check_existence_create_request(resource_group_name, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.CheckExistence", c.setup.pipeline.tracer)
+  let req = sp.on(c.check_existence_create_request(resource_group_name, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_check_existence_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_check_existence_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientCancelOptions: the optional parameters of DeploymentsClient.cancel.
@@ -1707,12 +1798,15 @@ fn (c: DeploymentsClient) cancel_create_request(resource_group_name: Str, deploy
 
 /// You can cancel a deployment only if the provisioningState is Accepted or Running. After the deployment is canceled, the provisioningState is set to Canceled. Canceling a template deployment stops the currently running template deployment and leaves the resource group partially deployed.
 pub fn (c: DeploymentsClient) cancel(resource_group_name: Str, deployment_name: Str, options: DeploymentsClientCancelOptions = DeploymentsClientCancelOptions{}) -> DeploymentsClientCancelResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.cancel_create_request(resource_group_name, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.Cancel", c.setup.pipeline.tracer)
+  let req = sp.on(c.cancel_create_request(resource_group_name, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_cancel_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_cancel_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientExportTemplateOptions: the optional parameters of DeploymentsClient.export_template.
@@ -1750,12 +1844,15 @@ fn (c: DeploymentsClient) export_template_create_request(resource_group_name: St
 
 /// Exports the template used for specified deployment.
 pub fn (c: DeploymentsClient) export_template(resource_group_name: Str, deployment_name: Str, options: DeploymentsClientExportTemplateOptions = DeploymentsClientExportTemplateOptions{}) -> DeploymentsClientExportTemplateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.export_template_create_request(resource_group_name, deployment_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.ExportTemplate", c.setup.pipeline.tracer)
+  let req = sp.on(c.export_template_create_request(resource_group_name, deployment_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deployments_export_template_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deployments_export_template_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeploymentsClientBeginValidateOptions: the optional parameters of DeploymentsClient.begin_validate.
@@ -1798,14 +1895,16 @@ fn (c: DeploymentsClient) validate_create_request(resource_group_name: Str, depl
 /// Validates whether the specified template is syntactically correct and will be accepted by Azure Resource Manager..
 pub fn (c: DeploymentsClient[fx]) begin_validate(resource_group_name: Str, deployment_name: Str, parameters: Deployment, options: DeploymentsClientBeginValidateOptions = DeploymentsClientBeginValidateOptions{}) -> runtime.Poller[DeploymentsClientValidateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateResponse", fn(r: http.Response) -> DeploymentsClientValidateResponse ! Str { deployments_validate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientValidateResponse", fn(r: http.Response) -> DeploymentsClientValidateResponse ! Str { deployments_validate_handle(r) }, traced: true)
   }
-  let req = c.validate_create_request(resource_group_name, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginValidate", c.setup.pipeline.tracer)
+  let req = c.validate_create_request(resource_group_name, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 400].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateResponse", fn(r: http.Response) -> DeploymentsClientValidateResponse ! Str { deployments_validate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientValidateResponse", fn(r: http.Response) -> DeploymentsClientValidateResponse ! Str { deployments_validate_handle(r) }, traced: true)
 }
 
 /// DeploymentsClientBeginWhatIfOptions: the optional parameters of DeploymentsClient.begin_what_if.
@@ -1848,12 +1947,14 @@ fn (c: DeploymentsClient) what_if_create_request(resource_group_name: Str, deplo
 /// Returns changes that will be made by the deployment if executed at the scope of the resource group.
 pub fn (c: DeploymentsClient[fx]) begin_what_if(resource_group_name: Str, deployment_name: Str, parameters: DeploymentWhatIf, options: DeploymentsClientBeginWhatIfOptions = DeploymentsClientBeginWhatIfOptions{}) -> runtime.Poller[DeploymentsClientWhatIfResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfResponse", fn(r: http.Response) -> DeploymentsClientWhatIfResponse ! Str { deployments_what_if_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeploymentsClientWhatIfResponse", fn(r: http.Response) -> DeploymentsClientWhatIfResponse ! Str { deployments_what_if_handle(r) }, traced: true)
   }
-  let req = c.what_if_create_request(resource_group_name, deployment_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeploymentsClient.BeginWhatIf", c.setup.pipeline.tracer)
+  let req = c.what_if_create_request(resource_group_name, deployment_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfResponse", fn(r: http.Response) -> DeploymentsClientWhatIfResponse ! Str { deployments_what_if_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeploymentsClientWhatIfResponse", fn(r: http.Response) -> DeploymentsClientWhatIfResponse ! Str { deployments_what_if_handle(r) }, traced: true)
 }

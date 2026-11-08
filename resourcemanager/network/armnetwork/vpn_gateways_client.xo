@@ -49,7 +49,7 @@ fn (c: VPNGatewaysClient) list_create_request(options: VPNGatewaysClientListOpti
 /// Lists all the VpnGateways in a subscription.
 pub fn (c: VPNGatewaysClient[fx]) new_list_pager(options: VPNGatewaysClientListOptions = VPNGatewaysClientListOptions{}) -> runtime.Pager[VPNGatewaysClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VPNGatewaysClientListResponse ! Str { vpn_gateways_list_handle(r) }, c.setup.endpoint, fn(r: VPNGatewaysClientListResponse) -> Str? { r.list_vpn_gateways_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VPNGatewaysClientListResponse ! Str { vpn_gateways_list_handle(r) }, c.setup.endpoint, fn(r: VPNGatewaysClientListResponse) -> Str? { r.list_vpn_gateways_result.next_link }).traced_as("VPNGatewaysClientListResponse"))
 }
 
 /// VPNGatewaysClientListByResourceGroupOptions: the optional parameters of VPNGatewaysClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VPNGatewaysClient) list_by_resource_group_create_request(resource_group_n
 /// Lists all the VpnGateways in a resource group.
 pub fn (c: VPNGatewaysClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VPNGatewaysClientListByResourceGroupOptions = VPNGatewaysClientListByResourceGroupOptions{}) -> runtime.Pager[VPNGatewaysClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VPNGatewaysClientListByResourceGroupResponse ! Str { vpn_gateways_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VPNGatewaysClientListByResourceGroupResponse) -> Str? { r.list_vpn_gateways_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VPNGatewaysClientListByResourceGroupResponse ! Str { vpn_gateways_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VPNGatewaysClientListByResourceGroupResponse) -> Str? { r.list_vpn_gateways_result.next_link }).traced_as("VPNGatewaysClientListByResourceGroupResponse"))
 }
 
 /// VPNGatewaysClientGetOptions: the optional parameters of VPNGatewaysClient.get.
@@ -122,12 +122,15 @@ fn (c: VPNGatewaysClient) get_create_request(resource_group_name: Str, gateway_n
 
 /// Retrieves the details of a virtual wan vpn gateway.
 pub fn (c: VPNGatewaysClient) get(resource_group_name: Str, gateway_name: Str, options: VPNGatewaysClientGetOptions = VPNGatewaysClientGetOptions{}) -> VPNGatewaysClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, gateway_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vpn_gateways_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vpn_gateways_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VPNGatewaysClientBeginCreateOrUpdateOptions: the optional parameters of VPNGatewaysClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: VPNGatewaysClient) create_or_update_create_request(resource_group_name: S
 /// Creates a virtual wan vpn gateway if it doesn't exist else updates the existing gateway.
 pub fn (c: VPNGatewaysClient[fx]) begin_create_or_update(resource_group_name: Str, gateway_name: Str, vpn_gateway_parameters: VPNGateway, options: VPNGatewaysClientBeginCreateOrUpdateOptions = VPNGatewaysClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VPNGatewaysClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> VPNGatewaysClientCreateOrUpdateResponse ! Str { vpn_gateways_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> VPNGatewaysClientCreateOrUpdateResponse ! Str { vpn_gateways_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, gateway_name, vpn_gateway_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, gateway_name, vpn_gateway_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> VPNGatewaysClientCreateOrUpdateResponse ! Str { vpn_gateways_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> VPNGatewaysClientCreateOrUpdateResponse ! Str { vpn_gateways_create_or_update_handle(r) }, traced: true)
 }
 
 /// VPNGatewaysClientBeginUpdateTagsOptions: the optional parameters of VPNGatewaysClient.begin_update_tags.
@@ -220,14 +225,16 @@ fn (c: VPNGatewaysClient) update_tags_create_request(resource_group_name: Str, g
 /// Updates virtual wan vpn gateway tags.
 pub fn (c: VPNGatewaysClient[fx]) begin_update_tags(resource_group_name: Str, gateway_name: Str, vpn_gateway_parameters: TagsObject, options: VPNGatewaysClientBeginUpdateTagsOptions = VPNGatewaysClientBeginUpdateTagsOptions{}) -> runtime.Poller[VPNGatewaysClientUpdateTagsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientUpdateTagsResponse", fn(r: http.Response) -> VPNGatewaysClientUpdateTagsResponse ! Str { vpn_gateways_update_tags_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientUpdateTagsResponse", fn(r: http.Response) -> VPNGatewaysClientUpdateTagsResponse ! Str { vpn_gateways_update_tags_handle(r) }, traced: true)
   }
-  let req = c.update_tags_create_request(resource_group_name, gateway_name, vpn_gateway_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginUpdateTags", c.setup.pipeline.tracer)
+  let req = c.update_tags_create_request(resource_group_name, gateway_name, vpn_gateway_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientUpdateTagsResponse", fn(r: http.Response) -> VPNGatewaysClientUpdateTagsResponse ! Str { vpn_gateways_update_tags_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientUpdateTagsResponse", fn(r: http.Response) -> VPNGatewaysClientUpdateTagsResponse ! Str { vpn_gateways_update_tags_handle(r) }, traced: true)
 }
 
 /// VPNGatewaysClientBeginDeleteOptions: the optional parameters of VPNGatewaysClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: VPNGatewaysClient) delete_create_request(resource_group_name: Str, gatewa
 /// Deletes a virtual wan vpn gateway.
 pub fn (c: VPNGatewaysClient[fx]) begin_delete(resource_group_name: Str, gateway_name: Str, options: VPNGatewaysClientBeginDeleteOptions = VPNGatewaysClientBeginDeleteOptions{}) -> runtime.Poller[VPNGatewaysClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientDeleteResponse", fn(r: http.Response) -> VPNGatewaysClientDeleteResponse ! Str { vpn_gateways_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientDeleteResponse", fn(r: http.Response) -> VPNGatewaysClientDeleteResponse ! Str { vpn_gateways_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientDeleteResponse", fn(r: http.Response) -> VPNGatewaysClientDeleteResponse ! Str { vpn_gateways_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientDeleteResponse", fn(r: http.Response) -> VPNGatewaysClientDeleteResponse ! Str { vpn_gateways_delete_handle(r) }, traced: true)
 }
 
 /// VPNGatewaysClientBeginResetOptions: the optional parameters of VPNGatewaysClient.begin_reset.
@@ -320,14 +329,16 @@ fn (c: VPNGatewaysClient) reset_create_request(resource_group_name: Str, gateway
 /// Resets the primary of the vpn gateway in the specified resource group.
 pub fn (c: VPNGatewaysClient[fx]) begin_reset(resource_group_name: Str, gateway_name: Str, options: VPNGatewaysClientBeginResetOptions = VPNGatewaysClientBeginResetOptions{}) -> runtime.Poller[VPNGatewaysClientResetResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientResetResponse", fn(r: http.Response) -> VPNGatewaysClientResetResponse ! Str { vpn_gateways_reset_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientResetResponse", fn(r: http.Response) -> VPNGatewaysClientResetResponse ! Str { vpn_gateways_reset_handle(r) }, traced: true)
   }
-  let req = c.reset_create_request(resource_group_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginReset", c.setup.pipeline.tracer)
+  let req = c.reset_create_request(resource_group_name, gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientResetResponse", fn(r: http.Response) -> VPNGatewaysClientResetResponse ! Str { vpn_gateways_reset_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientResetResponse", fn(r: http.Response) -> VPNGatewaysClientResetResponse ! Str { vpn_gateways_reset_handle(r) }, traced: true)
 }
 
 /// VPNGatewaysClientBeginStartPacketCaptureOptions: the optional parameters of VPNGatewaysClient.begin_start_packet_capture.
@@ -376,14 +387,16 @@ fn (c: VPNGatewaysClient) start_packet_capture_create_request(resource_group_nam
 /// Starts packet capture on vpn gateway in the specified resource group.
 pub fn (c: VPNGatewaysClient[fx]) begin_start_packet_capture(resource_group_name: Str, gateway_name: Str, options: VPNGatewaysClientBeginStartPacketCaptureOptions = VPNGatewaysClientBeginStartPacketCaptureOptions{}) -> runtime.Poller[VPNGatewaysClientStartPacketCaptureResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientStartPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStartPacketCaptureResponse ! Str { vpn_gateways_start_packet_capture_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientStartPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStartPacketCaptureResponse ! Str { vpn_gateways_start_packet_capture_handle(r) }, traced: true)
   }
-  let req = c.start_packet_capture_create_request(resource_group_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginStartPacketCapture", c.setup.pipeline.tracer)
+  let req = c.start_packet_capture_create_request(resource_group_name, gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientStartPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStartPacketCaptureResponse ! Str { vpn_gateways_start_packet_capture_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientStartPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStartPacketCaptureResponse ! Str { vpn_gateways_start_packet_capture_handle(r) }, traced: true)
 }
 
 /// VPNGatewaysClientBeginStopPacketCaptureOptions: the optional parameters of VPNGatewaysClient.begin_stop_packet_capture.
@@ -432,12 +445,14 @@ fn (c: VPNGatewaysClient) stop_packet_capture_create_request(resource_group_name
 /// Stops packet capture on vpn gateway in the specified resource group.
 pub fn (c: VPNGatewaysClient[fx]) begin_stop_packet_capture(resource_group_name: Str, gateway_name: Str, options: VPNGatewaysClientBeginStopPacketCaptureOptions = VPNGatewaysClientBeginStopPacketCaptureOptions{}) -> runtime.Poller[VPNGatewaysClientStopPacketCaptureResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientStopPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStopPacketCaptureResponse ! Str { vpn_gateways_stop_packet_capture_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VPNGatewaysClientStopPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStopPacketCaptureResponse ! Str { vpn_gateways_stop_packet_capture_handle(r) }, traced: true)
   }
-  let req = c.stop_packet_capture_create_request(resource_group_name, gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VPNGatewaysClient.BeginStopPacketCapture", c.setup.pipeline.tracer)
+  let req = c.stop_packet_capture_create_request(resource_group_name, gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientStopPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStopPacketCaptureResponse ! Str { vpn_gateways_stop_packet_capture_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VPNGatewaysClientStopPacketCaptureResponse", fn(r: http.Response) -> VPNGatewaysClientStopPacketCaptureResponse ! Str { vpn_gateways_stop_packet_capture_handle(r) }, traced: true)
 }

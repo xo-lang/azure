@@ -67,7 +67,7 @@ fn (c: TestJobStreamsClient) list_by_test_job_create_request(resource_group_name
 /// Retrieve a list of test job streams identified by runbook name.
 pub fn (c: TestJobStreamsClient[fx]) new_list_by_test_job_pager(resource_group_name: Str, automation_account_name: Str, runbook_name: Str, options: TestJobStreamsClientListByTestJobOptions = TestJobStreamsClientListByTestJobOptions{}) -> runtime.Pager[TestJobStreamsClientListByTestJobResponse, fx] ! azcore.CallErr {
   let req = c.list_by_test_job_create_request(resource_group_name, automation_account_name, runbook_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TestJobStreamsClientListByTestJobResponse ! Str { test_job_streams_list_by_test_job_handle(r) }, c.setup.endpoint, fn(r: TestJobStreamsClientListByTestJobResponse) -> Str? { r.job_stream_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TestJobStreamsClientListByTestJobResponse ! Str { test_job_streams_list_by_test_job_handle(r) }, c.setup.endpoint, fn(r: TestJobStreamsClientListByTestJobResponse) -> Str? { r.job_stream_list_result.next_link }).traced_as("TestJobStreamsClientListByTestJobResponse"))
 }
 
 /// TestJobStreamsClientGetOptions: the optional parameters of TestJobStreamsClient.get.
@@ -113,10 +113,13 @@ fn (c: TestJobStreamsClient) get_create_request(resource_group_name: Str, automa
 
 /// Retrieve a test job stream of the test job identified by runbook name and stream id.
 pub fn (c: TestJobStreamsClient) get(resource_group_name: Str, automation_account_name: Str, runbook_name: Str, job_stream_id: Str, options: TestJobStreamsClientGetOptions = TestJobStreamsClientGetOptions{}) -> TestJobStreamsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, automation_account_name, runbook_name, job_stream_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TestJobStreamsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, automation_account_name, runbook_name, job_stream_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  test_job_streams_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = test_job_streams_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

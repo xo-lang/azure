@@ -49,7 +49,7 @@ fn (c: SecureScoresClient) list_create_request(options: SecureScoresClientListOp
 /// List secure scores for all your Microsoft Defender for Cloud initiatives within your current scope.
 pub fn (c: SecureScoresClient[fx]) new_list_pager(options: SecureScoresClientListOptions = SecureScoresClientListOptions{}) -> runtime.Pager[SecureScoresClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SecureScoresClientListResponse ! Str { secure_scores_list_handle(r) }, c.setup.endpoint, fn(r: SecureScoresClientListResponse) -> Str? { r.secure_scores_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SecureScoresClientListResponse ! Str { secure_scores_list_handle(r) }, c.setup.endpoint, fn(r: SecureScoresClientListResponse) -> Str? { r.secure_scores_list.next_link }).traced_as("SecureScoresClientListResponse"))
 }
 
 /// SecureScoresClientGetOptions: the optional parameters of SecureScoresClient.get.
@@ -83,10 +83,13 @@ fn (c: SecureScoresClient) get_create_request(secure_score_name: Str, options: S
 
 /// Get secure score for a specific Microsoft Defender for Cloud initiative within your current scope. For the ASC Default initiative, use 'ascScore'.
 pub fn (c: SecureScoresClient) get(secure_score_name: Str, options: SecureScoresClientGetOptions = SecureScoresClientGetOptions{}) -> SecureScoresClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(secure_score_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SecureScoresClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(secure_score_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  secure_scores_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = secure_scores_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

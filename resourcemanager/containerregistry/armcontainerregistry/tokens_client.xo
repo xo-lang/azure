@@ -57,7 +57,7 @@ fn (c: TokensClient) list_create_request(resource_group_name: Str, registry_name
 /// Lists all the tokens for the specified container registry.
 pub fn (c: TokensClient[fx]) new_list_pager(resource_group_name: Str, registry_name: Str, options: TokensClientListOptions = TokensClientListOptions{}) -> runtime.Pager[TokensClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, registry_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TokensClientListResponse ! Str { tokens_list_handle(r) }, c.setup.endpoint, fn(r: TokensClientListResponse) -> Str? { r.token_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> TokensClientListResponse ! Str { tokens_list_handle(r) }, c.setup.endpoint, fn(r: TokensClientListResponse) -> Str? { r.token_list_result.next_link }).traced_as("TokensClientListResponse"))
 }
 
 /// TokensClientGetOptions: the optional parameters of TokensClient.get.
@@ -99,12 +99,15 @@ fn (c: TokensClient) get_create_request(resource_group_name: Str, registry_name:
 
 /// Gets the properties of the specified token.
 pub fn (c: TokensClient) get(resource_group_name: Str, registry_name: Str, token_name: Str, options: TokensClientGetOptions = TokensClientGetOptions{}) -> TokensClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, registry_name, token_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TokensClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, registry_name, token_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  tokens_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = tokens_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// TokensClientBeginCreateOptions: the optional parameters of TokensClient.begin_create.
@@ -151,14 +154,16 @@ fn (c: TokensClient) create_create_request(resource_group_name: Str, registry_na
 /// Creates a token for a container registry with the specified parameters.
 pub fn (c: TokensClient[fx]) begin_create(resource_group_name: Str, registry_name: Str, token_name: Str, token_create_parameters: Token, options: TokensClientBeginCreateOptions = TokensClientBeginCreateOptions{}) -> runtime.Poller[TokensClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientCreateResponse", fn(r: http.Response) -> TokensClientCreateResponse ! Str { tokens_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientCreateResponse", fn(r: http.Response) -> TokensClientCreateResponse ! Str { tokens_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, registry_name, token_name, token_create_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TokensClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, registry_name, token_name, token_create_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientCreateResponse", fn(r: http.Response) -> TokensClientCreateResponse ! Str { tokens_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientCreateResponse", fn(r: http.Response) -> TokensClientCreateResponse ! Str { tokens_create_handle(r) }, traced: true)
 }
 
 /// TokensClientBeginUpdateOptions: the optional parameters of TokensClient.begin_update.
@@ -205,14 +210,16 @@ fn (c: TokensClient) update_create_request(resource_group_name: Str, registry_na
 /// Updates a token with the specified parameters.
 pub fn (c: TokensClient[fx]) begin_update(resource_group_name: Str, registry_name: Str, token_name: Str, token_update_parameters: TokenUpdateParameters, options: TokensClientBeginUpdateOptions = TokensClientBeginUpdateOptions{}) -> runtime.Poller[TokensClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientUpdateResponse", fn(r: http.Response) -> TokensClientUpdateResponse ! Str { tokens_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientUpdateResponse", fn(r: http.Response) -> TokensClientUpdateResponse ! Str { tokens_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, registry_name, token_name, token_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TokensClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, registry_name, token_name, token_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientUpdateResponse", fn(r: http.Response) -> TokensClientUpdateResponse ! Str { tokens_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientUpdateResponse", fn(r: http.Response) -> TokensClientUpdateResponse ! Str { tokens_update_handle(r) }, traced: true)
 }
 
 /// TokensClientBeginDeleteOptions: the optional parameters of TokensClient.begin_delete.
@@ -255,12 +262,14 @@ fn (c: TokensClient) delete_create_request(resource_group_name: Str, registry_na
 /// Deletes a token from a container registry.
 pub fn (c: TokensClient[fx]) begin_delete(resource_group_name: Str, registry_name: Str, token_name: Str, options: TokensClientBeginDeleteOptions = TokensClientBeginDeleteOptions{}) -> runtime.Poller[TokensClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientDeleteResponse", fn(r: http.Response) -> TokensClientDeleteResponse ! Str { tokens_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "TokensClientDeleteResponse", fn(r: http.Response) -> TokensClientDeleteResponse ! Str { tokens_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, registry_name, token_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TokensClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, registry_name, token_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientDeleteResponse", fn(r: http.Response) -> TokensClientDeleteResponse ! Str { tokens_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "TokensClientDeleteResponse", fn(r: http.Response) -> TokensClientDeleteResponse ! Str { tokens_delete_handle(r) }, traced: true)
 }

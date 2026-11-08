@@ -63,7 +63,7 @@ fn (c: TenantSettingsClient) list_by_service_create_request(resource_group_name:
 /// Public settings.
 pub fn (c: TenantSettingsClient[fx]) new_list_by_service_pager(resource_group_name: Str, service_name: Str, options: TenantSettingsClientListByServiceOptions = TenantSettingsClientListByServiceOptions{}) -> runtime.Pager[TenantSettingsClientListByServiceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_service_create_request(resource_group_name, service_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> TenantSettingsClientListByServiceResponse ! Str { tenant_settings_list_by_service_handle(r) }, fn(r: TenantSettingsClientListByServiceResponse) -> Str? { r.tenant_settings_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> TenantSettingsClientListByServiceResponse ! Str { tenant_settings_list_by_service_handle(r) }, fn(r: TenantSettingsClientListByServiceResponse) -> Str? { r.tenant_settings_collection.next_link }).traced_as("TenantSettingsClientListByServiceResponse"))
 }
 
 /// TenantSettingsClientGetOptions: the optional parameters of TenantSettingsClient.get.
@@ -107,10 +107,13 @@ fn (c: TenantSettingsClient) get_create_request(resource_group_name: Str, servic
 
 /// Get tenant settings.
 pub fn (c: TenantSettingsClient) get(resource_group_name: Str, service_name: Str, settings_type: SettingsTypeName, options: TenantSettingsClientGetOptions = TenantSettingsClientGetOptions{}) -> TenantSettingsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, settings_type, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TenantSettingsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, settings_type, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  tenant_settings_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = tenant_settings_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

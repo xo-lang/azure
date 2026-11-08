@@ -60,7 +60,7 @@ fn (c: StorageAppliancesClient) list_by_subscription_create_request(options: Sto
 /// Get a list of storage appliances in the provided subscription.
 pub fn (c: StorageAppliancesClient[fx]) new_list_by_subscription_pager(options: StorageAppliancesClientListBySubscriptionOptions = StorageAppliancesClientListBySubscriptionOptions{}) -> runtime.Pager[StorageAppliancesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageAppliancesClientListBySubscriptionResponse ! Str { storage_appliances_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: StorageAppliancesClientListBySubscriptionResponse) -> Str? { r.storage_appliance_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageAppliancesClientListBySubscriptionResponse ! Str { storage_appliances_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: StorageAppliancesClientListBySubscriptionResponse) -> Str? { r.storage_appliance_list.next_link }).traced_as("StorageAppliancesClientListBySubscriptionResponse"))
 }
 
 /// StorageAppliancesClientListByResourceGroupOptions: the optional parameters of StorageAppliancesClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: StorageAppliancesClient) list_by_resource_group_create_request(resource_g
 /// Get a list of storage appliances in the provided resource group.
 pub fn (c: StorageAppliancesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: StorageAppliancesClientListByResourceGroupOptions = StorageAppliancesClientListByResourceGroupOptions{}) -> runtime.Pager[StorageAppliancesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageAppliancesClientListByResourceGroupResponse ! Str { storage_appliances_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: StorageAppliancesClientListByResourceGroupResponse) -> Str? { r.storage_appliance_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageAppliancesClientListByResourceGroupResponse ! Str { storage_appliances_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: StorageAppliancesClientListByResourceGroupResponse) -> Str? { r.storage_appliance_list.next_link }).traced_as("StorageAppliancesClientListByResourceGroupResponse"))
 }
 
 /// StorageAppliancesClientGetOptions: the optional parameters of StorageAppliancesClient.get.
@@ -144,12 +144,15 @@ fn (c: StorageAppliancesClient) get_create_request(resource_group_name: Str, sto
 
 /// Get properties of the provided storage appliance.
 pub fn (c: StorageAppliancesClient) get(resource_group_name: Str, storage_appliance_name: Str, options: StorageAppliancesClientGetOptions = StorageAppliancesClientGetOptions{}) -> StorageAppliancesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, storage_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, storage_appliance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_appliances_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_appliances_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StorageAppliancesClientBeginCreateOrUpdateOptions: the optional parameters of StorageAppliancesClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: StorageAppliancesClient) create_or_update_create_request(resource_group_n
 /// Create a new storage appliance or update the properties of the existing one. All customer initiated requests will be rejected as the life cycle of this resource is managed by the system.
 pub fn (c: StorageAppliancesClient[fx]) begin_create_or_update(resource_group_name: Str, storage_appliance_name: Str, storage_appliance_parameters: StorageAppliance, options: StorageAppliancesClientBeginCreateOrUpdateOptions = StorageAppliancesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[StorageAppliancesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientCreateOrUpdateResponse ! Str { storage_appliances_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientCreateOrUpdateResponse ! Str { storage_appliances_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, storage_appliance_name, storage_appliance_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, storage_appliance_name, storage_appliance_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientCreateOrUpdateResponse ! Str { storage_appliances_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientCreateOrUpdateResponse ! Str { storage_appliances_create_or_update_handle(r) }, traced: true)
 }
 
 /// StorageAppliancesClientBeginUpdateOptions: the optional parameters of StorageAppliancesClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: StorageAppliancesClient) update_create_request(resource_group_name: Str, 
 /// Update properties of the provided storage appliance, or update tags associated with the storage appliance Properties and tag updates can be done independently.
 pub fn (c: StorageAppliancesClient[fx]) begin_update(resource_group_name: Str, storage_appliance_name: Str, storage_appliance_update_parameters: StorageAppliancePatchParameters, options: StorageAppliancesClientBeginUpdateOptions = StorageAppliancesClientBeginUpdateOptions{}) -> runtime.Poller[StorageAppliancesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientUpdateResponse ! Str { storage_appliances_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientUpdateResponse ! Str { storage_appliances_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, storage_appliance_name, storage_appliance_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, storage_appliance_name, storage_appliance_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientUpdateResponse ! Str { storage_appliances_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientUpdateResponse", fn(r: http.Response) -> StorageAppliancesClientUpdateResponse ! Str { storage_appliances_update_handle(r) }, traced: true)
 }
 
 /// StorageAppliancesClientBeginDeleteOptions: the optional parameters of StorageAppliancesClient.begin_delete.
@@ -321,14 +328,16 @@ fn (c: StorageAppliancesClient) delete_create_request(resource_group_name: Str, 
 /// Delete the provided storage appliance. All customer initiated requests will be rejected as the life cycle of this resource is managed by the system.
 pub fn (c: StorageAppliancesClient[fx]) begin_delete(resource_group_name: Str, storage_appliance_name: Str, options: StorageAppliancesClientBeginDeleteOptions = StorageAppliancesClientBeginDeleteOptions{}) -> runtime.Poller[StorageAppliancesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientDeleteResponse", fn(r: http.Response) -> StorageAppliancesClientDeleteResponse ! Str { storage_appliances_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientDeleteResponse", fn(r: http.Response) -> StorageAppliancesClientDeleteResponse ! Str { storage_appliances_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, storage_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, storage_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientDeleteResponse", fn(r: http.Response) -> StorageAppliancesClientDeleteResponse ! Str { storage_appliances_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientDeleteResponse", fn(r: http.Response) -> StorageAppliancesClientDeleteResponse ! Str { storage_appliances_delete_handle(r) }, traced: true)
 }
 
 /// StorageAppliancesClientBeginDisableRemoteVendorManagementOptions: the optional parameters of StorageAppliancesClient.begin_disable_remote_vendor_management.
@@ -370,14 +379,16 @@ fn (c: StorageAppliancesClient) disable_remote_vendor_management_create_request(
 /// Disable remote vendor management of the provided storage appliance.
 pub fn (c: StorageAppliancesClient[fx]) begin_disable_remote_vendor_management(resource_group_name: Str, storage_appliance_name: Str, options: StorageAppliancesClientBeginDisableRemoteVendorManagementOptions = StorageAppliancesClientBeginDisableRemoteVendorManagementOptions{}) -> runtime.Poller[StorageAppliancesClientDisableRemoteVendorManagementResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientDisableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientDisableRemoteVendorManagementResponse ! Str { storage_appliances_disable_remote_vendor_management_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientDisableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientDisableRemoteVendorManagementResponse ! Str { storage_appliances_disable_remote_vendor_management_handle(r) }, traced: true)
   }
-  let req = c.disable_remote_vendor_management_create_request(resource_group_name, storage_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginDisableRemoteVendorManagement", c.setup.pipeline.tracer)
+  let req = c.disable_remote_vendor_management_create_request(resource_group_name, storage_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientDisableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientDisableRemoteVendorManagementResponse ! Str { storage_appliances_disable_remote_vendor_management_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientDisableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientDisableRemoteVendorManagementResponse ! Str { storage_appliances_disable_remote_vendor_management_handle(r) }, traced: true)
 }
 
 /// StorageAppliancesClientBeginEnableRemoteVendorManagementOptions: the optional parameters of StorageAppliancesClient.begin_enable_remote_vendor_management.
@@ -426,14 +437,16 @@ fn (c: StorageAppliancesClient) enable_remote_vendor_management_create_request(r
 /// Enable remote vendor management of the provided storage appliance.
 pub fn (c: StorageAppliancesClient[fx]) begin_enable_remote_vendor_management(resource_group_name: Str, storage_appliance_name: Str, options: StorageAppliancesClientBeginEnableRemoteVendorManagementOptions = StorageAppliancesClientBeginEnableRemoteVendorManagementOptions{}) -> runtime.Poller[StorageAppliancesClientEnableRemoteVendorManagementResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientEnableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientEnableRemoteVendorManagementResponse ! Str { storage_appliances_enable_remote_vendor_management_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientEnableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientEnableRemoteVendorManagementResponse ! Str { storage_appliances_enable_remote_vendor_management_handle(r) }, traced: true)
   }
-  let req = c.enable_remote_vendor_management_create_request(resource_group_name, storage_appliance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginEnableRemoteVendorManagement", c.setup.pipeline.tracer)
+  let req = c.enable_remote_vendor_management_create_request(resource_group_name, storage_appliance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientEnableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientEnableRemoteVendorManagementResponse ! Str { storage_appliances_enable_remote_vendor_management_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientEnableRemoteVendorManagementResponse", fn(r: http.Response) -> StorageAppliancesClientEnableRemoteVendorManagementResponse ! Str { storage_appliances_enable_remote_vendor_management_handle(r) }, traced: true)
 }
 
 /// StorageAppliancesClientBeginRunReadCommandsOptions: the optional parameters of StorageAppliancesClient.begin_run_read_commands.
@@ -476,12 +489,14 @@ fn (c: StorageAppliancesClient) run_read_commands_create_request(resource_group_
 /// Run one or more read-only commands on the provided storage appliance.
 pub fn (c: StorageAppliancesClient[fx]) begin_run_read_commands(resource_group_name: Str, storage_appliance_name: Str, storage_appliance_run_read_commands_parameters: StorageApplianceRunReadCommandsParameters, options: StorageAppliancesClientBeginRunReadCommandsOptions = StorageAppliancesClientBeginRunReadCommandsOptions{}) -> runtime.Poller[StorageAppliancesClientRunReadCommandsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientRunReadCommandsResponse", fn(r: http.Response) -> StorageAppliancesClientRunReadCommandsResponse ! Str { storage_appliances_run_read_commands_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageAppliancesClientRunReadCommandsResponse", fn(r: http.Response) -> StorageAppliancesClientRunReadCommandsResponse ! Str { storage_appliances_run_read_commands_handle(r) }, traced: true)
   }
-  let req = c.run_read_commands_create_request(resource_group_name, storage_appliance_name, storage_appliance_run_read_commands_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageAppliancesClient.BeginRunReadCommands", c.setup.pipeline.tracer)
+  let req = c.run_read_commands_create_request(resource_group_name, storage_appliance_name, storage_appliance_run_read_commands_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientRunReadCommandsResponse", fn(r: http.Response) -> StorageAppliancesClientRunReadCommandsResponse ! Str { storage_appliances_run_read_commands_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageAppliancesClientRunReadCommandsResponse", fn(r: http.Response) -> StorageAppliancesClientRunReadCommandsResponse ! Str { storage_appliances_run_read_commands_handle(r) }, traced: true)
 }

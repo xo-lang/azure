@@ -66,10 +66,13 @@ fn (c: OperationResultClient) get_create_request(operation_id: Str, location: St
 
 /// Gets the operation result for a resource
 pub fn (c: OperationResultClient) get(operation_id: Str, location: Str, options: OperationResultClientGetOptions = OperationResultClientGetOptions{}) -> OperationResultClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(operation_id, location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OperationResultClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(operation_id, location, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  operation_result_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = operation_result_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

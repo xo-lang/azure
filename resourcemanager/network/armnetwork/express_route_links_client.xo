@@ -57,7 +57,7 @@ fn (c: ExpressRouteLinksClient) list_create_request(resource_group_name: Str, ex
 /// Retrieve the ExpressRouteLink sub-resources of the specified ExpressRoutePort resource.
 pub fn (c: ExpressRouteLinksClient[fx]) new_list_pager(resource_group_name: Str, express_route_port_name: Str, options: ExpressRouteLinksClientListOptions = ExpressRouteLinksClientListOptions{}) -> runtime.Pager[ExpressRouteLinksClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, express_route_port_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ExpressRouteLinksClientListResponse ! Str { express_route_links_list_handle(r) }, c.setup.endpoint, fn(r: ExpressRouteLinksClientListResponse) -> Str? { r.express_route_link_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ExpressRouteLinksClientListResponse ! Str { express_route_links_list_handle(r) }, c.setup.endpoint, fn(r: ExpressRouteLinksClientListResponse) -> Str? { r.express_route_link_list_result.next_link }).traced_as("ExpressRouteLinksClientListResponse"))
 }
 
 /// ExpressRouteLinksClientGetOptions: the optional parameters of ExpressRouteLinksClient.get.
@@ -99,10 +99,13 @@ fn (c: ExpressRouteLinksClient) get_create_request(resource_group_name: Str, exp
 
 /// Retrieves the specified ExpressRouteLink resource.
 pub fn (c: ExpressRouteLinksClient) get(resource_group_name: Str, express_route_port_name: Str, link_name: Str, options: ExpressRouteLinksClientGetOptions = ExpressRouteLinksClientGetOptions{}) -> ExpressRouteLinksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, express_route_port_name, link_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ExpressRouteLinksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, express_route_port_name, link_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  express_route_links_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = express_route_links_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -49,7 +49,7 @@ fn (c: LocationsClient) list_create_request(options: LocationsClientListOptions)
 /// The location of the responsible ASC of the specific subscription (home region). For each subscription there is only one responsible location. The location in the response should be used to read or write other resources in ASC according to their ID.
 pub fn (c: LocationsClient[fx]) new_list_pager(options: LocationsClientListOptions = LocationsClientListOptions{}) -> runtime.Pager[LocationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationsClientListResponse ! Str { locations_list_handle(r) }, c.setup.endpoint, fn(r: LocationsClientListResponse) -> Str? { r.asc_location_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> LocationsClientListResponse ! Str { locations_list_handle(r) }, c.setup.endpoint, fn(r: LocationsClientListResponse) -> Str? { r.asc_location_list.next_link }).traced_as("LocationsClientListResponse"))
 }
 
 /// LocationsClientGetOptions: the optional parameters of LocationsClient.get.
@@ -83,10 +83,13 @@ fn (c: LocationsClient) get_create_request(asc_location: Str, options: Locations
 
 /// Details of a specific location
 pub fn (c: LocationsClient) get(asc_location: Str, options: LocationsClientGetOptions = LocationsClientGetOptions{}) -> LocationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(asc_location, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "LocationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(asc_location, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  locations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = locations_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

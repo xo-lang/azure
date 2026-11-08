@@ -49,7 +49,7 @@ fn (c: ContainerGroupsClient) list_create_request(options: ContainerGroupsClient
 /// Get a list of container groups in the specified subscription. This operation returns properties of each container group including containers, image registry credentials, restart policy, IP address type, OS type, state, and volumes.
 pub fn (c: ContainerGroupsClient[fx]) new_list_pager(options: ContainerGroupsClientListOptions = ContainerGroupsClientListOptions{}) -> runtime.Pager[ContainerGroupsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerGroupsClientListResponse ! Str { container_groups_list_handle(r) }, fn(r: ContainerGroupsClientListResponse) -> Str? { r.container_group_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerGroupsClientListResponse ! Str { container_groups_list_handle(r) }, fn(r: ContainerGroupsClientListResponse) -> Str? { r.container_group_list_result.next_link }).traced_as("ContainerGroupsClientListResponse"))
 }
 
 /// ContainerGroupsClientListByResourceGroupOptions: the optional parameters of ContainerGroupsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ContainerGroupsClient) list_by_resource_group_create_request(resource_gro
 /// Get a list of container groups in a specified subscription and resource group. This operation returns properties of each container group including containers, image registry credentials, restart policy, IP address type, OS type, state, and volumes.
 pub fn (c: ContainerGroupsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ContainerGroupsClientListByResourceGroupOptions = ContainerGroupsClientListByResourceGroupOptions{}) -> runtime.Pager[ContainerGroupsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerGroupsClientListByResourceGroupResponse ! Str { container_groups_list_by_resource_group_handle(r) }, fn(r: ContainerGroupsClientListByResourceGroupResponse) -> Str? { r.container_group_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerGroupsClientListByResourceGroupResponse ! Str { container_groups_list_by_resource_group_handle(r) }, fn(r: ContainerGroupsClientListByResourceGroupResponse) -> Str? { r.container_group_list_result.next_link }).traced_as("ContainerGroupsClientListByResourceGroupResponse"))
 }
 
 /// ContainerGroupsClientGetOptions: the optional parameters of ContainerGroupsClient.get.
@@ -122,12 +122,15 @@ fn (c: ContainerGroupsClient) get_create_request(resource_group_name: Str, conta
 
 /// Gets the properties of the specified container group in the specified subscription and resource group. The operation returns the properties of each container group including containers, image registry credentials, restart policy, IP address type, OS type, state, and volumes.
 pub fn (c: ContainerGroupsClient) get(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientGetOptions = ContainerGroupsClientGetOptions{}) -> ContainerGroupsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_groups_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_groups_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerGroupsClientBeginCreateOrUpdateOptions: the optional parameters of ContainerGroupsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ContainerGroupsClient) create_or_update_create_request(resource_group_nam
 /// Create or update container groups with specified configurations.
 pub fn (c: ContainerGroupsClient[fx]) begin_create_or_update(resource_group_name: Str, container_group_name: Str, container_group: ContainerGroup, options: ContainerGroupsClientBeginCreateOrUpdateOptions = ContainerGroupsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ContainerGroupsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerGroupsClientCreateOrUpdateResponse ! Str { container_groups_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerGroupsClientCreateOrUpdateResponse ! Str { container_groups_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, container_group_name, container_group, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, container_group_name, container_group, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerGroupsClientCreateOrUpdateResponse ! Str { container_groups_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerGroupsClientCreateOrUpdateResponse ! Str { container_groups_create_or_update_handle(r) }, traced: true)
 }
 
 /// ContainerGroupsClientUpdateOptions: the optional parameters of ContainerGroupsClient.update.
@@ -216,12 +221,15 @@ fn (c: ContainerGroupsClient) update_create_request(resource_group_name: Str, co
 
 /// Updates container group tags with specified values.
 pub fn (c: ContainerGroupsClient) update(resource_group_name: Str, container_group_name: Str, resource: Resource, options: ContainerGroupsClientUpdateOptions = ContainerGroupsClientUpdateOptions{}) -> ContainerGroupsClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, container_group_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, container_group_name, resource, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_groups_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_groups_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerGroupsClientBeginDeleteOptions: the optional parameters of ContainerGroupsClient.begin_delete.
@@ -263,14 +271,16 @@ fn (c: ContainerGroupsClient) delete_create_request(resource_group_name: Str, co
 /// Delete the specified container group in the specified subscription and resource group. The operation does not delete other resources provided by the user, such as volumes.
 pub fn (c: ContainerGroupsClient[fx]) begin_delete(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientBeginDeleteOptions = ContainerGroupsClientBeginDeleteOptions{}) -> runtime.Poller[ContainerGroupsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientDeleteResponse", fn(r: http.Response) -> ContainerGroupsClientDeleteResponse ! Str { container_groups_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientDeleteResponse", fn(r: http.Response) -> ContainerGroupsClientDeleteResponse ! Str { container_groups_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientDeleteResponse", fn(r: http.Response) -> ContainerGroupsClientDeleteResponse ! Str { container_groups_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientDeleteResponse", fn(r: http.Response) -> ContainerGroupsClientDeleteResponse ! Str { container_groups_delete_handle(r) }, traced: true)
 }
 
 /// ContainerGroupsClientBeginRestartOptions: the optional parameters of ContainerGroupsClient.begin_restart.
@@ -309,14 +319,16 @@ fn (c: ContainerGroupsClient) restart_create_request(resource_group_name: Str, c
 /// Restarts all containers in a container group in place. If container image has updates, new image will be downloaded.
 pub fn (c: ContainerGroupsClient[fx]) begin_restart(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientBeginRestartOptions = ContainerGroupsClientBeginRestartOptions{}) -> runtime.Poller[ContainerGroupsClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientRestartResponse", fn(r: http.Response) -> ContainerGroupsClientRestartResponse ! Str { container_groups_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientRestartResponse", fn(r: http.Response) -> ContainerGroupsClientRestartResponse ! Str { container_groups_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientRestartResponse", fn(r: http.Response) -> ContainerGroupsClientRestartResponse ! Str { container_groups_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientRestartResponse", fn(r: http.Response) -> ContainerGroupsClientRestartResponse ! Str { container_groups_restart_handle(r) }, traced: true)
 }
 
 /// ContainerGroupsClientStopOptions: the optional parameters of ContainerGroupsClient.stop.
@@ -351,12 +363,15 @@ fn (c: ContainerGroupsClient) stop_create_request(resource_group_name: Str, cont
 
 /// Stops all containers in a container group. Compute resources will be deallocated and billing will stop.
 pub fn (c: ContainerGroupsClient) stop(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientStopOptions = ContainerGroupsClientStopOptions{}) -> ContainerGroupsClientStopResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.stop_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.Stop", c.setup.pipeline.tracer)
+  let req = sp.on(c.stop_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_groups_stop_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_groups_stop_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerGroupsClientBeginStartOptions: the optional parameters of ContainerGroupsClient.begin_start.
@@ -395,14 +410,16 @@ fn (c: ContainerGroupsClient) start_create_request(resource_group_name: Str, con
 /// Starts all containers in a container group. Compute resources will be allocated and billing will start.
 pub fn (c: ContainerGroupsClient[fx]) begin_start(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientBeginStartOptions = ContainerGroupsClientBeginStartOptions{}) -> runtime.Poller[ContainerGroupsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientStartResponse", fn(r: http.Response) -> ContainerGroupsClientStartResponse ! Str { container_groups_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerGroupsClientStartResponse", fn(r: http.Response) -> ContainerGroupsClientStartResponse ! Str { container_groups_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientStartResponse", fn(r: http.Response) -> ContainerGroupsClientStartResponse ! Str { container_groups_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerGroupsClientStartResponse", fn(r: http.Response) -> ContainerGroupsClientStartResponse ! Str { container_groups_start_handle(r) }, traced: true)
 }
 
 /// ContainerGroupsClientGetOutboundNetworkDependenciesEndpointsOptions: the optional parameters of ContainerGroupsClient.get_outbound_network_dependencies_endpoints.
@@ -440,10 +457,13 @@ fn (c: ContainerGroupsClient) get_outbound_network_dependencies_endpoints_create
 
 /// Gets all the network dependencies for this container group to allow complete control of network setting and configuration. For container groups, this will always be an empty list.
 pub fn (c: ContainerGroupsClient) get_outbound_network_dependencies_endpoints(resource_group_name: Str, container_group_name: Str, options: ContainerGroupsClientGetOutboundNetworkDependenciesEndpointsOptions = ContainerGroupsClientGetOutboundNetworkDependenciesEndpointsOptions{}) -> ContainerGroupsClientGetOutboundNetworkDependenciesEndpointsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_outbound_network_dependencies_endpoints_create_request(resource_group_name, container_group_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerGroupsClient.GetOutboundNetworkDependenciesEndpoints", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_outbound_network_dependencies_endpoints_create_request(resource_group_name, container_group_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_groups_get_outbound_network_dependencies_endpoints_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_groups_get_outbound_network_dependencies_endpoints_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

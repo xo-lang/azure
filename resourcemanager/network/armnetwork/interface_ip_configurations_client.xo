@@ -57,7 +57,7 @@ fn (c: InterfaceIPConfigurationsClient) list_create_request(resource_group_name:
 /// Get all ip configurations in a network interface.
 pub fn (c: InterfaceIPConfigurationsClient[fx]) new_list_pager(resource_group_name: Str, network_interface_name: Str, options: InterfaceIPConfigurationsClientListOptions = InterfaceIPConfigurationsClientListOptions{}) -> runtime.Pager[InterfaceIPConfigurationsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, network_interface_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfaceIPConfigurationsClientListResponse ! Str { interface_ip_configurations_list_handle(r) }, c.setup.endpoint, fn(r: InterfaceIPConfigurationsClientListResponse) -> Str? { r.interface_ip_configuration_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InterfaceIPConfigurationsClientListResponse ! Str { interface_ip_configurations_list_handle(r) }, c.setup.endpoint, fn(r: InterfaceIPConfigurationsClientListResponse) -> Str? { r.interface_ip_configuration_list_result.next_link }).traced_as("InterfaceIPConfigurationsClientListResponse"))
 }
 
 /// InterfaceIPConfigurationsClientGetOptions: the optional parameters of InterfaceIPConfigurationsClient.get.
@@ -99,10 +99,13 @@ fn (c: InterfaceIPConfigurationsClient) get_create_request(resource_group_name: 
 
 /// Gets the specified network interface ip configuration.
 pub fn (c: InterfaceIPConfigurationsClient) get(resource_group_name: Str, network_interface_name: Str, ip_configuration_name: Str, options: InterfaceIPConfigurationsClientGetOptions = InterfaceIPConfigurationsClientGetOptions{}) -> InterfaceIPConfigurationsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, network_interface_name, ip_configuration_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InterfaceIPConfigurationsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, network_interface_name, ip_configuration_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  interface_ip_configurations_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = interface_ip_configurations_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

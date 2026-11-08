@@ -53,10 +53,13 @@ fn (c: FeatureSupportClient) validate_create_request(azure_region: Str, paramete
 
 /// It will validate if given feature with resource properties is supported in service
 pub fn (c: FeatureSupportClient) validate(azure_region: Str, parameters: FeatureSupportRequestClassification, options: FeatureSupportClientValidateOptions = FeatureSupportClientValidateOptions{}) -> FeatureSupportClientValidateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.validate_create_request(azure_region, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FeatureSupportClient.Validate", c.setup.pipeline.tracer)
+  let req = sp.on(c.validate_create_request(azure_region, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  feature_support_validate_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = feature_support_validate_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

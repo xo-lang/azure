@@ -1,0 +1,398 @@
+// Decision 0013 step 1: armstorage's spans against Go's. A Go program
+// (armstorage v4.3.0, azcore v1.24.0, a recording tracing.Provider over
+// a fake transport and credential; local only) printed what TRACE_GO
+// holds, with these changes, each a known difference:
+// - the endpoint is GV_EP, and the User-Agent and the client request id
+//   print as UA and ID;
+// - the tracer is named by this module's name and version (Go's names
+//   the Go module path at its version);
+// - every HTTP span has az.client_request_id: this SDK sends
+//   x-ms-client-request-id by default (decision 0003), Go's does not;
+// - the transport error's method span says *url.Error, the type Go's
+//   own transport returns (the Go program's fake returned an
+//   *errors.errorString), and its REQ lines are gone: FakeNet fails the
+//   request before any handler sees it.
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/arm
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/tracing
+
+const TR_SPAN: Str = "test.span"
+
+struct TrRec {
+  pub parent: Int
+  pub name: Str
+  pub kind: Int
+  pub lines: List[Str] = []
+  pub status: Str = ""
+  pub ended: Bool = false
+}
+
+struct TrReply {
+  pub status: Int = 200
+  pub body: Str = ""
+  pub headers: Map[Str, Str] = {}
+}
+
+struct TrLog {
+  out: Mutex[List[Str]]
+  spans: Mutex[List[TrRec]]
+  replies: Mutex[List[TrReply]]
+}
+
+fn tr_note(log: TrLog, s: Str) {
+  log.out.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn tr_update(log: TrLog, id: Int, f: fn(TrRec) -> TrRec) {
+  log.spans.with(fn(var l: List[TrRec]) { l[id - 1] = f(l[id - 1]) })
+}
+
+/// An attribute as the Go program prints it: `key=<Go type>:<value>`,
+/// the User-Agent as UA and the client request id as ID.
+fn tr_attr(a: tracing.Attribute) -> Str {
+  let (t, v) = match a.value {
+    tracing.Value.Str(s) => ("string", s)
+    tracing.Value.Int(i) => ("int", "${i}")
+    tracing.Value.Float(x) => ("float64", "${x}")
+    tracing.Value.Bool(b) => ("bool", if b { "true" } else { "false" })
+  }
+  let shown = if a.key == "http.user_agent" { "UA" } else if a.key == "az.client_request_id" { "ID" } else { v }
+  "${a.key}=${t}:${shown}"
+}
+
+fn tr_span_id(ctx: tracing.Context) -> Int {
+  match ctx.values.get(TR_SPAN) {
+    Some(v) => Int.parse(v) ?? 0
+    None => 0
+  }
+}
+
+fn tr_span(log: TrLog, id: Int) -> tracing.Span {
+  tracing.new_span(tracing.SpanImpl{
+    end: Some(fn() { tr_update(log, id, fn(r: TrRec) -> TrRec { r with {ended: true} }) }),
+    set_attributes: Some(fn(attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + attrs.map(fn(a: tracing.Attribute) -> Str { "    ATTR +${tr_attr(a)}" })} })
+    }),
+    add_event: Some(fn(name: Str, attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + ["    EVENT ${name}"]} })
+    }),
+    set_status: Some(fn(code: tracing.SpanStatus, desc: Str) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {status: "${code.code()} ${tr_q(desc)}"} })
+    }),
+  })
+}
+
+/// A provider recording every tracer it makes and every span.
+fn tr_provider(log: TrLog) -> tracing.Provider {
+  tracing.new_provider(fn(module: Str, version: Str) -> tracing.Tracer {
+    tr_note(log, "TRACER ${module} ${version}")
+    let start = fn(ctx: tracing.Context, name: Str, opts: tracing.SpanOptions) -> (tracing.Context, tracing.Span) {
+      let rec = TrRec{parent: tr_span_id(ctx), name: name, kind: opts.kind.code(), lines: opts.attributes.map(fn(a: tracing.Attribute) -> Str { "    ATTR ${tr_attr(a)}" })}
+      let id = log.spans.with(fn(var l: List[TrRec]) -> Int {
+        l.push(rec)
+        l.len()
+      })
+      var vs = ctx.values
+      vs.put(TR_SPAN, "${id}")
+      (tracing.Context{values: vs}, tr_span(log, id))
+    }
+    tracing.new_tracer(start, span_from_context: Some(fn(ctx: tracing.Context) -> tracing.Span {
+      let id = tr_span_id(ctx)
+      if id == 0 { tracing.Span{} } else { tr_span(log, id) }
+    }))
+  })
+}
+
+/// Go's %q of printable ASCII text with `\n`.
+fn tr_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+/// The case's error and spans, as the Go program dumps them, then a
+/// fresh span list.
+fn tr_dump(log: TrLog, name: Str, err: azcore.CallErr?) {
+  tr_note(log, "CASE ${name} err=${if err.is_some() { "true" } else { "false" }}")
+  if let Some(e) = err {
+    tr_note(log, "  ERR ${tr_q(e.display())}")
+  }
+  let spans = log.spans.with(fn(var l: List[TrRec]) -> List[TrRec] {
+    let out = l
+    l = []
+    out
+  })
+  var i = 0
+  for r in spans {
+    i += 1
+    tr_note(log, "  SPAN ${i} parent=${r.parent} ${tr_q(r.name)} kind=${r.kind} ended=${if r.ended { "true" } else { "false" }} status=${r.status}")
+    for line in r.lines {
+      tr_note(log, line)
+    }
+  }
+}
+
+fn tr_new_log(net: testing.FakeNet) -> TrLog {
+  let log = TrLog{out: Mutex[List[Str]].new([]), spans: Mutex[List[TrRec]].new([]), replies: Mutex[List[TrReply]].new([])}
+  let h = fn(req: http.Request) -> http.Response {
+    let q = req.raw_query()
+    tr_note(log, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+    let r = log.replies.with(fn(var l: List[TrReply]) -> TrReply {
+      if l.is_empty() {
+        return TrReply{}
+      }
+      let first = l[0]
+      l = l[1..l.len()]
+      first
+    })
+    var hs = r.headers
+    hs.put("Content-Type", "application/json")
+    http.Response{status: r.status, headers: hs, body: r.body.bytes()}
+  }
+  for m in ["GET", "PUT", "POST"] {
+    net.handle("${m} ${GV_EP}/{rest...}", h)
+  }
+  log
+}
+
+fn tr_replies(log: TrLog, rs: List[TrReply]) {
+  log.replies.with(fn(var l: List[TrReply]) { l = rs })
+}
+
+fn tr_client(net: Net, clock: Clock, rand: Rand, log: TrLog, traced: Bool) -> AccountsClient[()] {
+  let prov = if traced { tr_provider(log) } else { tracing.Provider{} }
+  let opts = arm.ClientOptions{endpoint: GV_EP, client: policy.ClientOptions{tracing_provider: prov, retry: policy.RetryOptions{retry_delay: 1ms, max_retry_delay: 2ms}}}
+  new_accounts_client(net, clock, rand, "sub1", GvCred{}, opts) ?? e => fault(e)
+}
+
+fn tr_err[T](r: Result[T, azcore.CallErr]) -> azcore.CallErr? {
+  match r {
+    Ok(_) => None
+    Err(e) => Some(e)
+  }
+}
+
+const TR_AVAIL: Str = "{\"nameAvailable\":true}"
+
+test "spans as Go's armstorage v4.3.0 makes them" {
+  let log = tr_new_log(os.net)
+  let p = AccountCheckNameAvailabilityParameters{name: Some("acct1"), type_: Some("Microsoft.Storage/storageAccounts")}
+
+  tr_replies(log, [TrReply{body: TR_AVAIL, headers: {"x-ms-request-id": "srv-1"}}])
+  tr_dump(log, "check ok", tr_err(tr_client(os.net, os.clock, os.rand, log, true).check_name_availability(p)))
+
+  tr_replies(log, [TrReply{status: 404, body: "{\"error\":{\"code\":\"NotFound\",\"message\":\"no such thing\"}}", headers: {"x-ms-request-id": "srv-2"}}])
+  tr_dump(log, "check 404", tr_err(tr_client(os.net, os.clock, os.rand, log, true).check_name_availability(p)))
+
+  tr_replies(log, [TrReply{status: 503, body: "{}"}, TrReply{body: TR_AVAIL}])
+  tr_dump(log, "check retried", tr_err(tr_client(os.net, os.clock, os.rand, log, true).check_name_availability(p)))
+
+  os.net.fail("POST ${GV_EP}/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability", http.ClientErr.Connect(msg: "dial tcp: connection refused"))
+  tr_dump(log, "check transport error", tr_err(tr_client(os.net, os.clock, os.rand, log, true).check_name_availability(p)))
+  os.net.clear_failures()
+
+  tr_replies(log, [TrReply{body: TR_AVAIL}])
+  tr_dump(log, "check untraced", tr_err(tr_client(os.net, os.clock, os.rand, log, false).check_name_availability(p)))
+
+  let page1 = "{\"value\":[{\"name\":\"a\"}],\"nextLink\":\"${GV_EP}/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2025-08-01&$skiptoken=t2\"}"
+  tr_replies(log, [TrReply{body: page1}, TrReply{body: "{\"value\":[{\"name\":\"b\"}]}"}])
+  var pg = tr_client(os.net, os.clock, os.rand, log, true).new_list_pager() ?? e => fault(e.display())
+  var lerr: azcore.CallErr? = None
+  while pg.more() {
+    if let Err(e) = pg.next_page() {
+      lerr = Some(e)
+      break
+    }
+  }
+  tr_dump(log, "list two pages", lerr)
+
+  tr_replies(log, [TrReply{status: 500, body: "{\"error\":{\"code\":\"Boom\",\"message\":\"bad\"}}"}, TrReply{status: 500, body: "{}"}, TrReply{status: 500, body: "{}"}, TrReply{status: 500, body: "{}"}])
+  var pg2 = tr_client(os.net, os.clock, os.rand, log, true).new_list_pager() ?? e => fault(e.display())
+  tr_dump(log, "list error", tr_err(pg2.next_page()))
+
+  let op = "${GV_EP}/subscriptions/sub1/providers/Microsoft.Storage/operations/op1?api-version=2025-08-01"
+  tr_replies(log, [
+    TrReply{status: 202, headers: {"Location": op, "Retry-After": "0"}},
+    TrReply{status: 202, headers: {"Location": op, "Retry-After": "0"}},
+    TrReply{body: "{\"name\":\"acct1\",\"location\":\"eastus\"}"},
+  ])
+  let params = AccountCreateParameters{kind: Some(KIND_STORAGE_V2), location: Some("eastus"), sku: Some(SKU{name: Some(SKU_NAME_STANDARD_LRS)})}
+  match tr_client(os.net, os.clock, os.rand, log, true).begin_create("rg1", "acct1", params) {
+    Ok(p0) => {
+      tr_dump(log, "begin create", None)
+      var poller = p0
+      tr_dump(log, "poll until done", tr_err(poller.poll_until_done(os.clock, frequency: 1s)))
+    }
+    Err(e) => tr_dump(log, "begin create", Some(e))
+  }
+  let got = log.out.with(fn(var l: List[Str]) -> List[Str] { l })
+  gv_compare(got, TRACE_GO)
+}
+
+/// The Go program's output, changed as the header says.
+const TRACE_GO: List[Str] = [
+  "TRACER armstorage v0.1.0",
+  "REQ POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "CASE check ok err=false",
+  "  SPAN 1 parent=0 \"AccountsClient.CheckNameAvailability\" kind=1 ended=true status=",
+  "  SPAN 2 parent=1 \"HTTP POST\" kind=3 ended=true status=",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:200",
+  "    ATTR +az.service_request_id=string:srv-1",
+  "TRACER armstorage v0.1.0",
+  "REQ POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "CASE check 404 err=true",
+  "  ERR \"POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability\\n--------------------------------------------------------------------------------\\nRESPONSE 404: 404 Not Found\\nERROR CODE: NotFound\\n--------------------------------------------------------------------------------\\n{\\n  \\\"error\\\": {\\n    \\\"code\\\": \\\"NotFound\\\",\\n    \\\"message\\\": \\\"no such thing\\\"\\n  }\\n}\\n--------------------------------------------------------------------------------\\n\"",
+  "  SPAN 1 parent=0 \"AccountsClient.CheckNameAvailability\" kind=1 ended=true status=",
+  "  SPAN 2 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"404 Not Found\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:404",
+  "    ATTR +az.service_request_id=string:srv-2",
+  "TRACER armstorage v0.1.0",
+  "REQ POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "REQ POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "CASE check retried err=false",
+  "  SPAN 1 parent=0 \"AccountsClient.CheckNameAvailability\" kind=1 ended=true status=",
+  "  SPAN 2 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"503 Service Unavailable\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:503",
+  "  SPAN 3 parent=1 \"HTTP POST\" kind=3 ended=true status=",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:200",
+  "TRACER armstorage v0.1.0",
+  "CASE check transport error err=true",
+  "  ERR \"dial tcp: connection refused\"",
+  "  SPAN 1 parent=0 \"AccountsClient.CheckNameAvailability\" kind=1 ended=true status=1 \"*url.Error:\\ndial tcp: connection refused\"",
+  "  SPAN 2 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"dial tcp: connection refused\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "  SPAN 3 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"dial tcp: connection refused\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "  SPAN 4 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"dial tcp: connection refused\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "  SPAN 5 parent=1 \"HTTP POST\" kind=3 ended=true status=1 \"dial tcp: connection refused\"",
+  "    ATTR http.method=string:POST",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "REQ POST https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/checkNameAvailability?api-version=2026-09-01",
+  "CASE check untraced err=false",
+  "TRACER armstorage v0.1.0",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?%24skiptoken=t2&api-version=2025-08-01",
+  "CASE list two pages err=false",
+  "  SPAN 1 parent=0 \"Pager[AccountsClientListResponse].NextPage\" kind=1 ended=true status=",
+  "  SPAN 2 parent=1 \"HTTP GET\" kind=3 ended=true status=",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:200",
+  "  SPAN 3 parent=0 \"Pager[AccountsClientListResponse].NextPage\" kind=1 ended=true status=",
+  "  SPAN 4 parent=3 \"HTTP GET\" kind=3 ended=true status=",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?%24skiptoken=REDACTED&api-version=2025-08-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:200",
+  "TRACER armstorage v0.1.0",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "CASE list error err=true",
+  "  ERR \"GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts\\n--------------------------------------------------------------------------------\\nRESPONSE 500: 500 Internal Server Error\\nERROR CODE UNAVAILABLE\\n--------------------------------------------------------------------------------\\n{}\\n--------------------------------------------------------------------------------\\n\"",
+  "  SPAN 1 parent=0 \"Pager[AccountsClientListResponse].NextPage\" kind=1 ended=true status=1 \"*azcore.ResponseError:\\nGET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts\\n--------------------------------------------------------------------------------\\nRESPONSE 500: 500 Internal Server Error\\nERROR CODE UNAVAILABLE\\n--------------------------------------------------------------------------------\\n{}\\n--------------------------------------------------------------------------------\\n\"",
+  "  SPAN 2 parent=1 \"HTTP GET\" kind=3 ended=true status=1 \"500 Internal Server Error\"",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:500",
+  "  SPAN 3 parent=1 \"HTTP GET\" kind=3 ended=true status=1 \"500 Internal Server Error\"",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:500",
+  "  SPAN 4 parent=1 \"HTTP GET\" kind=3 ended=true status=1 \"500 Internal Server Error\"",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:500",
+  "  SPAN 5 parent=1 \"HTTP GET\" kind=3 ended=true status=1 \"500 Internal Server Error\"",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/storageAccounts?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:500",
+  "TRACER armstorage v0.1.0",
+  "REQ PUT https://management.example.test/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/acct1?api-version=2026-09-01",
+  "CASE begin create err=false",
+  "  SPAN 1 parent=0 \"AccountsClient.BeginCreate\" kind=1 ended=true status=",
+  "    ATTR +az.namespace=string:Microsoft.Storage",
+  "  SPAN 2 parent=1 \"HTTP PUT\" kind=3 ended=true status=",
+  "    ATTR http.method=string:PUT",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/acct1?api-version=2026-09-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:202",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/operations/op1?api-version=2025-08-01",
+  "REQ GET https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/operations/op1?api-version=2025-08-01",
+  "CASE poll until done err=false",
+  "  SPAN 1 parent=0 \"Poller[AccountsClientCreateResponse].PollUntilDone\" kind=1 ended=true status=",
+  "    ATTR +az.namespace=string:Microsoft.Storage",
+  "    ATTR +az.namespace=string:Microsoft.Storage",
+  "  SPAN 2 parent=1 \"HTTP GET\" kind=3 ended=true status=",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/operations/op1?api-version=2025-08-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:202",
+  "  SPAN 3 parent=1 \"HTTP GET\" kind=3 ended=true status=",
+  "    ATTR http.method=string:GET",
+  "    ATTR http.url=string:https://management.example.test/subscriptions/sub1/providers/Microsoft.Storage/operations/op1?api-version=2025-08-01",
+  "    ATTR net.peer.name=string:management.example.test",
+  "    ATTR http.user_agent=string:UA",
+  "    ATTR az.client_request_id=string:ID",
+  "    ATTR +http.status_code=int:200",
+]

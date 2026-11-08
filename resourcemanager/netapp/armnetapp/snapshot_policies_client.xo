@@ -57,7 +57,7 @@ fn (c: SnapshotPoliciesClient) list_create_request(resource_group_name: Str, acc
 /// List snapshot policy
 pub fn (c: SnapshotPoliciesClient[fx]) new_list_pager(resource_group_name: Str, account_name: Str, options: SnapshotPoliciesClientListOptions = SnapshotPoliciesClientListOptions{}) -> runtime.Pager[SnapshotPoliciesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotPoliciesClientListResponse ! Str { snapshot_policies_list_handle(r) }, c.setup.endpoint, fn(r: SnapshotPoliciesClientListResponse) -> Str? { r.snapshot_policies_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> SnapshotPoliciesClientListResponse ! Str { snapshot_policies_list_handle(r) }, c.setup.endpoint, fn(r: SnapshotPoliciesClientListResponse) -> Str? { r.snapshot_policies_list.next_link }).traced_as("SnapshotPoliciesClientListResponse"))
 }
 
 /// SnapshotPoliciesClientGetOptions: the optional parameters of SnapshotPoliciesClient.get.
@@ -99,12 +99,15 @@ fn (c: SnapshotPoliciesClient) get_create_request(resource_group_name: Str, acco
 
 /// Get a snapshot Policy
 pub fn (c: SnapshotPoliciesClient) get(resource_group_name: Str, account_name: Str, snapshot_policy_name: Str, options: SnapshotPoliciesClientGetOptions = SnapshotPoliciesClientGetOptions{}) -> SnapshotPoliciesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, snapshot_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotPoliciesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, snapshot_policy_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  snapshot_policies_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = snapshot_policies_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SnapshotPoliciesClientCreateOptions: the optional parameters of SnapshotPoliciesClient.create.
@@ -147,12 +150,15 @@ fn (c: SnapshotPoliciesClient) create_create_request(resource_group_name: Str, a
 
 /// Create a snapshot policy
 pub fn (c: SnapshotPoliciesClient) create(resource_group_name: Str, account_name: Str, snapshot_policy_name: Str, body: SnapshotPolicy, options: SnapshotPoliciesClientCreateOptions = SnapshotPoliciesClientCreateOptions{}) -> SnapshotPoliciesClientCreateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_create_request(resource_group_name, account_name, snapshot_policy_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotPoliciesClient.Create", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_create_request(resource_group_name, account_name, snapshot_policy_name, body, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  snapshot_policies_create_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = snapshot_policies_create_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// SnapshotPoliciesClientBeginUpdateOptions: the optional parameters of SnapshotPoliciesClient.begin_update.
@@ -199,14 +205,16 @@ fn (c: SnapshotPoliciesClient) update_create_request(resource_group_name: Str, a
 /// Patch a snapshot policy
 pub fn (c: SnapshotPoliciesClient[fx]) begin_update(resource_group_name: Str, account_name: Str, snapshot_policy_name: Str, body: SnapshotPolicyPatch, options: SnapshotPoliciesClientBeginUpdateOptions = SnapshotPoliciesClientBeginUpdateOptions{}) -> runtime.Poller[SnapshotPoliciesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotPoliciesClientUpdateResponse", fn(r: http.Response) -> SnapshotPoliciesClientUpdateResponse ! Str { snapshot_policies_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotPoliciesClientUpdateResponse", fn(r: http.Response) -> SnapshotPoliciesClientUpdateResponse ! Str { snapshot_policies_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, account_name, snapshot_policy_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotPoliciesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, account_name, snapshot_policy_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotPoliciesClientUpdateResponse", fn(r: http.Response) -> SnapshotPoliciesClientUpdateResponse ! Str { snapshot_policies_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotPoliciesClientUpdateResponse", fn(r: http.Response) -> SnapshotPoliciesClientUpdateResponse ! Str { snapshot_policies_update_handle(r) }, traced: true)
 }
 
 /// SnapshotPoliciesClientBeginDeleteOptions: the optional parameters of SnapshotPoliciesClient.begin_delete.
@@ -249,14 +257,16 @@ fn (c: SnapshotPoliciesClient) delete_create_request(resource_group_name: Str, a
 /// Delete snapshot policy
 pub fn (c: SnapshotPoliciesClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, snapshot_policy_name: Str, options: SnapshotPoliciesClientBeginDeleteOptions = SnapshotPoliciesClientBeginDeleteOptions{}) -> runtime.Poller[SnapshotPoliciesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotPoliciesClientDeleteResponse", fn(r: http.Response) -> SnapshotPoliciesClientDeleteResponse ! Str { snapshot_policies_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "SnapshotPoliciesClientDeleteResponse", fn(r: http.Response) -> SnapshotPoliciesClientDeleteResponse ! Str { snapshot_policies_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, snapshot_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotPoliciesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, snapshot_policy_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotPoliciesClientDeleteResponse", fn(r: http.Response) -> SnapshotPoliciesClientDeleteResponse ! Str { snapshot_policies_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "SnapshotPoliciesClientDeleteResponse", fn(r: http.Response) -> SnapshotPoliciesClientDeleteResponse ! Str { snapshot_policies_delete_handle(r) }, traced: true)
 }
 
 /// SnapshotPoliciesClientListVolumesOptions: the optional parameters of SnapshotPoliciesClient.list_volumes.
@@ -298,10 +308,13 @@ fn (c: SnapshotPoliciesClient) list_volumes_create_request(resource_group_name: 
 
 /// Get volumes associated with snapshot policy
 pub fn (c: SnapshotPoliciesClient) list_volumes(resource_group_name: Str, account_name: Str, snapshot_policy_name: Str, options: SnapshotPoliciesClientListVolumesOptions = SnapshotPoliciesClientListVolumesOptions{}) -> SnapshotPoliciesClientListVolumesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_volumes_create_request(resource_group_name, account_name, snapshot_policy_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "SnapshotPoliciesClient.ListVolumes", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_volumes_create_request(resource_group_name, account_name, snapshot_policy_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  snapshot_policies_list_volumes_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = snapshot_policies_list_volumes_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

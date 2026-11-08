@@ -7,6 +7,7 @@ use std/http
 use std/uuid
 use std/url
 use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/tracing
 
 /// What the client itself adds (its generated code).
 pub struct PipelineOptions[fx: Effects] {
@@ -16,11 +17,22 @@ pub struct PipelineOptions[fx: Effects] {
   pub api_version: Str = ""
   pub per_call: List[policy.Policy[fx]] = []
   pub per_retry: List[policy.Policy[fx]] = []
+  /// The `az.namespace` of every span of the client (Go's
+  /// TracingOptions.Namespace: the resource provider, such as
+  /// `Microsoft.AppConfiguration`).
+  pub tracing_namespace: Str = ""
+  /// ARM's: the resource provider of a request's path, set on the span
+  /// in progress as `az.namespace` on each try, after `per_retry` (Go's
+  /// httpTraceNamespacePolicy).
+  pub namespace_of_path: (fn(Str) -> Str?)? = None
 }
 
 pub struct Pipeline[fx: Effects] {
   pub policies: List[policy.Policy[fx]]
   pub transport: http.Client
+  /// The client's tracer (azcore's Client.Tracer): disabled unless
+  /// ClientOptions.tracing_provider makes one.
+  pub tracer: tracing.Tracer = tracing.Tracer{}
 }
 
 /// The pipeline of a client of module `module` (`armstorage`) at
@@ -37,8 +49,21 @@ pub fn new_pipeline[fx: Effects](module: Str, version: Str, net: Net, clock: Clo
   ps.push(RequestIdPolicy{rand: rand})
   ps = ps + pl.per_call + opts.per_call_policies
   ps.push(RetryPolicy{opts: opts.retry, clock: clock, rand: rand})
-  ps = ps + pl.per_retry + opts.per_retry_policies
-  Pipeline{policies: ps, transport: http.client(net, opts.timeout)}
+  ps = ps + pl.per_retry
+  // the client's tracer, as azcore.NewClient and arm.NewClient make it:
+  // the namespace attribute, then the sanitizer's wrapper
+  let sanitizer = new_sanitizer(opts.allowed_query_params)
+  var tracer = opts.tracing_provider.new_tracer(module, version)
+  if tracer.enabled() && pl.tracing_namespace != "" {
+    tracer = tracer.with_attributes([tracing.str_attr(NAMESPACE_ATTR, pl.tracing_namespace)])
+  }
+  tracer = sanitized_tracer(tracer, sanitizer)
+  if let Some(f) = pl.namespace_of_path {
+    ps.push(NamespacePolicy{tracer: tracer, namespace_of_path: f})
+  }
+  ps = ps + opts.per_retry_policies
+  ps.push(HttpTracePolicy{tracer: tracer, sanitizer: sanitizer})
+  Pipeline{policies: ps, transport: http.client(net, opts.timeout), tracer: tracer}
 }
 
 /// Sends `req` through every policy.

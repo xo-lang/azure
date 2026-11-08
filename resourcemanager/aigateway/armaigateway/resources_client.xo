@@ -49,7 +49,7 @@ fn (c: ResourcesClient) list_by_subscription_create_request(options: ResourcesCl
 /// List AiGatewayResource resources by subscription ID
 pub fn (c: ResourcesClient[fx]) new_list_by_subscription_pager(options: ResourcesClientListBySubscriptionOptions = ResourcesClientListBySubscriptionOptions{}) -> runtime.Pager[ResourcesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcesClientListBySubscriptionResponse ! Str { resources_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ResourcesClientListBySubscriptionResponse) -> Str? { r.resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcesClientListBySubscriptionResponse ! Str { resources_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ResourcesClientListBySubscriptionResponse) -> Str? { r.resource_list_result.next_link }).traced_as("ResourcesClientListBySubscriptionResponse"))
 }
 
 /// ResourcesClientListByResourceGroupOptions: the optional parameters of ResourcesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ResourcesClient) list_by_resource_group_create_request(resource_group_nam
 /// List AiGatewayResource resources by resource group
 pub fn (c: ResourcesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ResourcesClientListByResourceGroupOptions = ResourcesClientListByResourceGroupOptions{}) -> runtime.Pager[ResourcesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcesClientListByResourceGroupResponse ! Str { resources_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ResourcesClientListByResourceGroupResponse) -> Str? { r.resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ResourcesClientListByResourceGroupResponse ! Str { resources_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ResourcesClientListByResourceGroupResponse) -> Str? { r.resource_list_result.next_link }).traced_as("ResourcesClientListByResourceGroupResponse"))
 }
 
 /// ResourcesClientGetOptions: the optional parameters of ResourcesClient.get.
@@ -122,12 +122,15 @@ fn (c: ResourcesClient) get_create_request(resource_group_name: Str, ai_gateway_
 
 /// Get a AiGatewayResource
 pub fn (c: ResourcesClient) get(resource_group_name: Str, ai_gateway_name: Str, options: ResourcesClientGetOptions = ResourcesClientGetOptions{}) -> ResourcesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, ai_gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourcesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, ai_gateway_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  resources_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = resources_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ResourcesClientBeginCreateOrUpdateOptions: the optional parameters of ResourcesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ResourcesClient) create_or_update_create_request(resource_group_name: Str
 /// Create a AiGatewayResource
 pub fn (c: ResourcesClient[fx]) begin_create_or_update(resource_group_name: Str, ai_gateway_name: Str, resource: Resource, options: ResourcesClientBeginCreateOrUpdateOptions = ResourcesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ResourcesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientCreateOrUpdateResponse", fn(r: http.Response) -> ResourcesClientCreateOrUpdateResponse ! Str { resources_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientCreateOrUpdateResponse", fn(r: http.Response) -> ResourcesClientCreateOrUpdateResponse ! Str { resources_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, ai_gateway_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourcesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, ai_gateway_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientCreateOrUpdateResponse", fn(r: http.Response) -> ResourcesClientCreateOrUpdateResponse ! Str { resources_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientCreateOrUpdateResponse", fn(r: http.Response) -> ResourcesClientCreateOrUpdateResponse ! Str { resources_create_or_update_handle(r) }, traced: true)
 }
 
 /// ResourcesClientBeginUpdateOptions: the optional parameters of ResourcesClient.begin_update.
@@ -221,14 +226,16 @@ fn (c: ResourcesClient) update_create_request(resource_group_name: Str, ai_gatew
 /// Update a AiGatewayResource
 pub fn (c: ResourcesClient[fx]) begin_update(resource_group_name: Str, ai_gateway_name: Str, if_match: Str, properties: UpdateParameters, options: ResourcesClientBeginUpdateOptions = ResourcesClientBeginUpdateOptions{}) -> runtime.Poller[ResourcesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientUpdateResponse", fn(r: http.Response) -> ResourcesClientUpdateResponse ! Str { resources_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientUpdateResponse", fn(r: http.Response) -> ResourcesClientUpdateResponse ! Str { resources_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, ai_gateway_name, if_match, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourcesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, ai_gateway_name, if_match, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientUpdateResponse", fn(r: http.Response) -> ResourcesClientUpdateResponse ! Str { resources_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientUpdateResponse", fn(r: http.Response) -> ResourcesClientUpdateResponse ! Str { resources_update_handle(r) }, traced: true)
 }
 
 /// ResourcesClientBeginDeleteOptions: the optional parameters of ResourcesClient.begin_delete.
@@ -268,12 +275,14 @@ fn (c: ResourcesClient) delete_create_request(resource_group_name: Str, ai_gatew
 /// Delete a AiGatewayResource
 pub fn (c: ResourcesClient[fx]) begin_delete(resource_group_name: Str, ai_gateway_name: Str, if_match: Str, options: ResourcesClientBeginDeleteOptions = ResourcesClientBeginDeleteOptions{}) -> runtime.Poller[ResourcesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientDeleteResponse", fn(r: http.Response) -> ResourcesClientDeleteResponse ! Str { resources_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ResourcesClientDeleteResponse", fn(r: http.Response) -> ResourcesClientDeleteResponse ! Str { resources_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, ai_gateway_name, if_match, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ResourcesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, ai_gateway_name, if_match, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientDeleteResponse", fn(r: http.Response) -> ResourcesClientDeleteResponse ! Str { resources_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ResourcesClientDeleteResponse", fn(r: http.Response) -> ResourcesClientDeleteResponse ! Str { resources_delete_handle(r) }, traced: true)
 }

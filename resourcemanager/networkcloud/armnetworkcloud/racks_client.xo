@@ -60,7 +60,7 @@ fn (c: RacksClient) list_by_subscription_create_request(options: RacksClientList
 /// Get a list of racks in the provided subscription.
 pub fn (c: RacksClient[fx]) new_list_by_subscription_pager(options: RacksClientListBySubscriptionOptions = RacksClientListBySubscriptionOptions{}) -> runtime.Pager[RacksClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RacksClientListBySubscriptionResponse ! Str { racks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RacksClientListBySubscriptionResponse) -> Str? { r.rack_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RacksClientListBySubscriptionResponse ! Str { racks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: RacksClientListBySubscriptionResponse) -> Str? { r.rack_list.next_link }).traced_as("RacksClientListBySubscriptionResponse"))
 }
 
 /// RacksClientListByResourceGroupOptions: the optional parameters of RacksClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: RacksClient) list_by_resource_group_create_request(resource_group_name: S
 /// Get a list of racks in the provided resource group.
 pub fn (c: RacksClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: RacksClientListByResourceGroupOptions = RacksClientListByResourceGroupOptions{}) -> runtime.Pager[RacksClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RacksClientListByResourceGroupResponse ! Str { racks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: RacksClientListByResourceGroupResponse) -> Str? { r.rack_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RacksClientListByResourceGroupResponse ! Str { racks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: RacksClientListByResourceGroupResponse) -> Str? { r.rack_list.next_link }).traced_as("RacksClientListByResourceGroupResponse"))
 }
 
 /// RacksClientGetOptions: the optional parameters of RacksClient.get.
@@ -144,12 +144,15 @@ fn (c: RacksClient) get_create_request(resource_group_name: Str, rack_name: Str,
 
 /// Get properties of the provided rack.
 pub fn (c: RacksClient) get(resource_group_name: Str, rack_name: Str, options: RacksClientGetOptions = RacksClientGetOptions{}) -> RacksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, rack_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RacksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, rack_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  racks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = racks_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// RacksClientBeginCreateOrUpdateOptions: the optional parameters of RacksClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: RacksClient) create_or_update_create_request(resource_group_name: Str, ra
 /// Create a new rack or update properties of the existing one. All customer initiated requests will be rejected as the life cycle of this resource is managed by the system.
 pub fn (c: RacksClient[fx]) begin_create_or_update(resource_group_name: Str, rack_name: Str, rack_parameters: Rack, options: RacksClientBeginCreateOrUpdateOptions = RacksClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[RacksClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientCreateOrUpdateResponse", fn(r: http.Response) -> RacksClientCreateOrUpdateResponse ! Str { racks_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientCreateOrUpdateResponse", fn(r: http.Response) -> RacksClientCreateOrUpdateResponse ! Str { racks_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, rack_name, rack_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RacksClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, rack_name, rack_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientCreateOrUpdateResponse", fn(r: http.Response) -> RacksClientCreateOrUpdateResponse ! Str { racks_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientCreateOrUpdateResponse", fn(r: http.Response) -> RacksClientCreateOrUpdateResponse ! Str { racks_create_or_update_handle(r) }, traced: true)
 }
 
 /// RacksClientBeginUpdateOptions: the optional parameters of RacksClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: RacksClient) update_create_request(resource_group_name: Str, rack_name: S
 /// Patch properties of the provided rack, or update the tags associated with the rack. Properties and tag updates can be done independently.
 pub fn (c: RacksClient[fx]) begin_update(resource_group_name: Str, rack_name: Str, rack_update_parameters: RackPatchParameters, options: RacksClientBeginUpdateOptions = RacksClientBeginUpdateOptions{}) -> runtime.Poller[RacksClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientUpdateResponse", fn(r: http.Response) -> RacksClientUpdateResponse ! Str { racks_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientUpdateResponse", fn(r: http.Response) -> RacksClientUpdateResponse ! Str { racks_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, rack_name, rack_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RacksClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, rack_name, rack_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientUpdateResponse", fn(r: http.Response) -> RacksClientUpdateResponse ! Str { racks_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientUpdateResponse", fn(r: http.Response) -> RacksClientUpdateResponse ! Str { racks_update_handle(r) }, traced: true)
 }
 
 /// RacksClientBeginDeleteOptions: the optional parameters of RacksClient.begin_delete.
@@ -321,12 +328,14 @@ fn (c: RacksClient) delete_create_request(resource_group_name: Str, rack_name: S
 /// Delete the provided rack. All customer initiated requests will be rejected as the life cycle of this resource is managed by the system.
 pub fn (c: RacksClient[fx]) begin_delete(resource_group_name: Str, rack_name: Str, options: RacksClientBeginDeleteOptions = RacksClientBeginDeleteOptions{}) -> runtime.Poller[RacksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientDeleteResponse", fn(r: http.Response) -> RacksClientDeleteResponse ! Str { racks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RacksClientDeleteResponse", fn(r: http.Response) -> RacksClientDeleteResponse ! Str { racks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, rack_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RacksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, rack_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientDeleteResponse", fn(r: http.Response) -> RacksClientDeleteResponse ! Str { racks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RacksClientDeleteResponse", fn(r: http.Response) -> RacksClientDeleteResponse ! Str { racks_delete_handle(r) }, traced: true)
 }

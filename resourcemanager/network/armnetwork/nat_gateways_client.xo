@@ -49,7 +49,7 @@ fn (c: NatGatewaysClient) list_all_create_request(options: NatGatewaysClientList
 /// Gets all the Nat Gateways in a subscription.
 pub fn (c: NatGatewaysClient[fx]) new_list_all_pager(options: NatGatewaysClientListAllOptions = NatGatewaysClientListAllOptions{}) -> runtime.Pager[NatGatewaysClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatGatewaysClientListAllResponse ! Str { nat_gateways_list_all_handle(r) }, c.setup.endpoint, fn(r: NatGatewaysClientListAllResponse) -> Str? { r.nat_gateway_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatGatewaysClientListAllResponse ! Str { nat_gateways_list_all_handle(r) }, c.setup.endpoint, fn(r: NatGatewaysClientListAllResponse) -> Str? { r.nat_gateway_list_result.next_link }).traced_as("NatGatewaysClientListAllResponse"))
 }
 
 /// NatGatewaysClientListOptions: the optional parameters of NatGatewaysClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: NatGatewaysClient) list_create_request(resource_group_name: Str, options:
 /// Gets all nat gateways in a resource group.
 pub fn (c: NatGatewaysClient[fx]) new_list_pager(resource_group_name: Str, options: NatGatewaysClientListOptions = NatGatewaysClientListOptions{}) -> runtime.Pager[NatGatewaysClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatGatewaysClientListResponse ! Str { nat_gateways_list_handle(r) }, c.setup.endpoint, fn(r: NatGatewaysClientListResponse) -> Str? { r.nat_gateway_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> NatGatewaysClientListResponse ! Str { nat_gateways_list_handle(r) }, c.setup.endpoint, fn(r: NatGatewaysClientListResponse) -> Str? { r.nat_gateway_list_result.next_link }).traced_as("NatGatewaysClientListResponse"))
 }
 
 /// NatGatewaysClientGetOptions: the optional parameters of NatGatewaysClient.get.
@@ -128,12 +128,15 @@ fn (c: NatGatewaysClient) get_create_request(resource_group_name: Str, nat_gatew
 
 /// Gets the specified nat gateway in a specified resource group.
 pub fn (c: NatGatewaysClient) get(resource_group_name: Str, nat_gateway_name: Str, options: NatGatewaysClientGetOptions = NatGatewaysClientGetOptions{}) -> NatGatewaysClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, nat_gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatGatewaysClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, nat_gateway_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  nat_gateways_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = nat_gateways_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NatGatewaysClientBeginCreateOrUpdateOptions: the optional parameters of NatGatewaysClient.begin_create_or_update.
@@ -176,14 +179,16 @@ fn (c: NatGatewaysClient) create_or_update_create_request(resource_group_name: S
 /// Creates or updates a nat gateway.
 pub fn (c: NatGatewaysClient[fx]) begin_create_or_update(resource_group_name: Str, nat_gateway_name: Str, parameters: NatGateway, options: NatGatewaysClientBeginCreateOrUpdateOptions = NatGatewaysClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[NatGatewaysClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> NatGatewaysClientCreateOrUpdateResponse ! Str { nat_gateways_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> NatGatewaysClientCreateOrUpdateResponse ! Str { nat_gateways_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, nat_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatGatewaysClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, nat_gateway_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> NatGatewaysClientCreateOrUpdateResponse ! Str { nat_gateways_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatGatewaysClientCreateOrUpdateResponse", fn(r: http.Response) -> NatGatewaysClientCreateOrUpdateResponse ! Str { nat_gateways_create_or_update_handle(r) }, traced: true)
 }
 
 /// NatGatewaysClientUpdateTagsOptions: the optional parameters of NatGatewaysClient.update_tags.
@@ -222,12 +227,15 @@ fn (c: NatGatewaysClient) update_tags_create_request(resource_group_name: Str, n
 
 /// Updates nat gateway tags.
 pub fn (c: NatGatewaysClient) update_tags(resource_group_name: Str, nat_gateway_name: Str, parameters: TagsObject, options: NatGatewaysClientUpdateTagsOptions = NatGatewaysClientUpdateTagsOptions{}) -> NatGatewaysClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, nat_gateway_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatGatewaysClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, nat_gateway_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  nat_gateways_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = nat_gateways_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// NatGatewaysClientBeginDeleteOptions: the optional parameters of NatGatewaysClient.begin_delete.
@@ -266,12 +274,14 @@ fn (c: NatGatewaysClient) delete_create_request(resource_group_name: Str, nat_ga
 /// Deletes the specified nat gateway.
 pub fn (c: NatGatewaysClient[fx]) begin_delete(resource_group_name: Str, nat_gateway_name: Str, options: NatGatewaysClientBeginDeleteOptions = NatGatewaysClientBeginDeleteOptions{}) -> runtime.Poller[NatGatewaysClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatGatewaysClientDeleteResponse", fn(r: http.Response) -> NatGatewaysClientDeleteResponse ! Str { nat_gateways_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "NatGatewaysClientDeleteResponse", fn(r: http.Response) -> NatGatewaysClientDeleteResponse ! Str { nat_gateways_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, nat_gateway_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "NatGatewaysClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, nat_gateway_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatGatewaysClientDeleteResponse", fn(r: http.Response) -> NatGatewaysClientDeleteResponse ! Str { nat_gateways_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "NatGatewaysClientDeleteResponse", fn(r: http.Response) -> NatGatewaysClientDeleteResponse ! Str { nat_gateways_delete_handle(r) }, traced: true)
 }

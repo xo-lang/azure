@@ -45,7 +45,7 @@ fn (c: HealthReportsClient) list_create_request(scope: Str, options: HealthRepor
 /// Get a list of all health reports inside a scope. Valid scopes are: subscription (format: 'subscriptions/{subscriptionId}'), or security connector (format: 'subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Security/securityConnectors/{securityConnectorName})'
 pub fn (c: HealthReportsClient[fx]) new_list_pager(scope: Str, options: HealthReportsClientListOptions = HealthReportsClientListOptions{}) -> runtime.Pager[HealthReportsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(scope, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> HealthReportsClientListResponse ! Str { health_reports_list_handle(r) }, c.setup.endpoint, fn(r: HealthReportsClientListResponse) -> Str? { r.health_reports_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> HealthReportsClientListResponse ! Str { health_reports_list_handle(r) }, c.setup.endpoint, fn(r: HealthReportsClientListResponse) -> Str? { r.health_reports_list.next_link }).traced_as("HealthReportsClientListResponse"))
 }
 
 /// HealthReportsClientGetOptions: the optional parameters of HealthReportsClient.get.
@@ -76,10 +76,13 @@ fn (c: HealthReportsClient) get_create_request(resource_id: Str, health_report_n
 
 /// Get health report of resource
 pub fn (c: HealthReportsClient) get(resource_id: Str, health_report_name: Str, options: HealthReportsClientGetOptions = HealthReportsClientGetOptions{}) -> HealthReportsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_id, health_report_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "HealthReportsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_id, health_report_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  health_reports_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = health_reports_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -49,7 +49,7 @@ fn (c: DashboardsClient) list_by_subscription_create_request(options: Dashboards
 /// List all resources of dashboards under the specified subscription.
 pub fn (c: DashboardsClient[fx]) new_list_by_subscription_pager(options: DashboardsClientListBySubscriptionOptions = DashboardsClientListBySubscriptionOptions{}) -> runtime.Pager[DashboardsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DashboardsClientListBySubscriptionResponse ! Str { dashboards_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DashboardsClientListBySubscriptionResponse) -> Str? { r.managed_dashboard_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DashboardsClientListBySubscriptionResponse ! Str { dashboards_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: DashboardsClientListBySubscriptionResponse) -> Str? { r.managed_dashboard_list_response.next_link }).traced_as("DashboardsClientListBySubscriptionResponse"))
 }
 
 /// DashboardsClientListOptions: the optional parameters of DashboardsClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: DashboardsClient) list_create_request(resource_group_name: Str, options: 
 /// List all resources of dashboards under the specified resource group.
 pub fn (c: DashboardsClient[fx]) new_list_pager(resource_group_name: Str, options: DashboardsClientListOptions = DashboardsClientListOptions{}) -> runtime.Pager[DashboardsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DashboardsClientListResponse ! Str { dashboards_list_handle(r) }, c.setup.endpoint, fn(r: DashboardsClientListResponse) -> Str? { r.managed_dashboard_list_response.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> DashboardsClientListResponse ! Str { dashboards_list_handle(r) }, c.setup.endpoint, fn(r: DashboardsClientListResponse) -> Str? { r.managed_dashboard_list_response.next_link }).traced_as("DashboardsClientListResponse"))
 }
 
 /// DashboardsClientGetOptions: the optional parameters of DashboardsClient.get.
@@ -122,10 +122,13 @@ fn (c: DashboardsClient) get_create_request(resource_group_name: Str, dashboard_
 
 /// Get the properties of a specific dashboard for grafana resource.
 pub fn (c: DashboardsClient) get(resource_group_name: Str, dashboard_name: Str, options: DashboardsClientGetOptions = DashboardsClientGetOptions{}) -> DashboardsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, dashboard_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DashboardsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, dashboard_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  dashboards_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = dashboards_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -57,7 +57,7 @@ fn (c: BlobServicesClient) list_create_request(resource_group_name: Str, account
 /// List blob services of storage account. It returns a collection of one object named default.
 pub fn (c: BlobServicesClient[fx]) new_list_pager(resource_group_name: Str, account_name: Str, options: BlobServicesClientListOptions = BlobServicesClientListOptions{}) -> runtime.Pager[BlobServicesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BlobServicesClientListResponse ! Str { blob_services_list_handle(r) }, c.setup.endpoint, fn(r: BlobServicesClientListResponse) -> Str? { r.blob_service_items.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> BlobServicesClientListResponse ! Str { blob_services_list_handle(r) }, c.setup.endpoint, fn(r: BlobServicesClientListResponse) -> Str? { r.blob_service_items.next_link }).traced_as("BlobServicesClientListResponse"))
 }
 
 /// BlobServicesClientGetServicePropertiesOptions: the optional parameters of BlobServicesClient.get_service_properties.
@@ -95,12 +95,15 @@ fn (c: BlobServicesClient) get_service_properties_create_request(resource_group_
 
 /// Gets the properties of a storage account’s Blob service, including properties for Storage Analytics and CORS (Cross-Origin Resource Sharing) rules.
 pub fn (c: BlobServicesClient) get_service_properties(resource_group_name: Str, account_name: Str, options: BlobServicesClientGetServicePropertiesOptions = BlobServicesClientGetServicePropertiesOptions{}) -> BlobServicesClientGetServicePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_service_properties_create_request(resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BlobServicesClient.GetServiceProperties", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_service_properties_create_request(resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  blob_services_get_service_properties_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = blob_services_get_service_properties_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// BlobServicesClientSetServicePropertiesOptions: the optional parameters of BlobServicesClient.set_service_properties.
@@ -139,10 +142,13 @@ fn (c: BlobServicesClient) set_service_properties_create_request(resource_group_
 
 /// Sets the properties of a storage account’s Blob service, including properties for Storage Analytics and CORS (Cross-Origin Resource Sharing) rules.
 pub fn (c: BlobServicesClient) set_service_properties(resource_group_name: Str, account_name: Str, parameters: BlobServiceProperties, options: BlobServicesClientSetServicePropertiesOptions = BlobServicesClientSetServicePropertiesOptions{}) -> BlobServicesClientSetServicePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.set_service_properties_create_request(resource_group_name, account_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "BlobServicesClient.SetServiceProperties", c.setup.pipeline.tracer)
+  let req = sp.on(c.set_service_properties_create_request(resource_group_name, account_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  blob_services_set_service_properties_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = blob_services_set_service_properties_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

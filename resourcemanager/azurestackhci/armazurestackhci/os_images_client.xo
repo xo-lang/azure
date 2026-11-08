@@ -53,7 +53,7 @@ fn (c: OsImagesClient) list_by_subscription_location_resource_create_request(loc
 /// List all os images.
 pub fn (c: OsImagesClient[fx]) new_list_by_subscription_location_resource_pager(location: Str, options: OsImagesClientListBySubscriptionLocationResourceOptions = OsImagesClientListBySubscriptionLocationResourceOptions{}) -> runtime.Pager[OsImagesClientListBySubscriptionLocationResourceResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_location_resource_create_request(location, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OsImagesClientListBySubscriptionLocationResourceResponse ! Str { os_images_list_by_subscription_location_resource_handle(r) }, c.setup.endpoint, fn(r: OsImagesClientListBySubscriptionLocationResourceResponse) -> Str? { r.os_image_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> OsImagesClientListBySubscriptionLocationResourceResponse ! Str { os_images_list_by_subscription_location_resource_handle(r) }, c.setup.endpoint, fn(r: OsImagesClientListBySubscriptionLocationResourceResponse) -> Str? { r.os_image_list_result.next_link }).traced_as("OsImagesClientListBySubscriptionLocationResourceResponse"))
 }
 
 /// OsImagesClientGetOptions: the optional parameters of OsImagesClient.get.
@@ -91,10 +91,13 @@ fn (c: OsImagesClient) get_create_request(location: Str, os_image_name: Str, opt
 
 /// Get a os image.
 pub fn (c: OsImagesClient) get(location: Str, os_image_name: Str, options: OsImagesClientGetOptions = OsImagesClientGetOptions{}) -> OsImagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, os_image_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OsImagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, os_image_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  os_images_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = os_images_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

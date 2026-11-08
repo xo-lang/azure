@@ -60,12 +60,15 @@ fn (c: DeletedAccountsClient) get_create_request(location: Str, resource_group_n
 
 /// Returns a Cognitive Services account specified by the parameters.
 pub fn (c: DeletedAccountsClient) get(location: Str, resource_group_name: Str, account_name: Str, options: DeletedAccountsClientGetOptions = DeletedAccountsClientGetOptions{}) -> DeletedAccountsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(location, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeletedAccountsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(location, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  deleted_accounts_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = deleted_accounts_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// DeletedAccountsClientBeginPurgeOptions: the optional parameters of DeletedAccountsClient.begin_purge.
@@ -108,14 +111,16 @@ fn (c: DeletedAccountsClient) purge_create_request(location: Str, resource_group
 /// Deletes a Cognitive Services account from the resource group.
 pub fn (c: DeletedAccountsClient[fx]) begin_purge(location: Str, resource_group_name: Str, account_name: Str, options: DeletedAccountsClientBeginPurgeOptions = DeletedAccountsClientBeginPurgeOptions{}) -> runtime.Poller[DeletedAccountsClientPurgeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeletedAccountsClientPurgeResponse", fn(r: http.Response) -> DeletedAccountsClientPurgeResponse ! Str { deleted_accounts_purge_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "DeletedAccountsClientPurgeResponse", fn(r: http.Response) -> DeletedAccountsClientPurgeResponse ! Str { deleted_accounts_purge_handle(r) }, traced: true)
   }
-  let req = c.purge_create_request(location, resource_group_name, account_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "DeletedAccountsClient.BeginPurge", c.setup.pipeline.tracer)
+  let req = c.purge_create_request(location, resource_group_name, account_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeletedAccountsClientPurgeResponse", fn(r: http.Response) -> DeletedAccountsClientPurgeResponse ! Str { deleted_accounts_purge_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "DeletedAccountsClientPurgeResponse", fn(r: http.Response) -> DeletedAccountsClientPurgeResponse ! Str { deleted_accounts_purge_handle(r) }, traced: true)
 }
 
 /// DeletedAccountsClientListOptions: the optional parameters of DeletedAccountsClient.new_list_pager.
@@ -146,5 +151,5 @@ fn (c: DeletedAccountsClient) list_create_request(options: DeletedAccountsClient
 /// Returns all the resources of a particular type belonging to a subscription.
 pub fn (c: DeletedAccountsClient[fx]) new_list_pager(options: DeletedAccountsClientListOptions = DeletedAccountsClientListOptions{}) -> runtime.Pager[DeletedAccountsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeletedAccountsClientListResponse ! Str { deleted_accounts_list_handle(r) }, fn(r: DeletedAccountsClientListResponse) -> Str? { r.account_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> DeletedAccountsClientListResponse ! Str { deleted_accounts_list_handle(r) }, fn(r: DeletedAccountsClientListResponse) -> Str? { r.account_list_result.next_link }).traced_as("DeletedAccountsClientListResponse"))
 }

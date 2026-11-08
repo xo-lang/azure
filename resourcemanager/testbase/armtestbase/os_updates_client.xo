@@ -62,7 +62,7 @@ fn (c: OSUpdatesClient) list_create_request(resource_group_name: Str, test_base_
 /// Lists the OS Updates in which the package were tested before.
 pub fn (c: OSUpdatesClient[fx]) new_list_pager(resource_group_name: Str, test_base_account_name: Str, package_name: Str, os_update_type: OsUpdateType, options: OSUpdatesClientListOptions = OSUpdatesClientListOptions{}) -> runtime.Pager[OSUpdatesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, test_base_account_name, package_name, os_update_type, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> OSUpdatesClientListResponse ! Str { os_updates_list_handle(r) }, fn(r: OSUpdatesClientListResponse) -> Str? { r.os_update_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> OSUpdatesClientListResponse ! Str { os_updates_list_handle(r) }, fn(r: OSUpdatesClientListResponse) -> Str? { r.os_update_list_result.next_link }).traced_as("OSUpdatesClientListResponse"))
 }
 
 /// OSUpdatesClientGetOptions: the optional parameters of OSUpdatesClient.get.
@@ -108,10 +108,13 @@ fn (c: OSUpdatesClient) get_create_request(resource_group_name: Str, test_base_a
 
 /// Gets an OS Update by name in which the package was tested before.
 pub fn (c: OSUpdatesClient) get(resource_group_name: Str, test_base_account_name: Str, package_name: Str, os_update_resource_name: Str, options: OSUpdatesClientGetOptions = OSUpdatesClientGetOptions{}) -> OSUpdatesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, test_base_account_name, package_name, os_update_resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "OSUpdatesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, test_base_account_name, package_name, os_update_resource_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  os_updates_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = os_updates_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

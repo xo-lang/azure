@@ -49,7 +49,7 @@ fn (c: VirtualHubsClient) list_create_request(options: VirtualHubsClientListOpti
 /// Lists all the VirtualHubs in a subscription.
 pub fn (c: VirtualHubsClient[fx]) new_list_pager(options: VirtualHubsClientListOptions = VirtualHubsClientListOptions{}) -> runtime.Pager[VirtualHubsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHubsClientListResponse ! Str { virtual_hubs_list_handle(r) }, c.setup.endpoint, fn(r: VirtualHubsClientListResponse) -> Str? { r.list_virtual_hubs_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHubsClientListResponse ! Str { virtual_hubs_list_handle(r) }, c.setup.endpoint, fn(r: VirtualHubsClientListResponse) -> Str? { r.list_virtual_hubs_result.next_link }).traced_as("VirtualHubsClientListResponse"))
 }
 
 /// VirtualHubsClientListByResourceGroupOptions: the optional parameters of VirtualHubsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VirtualHubsClient) list_by_resource_group_create_request(resource_group_n
 /// Lists all the VirtualHubs in a resource group.
 pub fn (c: VirtualHubsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VirtualHubsClientListByResourceGroupOptions = VirtualHubsClientListByResourceGroupOptions{}) -> runtime.Pager[VirtualHubsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHubsClientListByResourceGroupResponse ! Str { virtual_hubs_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualHubsClientListByResourceGroupResponse) -> Str? { r.list_virtual_hubs_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHubsClientListByResourceGroupResponse ! Str { virtual_hubs_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualHubsClientListByResourceGroupResponse) -> Str? { r.list_virtual_hubs_result.next_link }).traced_as("VirtualHubsClientListByResourceGroupResponse"))
 }
 
 /// VirtualHubsClientGetOptions: the optional parameters of VirtualHubsClient.get.
@@ -122,12 +122,15 @@ fn (c: VirtualHubsClient) get_create_request(resource_group_name: Str, virtual_h
 
 /// Retrieves the details of a VirtualHub.
 pub fn (c: VirtualHubsClient) get(resource_group_name: Str, virtual_hub_name: Str, options: VirtualHubsClientGetOptions = VirtualHubsClientGetOptions{}) -> VirtualHubsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_hub_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_hub_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_hubs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_hubs_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualHubsClientBeginCreateOrUpdateOptions: the optional parameters of VirtualHubsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: VirtualHubsClient) create_or_update_create_request(resource_group_name: S
 /// Creates a VirtualHub resource if it doesn't exist else updates the existing VirtualHub.
 pub fn (c: VirtualHubsClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_hub_name: Str, virtual_hub_parameters: VirtualHub, options: VirtualHubsClientBeginCreateOrUpdateOptions = VirtualHubsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualHubsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHubsClientCreateOrUpdateResponse ! Str { virtual_hubs_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHubsClientCreateOrUpdateResponse ! Str { virtual_hubs_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_hub_name, virtual_hub_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_hub_name, virtual_hub_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHubsClientCreateOrUpdateResponse ! Str { virtual_hubs_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHubsClientCreateOrUpdateResponse ! Str { virtual_hubs_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualHubsClientUpdateTagsOptions: the optional parameters of VirtualHubsClient.update_tags.
@@ -216,12 +221,15 @@ fn (c: VirtualHubsClient) update_tags_create_request(resource_group_name: Str, v
 
 /// Updates VirtualHub tags.
 pub fn (c: VirtualHubsClient) update_tags(resource_group_name: Str, virtual_hub_name: Str, virtual_hub_parameters: TagsObject, options: VirtualHubsClientUpdateTagsOptions = VirtualHubsClientUpdateTagsOptions{}) -> VirtualHubsClientUpdateTagsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_tags_create_request(resource_group_name, virtual_hub_name, virtual_hub_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.UpdateTags", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_tags_create_request(resource_group_name, virtual_hub_name, virtual_hub_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_hubs_update_tags_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_hubs_update_tags_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualHubsClientBeginDeleteOptions: the optional parameters of VirtualHubsClient.begin_delete.
@@ -260,14 +268,16 @@ fn (c: VirtualHubsClient) delete_create_request(resource_group_name: Str, virtua
 /// Deletes a VirtualHub.
 pub fn (c: VirtualHubsClient[fx]) begin_delete(resource_group_name: Str, virtual_hub_name: Str, options: VirtualHubsClientBeginDeleteOptions = VirtualHubsClientBeginDeleteOptions{}) -> runtime.Poller[VirtualHubsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientDeleteResponse", fn(r: http.Response) -> VirtualHubsClientDeleteResponse ! Str { virtual_hubs_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientDeleteResponse", fn(r: http.Response) -> VirtualHubsClientDeleteResponse ! Str { virtual_hubs_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_hub_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_hub_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientDeleteResponse", fn(r: http.Response) -> VirtualHubsClientDeleteResponse ! Str { virtual_hubs_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientDeleteResponse", fn(r: http.Response) -> VirtualHubsClientDeleteResponse ! Str { virtual_hubs_delete_handle(r) }, traced: true)
 }
 
 /// VirtualHubsClientBeginGetEffectiveVirtualHubRoutesOptions: the optional parameters of VirtualHubsClient.begin_get_effective_virtual_hub_routes.
@@ -316,14 +326,16 @@ fn (c: VirtualHubsClient) get_effective_virtual_hub_routes_create_request(resour
 /// Gets the effective routes configured for the Virtual Hub resource or the specified resource .
 pub fn (c: VirtualHubsClient[fx]) begin_get_effective_virtual_hub_routes(resource_group_name: Str, virtual_hub_name: Str, options: VirtualHubsClientBeginGetEffectiveVirtualHubRoutesOptions = VirtualHubsClientBeginGetEffectiveVirtualHubRoutesOptions{}) -> runtime.Poller[VirtualHubsClientGetEffectiveVirtualHubRoutesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetEffectiveVirtualHubRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetEffectiveVirtualHubRoutesResponse ! Str { virtual_hubs_get_effective_virtual_hub_routes_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetEffectiveVirtualHubRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetEffectiveVirtualHubRoutesResponse ! Str { virtual_hubs_get_effective_virtual_hub_routes_handle(r) }, traced: true)
   }
-  let req = c.get_effective_virtual_hub_routes_create_request(resource_group_name, virtual_hub_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.BeginGetEffectiveVirtualHubRoutes", c.setup.pipeline.tracer)
+  let req = c.get_effective_virtual_hub_routes_create_request(resource_group_name, virtual_hub_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetEffectiveVirtualHubRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetEffectiveVirtualHubRoutesResponse ! Str { virtual_hubs_get_effective_virtual_hub_routes_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetEffectiveVirtualHubRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetEffectiveVirtualHubRoutesResponse ! Str { virtual_hubs_get_effective_virtual_hub_routes_handle(r) }, traced: true)
 }
 
 /// VirtualHubsClientBeginGetInboundRoutesOptions: the optional parameters of VirtualHubsClient.begin_get_inbound_routes.
@@ -366,14 +378,16 @@ fn (c: VirtualHubsClient) get_inbound_routes_create_request(resource_group_name:
 /// Gets the inbound routes configured for the Virtual Hub on a particular connection.
 pub fn (c: VirtualHubsClient[fx]) begin_get_inbound_routes(resource_group_name: Str, virtual_hub_name: Str, get_inbound_routes_parameters: GetInboundRoutesParameters, options: VirtualHubsClientBeginGetInboundRoutesOptions = VirtualHubsClientBeginGetInboundRoutesOptions{}) -> runtime.Poller[VirtualHubsClientGetInboundRoutesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetInboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetInboundRoutesResponse ! Str { virtual_hubs_get_inbound_routes_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetInboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetInboundRoutesResponse ! Str { virtual_hubs_get_inbound_routes_handle(r) }, traced: true)
   }
-  let req = c.get_inbound_routes_create_request(resource_group_name, virtual_hub_name, get_inbound_routes_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.BeginGetInboundRoutes", c.setup.pipeline.tracer)
+  let req = c.get_inbound_routes_create_request(resource_group_name, virtual_hub_name, get_inbound_routes_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetInboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetInboundRoutesResponse ! Str { virtual_hubs_get_inbound_routes_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetInboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetInboundRoutesResponse ! Str { virtual_hubs_get_inbound_routes_handle(r) }, traced: true)
 }
 
 /// VirtualHubsClientBeginGetOutboundRoutesOptions: the optional parameters of VirtualHubsClient.begin_get_outbound_routes.
@@ -416,12 +430,14 @@ fn (c: VirtualHubsClient) get_outbound_routes_create_request(resource_group_name
 /// Gets the outbound routes configured for the Virtual Hub on a particular connection.
 pub fn (c: VirtualHubsClient[fx]) begin_get_outbound_routes(resource_group_name: Str, virtual_hub_name: Str, get_outbound_routes_parameters: GetOutboundRoutesParameters, options: VirtualHubsClientBeginGetOutboundRoutesOptions = VirtualHubsClientBeginGetOutboundRoutesOptions{}) -> runtime.Poller[VirtualHubsClientGetOutboundRoutesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetOutboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetOutboundRoutesResponse ! Str { virtual_hubs_get_outbound_routes_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHubsClientGetOutboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetOutboundRoutesResponse ! Str { virtual_hubs_get_outbound_routes_handle(r) }, traced: true)
   }
-  let req = c.get_outbound_routes_create_request(resource_group_name, virtual_hub_name, get_outbound_routes_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHubsClient.BeginGetOutboundRoutes", c.setup.pipeline.tracer)
+  let req = c.get_outbound_routes_create_request(resource_group_name, virtual_hub_name, get_outbound_routes_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetOutboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetOutboundRoutesResponse ! Str { virtual_hubs_get_outbound_routes_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHubsClientGetOutboundRoutesResponse", fn(r: http.Response) -> VirtualHubsClientGetOutboundRoutesResponse ! Str { virtual_hubs_get_outbound_routes_handle(r) }, traced: true)
 }

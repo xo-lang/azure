@@ -60,7 +60,7 @@ fn (c: L3NetworksClient) list_by_subscription_create_request(options: L3Networks
 /// Get a list of layer 3 (L3) networks in the provided subscription.
 pub fn (c: L3NetworksClient[fx]) new_list_by_subscription_pager(options: L3NetworksClientListBySubscriptionOptions = L3NetworksClientListBySubscriptionOptions{}) -> runtime.Pager[L3NetworksClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L3NetworksClientListBySubscriptionResponse ! Str { l3_networks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: L3NetworksClientListBySubscriptionResponse) -> Str? { r.l3_network_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L3NetworksClientListBySubscriptionResponse ! Str { l3_networks_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: L3NetworksClientListBySubscriptionResponse) -> Str? { r.l3_network_list.next_link }).traced_as("L3NetworksClientListBySubscriptionResponse"))
 }
 
 /// L3NetworksClientListByResourceGroupOptions: the optional parameters of L3NetworksClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: L3NetworksClient) list_by_resource_group_create_request(resource_group_na
 /// Get a list of layer 3 (L3) networks in the provided resource group.
 pub fn (c: L3NetworksClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: L3NetworksClientListByResourceGroupOptions = L3NetworksClientListByResourceGroupOptions{}) -> runtime.Pager[L3NetworksClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L3NetworksClientListByResourceGroupResponse ! Str { l3_networks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: L3NetworksClientListByResourceGroupResponse) -> Str? { r.l3_network_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> L3NetworksClientListByResourceGroupResponse ! Str { l3_networks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: L3NetworksClientListByResourceGroupResponse) -> Str? { r.l3_network_list.next_link }).traced_as("L3NetworksClientListByResourceGroupResponse"))
 }
 
 /// L3NetworksClientGetOptions: the optional parameters of L3NetworksClient.get.
@@ -144,12 +144,15 @@ fn (c: L3NetworksClient) get_create_request(resource_group_name: Str, l3_network
 
 /// Get properties of the provided layer 3 (L3) network.
 pub fn (c: L3NetworksClient) get(resource_group_name: Str, l3_network_name: Str, options: L3NetworksClientGetOptions = L3NetworksClientGetOptions{}) -> L3NetworksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, l3_network_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L3NetworksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, l3_network_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  l3_networks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = l3_networks_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// L3NetworksClientBeginCreateOrUpdateOptions: the optional parameters of L3NetworksClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: L3NetworksClient) create_or_update_create_request(resource_group_name: St
 /// Create a new layer 3 (L3) network or update the properties of the existing network.
 pub fn (c: L3NetworksClient[fx]) begin_create_or_update(resource_group_name: Str, l3_network_name: Str, l3_network_parameters: L3Network, options: L3NetworksClientBeginCreateOrUpdateOptions = L3NetworksClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[L3NetworksClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L3NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L3NetworksClientCreateOrUpdateResponse ! Str { l3_networks_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L3NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L3NetworksClientCreateOrUpdateResponse ! Str { l3_networks_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, l3_network_name, l3_network_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L3NetworksClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, l3_network_name, l3_network_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "L3NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L3NetworksClientCreateOrUpdateResponse ! Str { l3_networks_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "L3NetworksClientCreateOrUpdateResponse", fn(r: http.Response) -> L3NetworksClientCreateOrUpdateResponse ! Str { l3_networks_create_or_update_handle(r) }, traced: true)
 }
 
 /// L3NetworksClientUpdateOptions: the optional parameters of L3NetworksClient.update.
@@ -259,12 +264,15 @@ fn (c: L3NetworksClient) update_create_request(resource_group_name: Str, l3_netw
 
 /// Update tags associated with the provided layer 3 (L3) network.
 pub fn (c: L3NetworksClient) update(resource_group_name: Str, l3_network_name: Str, l3_network_update_parameters: L3NetworkPatchParameters, options: L3NetworksClientUpdateOptions = L3NetworksClientUpdateOptions{}) -> L3NetworksClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, l3_network_name, l3_network_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L3NetworksClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, l3_network_name, l3_network_update_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  l3_networks_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = l3_networks_update_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// L3NetworksClientBeginDeleteOptions: the optional parameters of L3NetworksClient.begin_delete.
@@ -316,12 +324,14 @@ fn (c: L3NetworksClient) delete_create_request(resource_group_name: Str, l3_netw
 /// Delete the provided layer 3 (L3) network.
 pub fn (c: L3NetworksClient[fx]) begin_delete(resource_group_name: Str, l3_network_name: Str, options: L3NetworksClientBeginDeleteOptions = L3NetworksClientBeginDeleteOptions{}) -> runtime.Poller[L3NetworksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L3NetworksClientDeleteResponse", fn(r: http.Response) -> L3NetworksClientDeleteResponse ! Str { l3_networks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "L3NetworksClientDeleteResponse", fn(r: http.Response) -> L3NetworksClientDeleteResponse ! Str { l3_networks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, l3_network_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "L3NetworksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, l3_network_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "L3NetworksClientDeleteResponse", fn(r: http.Response) -> L3NetworksClientDeleteResponse ! Str { l3_networks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "L3NetworksClientDeleteResponse", fn(r: http.Response) -> L3NetworksClientDeleteResponse ! Str { l3_networks_delete_handle(r) }, traced: true)
 }

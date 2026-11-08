@@ -47,7 +47,7 @@ fn (c: UsagesClient) list_create_request(scope: Str, options: UsagesClientListOp
 /// Get a list of current usage for all resources for the scope specified.
 pub fn (c: UsagesClient[fx]) new_list_pager(scope: Str, options: UsagesClientListOptions = UsagesClientListOptions{}) -> runtime.Pager[UsagesClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(scope, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> UsagesClientListResponse ! Str { usages_list_handle(r) }, c.setup.endpoint, fn(r: UsagesClientListResponse) -> Str? { r.usages_limits.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> UsagesClientListResponse ! Str { usages_list_handle(r) }, c.setup.endpoint, fn(r: UsagesClientListResponse) -> Str? { r.usages_limits.next_link }).traced_as("UsagesClientListResponse"))
 }
 
 /// UsagesClientGetOptions: the optional parameters of UsagesClient.get.
@@ -80,10 +80,13 @@ fn (c: UsagesClient) get_create_request(resource_name: Str, scope: Str, options:
 
 /// Get the current usage of a resource.
 pub fn (c: UsagesClient) get(resource_name: Str, scope: Str, options: UsagesClientGetOptions = UsagesClientGetOptions{}) -> UsagesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_name, scope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "UsagesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_name, scope, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  usages_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = usages_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

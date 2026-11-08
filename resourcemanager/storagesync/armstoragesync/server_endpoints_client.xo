@@ -67,7 +67,7 @@ fn (c: ServerEndpointsClient) list_by_sync_group_create_request(resource_group_n
 /// Get a ServerEndpoint list.
 pub fn (c: ServerEndpointsClient[fx]) new_list_by_sync_group_pager(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, options: ServerEndpointsClientListBySyncGroupOptions = ServerEndpointsClientListBySyncGroupOptions{}) -> runtime.Pager[ServerEndpointsClientListBySyncGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_sync_group_create_request(resource_group_name, storage_sync_service_name, sync_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServerEndpointsClientListBySyncGroupResponse ! Str { server_endpoints_list_by_sync_group_handle(r) }, c.setup.endpoint, fn(r: ServerEndpointsClientListBySyncGroupResponse) -> Str? { r.server_endpoint_array.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServerEndpointsClientListBySyncGroupResponse ! Str { server_endpoints_list_by_sync_group_handle(r) }, c.setup.endpoint, fn(r: ServerEndpointsClientListBySyncGroupResponse) -> Str? { r.server_endpoint_array.next_link }).traced_as("ServerEndpointsClientListBySyncGroupResponse"))
 }
 
 /// ServerEndpointsClientGetOptions: the optional parameters of ServerEndpointsClient.get.
@@ -117,12 +117,15 @@ fn (c: ServerEndpointsClient) get_create_request(resource_group_name: Str, stora
 
 /// Get a ServerEndpoint.
 pub fn (c: ServerEndpointsClient) get(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, server_endpoint_name: Str, options: ServerEndpointsClientGetOptions = ServerEndpointsClientGetOptions{}) -> ServerEndpointsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServerEndpointsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  server_endpoints_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = server_endpoints_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServerEndpointsClientBeginCreateOptions: the optional parameters of ServerEndpointsClient.begin_create.
@@ -173,14 +176,16 @@ fn (c: ServerEndpointsClient) create_create_request(resource_group_name: Str, st
 /// Create a new ServerEndpoint.
 pub fn (c: ServerEndpointsClient[fx]) begin_create(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, server_endpoint_name: Str, parameters: ServerEndpointCreateParameters, options: ServerEndpointsClientBeginCreateOptions = ServerEndpointsClientBeginCreateOptions{}) -> runtime.Poller[ServerEndpointsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientCreateResponse", fn(r: http.Response) -> ServerEndpointsClientCreateResponse ! Str { server_endpoints_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientCreateResponse", fn(r: http.Response) -> ServerEndpointsClientCreateResponse ! Str { server_endpoints_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServerEndpointsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ServerEndpointsClientCreateResponse", fn(r: http.Response) -> ServerEndpointsClientCreateResponse ! Str { server_endpoints_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ServerEndpointsClientCreateResponse", fn(r: http.Response) -> ServerEndpointsClientCreateResponse ! Str { server_endpoints_create_handle(r) }, traced: true)
 }
 
 /// ServerEndpointsClientBeginUpdateOptions: the optional parameters of ServerEndpointsClient.begin_update.
@@ -231,14 +236,16 @@ fn (c: ServerEndpointsClient) update_create_request(resource_group_name: Str, st
 /// Patch a given ServerEndpoint.
 pub fn (c: ServerEndpointsClient[fx]) begin_update(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, server_endpoint_name: Str, parameters: ServerEndpointUpdateParameters, options: ServerEndpointsClientBeginUpdateOptions = ServerEndpointsClientBeginUpdateOptions{}) -> runtime.Poller[ServerEndpointsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientUpdateResponse", fn(r: http.Response) -> ServerEndpointsClientUpdateResponse ! Str { server_endpoints_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientUpdateResponse", fn(r: http.Response) -> ServerEndpointsClientUpdateResponse ! Str { server_endpoints_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServerEndpointsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ServerEndpointsClientUpdateResponse", fn(r: http.Response) -> ServerEndpointsClientUpdateResponse ! Str { server_endpoints_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "ServerEndpointsClientUpdateResponse", fn(r: http.Response) -> ServerEndpointsClientUpdateResponse ! Str { server_endpoints_update_handle(r) }, traced: true)
 }
 
 /// ServerEndpointsClientBeginDeleteOptions: the optional parameters of ServerEndpointsClient.begin_delete.
@@ -285,14 +292,16 @@ fn (c: ServerEndpointsClient) delete_create_request(resource_group_name: Str, st
 /// Delete a given ServerEndpoint.
 pub fn (c: ServerEndpointsClient[fx]) begin_delete(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, server_endpoint_name: Str, options: ServerEndpointsClientBeginDeleteOptions = ServerEndpointsClientBeginDeleteOptions{}) -> runtime.Poller[ServerEndpointsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientDeleteResponse", fn(r: http.Response) -> ServerEndpointsClientDeleteResponse ! Str { server_endpoints_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientDeleteResponse", fn(r: http.Response) -> ServerEndpointsClientDeleteResponse ! Str { server_endpoints_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServerEndpointsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServerEndpointsClientDeleteResponse", fn(r: http.Response) -> ServerEndpointsClientDeleteResponse ! Str { server_endpoints_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServerEndpointsClientDeleteResponse", fn(r: http.Response) -> ServerEndpointsClientDeleteResponse ! Str { server_endpoints_delete_handle(r) }, traced: true)
 }
 
 /// ServerEndpointsClientBeginRecallActionOptions: the optional parameters of ServerEndpointsClient.begin_recall_action.
@@ -340,12 +349,14 @@ fn (c: ServerEndpointsClient) recall_action_create_request(resource_group_name: 
 /// Recall a server endpoint.
 pub fn (c: ServerEndpointsClient[fx]) begin_recall_action(resource_group_name: Str, storage_sync_service_name: Str, sync_group_name: Str, server_endpoint_name: Str, parameters: RecallActionParameters, options: ServerEndpointsClientBeginRecallActionOptions = ServerEndpointsClientBeginRecallActionOptions{}) -> runtime.Poller[ServerEndpointsClientRecallActionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientRecallActionResponse", fn(r: http.Response) -> ServerEndpointsClientRecallActionResponse ! Str { server_endpoints_recall_action_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServerEndpointsClientRecallActionResponse", fn(r: http.Response) -> ServerEndpointsClientRecallActionResponse ! Str { server_endpoints_recall_action_handle(r) }, traced: true)
   }
-  let req = c.recall_action_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServerEndpointsClient.BeginRecallAction", c.setup.pipeline.tracer)
+  let req = c.recall_action_create_request(resource_group_name, storage_sync_service_name, sync_group_name, server_endpoint_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServerEndpointsClientRecallActionResponse", fn(r: http.Response) -> ServerEndpointsClientRecallActionResponse ! Str { server_endpoints_recall_action_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServerEndpointsClientRecallActionResponse", fn(r: http.Response) -> ServerEndpointsClientRecallActionResponse ! Str { server_endpoints_recall_action_handle(r) }, traced: true)
 }

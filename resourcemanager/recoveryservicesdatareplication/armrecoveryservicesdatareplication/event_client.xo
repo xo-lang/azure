@@ -73,7 +73,7 @@ fn (c: EventClient) list_create_request(resource_group_name: Str, vault_name: St
 /// Gets the list of events in the given vault.
 pub fn (c: EventClient[fx]) new_list_pager(resource_group_name: Str, vault_name: Str, options: EventClientListOptions = EventClientListOptions{}) -> runtime.Pager[EventClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, vault_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EventClientListResponse ! Str { event_list_handle(r) }, c.setup.endpoint, fn(r: EventClientListResponse) -> Str? { r.event_model_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EventClientListResponse ! Str { event_list_handle(r) }, c.setup.endpoint, fn(r: EventClientListResponse) -> Str? { r.event_model_list_result.next_link }).traced_as("EventClientListResponse"))
 }
 
 /// EventClientGetOptions: the optional parameters of EventClient.get.
@@ -115,10 +115,13 @@ fn (c: EventClient) get_create_request(resource_group_name: Str, vault_name: Str
 
 /// Gets the details of the event.
 pub fn (c: EventClient) get(resource_group_name: Str, vault_name: Str, event_name: Str, options: EventClientGetOptions = EventClientGetOptions{}) -> EventClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vault_name, event_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EventClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vault_name, event_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  event_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = event_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

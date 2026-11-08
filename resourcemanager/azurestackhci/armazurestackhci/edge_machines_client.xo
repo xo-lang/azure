@@ -49,7 +49,7 @@ fn (c: EdgeMachinesClient) list_by_subscription_create_request(options: EdgeMach
 /// List all edge machines in a subscription.
 pub fn (c: EdgeMachinesClient[fx]) new_list_by_subscription_pager(options: EdgeMachinesClientListBySubscriptionOptions = EdgeMachinesClientListBySubscriptionOptions{}) -> runtime.Pager[EdgeMachinesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EdgeMachinesClientListBySubscriptionResponse ! Str { edge_machines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: EdgeMachinesClientListBySubscriptionResponse) -> Str? { r.edge_machine_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EdgeMachinesClientListBySubscriptionResponse ! Str { edge_machines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: EdgeMachinesClientListBySubscriptionResponse) -> Str? { r.edge_machine_list_result.next_link }).traced_as("EdgeMachinesClientListBySubscriptionResponse"))
 }
 
 /// EdgeMachinesClientListByResourceGroupOptions: the optional parameters of EdgeMachinesClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: EdgeMachinesClient) list_by_resource_group_create_request(resource_group_
 /// List all edge machines in a resource group.
 pub fn (c: EdgeMachinesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: EdgeMachinesClientListByResourceGroupOptions = EdgeMachinesClientListByResourceGroupOptions{}) -> runtime.Pager[EdgeMachinesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EdgeMachinesClientListByResourceGroupResponse ! Str { edge_machines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: EdgeMachinesClientListByResourceGroupResponse) -> Str? { r.edge_machine_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> EdgeMachinesClientListByResourceGroupResponse ! Str { edge_machines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: EdgeMachinesClientListByResourceGroupResponse) -> Str? { r.edge_machine_list_result.next_link }).traced_as("EdgeMachinesClientListByResourceGroupResponse"))
 }
 
 /// EdgeMachinesClientGetOptions: the optional parameters of EdgeMachinesClient.get.
@@ -122,12 +122,15 @@ fn (c: EdgeMachinesClient) get_create_request(resource_group_name: Str, edge_mac
 
 /// Get an edge machine.
 pub fn (c: EdgeMachinesClient) get(resource_group_name: Str, edge_machine_name: Str, options: EdgeMachinesClientGetOptions = EdgeMachinesClientGetOptions{}) -> EdgeMachinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, edge_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, edge_machine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  edge_machines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = edge_machines_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// EdgeMachinesClientBeginCreateOrUpdateOptions: the optional parameters of EdgeMachinesClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: EdgeMachinesClient) create_or_update_create_request(resource_group_name: 
 /// Create or update an edge machine.
 pub fn (c: EdgeMachinesClient[fx]) begin_create_or_update(resource_group_name: Str, edge_machine_name: Str, resource: EdgeMachine, options: EdgeMachinesClientBeginCreateOrUpdateOptions = EdgeMachinesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[EdgeMachinesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientCreateOrUpdateResponse ! Str { edge_machines_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientCreateOrUpdateResponse ! Str { edge_machines_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, edge_machine_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, edge_machine_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientCreateOrUpdateResponse ! Str { edge_machines_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientCreateOrUpdateResponse ! Str { edge_machines_create_or_update_handle(r) }, traced: true)
 }
 
 /// EdgeMachinesClientBeginUpdateOptions: the optional parameters of EdgeMachinesClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: EdgeMachinesClient) update_create_request(resource_group_name: Str, edge_
 /// Update an edge machine.
 pub fn (c: EdgeMachinesClient[fx]) begin_update(resource_group_name: Str, edge_machine_name: Str, properties: EdgeMachinePatch, options: EdgeMachinesClientBeginUpdateOptions = EdgeMachinesClientBeginUpdateOptions{}) -> runtime.Poller[EdgeMachinesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientUpdateResponse ! Str { edge_machines_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientUpdateResponse ! Str { edge_machines_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, edge_machine_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, edge_machine_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientUpdateResponse ! Str { edge_machines_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientUpdateResponse", fn(r: http.Response) -> EdgeMachinesClientUpdateResponse ! Str { edge_machines_update_handle(r) }, traced: true)
 }
 
 /// EdgeMachinesClientBeginDeleteOptions: the optional parameters of EdgeMachinesClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: EdgeMachinesClient) delete_create_request(resource_group_name: Str, edge_
 /// Delete an edge machine.
 pub fn (c: EdgeMachinesClient[fx]) begin_delete(resource_group_name: Str, edge_machine_name: Str, options: EdgeMachinesClientBeginDeleteOptions = EdgeMachinesClientBeginDeleteOptions{}) -> runtime.Poller[EdgeMachinesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientDeleteResponse", fn(r: http.Response) -> EdgeMachinesClientDeleteResponse ! Str { edge_machines_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientDeleteResponse", fn(r: http.Response) -> EdgeMachinesClientDeleteResponse ! Str { edge_machines_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, edge_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, edge_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientDeleteResponse", fn(r: http.Response) -> EdgeMachinesClientDeleteResponse ! Str { edge_machines_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientDeleteResponse", fn(r: http.Response) -> EdgeMachinesClientDeleteResponse ! Str { edge_machines_delete_handle(r) }, traced: true)
 }
 
 /// EdgeMachinesClientBeginRefreshApplicableUpdatesOptions: the optional parameters of EdgeMachinesClient.begin_refresh_applicable_updates.
@@ -312,14 +321,16 @@ fn (c: EdgeMachinesClient) refresh_applicable_updates_create_request(resource_gr
 /// Trigger an on-demand refresh of applicable updates for the edge machine. Creates or updates the default EdgeMachineUpdate child resource with the latest set of applicable updates.
 pub fn (c: EdgeMachinesClient[fx]) begin_refresh_applicable_updates(resource_group_name: Str, edge_machine_name: Str, options: EdgeMachinesClientBeginRefreshApplicableUpdatesOptions = EdgeMachinesClientBeginRefreshApplicableUpdatesOptions{}) -> runtime.Poller[EdgeMachinesClientRefreshApplicableUpdatesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientRefreshApplicableUpdatesResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshApplicableUpdatesResponse ! Str { edge_machines_refresh_applicable_updates_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientRefreshApplicableUpdatesResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshApplicableUpdatesResponse ! Str { edge_machines_refresh_applicable_updates_handle(r) }, traced: true)
   }
-  let req = c.refresh_applicable_updates_create_request(resource_group_name, edge_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginRefreshApplicableUpdates", c.setup.pipeline.tracer)
+  let req = c.refresh_applicable_updates_create_request(resource_group_name, edge_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientRefreshApplicableUpdatesResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshApplicableUpdatesResponse ! Str { edge_machines_refresh_applicable_updates_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientRefreshApplicableUpdatesResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshApplicableUpdatesResponse ! Str { edge_machines_refresh_applicable_updates_handle(r) }, traced: true)
 }
 
 /// EdgeMachinesClientBeginRefreshSecuritySettingsOptions: the optional parameters of EdgeMachinesClient.begin_refresh_security_settings.
@@ -358,14 +369,16 @@ fn (c: EdgeMachinesClient) refresh_security_settings_create_request(resource_gro
 /// Trigger an on-demand sync of edge machine security settings from Guest Configuration. Creates the default security settings child resource if it does not already exist.
 pub fn (c: EdgeMachinesClient[fx]) begin_refresh_security_settings(resource_group_name: Str, edge_machine_name: Str, options: EdgeMachinesClientBeginRefreshSecuritySettingsOptions = EdgeMachinesClientBeginRefreshSecuritySettingsOptions{}) -> runtime.Poller[EdgeMachinesClientRefreshSecuritySettingsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientRefreshSecuritySettingsResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshSecuritySettingsResponse ! Str { edge_machines_refresh_security_settings_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientRefreshSecuritySettingsResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshSecuritySettingsResponse ! Str { edge_machines_refresh_security_settings_handle(r) }, traced: true)
   }
-  let req = c.refresh_security_settings_create_request(resource_group_name, edge_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginRefreshSecuritySettings", c.setup.pipeline.tracer)
+  let req = c.refresh_security_settings_create_request(resource_group_name, edge_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientRefreshSecuritySettingsResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshSecuritySettingsResponse ! Str { edge_machines_refresh_security_settings_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientRefreshSecuritySettingsResponse", fn(r: http.Response) -> EdgeMachinesClientRefreshSecuritySettingsResponse ! Str { edge_machines_refresh_security_settings_handle(r) }, traced: true)
 }
 
 /// EdgeMachinesClientBeginValidateOptions: the optional parameters of EdgeMachinesClient.begin_validate.
@@ -408,12 +421,14 @@ fn (c: EdgeMachinesClient) validate_create_request(resource_group_name: Str, edg
 /// A long-running resource action to validate the edge machine.
 pub fn (c: EdgeMachinesClient[fx]) begin_validate(resource_group_name: Str, edge_machine_name: Str, body: EdgeMachineValidateRequest, options: EdgeMachinesClientBeginValidateOptions = EdgeMachinesClientBeginValidateOptions{}) -> runtime.Poller[EdgeMachinesClientValidateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientValidateResponse", fn(r: http.Response) -> EdgeMachinesClientValidateResponse ! Str { edge_machines_validate_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "EdgeMachinesClientValidateResponse", fn(r: http.Response) -> EdgeMachinesClientValidateResponse ! Str { edge_machines_validate_handle(r) }, traced: true)
   }
-  let req = c.validate_create_request(resource_group_name, edge_machine_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "EdgeMachinesClient.BeginValidate", c.setup.pipeline.tracer)
+  let req = c.validate_create_request(resource_group_name, edge_machine_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientValidateResponse", fn(r: http.Response) -> EdgeMachinesClientValidateResponse ! Str { edge_machines_validate_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "EdgeMachinesClientValidateResponse", fn(r: http.Response) -> EdgeMachinesClientValidateResponse ! Str { edge_machines_validate_handle(r) }, traced: true)
 }

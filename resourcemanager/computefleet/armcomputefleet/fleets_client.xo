@@ -49,7 +49,7 @@ fn (c: FleetsClient) list_by_subscription_create_request(options: FleetsClientLi
 /// List Fleet resources by subscription ID
 pub fn (c: FleetsClient[fx]) new_list_by_subscription_pager(options: FleetsClientListBySubscriptionOptions = FleetsClientListBySubscriptionOptions{}) -> runtime.Pager[FleetsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListBySubscriptionResponse ! Str { fleets_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListBySubscriptionResponse) -> Str? { r.fleet_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListBySubscriptionResponse ! Str { fleets_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListBySubscriptionResponse) -> Str? { r.fleet_list_result.next_link }).traced_as("FleetsClientListBySubscriptionResponse"))
 }
 
 /// FleetsClientListByResourceGroupOptions: the optional parameters of FleetsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: FleetsClient) list_by_resource_group_create_request(resource_group_name: 
 /// List Fleet resources by resource group
 pub fn (c: FleetsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: FleetsClientListByResourceGroupOptions = FleetsClientListByResourceGroupOptions{}) -> runtime.Pager[FleetsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListByResourceGroupResponse ! Str { fleets_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListByResourceGroupResponse) -> Str? { r.fleet_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListByResourceGroupResponse ! Str { fleets_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListByResourceGroupResponse) -> Str? { r.fleet_list_result.next_link }).traced_as("FleetsClientListByResourceGroupResponse"))
 }
 
 /// FleetsClientGetOptions: the optional parameters of FleetsClient.get.
@@ -122,12 +122,15 @@ fn (c: FleetsClient) get_create_request(resource_group_name: Str, fleet_name: St
 
 /// Get a Fleet
 pub fn (c: FleetsClient) get(resource_group_name: Str, fleet_name: Str, options: FleetsClientGetOptions = FleetsClientGetOptions{}) -> FleetsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, fleet_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FleetsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, fleet_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  fleets_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = fleets_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// FleetsClientBeginCreateOrUpdateOptions: the optional parameters of FleetsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: FleetsClient) create_or_update_create_request(resource_group_name: Str, f
 /// Create a Fleet
 pub fn (c: FleetsClient[fx]) begin_create_or_update(resource_group_name: Str, fleet_name: Str, resource: Fleet, options: FleetsClientBeginCreateOrUpdateOptions = FleetsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[FleetsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientCreateOrUpdateResponse", fn(r: http.Response) -> FleetsClientCreateOrUpdateResponse ! Str { fleets_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientCreateOrUpdateResponse", fn(r: http.Response) -> FleetsClientCreateOrUpdateResponse ! Str { fleets_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, fleet_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FleetsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, fleet_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "FleetsClientCreateOrUpdateResponse", fn(r: http.Response) -> FleetsClientCreateOrUpdateResponse ! Str { fleets_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "FleetsClientCreateOrUpdateResponse", fn(r: http.Response) -> FleetsClientCreateOrUpdateResponse ! Str { fleets_create_or_update_handle(r) }, traced: true)
 }
 
 /// FleetsClientBeginUpdateOptions: the optional parameters of FleetsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: FleetsClient) update_create_request(resource_group_name: Str, fleet_name:
 /// Update a Fleet
 pub fn (c: FleetsClient[fx]) begin_update(resource_group_name: Str, fleet_name: Str, properties: FleetUpdate, options: FleetsClientBeginUpdateOptions = FleetsClientBeginUpdateOptions{}) -> runtime.Poller[FleetsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientUpdateResponse", fn(r: http.Response) -> FleetsClientUpdateResponse ! Str { fleets_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientUpdateResponse", fn(r: http.Response) -> FleetsClientUpdateResponse ! Str { fleets_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, fleet_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FleetsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, fleet_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "FleetsClientUpdateResponse", fn(r: http.Response) -> FleetsClientUpdateResponse ! Str { fleets_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "FleetsClientUpdateResponse", fn(r: http.Response) -> FleetsClientUpdateResponse ! Str { fleets_update_handle(r) }, traced: true)
 }
 
 /// FleetsClientBeginDeleteOptions: the optional parameters of FleetsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: FleetsClient) delete_create_request(resource_group_name: Str, fleet_name:
 /// Delete a Fleet
 pub fn (c: FleetsClient[fx]) begin_delete(resource_group_name: Str, fleet_name: Str, options: FleetsClientBeginDeleteOptions = FleetsClientBeginDeleteOptions{}) -> runtime.Poller[FleetsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientDeleteResponse", fn(r: http.Response) -> FleetsClientDeleteResponse ! Str { fleets_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "FleetsClientDeleteResponse", fn(r: http.Response) -> FleetsClientDeleteResponse ! Str { fleets_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, fleet_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "FleetsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, fleet_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "FleetsClientDeleteResponse", fn(r: http.Response) -> FleetsClientDeleteResponse ! Str { fleets_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "FleetsClientDeleteResponse", fn(r: http.Response) -> FleetsClientDeleteResponse ! Str { fleets_delete_handle(r) }, traced: true)
 }
 
 /// FleetsClientListVirtualMachineScaleSetsOptions: the optional parameters of FleetsClient.new_list_virtual_machine_scale_sets_pager.
@@ -312,7 +321,7 @@ fn (c: FleetsClient) list_virtual_machine_scale_sets_create_request(resource_gro
 /// List VirtualMachineScaleSet resources by Fleet
 pub fn (c: FleetsClient[fx]) new_list_virtual_machine_scale_sets_pager(resource_group_name: Str, name: Str, options: FleetsClientListVirtualMachineScaleSetsOptions = FleetsClientListVirtualMachineScaleSetsOptions{}) -> runtime.Pager[FleetsClientListVirtualMachineScaleSetsResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machine_scale_sets_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListVirtualMachineScaleSetsResponse ! Str { fleets_list_virtual_machine_scale_sets_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListVirtualMachineScaleSetsResponse) -> Str? { r.virtual_machine_scale_set_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListVirtualMachineScaleSetsResponse ! Str { fleets_list_virtual_machine_scale_sets_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListVirtualMachineScaleSetsResponse) -> Str? { r.virtual_machine_scale_set_list_result.next_link }).traced_as("FleetsClientListVirtualMachineScaleSetsResponse"))
 }
 
 /// FleetsClientListVirtualMachinesOptions: the optional parameters of FleetsClient.new_list_virtual_machines_pager.
@@ -362,5 +371,5 @@ fn (c: FleetsClient) list_virtual_machines_create_request(resource_group_name: S
 /// List VirtualMachine resources of a Launch mode Fleet.
 pub fn (c: FleetsClient[fx]) new_list_virtual_machines_pager(resource_group_name: Str, name: Str, options: FleetsClientListVirtualMachinesOptions = FleetsClientListVirtualMachinesOptions{}) -> runtime.Pager[FleetsClientListVirtualMachinesResponse, fx] ! azcore.CallErr {
   let req = c.list_virtual_machines_create_request(resource_group_name, name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListVirtualMachinesResponse ! Str { fleets_list_virtual_machines_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListVirtualMachinesResponse) -> Str? { r.virtual_machine_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> FleetsClientListVirtualMachinesResponse ! Str { fleets_list_virtual_machines_handle(r) }, c.setup.endpoint, fn(r: FleetsClientListVirtualMachinesResponse) -> Str? { r.virtual_machine_list_result.next_link }).traced_as("FleetsClientListVirtualMachinesResponse"))
 }

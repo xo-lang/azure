@@ -77,7 +77,7 @@ fn (c: APISchemaClient) list_by_api_create_request(resource_group_name: Str, ser
 /// Get the schema configuration at the API level.
 pub fn (c: APISchemaClient[fx]) new_list_by_api_pager(resource_group_name: Str, service_name: Str, api_id: Str, options: APISchemaClientListByAPIOptions = APISchemaClientListByAPIOptions{}) -> runtime.Pager[APISchemaClientListByAPIResponse, fx] ! azcore.CallErr {
   let req = c.list_by_api_create_request(resource_group_name, service_name, api_id, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APISchemaClientListByAPIResponse ! Str { api_schema_list_by_api_handle(r) }, fn(r: APISchemaClientListByAPIResponse) -> Str? { r.schema_collection.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> APISchemaClientListByAPIResponse ! Str { api_schema_list_by_api_handle(r) }, fn(r: APISchemaClientListByAPIResponse) -> Str? { r.schema_collection.next_link }).traced_as("APISchemaClientListByAPIResponse"))
 }
 
 /// APISchemaClientGetEntityTagOptions: the optional parameters of APISchemaClient.get_entity_tag.
@@ -125,12 +125,15 @@ fn (c: APISchemaClient) get_entity_tag_create_request(resource_group_name: Str, 
 
 /// Gets the entity state (Etag) version of the schema specified by its identifier.
 pub fn (c: APISchemaClient) get_entity_tag(resource_group_name: Str, service_name: Str, api_id: Str, schema_id: Str, options: APISchemaClientGetEntityTagOptions = APISchemaClientGetEntityTagOptions{}) -> APISchemaClientGetEntityTagResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_entity_tag_create_request(resource_group_name, service_name, api_id, schema_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APISchemaClient.GetEntityTag", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_entity_tag_create_request(resource_group_name, service_name, api_id, schema_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_schema_get_entity_tag_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_schema_get_entity_tag_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// APISchemaClientGetOptions: the optional parameters of APISchemaClient.get.
@@ -178,12 +181,15 @@ fn (c: APISchemaClient) get_create_request(resource_group_name: Str, service_nam
 
 /// Get the schema configuration at the API level.
 pub fn (c: APISchemaClient) get(resource_group_name: Str, service_name: Str, api_id: Str, schema_id: Str, options: APISchemaClientGetOptions = APISchemaClientGetOptions{}) -> APISchemaClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, service_name, api_id, schema_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APISchemaClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, service_name, api_id, schema_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_schema_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_schema_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// APISchemaClientBeginCreateOrUpdateOptions: the optional parameters of APISchemaClient.begin_create_or_update.
@@ -239,14 +245,16 @@ fn (c: APISchemaClient) create_or_update_create_request(resource_group_name: Str
 /// Creates or updates schema configuration for the API.
 pub fn (c: APISchemaClient[fx]) begin_create_or_update(resource_group_name: Str, service_name: Str, api_id: Str, schema_id: Str, parameters: SchemaContract, options: APISchemaClientBeginCreateOrUpdateOptions = APISchemaClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[APISchemaClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APISchemaClientCreateOrUpdateResponse", fn(r: http.Response) -> APISchemaClientCreateOrUpdateResponse ! Str { api_schema_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "APISchemaClientCreateOrUpdateResponse", fn(r: http.Response) -> APISchemaClientCreateOrUpdateResponse ! Str { api_schema_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, service_name, api_id, schema_id, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APISchemaClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, service_name, api_id, schema_id, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APISchemaClientCreateOrUpdateResponse", fn(r: http.Response) -> APISchemaClientCreateOrUpdateResponse ! Str { api_schema_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "APISchemaClientCreateOrUpdateResponse", fn(r: http.Response) -> APISchemaClientCreateOrUpdateResponse ! Str { api_schema_create_or_update_handle(r) }, traced: true)
 }
 
 /// APISchemaClientDeleteOptions: the optional parameters of APISchemaClient.delete.
@@ -296,10 +304,13 @@ fn (c: APISchemaClient) delete_create_request(resource_group_name: Str, service_
 
 /// Deletes the schema configuration at the Api.
 pub fn (c: APISchemaClient) delete(resource_group_name: Str, service_name: Str, api_id: Str, schema_id: Str, if_match: Str, options: APISchemaClientDeleteOptions = APISchemaClientDeleteOptions{}) -> APISchemaClientDeleteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.delete_create_request(resource_group_name, service_name, api_id, schema_id, if_match, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "APISchemaClient.Delete", c.setup.pipeline.tracer)
+  let req = sp.on(c.delete_create_request(resource_group_name, service_name, api_id, schema_id, if_match, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  api_schema_delete_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = api_schema_delete_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

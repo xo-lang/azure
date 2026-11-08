@@ -55,7 +55,7 @@ fn (c: ConfigurationStoresClient) list_create_request(options: ConfigurationStor
 /// Lists the configuration stores for a given subscription.
 pub fn (c: ConfigurationStoresClient[fx]) new_list_pager(options: ConfigurationStoresClientListOptions = ConfigurationStoresClientListOptions{}) -> runtime.Pager[ConfigurationStoresClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListResponse ! Str { configuration_stores_list_handle(r) }, fn(r: ConfigurationStoresClientListResponse) -> Str? { r.configuration_store_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListResponse ! Str { configuration_stores_list_handle(r) }, fn(r: ConfigurationStoresClientListResponse) -> Str? { r.configuration_store_list_result.next_link }).traced_as("ConfigurationStoresClientListResponse"))
 }
 
 /// ConfigurationStoresClientListByResourceGroupOptions: the optional parameters of ConfigurationStoresClient.new_list_by_resource_group_pager.
@@ -96,7 +96,7 @@ fn (c: ConfigurationStoresClient) list_by_resource_group_create_request(resource
 /// Lists the configuration stores for a given resource group.
 pub fn (c: ConfigurationStoresClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ConfigurationStoresClientListByResourceGroupOptions = ConfigurationStoresClientListByResourceGroupOptions{}) -> runtime.Pager[ConfigurationStoresClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListByResourceGroupResponse ! Str { configuration_stores_list_by_resource_group_handle(r) }, fn(r: ConfigurationStoresClientListByResourceGroupResponse) -> Str? { r.configuration_store_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListByResourceGroupResponse ! Str { configuration_stores_list_by_resource_group_handle(r) }, fn(r: ConfigurationStoresClientListByResourceGroupResponse) -> Str? { r.configuration_store_list_result.next_link }).traced_as("ConfigurationStoresClientListByResourceGroupResponse"))
 }
 
 /// ConfigurationStoresClientGetOptions: the optional parameters of ConfigurationStoresClient.get.
@@ -134,12 +134,15 @@ fn (c: ConfigurationStoresClient) get_create_request(resource_group_name: Str, c
 
 /// Gets the properties of the specified configuration store.
 pub fn (c: ConfigurationStoresClient) get(resource_group_name: Str, config_store_name: Str, options: ConfigurationStoresClientGetOptions = ConfigurationStoresClientGetOptions{}) -> ConfigurationStoresClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, config_store_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, config_store_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  configuration_stores_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = configuration_stores_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ConfigurationStoresClientBeginCreateOptions: the optional parameters of ConfigurationStoresClient.begin_create.
@@ -182,14 +185,16 @@ fn (c: ConfigurationStoresClient) create_create_request(resource_group_name: Str
 /// Creates a configuration store with the specified parameters.
 pub fn (c: ConfigurationStoresClient[fx]) begin_create(resource_group_name: Str, config_store_name: Str, config_store_creation_parameters: ConfigurationStore, options: ConfigurationStoresClientBeginCreateOptions = ConfigurationStoresClientBeginCreateOptions{}) -> runtime.Poller[ConfigurationStoresClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientCreateResponse", fn(r: http.Response) -> ConfigurationStoresClientCreateResponse ! Str { configuration_stores_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientCreateResponse", fn(r: http.Response) -> ConfigurationStoresClientCreateResponse ! Str { configuration_stores_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, config_store_name, config_store_creation_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, config_store_name, config_store_creation_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientCreateResponse", fn(r: http.Response) -> ConfigurationStoresClientCreateResponse ! Str { configuration_stores_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientCreateResponse", fn(r: http.Response) -> ConfigurationStoresClientCreateResponse ! Str { configuration_stores_create_handle(r) }, traced: true)
 }
 
 /// ConfigurationStoresClientBeginDeleteOptions: the optional parameters of ConfigurationStoresClient.begin_delete.
@@ -228,14 +233,16 @@ fn (c: ConfigurationStoresClient) delete_create_request(resource_group_name: Str
 /// Deletes a configuration store.
 pub fn (c: ConfigurationStoresClient[fx]) begin_delete(resource_group_name: Str, config_store_name: Str, options: ConfigurationStoresClientBeginDeleteOptions = ConfigurationStoresClientBeginDeleteOptions{}) -> runtime.Poller[ConfigurationStoresClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientDeleteResponse", fn(r: http.Response) -> ConfigurationStoresClientDeleteResponse ! Str { configuration_stores_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientDeleteResponse", fn(r: http.Response) -> ConfigurationStoresClientDeleteResponse ! Str { configuration_stores_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, config_store_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, config_store_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientDeleteResponse", fn(r: http.Response) -> ConfigurationStoresClientDeleteResponse ! Str { configuration_stores_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientDeleteResponse", fn(r: http.Response) -> ConfigurationStoresClientDeleteResponse ! Str { configuration_stores_delete_handle(r) }, traced: true)
 }
 
 /// ConfigurationStoresClientBeginUpdateOptions: the optional parameters of ConfigurationStoresClient.begin_update.
@@ -278,14 +285,16 @@ fn (c: ConfigurationStoresClient) update_create_request(resource_group_name: Str
 /// Updates a configuration store with the specified parameters.
 pub fn (c: ConfigurationStoresClient[fx]) begin_update(resource_group_name: Str, config_store_name: Str, config_store_update_parameters: ConfigurationStoreUpdateParameters, options: ConfigurationStoresClientBeginUpdateOptions = ConfigurationStoresClientBeginUpdateOptions{}) -> runtime.Poller[ConfigurationStoresClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientUpdateResponse", fn(r: http.Response) -> ConfigurationStoresClientUpdateResponse ! Str { configuration_stores_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientUpdateResponse", fn(r: http.Response) -> ConfigurationStoresClientUpdateResponse ! Str { configuration_stores_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, config_store_name, config_store_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, config_store_name, config_store_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientUpdateResponse", fn(r: http.Response) -> ConfigurationStoresClientUpdateResponse ! Str { configuration_stores_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientUpdateResponse", fn(r: http.Response) -> ConfigurationStoresClientUpdateResponse ! Str { configuration_stores_update_handle(r) }, traced: true)
 }
 
 /// ConfigurationStoresClientListKeysOptions: the optional parameters of ConfigurationStoresClient.new_list_keys_pager.
@@ -330,7 +339,7 @@ fn (c: ConfigurationStoresClient) list_keys_create_request(resource_group_name: 
 /// Lists the access key for the specified configuration store.
 pub fn (c: ConfigurationStoresClient[fx]) new_list_keys_pager(resource_group_name: Str, config_store_name: Str, options: ConfigurationStoresClientListKeysOptions = ConfigurationStoresClientListKeysOptions{}) -> runtime.Pager[ConfigurationStoresClientListKeysResponse, fx] ! azcore.CallErr {
   let req = c.list_keys_create_request(resource_group_name, config_store_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListKeysResponse ! Str { configuration_stores_list_keys_handle(r) }, fn(r: ConfigurationStoresClientListKeysResponse) -> Str? { r.api_key_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListKeysResponse ! Str { configuration_stores_list_keys_handle(r) }, fn(r: ConfigurationStoresClientListKeysResponse) -> Str? { r.api_key_list_result.next_link }).traced_as("ConfigurationStoresClientListKeysResponse"))
 }
 
 /// ConfigurationStoresClientRegenerateKeyOptions: the optional parameters of ConfigurationStoresClient.regenerate_key.
@@ -369,12 +378,15 @@ fn (c: ConfigurationStoresClient) regenerate_key_create_request(resource_group_n
 
 /// Regenerates an access key for the specified configuration store.
 pub fn (c: ConfigurationStoresClient) regenerate_key(resource_group_name: Str, config_store_name: Str, regenerate_key_parameters: RegenerateKeyParameters, options: ConfigurationStoresClientRegenerateKeyOptions = ConfigurationStoresClientRegenerateKeyOptions{}) -> ConfigurationStoresClientRegenerateKeyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.regenerate_key_create_request(resource_group_name, config_store_name, regenerate_key_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.RegenerateKey", c.setup.pipeline.tracer)
+  let req = sp.on(c.regenerate_key_create_request(resource_group_name, config_store_name, regenerate_key_parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  configuration_stores_regenerate_key_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = configuration_stores_regenerate_key_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ConfigurationStoresClientListDeletedOptions: the optional parameters of ConfigurationStoresClient.new_list_deleted_pager.
@@ -405,7 +417,7 @@ fn (c: ConfigurationStoresClient) list_deleted_create_request(options: Configura
 /// Gets information about the deleted configuration stores in a subscription.
 pub fn (c: ConfigurationStoresClient[fx]) new_list_deleted_pager(options: ConfigurationStoresClientListDeletedOptions = ConfigurationStoresClientListDeletedOptions{}) -> runtime.Pager[ConfigurationStoresClientListDeletedResponse, fx] ! azcore.CallErr {
   let req = c.list_deleted_create_request(options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListDeletedResponse ! Str { configuration_stores_list_deleted_handle(r) }, fn(r: ConfigurationStoresClientListDeletedResponse) -> Str? { r.deleted_configuration_store_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ConfigurationStoresClientListDeletedResponse ! Str { configuration_stores_list_deleted_handle(r) }, fn(r: ConfigurationStoresClientListDeletedResponse) -> Str? { r.deleted_configuration_store_list_result.next_link }).traced_as("ConfigurationStoresClientListDeletedResponse"))
 }
 
 /// ConfigurationStoresClientGetDeletedOptions: the optional parameters of ConfigurationStoresClient.get_deleted.
@@ -443,12 +455,15 @@ fn (c: ConfigurationStoresClient) get_deleted_create_request(location: Str, conf
 
 /// Gets a deleted Azure app configuration store.
 pub fn (c: ConfigurationStoresClient) get_deleted(location: Str, config_store_name: Str, options: ConfigurationStoresClientGetDeletedOptions = ConfigurationStoresClientGetDeletedOptions{}) -> ConfigurationStoresClientGetDeletedResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_deleted_create_request(location, config_store_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.GetDeleted", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_deleted_create_request(location, config_store_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  configuration_stores_get_deleted_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = configuration_stores_get_deleted_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ConfigurationStoresClientBeginPurgeDeletedOptions: the optional parameters of ConfigurationStoresClient.begin_purge_deleted.
@@ -487,12 +502,14 @@ fn (c: ConfigurationStoresClient) purge_deleted_create_request(location: Str, co
 /// Permanently deletes the specified configuration store.
 pub fn (c: ConfigurationStoresClient[fx]) begin_purge_deleted(location: Str, config_store_name: Str, options: ConfigurationStoresClientBeginPurgeDeletedOptions = ConfigurationStoresClientBeginPurgeDeletedOptions{}) -> runtime.Poller[ConfigurationStoresClientPurgeDeletedResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientPurgeDeletedResponse", fn(r: http.Response) -> ConfigurationStoresClientPurgeDeletedResponse ! Str { configuration_stores_purge_deleted_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ConfigurationStoresClientPurgeDeletedResponse", fn(r: http.Response) -> ConfigurationStoresClientPurgeDeletedResponse ! Str { configuration_stores_purge_deleted_handle(r) }, traced: true)
   }
-  let req = c.purge_deleted_create_request(location, config_store_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ConfigurationStoresClient.BeginPurgeDeleted", c.setup.pipeline.tracer)
+  let req = c.purge_deleted_create_request(location, config_store_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientPurgeDeletedResponse", fn(r: http.Response) -> ConfigurationStoresClientPurgeDeletedResponse ! Str { configuration_stores_purge_deleted_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ConfigurationStoresClientPurgeDeletedResponse", fn(r: http.Response) -> ConfigurationStoresClientPurgeDeletedResponse ! Str { configuration_stores_purge_deleted_handle(r) }, traced: true)
 }

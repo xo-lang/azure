@@ -49,7 +49,7 @@ fn (c: VirtualHardDisksClient) list_all_create_request(options: VirtualHardDisks
 /// Lists all of the virtual hard disks in the specified subscription. Use the nextLink property in the response to get the next page of virtual hard disks.
 pub fn (c: VirtualHardDisksClient[fx]) new_list_all_pager(options: VirtualHardDisksClientListAllOptions = VirtualHardDisksClientListAllOptions{}) -> runtime.Pager[VirtualHardDisksClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHardDisksClientListAllResponse ! Str { virtual_hard_disks_list_all_handle(r) }, c.setup.endpoint, fn(r: VirtualHardDisksClientListAllResponse) -> Str? { r.virtual_hard_disk_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHardDisksClientListAllResponse ! Str { virtual_hard_disks_list_all_handle(r) }, c.setup.endpoint, fn(r: VirtualHardDisksClientListAllResponse) -> Str? { r.virtual_hard_disk_list_result.next_link }).traced_as("VirtualHardDisksClientListAllResponse"))
 }
 
 /// VirtualHardDisksClientListByResourceGroupOptions: the optional parameters of VirtualHardDisksClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: VirtualHardDisksClient) list_by_resource_group_create_request(resource_gr
 /// Lists all of the virtual hard disks in the specified resource group. Use the nextLink property in the response to get the next page of virtual hard disks.
 pub fn (c: VirtualHardDisksClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VirtualHardDisksClientListByResourceGroupOptions = VirtualHardDisksClientListByResourceGroupOptions{}) -> runtime.Pager[VirtualHardDisksClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHardDisksClientListByResourceGroupResponse ! Str { virtual_hard_disks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualHardDisksClientListByResourceGroupResponse) -> Str? { r.virtual_hard_disk_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualHardDisksClientListByResourceGroupResponse ! Str { virtual_hard_disks_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualHardDisksClientListByResourceGroupResponse) -> Str? { r.virtual_hard_disk_list_result.next_link }).traced_as("VirtualHardDisksClientListByResourceGroupResponse"))
 }
 
 /// VirtualHardDisksClientGetOptions: the optional parameters of VirtualHardDisksClient.get.
@@ -122,12 +122,15 @@ fn (c: VirtualHardDisksClient) get_create_request(resource_group_name: Str, virt
 
 /// Gets a virtual hard disk
 pub fn (c: VirtualHardDisksClient) get(resource_group_name: Str, virtual_hard_disk_name: Str, options: VirtualHardDisksClientGetOptions = VirtualHardDisksClientGetOptions{}) -> VirtualHardDisksClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_hard_disk_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHardDisksClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_hard_disk_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_hard_disks_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_hard_disks_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualHardDisksClientBeginCreateOrUpdateOptions: the optional parameters of VirtualHardDisksClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: VirtualHardDisksClient) create_or_update_create_request(resource_group_na
 /// The operation to create or update a virtual hard disk. Please note some properties can be set only during virtual hard disk creation.
 pub fn (c: VirtualHardDisksClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_hard_disk_name: Str, resource: VirtualHardDisk, options: VirtualHardDisksClientBeginCreateOrUpdateOptions = VirtualHardDisksClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualHardDisksClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientCreateOrUpdateResponse ! Str { virtual_hard_disks_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientCreateOrUpdateResponse ! Str { virtual_hard_disks_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_hard_disk_name, resource, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHardDisksClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_hard_disk_name, resource, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "VirtualHardDisksClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientCreateOrUpdateResponse ! Str { virtual_hard_disks_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "VirtualHardDisksClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientCreateOrUpdateResponse ! Str { virtual_hard_disks_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualHardDisksClientBeginUpdateOptions: the optional parameters of VirtualHardDisksClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: VirtualHardDisksClient) update_create_request(resource_group_name: Str, v
 /// The operation to update a virtual hard disk.
 pub fn (c: VirtualHardDisksClient[fx]) begin_update(resource_group_name: Str, virtual_hard_disk_name: Str, properties: VirtualHardDisksUpdateRequest, options: VirtualHardDisksClientBeginUpdateOptions = VirtualHardDisksClientBeginUpdateOptions{}) -> runtime.Poller[VirtualHardDisksClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientUpdateResponse ! Str { virtual_hard_disks_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientUpdateResponse ! Str { virtual_hard_disks_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, virtual_hard_disk_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHardDisksClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, virtual_hard_disk_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientUpdateResponse ! Str { virtual_hard_disks_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientUpdateResponse", fn(r: http.Response) -> VirtualHardDisksClientUpdateResponse ! Str { virtual_hard_disks_update_handle(r) }, traced: true)
 }
 
 /// VirtualHardDisksClientBeginDeleteOptions: the optional parameters of VirtualHardDisksClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: VirtualHardDisksClient) delete_create_request(resource_group_name: Str, v
 /// The operation to delete a virtual hard disk.
 pub fn (c: VirtualHardDisksClient[fx]) begin_delete(resource_group_name: Str, virtual_hard_disk_name: Str, options: VirtualHardDisksClientBeginDeleteOptions = VirtualHardDisksClientBeginDeleteOptions{}) -> runtime.Poller[VirtualHardDisksClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientDeleteResponse", fn(r: http.Response) -> VirtualHardDisksClientDeleteResponse ! Str { virtual_hard_disks_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientDeleteResponse", fn(r: http.Response) -> VirtualHardDisksClientDeleteResponse ! Str { virtual_hard_disks_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_hard_disk_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHardDisksClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_hard_disk_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientDeleteResponse", fn(r: http.Response) -> VirtualHardDisksClientDeleteResponse ! Str { virtual_hard_disks_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientDeleteResponse", fn(r: http.Response) -> VirtualHardDisksClientDeleteResponse ! Str { virtual_hard_disks_delete_handle(r) }, traced: true)
 }
 
 /// VirtualHardDisksClientBeginUploadOptions: the optional parameters of VirtualHardDisksClient.begin_upload.
@@ -316,12 +325,14 @@ fn (c: VirtualHardDisksClient) upload_create_request(resource_group_name: Str, v
 /// The operation to upload a virtual hard disk.
 pub fn (c: VirtualHardDisksClient[fx]) begin_upload(resource_group_name: Str, virtual_hard_disk_name: Str, body: VirtualHardDiskUploadRequest, options: VirtualHardDisksClientBeginUploadOptions = VirtualHardDisksClientBeginUploadOptions{}) -> runtime.Poller[VirtualHardDisksClientUploadResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientUploadResponse", fn(r: http.Response) -> VirtualHardDisksClientUploadResponse ! Str { virtual_hard_disks_upload_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualHardDisksClientUploadResponse", fn(r: http.Response) -> VirtualHardDisksClientUploadResponse ! Str { virtual_hard_disks_upload_handle(r) }, traced: true)
   }
-  let req = c.upload_create_request(resource_group_name, virtual_hard_disk_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualHardDisksClient.BeginUpload", c.setup.pipeline.tracer)
+  let req = c.upload_create_request(resource_group_name, virtual_hard_disk_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientUploadResponse", fn(r: http.Response) -> VirtualHardDisksClientUploadResponse ! Str { virtual_hard_disks_upload_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualHardDisksClientUploadResponse", fn(r: http.Response) -> VirtualHardDisksClientUploadResponse ! Str { virtual_hard_disks_upload_handle(r) }, traced: true)
 }

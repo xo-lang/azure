@@ -60,7 +60,7 @@ fn (c: VirtualMachinesClient) list_by_subscription_create_request(options: Virtu
 /// Get a list of virtual machines in the provided subscription.
 pub fn (c: VirtualMachinesClient[fx]) new_list_by_subscription_pager(options: VirtualMachinesClientListBySubscriptionOptions = VirtualMachinesClientListBySubscriptionOptions{}) -> runtime.Pager[VirtualMachinesClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListBySubscriptionResponse ! Str { virtual_machines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListBySubscriptionResponse) -> Str? { r.virtual_machine_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListBySubscriptionResponse ! Str { virtual_machines_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListBySubscriptionResponse) -> Str? { r.virtual_machine_list.next_link }).traced_as("VirtualMachinesClientListBySubscriptionResponse"))
 }
 
 /// VirtualMachinesClientListByResourceGroupOptions: the optional parameters of VirtualMachinesClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: VirtualMachinesClient) list_by_resource_group_create_request(resource_gro
 /// Get a list of virtual machines in the provided resource group.
 pub fn (c: VirtualMachinesClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: VirtualMachinesClientListByResourceGroupOptions = VirtualMachinesClientListByResourceGroupOptions{}) -> runtime.Pager[VirtualMachinesClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListByResourceGroupResponse ! Str { virtual_machines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListByResourceGroupResponse) -> Str? { r.virtual_machine_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VirtualMachinesClientListByResourceGroupResponse ! Str { virtual_machines_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: VirtualMachinesClientListByResourceGroupResponse) -> Str? { r.virtual_machine_list.next_link }).traced_as("VirtualMachinesClientListByResourceGroupResponse"))
 }
 
 /// VirtualMachinesClientGetOptions: the optional parameters of VirtualMachinesClient.get.
@@ -144,12 +144,15 @@ fn (c: VirtualMachinesClient) get_create_request(resource_group_name: Str, virtu
 
 /// Get properties of the provided virtual machine.
 pub fn (c: VirtualMachinesClient) get(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientGetOptions = VirtualMachinesClientGetOptions{}) -> VirtualMachinesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  virtual_machines_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = virtual_machines_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VirtualMachinesClientBeginCreateOrUpdateOptions: the optional parameters of VirtualMachinesClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: VirtualMachinesClient) create_or_update_create_request(resource_group_nam
 /// Create a new virtual machine or update the properties of the existing virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_create_or_update(resource_group_name: Str, virtual_machine_name: Str, virtual_machine_parameters: VirtualMachine, options: VirtualMachinesClientBeginCreateOrUpdateOptions = VirtualMachinesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[VirtualMachinesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientCreateOrUpdateResponse ! Str { virtual_machines_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientCreateOrUpdateResponse ! Str { virtual_machines_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, virtual_machine_name, virtual_machine_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, virtual_machine_name, virtual_machine_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientCreateOrUpdateResponse ! Str { virtual_machines_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientCreateOrUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientCreateOrUpdateResponse ! Str { virtual_machines_create_or_update_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginUpdateOptions: the optional parameters of VirtualMachinesClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: VirtualMachinesClient) update_create_request(resource_group_name: Str, vi
 /// Patch the properties of the provided virtual machine, or update the tags associated with the virtual machine. Properties and tag updates can be done independently.
 pub fn (c: VirtualMachinesClient[fx]) begin_update(resource_group_name: Str, virtual_machine_name: Str, virtual_machine_update_parameters: VirtualMachinePatchParameters, options: VirtualMachinesClientBeginUpdateOptions = VirtualMachinesClientBeginUpdateOptions{}) -> runtime.Poller[VirtualMachinesClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientUpdateResponse ! Str { virtual_machines_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientUpdateResponse ! Str { virtual_machines_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, virtual_machine_name, virtual_machine_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, virtual_machine_name, virtual_machine_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientUpdateResponse ! Str { virtual_machines_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientUpdateResponse", fn(r: http.Response) -> VirtualMachinesClientUpdateResponse ! Str { virtual_machines_update_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginDeleteOptions: the optional parameters of VirtualMachinesClient.begin_delete.
@@ -321,14 +328,16 @@ fn (c: VirtualMachinesClient) delete_create_request(resource_group_name: Str, vi
 /// Delete the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_delete(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginDeleteOptions = VirtualMachinesClientBeginDeleteOptions{}) -> runtime.Poller[VirtualMachinesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientDeleteResponse", fn(r: http.Response) -> VirtualMachinesClientDeleteResponse ! Str { virtual_machines_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientDeleteResponse", fn(r: http.Response) -> VirtualMachinesClientDeleteResponse ! Str { virtual_machines_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientDeleteResponse", fn(r: http.Response) -> VirtualMachinesClientDeleteResponse ! Str { virtual_machines_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientDeleteResponse", fn(r: http.Response) -> VirtualMachinesClientDeleteResponse ! Str { virtual_machines_delete_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginAssignRelayOptions: the optional parameters of VirtualMachinesClient.begin_assign_relay.
@@ -377,14 +386,16 @@ fn (c: VirtualMachinesClient) assign_relay_create_request(resource_group_name: S
 /// Assigns a relay to the specified Microsoft.HybridCompute machine associated with the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_assign_relay(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginAssignRelayOptions = VirtualMachinesClientBeginAssignRelayOptions{}) -> runtime.Poller[VirtualMachinesClientAssignRelayResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientAssignRelayResponse", fn(r: http.Response) -> VirtualMachinesClientAssignRelayResponse ! Str { virtual_machines_assign_relay_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientAssignRelayResponse", fn(r: http.Response) -> VirtualMachinesClientAssignRelayResponse ! Str { virtual_machines_assign_relay_handle(r) }, traced: true)
   }
-  let req = c.assign_relay_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginAssignRelay", c.setup.pipeline.tracer)
+  let req = c.assign_relay_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientAssignRelayResponse", fn(r: http.Response) -> VirtualMachinesClientAssignRelayResponse ! Str { virtual_machines_assign_relay_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientAssignRelayResponse", fn(r: http.Response) -> VirtualMachinesClientAssignRelayResponse ! Str { virtual_machines_assign_relay_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginPowerOffOptions: the optional parameters of VirtualMachinesClient.begin_power_off.
@@ -433,14 +444,16 @@ fn (c: VirtualMachinesClient) power_off_create_request(resource_group_name: Str,
 /// Power off the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_power_off(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginPowerOffOptions = VirtualMachinesClientBeginPowerOffOptions{}) -> runtime.Poller[VirtualMachinesClientPowerOffResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientPowerOffResponse", fn(r: http.Response) -> VirtualMachinesClientPowerOffResponse ! Str { virtual_machines_power_off_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientPowerOffResponse", fn(r: http.Response) -> VirtualMachinesClientPowerOffResponse ! Str { virtual_machines_power_off_handle(r) }, traced: true)
   }
-  let req = c.power_off_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginPowerOff", c.setup.pipeline.tracer)
+  let req = c.power_off_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientPowerOffResponse", fn(r: http.Response) -> VirtualMachinesClientPowerOffResponse ! Str { virtual_machines_power_off_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientPowerOffResponse", fn(r: http.Response) -> VirtualMachinesClientPowerOffResponse ! Str { virtual_machines_power_off_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginReimageOptions: the optional parameters of VirtualMachinesClient.begin_reimage.
@@ -482,14 +495,16 @@ fn (c: VirtualMachinesClient) reimage_create_request(resource_group_name: Str, v
 /// Reimage the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_reimage(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginReimageOptions = VirtualMachinesClientBeginReimageOptions{}) -> runtime.Poller[VirtualMachinesClientReimageResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientReimageResponse", fn(r: http.Response) -> VirtualMachinesClientReimageResponse ! Str { virtual_machines_reimage_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientReimageResponse", fn(r: http.Response) -> VirtualMachinesClientReimageResponse ! Str { virtual_machines_reimage_handle(r) }, traced: true)
   }
-  let req = c.reimage_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginReimage", c.setup.pipeline.tracer)
+  let req = c.reimage_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientReimageResponse", fn(r: http.Response) -> VirtualMachinesClientReimageResponse ! Str { virtual_machines_reimage_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientReimageResponse", fn(r: http.Response) -> VirtualMachinesClientReimageResponse ! Str { virtual_machines_reimage_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginRestartOptions: the optional parameters of VirtualMachinesClient.begin_restart.
@@ -531,14 +546,16 @@ fn (c: VirtualMachinesClient) restart_create_request(resource_group_name: Str, v
 /// Restart the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_restart(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginRestartOptions = VirtualMachinesClientBeginRestartOptions{}) -> runtime.Poller[VirtualMachinesClientRestartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientRestartResponse", fn(r: http.Response) -> VirtualMachinesClientRestartResponse ! Str { virtual_machines_restart_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientRestartResponse", fn(r: http.Response) -> VirtualMachinesClientRestartResponse ! Str { virtual_machines_restart_handle(r) }, traced: true)
   }
-  let req = c.restart_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginRestart", c.setup.pipeline.tracer)
+  let req = c.restart_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientRestartResponse", fn(r: http.Response) -> VirtualMachinesClientRestartResponse ! Str { virtual_machines_restart_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientRestartResponse", fn(r: http.Response) -> VirtualMachinesClientRestartResponse ! Str { virtual_machines_restart_handle(r) }, traced: true)
 }
 
 /// VirtualMachinesClientBeginStartOptions: the optional parameters of VirtualMachinesClient.begin_start.
@@ -580,12 +597,14 @@ fn (c: VirtualMachinesClient) start_create_request(resource_group_name: Str, vir
 /// Start the provided virtual machine.
 pub fn (c: VirtualMachinesClient[fx]) begin_start(resource_group_name: Str, virtual_machine_name: Str, options: VirtualMachinesClientBeginStartOptions = VirtualMachinesClientBeginStartOptions{}) -> runtime.Poller[VirtualMachinesClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientStartResponse", fn(r: http.Response) -> VirtualMachinesClientStartResponse ! Str { virtual_machines_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VirtualMachinesClientStartResponse", fn(r: http.Response) -> VirtualMachinesClientStartResponse ! Str { virtual_machines_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, virtual_machine_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VirtualMachinesClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, virtual_machine_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientStartResponse", fn(r: http.Response) -> VirtualMachinesClientStartResponse ! Str { virtual_machines_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VirtualMachinesClientStartResponse", fn(r: http.Response) -> VirtualMachinesClientStartResponse ! Str { virtual_machines_start_handle(r) }, traced: true)
 }

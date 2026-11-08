@@ -49,7 +49,7 @@ fn (c: InventoryClient) list_by_solution_configuration_create_request(resource_u
 /// List InventoryResource resources by SolutionConfiguration
 pub fn (c: InventoryClient[fx]) new_list_by_solution_configuration_pager(resource_uri: Str, solution_configuration: Str, options: InventoryClientListBySolutionConfigurationOptions = InventoryClientListBySolutionConfigurationOptions{}) -> runtime.Pager[InventoryClientListBySolutionConfigurationResponse, fx] ! azcore.CallErr {
   let req = c.list_by_solution_configuration_create_request(resource_uri, solution_configuration, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InventoryClientListBySolutionConfigurationResponse ! Str { inventory_list_by_solution_configuration_handle(r) }, c.setup.endpoint, fn(r: InventoryClientListBySolutionConfigurationResponse) -> Str? { r.inventory_resource_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> InventoryClientListBySolutionConfigurationResponse ! Str { inventory_list_by_solution_configuration_handle(r) }, c.setup.endpoint, fn(r: InventoryClientListBySolutionConfigurationResponse) -> Str? { r.inventory_resource_list_result.next_link }).traced_as("InventoryClientListBySolutionConfigurationResponse"))
 }
 
 /// InventoryClientGetOptions: the optional parameters of InventoryClient.get.
@@ -84,10 +84,13 @@ fn (c: InventoryClient) get_create_request(resource_uri: Str, solution_configura
 
 /// Get a InventoryResource
 pub fn (c: InventoryClient) get(resource_uri: Str, solution_configuration: Str, inventory_id: Str, options: InventoryClientGetOptions = InventoryClientGetOptions{}) -> InventoryClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_uri, solution_configuration, inventory_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InventoryClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_uri, solution_configuration, inventory_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  inventory_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = inventory_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

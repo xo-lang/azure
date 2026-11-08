@@ -49,7 +49,7 @@ fn (c: ContainerAppsClient) list_by_subscription_create_request(options: Contain
 /// Get the Container Apps in a given subscription.
 pub fn (c: ContainerAppsClient[fx]) new_list_by_subscription_pager(options: ContainerAppsClientListBySubscriptionOptions = ContainerAppsClientListBySubscriptionOptions{}) -> runtime.Pager[ContainerAppsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerAppsClientListBySubscriptionResponse ! Str { container_apps_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ContainerAppsClientListBySubscriptionResponse) -> Str? { r.container_app_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerAppsClientListBySubscriptionResponse ! Str { container_apps_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ContainerAppsClientListBySubscriptionResponse) -> Str? { r.container_app_collection.next_link }).traced_as("ContainerAppsClientListBySubscriptionResponse"))
 }
 
 /// ContainerAppsClientListByResourceGroupOptions: the optional parameters of ContainerAppsClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ContainerAppsClient) list_by_resource_group_create_request(resource_group
 /// Get the Container Apps in a given resource group.
 pub fn (c: ContainerAppsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ContainerAppsClientListByResourceGroupOptions = ContainerAppsClientListByResourceGroupOptions{}) -> runtime.Pager[ContainerAppsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerAppsClientListByResourceGroupResponse ! Str { container_apps_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ContainerAppsClientListByResourceGroupResponse) -> Str? { r.container_app_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ContainerAppsClientListByResourceGroupResponse ! Str { container_apps_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ContainerAppsClientListByResourceGroupResponse) -> Str? { r.container_app_collection.next_link }).traced_as("ContainerAppsClientListByResourceGroupResponse"))
 }
 
 /// ContainerAppsClientGetOptions: the optional parameters of ContainerAppsClient.get.
@@ -122,12 +122,15 @@ fn (c: ContainerAppsClient) get_create_request(resource_group_name: Str, contain
 
 /// Get the properties of a Container App.
 pub fn (c: ContainerAppsClient) get(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientGetOptions = ContainerAppsClientGetOptions{}) -> ContainerAppsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_apps_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_apps_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerAppsClientBeginCreateOrUpdateOptions: the optional parameters of ContainerAppsClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ContainerAppsClient) create_or_update_create_request(resource_group_name:
 /// Create or update a Container App.
 pub fn (c: ContainerAppsClient[fx]) begin_create_or_update(resource_group_name: Str, container_app_name: Str, container_app_envelope: ContainerApp, options: ContainerAppsClientBeginCreateOrUpdateOptions = ContainerAppsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ContainerAppsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerAppsClientCreateOrUpdateResponse ! Str { container_apps_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerAppsClientCreateOrUpdateResponse ! Str { container_apps_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, container_app_name, container_app_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, container_app_name, container_app_envelope, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerAppsClientCreateOrUpdateResponse ! Str { container_apps_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientCreateOrUpdateResponse", fn(r: http.Response) -> ContainerAppsClientCreateOrUpdateResponse ! Str { container_apps_create_or_update_handle(r) }, traced: true)
 }
 
 /// ContainerAppsClientBeginUpdateOptions: the optional parameters of ContainerAppsClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ContainerAppsClient) update_create_request(resource_group_name: Str, cont
 /// Patches a Container App using JSON Merge Patch
 pub fn (c: ContainerAppsClient[fx]) begin_update(resource_group_name: Str, container_app_name: Str, container_app_envelope: ContainerApp, options: ContainerAppsClientBeginUpdateOptions = ContainerAppsClientBeginUpdateOptions{}) -> runtime.Poller[ContainerAppsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientUpdateResponse", fn(r: http.Response) -> ContainerAppsClientUpdateResponse ! Str { container_apps_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientUpdateResponse", fn(r: http.Response) -> ContainerAppsClientUpdateResponse ! Str { container_apps_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, container_app_name, container_app_envelope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, container_app_name, container_app_envelope, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientUpdateResponse", fn(r: http.Response) -> ContainerAppsClientUpdateResponse ! Str { container_apps_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientUpdateResponse", fn(r: http.Response) -> ContainerAppsClientUpdateResponse ! Str { container_apps_update_handle(r) }, traced: true)
 }
 
 /// ContainerAppsClientBeginDeleteOptions: the optional parameters of ContainerAppsClient.begin_delete.
@@ -266,14 +273,16 @@ fn (c: ContainerAppsClient) delete_create_request(resource_group_name: Str, cont
 /// Delete a Container App.
 pub fn (c: ContainerAppsClient[fx]) begin_delete(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientBeginDeleteOptions = ContainerAppsClientBeginDeleteOptions{}) -> runtime.Poller[ContainerAppsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientDeleteResponse", fn(r: http.Response) -> ContainerAppsClientDeleteResponse ! Str { container_apps_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientDeleteResponse", fn(r: http.Response) -> ContainerAppsClientDeleteResponse ! Str { container_apps_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientDeleteResponse", fn(r: http.Response) -> ContainerAppsClientDeleteResponse ! Str { container_apps_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientDeleteResponse", fn(r: http.Response) -> ContainerAppsClientDeleteResponse ! Str { container_apps_delete_handle(r) }, traced: true)
 }
 
 /// ContainerAppsClientGetAuthTokenOptions: the optional parameters of ContainerAppsClient.get_auth_token.
@@ -311,12 +320,15 @@ fn (c: ContainerAppsClient) get_auth_token_create_request(resource_group_name: S
 
 /// Get auth token for a container app
 pub fn (c: ContainerAppsClient) get_auth_token(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientGetAuthTokenOptions = ContainerAppsClientGetAuthTokenOptions{}) -> ContainerAppsClientGetAuthTokenResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_auth_token_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.GetAuthToken", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_auth_token_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_apps_get_auth_token_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_apps_get_auth_token_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerAppsClientListCustomHostNameAnalysisOptions: the optional parameters of ContainerAppsClient.list_custom_host_name_analysis.
@@ -360,12 +372,15 @@ fn (c: ContainerAppsClient) list_custom_host_name_analysis_create_request(resour
 
 /// Analyzes a custom hostname for a Container App
 pub fn (c: ContainerAppsClient) list_custom_host_name_analysis(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientListCustomHostNameAnalysisOptions = ContainerAppsClientListCustomHostNameAnalysisOptions{}) -> ContainerAppsClientListCustomHostNameAnalysisResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_custom_host_name_analysis_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.ListCustomHostNameAnalysis", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_custom_host_name_analysis_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_apps_list_custom_host_name_analysis_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_apps_list_custom_host_name_analysis_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerAppsClientListSecretsOptions: the optional parameters of ContainerAppsClient.list_secrets.
@@ -403,12 +418,15 @@ fn (c: ContainerAppsClient) list_secrets_create_request(resource_group_name: Str
 
 /// List secrets for a container app
 pub fn (c: ContainerAppsClient) list_secrets(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientListSecretsOptions = ContainerAppsClientListSecretsOptions{}) -> ContainerAppsClientListSecretsResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.list_secrets_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.ListSecrets", c.setup.pipeline.tracer)
+  let req = sp.on(c.list_secrets_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  container_apps_list_secrets_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = container_apps_list_secrets_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ContainerAppsClientBeginStartOptions: the optional parameters of ContainerAppsClient.begin_start.
@@ -450,14 +468,16 @@ fn (c: ContainerAppsClient) start_create_request(resource_group_name: Str, conta
 /// Start a container app
 pub fn (c: ContainerAppsClient[fx]) begin_start(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientBeginStartOptions = ContainerAppsClientBeginStartOptions{}) -> runtime.Poller[ContainerAppsClientStartResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientStartResponse", fn(r: http.Response) -> ContainerAppsClientStartResponse ! Str { container_apps_start_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientStartResponse", fn(r: http.Response) -> ContainerAppsClientStartResponse ! Str { container_apps_start_handle(r) }, traced: true)
   }
-  let req = c.start_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.BeginStart", c.setup.pipeline.tracer)
+  let req = c.start_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientStartResponse", fn(r: http.Response) -> ContainerAppsClientStartResponse ! Str { container_apps_start_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientStartResponse", fn(r: http.Response) -> ContainerAppsClientStartResponse ! Str { container_apps_start_handle(r) }, traced: true)
 }
 
 /// ContainerAppsClientBeginStopOptions: the optional parameters of ContainerAppsClient.begin_stop.
@@ -499,12 +519,14 @@ fn (c: ContainerAppsClient) stop_create_request(resource_group_name: Str, contai
 /// Stop a container app
 pub fn (c: ContainerAppsClient[fx]) begin_stop(resource_group_name: Str, container_app_name: Str, options: ContainerAppsClientBeginStopOptions = ContainerAppsClientBeginStopOptions{}) -> runtime.Poller[ContainerAppsClientStopResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientStopResponse", fn(r: http.Response) -> ContainerAppsClientStopResponse ! Str { container_apps_stop_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ContainerAppsClientStopResponse", fn(r: http.Response) -> ContainerAppsClientStopResponse ! Str { container_apps_stop_handle(r) }, traced: true)
   }
-  let req = c.stop_create_request(resource_group_name, container_app_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ContainerAppsClient.BeginStop", c.setup.pipeline.tracer)
+  let req = c.stop_create_request(resource_group_name, container_app_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientStopResponse", fn(r: http.Response) -> ContainerAppsClientStopResponse ! Str { container_apps_stop_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ContainerAppsClientStopResponse", fn(r: http.Response) -> ContainerAppsClientStopResponse ! Str { container_apps_stop_handle(r) }, traced: true)
 }

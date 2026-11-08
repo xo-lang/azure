@@ -49,7 +49,7 @@ fn (c: ManagedClustersClient) list_by_subscription_create_request(options: Manag
 /// Gets all Service Fabric cluster resources created or in the process of being created in the subscription.
 pub fn (c: ManagedClustersClient[fx]) new_list_by_subscription_pager(options: ManagedClustersClientListBySubscriptionOptions = ManagedClustersClientListBySubscriptionOptions{}) -> runtime.Pager[ManagedClustersClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedClustersClientListBySubscriptionResponse ! Str { managed_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ManagedClustersClientListBySubscriptionResponse) -> Str? { r.managed_cluster_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedClustersClientListBySubscriptionResponse ! Str { managed_clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ManagedClustersClientListBySubscriptionResponse) -> Str? { r.managed_cluster_list_result.next_link }).traced_as("ManagedClustersClientListBySubscriptionResponse"))
 }
 
 /// ManagedClustersClientListByResourceGroupOptions: the optional parameters of ManagedClustersClient.new_list_by_resource_group_pager.
@@ -84,7 +84,7 @@ fn (c: ManagedClustersClient) list_by_resource_group_create_request(resource_gro
 /// Gets all Service Fabric cluster resources created or in the process of being created in the resource group.
 pub fn (c: ManagedClustersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ManagedClustersClientListByResourceGroupOptions = ManagedClustersClientListByResourceGroupOptions{}) -> runtime.Pager[ManagedClustersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedClustersClientListByResourceGroupResponse ! Str { managed_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ManagedClustersClientListByResourceGroupResponse) -> Str? { r.managed_cluster_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedClustersClientListByResourceGroupResponse ! Str { managed_clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ManagedClustersClientListByResourceGroupResponse) -> Str? { r.managed_cluster_list_result.next_link }).traced_as("ManagedClustersClientListByResourceGroupResponse"))
 }
 
 /// ManagedClustersClientGetOptions: the optional parameters of ManagedClustersClient.get.
@@ -122,12 +122,15 @@ fn (c: ManagedClustersClient) get_create_request(resource_group_name: Str, clust
 
 /// Get a Service Fabric managed cluster resource created or in the process of being created in the specified resource group.
 pub fn (c: ManagedClustersClient) get(resource_group_name: Str, cluster_name: Str, options: ManagedClustersClientGetOptions = ManagedClustersClientGetOptions{}) -> ManagedClustersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedClustersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  managed_clusters_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = managed_clusters_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ManagedClustersClientBeginCreateOrUpdateOptions: the optional parameters of ManagedClustersClient.begin_create_or_update.
@@ -170,14 +173,16 @@ fn (c: ManagedClustersClient) create_or_update_create_request(resource_group_nam
 /// Create or update a Service Fabric managed cluster resource with the specified name.
 pub fn (c: ManagedClustersClient[fx]) begin_create_or_update(resource_group_name: Str, cluster_name: Str, parameters: ManagedCluster, options: ManagedClustersClientBeginCreateOrUpdateOptions = ManagedClustersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ManagedClustersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedClustersClientCreateOrUpdateResponse ! Str { managed_clusters_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedClustersClientCreateOrUpdateResponse ! Str { managed_clusters_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cluster_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedClustersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cluster_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedClustersClientCreateOrUpdateResponse ! Str { managed_clusters_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ManagedClustersClientCreateOrUpdateResponse ! Str { managed_clusters_create_or_update_handle(r) }, traced: true)
 }
 
 /// ManagedClustersClientBeginUpdateOptions: the optional parameters of ManagedClustersClient.begin_update.
@@ -220,14 +225,16 @@ fn (c: ManagedClustersClient) update_create_request(resource_group_name: Str, cl
 /// Update the tags of of a Service Fabric managed cluster resource with the specified name.
 pub fn (c: ManagedClustersClient[fx]) begin_update(resource_group_name: Str, cluster_name: Str, parameters: ManagedClusterUpdateParameters, options: ManagedClustersClientBeginUpdateOptions = ManagedClustersClientBeginUpdateOptions{}) -> runtime.Poller[ManagedClustersClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientUpdateResponse", fn(r: http.Response) -> ManagedClustersClientUpdateResponse ! Str { managed_clusters_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientUpdateResponse", fn(r: http.Response) -> ManagedClustersClientUpdateResponse ! Str { managed_clusters_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cluster_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedClustersClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cluster_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientUpdateResponse", fn(r: http.Response) -> ManagedClustersClientUpdateResponse ! Str { managed_clusters_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientUpdateResponse", fn(r: http.Response) -> ManagedClustersClientUpdateResponse ! Str { managed_clusters_update_handle(r) }, traced: true)
 }
 
 /// ManagedClustersClientBeginDeleteOptions: the optional parameters of ManagedClustersClient.begin_delete.
@@ -266,12 +273,14 @@ fn (c: ManagedClustersClient) delete_create_request(resource_group_name: Str, cl
 /// Delete a Service Fabric managed cluster resource with the specified name.
 pub fn (c: ManagedClustersClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, options: ManagedClustersClientBeginDeleteOptions = ManagedClustersClientBeginDeleteOptions{}) -> runtime.Poller[ManagedClustersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientDeleteResponse", fn(r: http.Response) -> ManagedClustersClientDeleteResponse ! Str { managed_clusters_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ManagedClustersClientDeleteResponse", fn(r: http.Response) -> ManagedClustersClientDeleteResponse ! Str { managed_clusters_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedClustersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientDeleteResponse", fn(r: http.Response) -> ManagedClustersClientDeleteResponse ! Str { managed_clusters_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ManagedClustersClientDeleteResponse", fn(r: http.Response) -> ManagedClustersClientDeleteResponse ! Str { managed_clusters_delete_handle(r) }, traced: true)
 }

@@ -61,10 +61,13 @@ fn (c: VaultCertificatesClient) create_create_request(resource_group_name: Str, 
 
 /// Uploads a certificate for a resource.
 pub fn (c: VaultCertificatesClient) create(resource_group_name: Str, vault_name: Str, certificate_name: Str, certificate_request: CertificateRequest, options: VaultCertificatesClientCreateOptions = VaultCertificatesClientCreateOptions{}) -> VaultCertificatesClientCreateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.create_create_request(resource_group_name, vault_name, certificate_name, certificate_request, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VaultCertificatesClient.Create", c.setup.pipeline.tracer)
+  let req = sp.on(c.create_create_request(resource_group_name, vault_name, certificate_name, certificate_request, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  vault_certificates_create_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = vault_certificates_create_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

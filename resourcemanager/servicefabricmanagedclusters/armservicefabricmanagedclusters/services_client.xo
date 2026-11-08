@@ -61,7 +61,7 @@ fn (c: ServicesClient) list_by_applications_create_request(resource_group_name: 
 /// Gets all service resources created or in the process of being created in the Service Fabric managed application resource.
 pub fn (c: ServicesClient[fx]) new_list_by_applications_pager(resource_group_name: Str, cluster_name: Str, application_name: Str, options: ServicesClientListByApplicationsOptions = ServicesClientListByApplicationsOptions{}) -> runtime.Pager[ServicesClientListByApplicationsResponse, fx] ! azcore.CallErr {
   let req = c.list_by_applications_create_request(resource_group_name, cluster_name, application_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicesClientListByApplicationsResponse ! Str { services_list_by_applications_handle(r) }, c.setup.endpoint, fn(r: ServicesClientListByApplicationsResponse) -> Str? { r.service_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ServicesClientListByApplicationsResponse ! Str { services_list_by_applications_handle(r) }, c.setup.endpoint, fn(r: ServicesClientListByApplicationsResponse) -> Str? { r.service_resource_list.next_link }).traced_as("ServicesClientListByApplicationsResponse"))
 }
 
 /// ServicesClientGetOptions: the optional parameters of ServicesClient.get.
@@ -107,12 +107,15 @@ fn (c: ServicesClient) get_create_request(resource_group_name: Str, cluster_name
 
 /// Get a Service Fabric service resource created or in the process of being created in the Service Fabric managed application resource.
 pub fn (c: ServicesClient) get(resource_group_name: Str, cluster_name: Str, application_name: Str, service_name: Str, options: ServicesClientGetOptions = ServicesClientGetOptions{}) -> ServicesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, application_name, service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, application_name, service_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  services_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = services_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServicesClientBeginCreateOrUpdateOptions: the optional parameters of ServicesClient.begin_create_or_update.
@@ -163,14 +166,16 @@ fn (c: ServicesClient) create_or_update_create_request(resource_group_name: Str,
 /// Create or update a Service Fabric managed service resource with the specified name.
 pub fn (c: ServicesClient[fx]) begin_create_or_update(resource_group_name: Str, cluster_name: Str, application_name: Str, service_name: Str, parameters: ServiceResource, options: ServicesClientBeginCreateOrUpdateOptions = ServicesClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ServicesClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> ServicesClientCreateOrUpdateResponse ! Str { services_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> ServicesClientCreateOrUpdateResponse ! Str { services_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> ServicesClientCreateOrUpdateResponse ! Str { services_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientCreateOrUpdateResponse", fn(r: http.Response) -> ServicesClientCreateOrUpdateResponse ! Str { services_create_or_update_handle(r) }, traced: true)
 }
 
 /// ServicesClientUpdateOptions: the optional parameters of ServicesClient.update.
@@ -217,12 +222,15 @@ fn (c: ServicesClient) update_create_request(resource_group_name: Str, cluster_n
 
 /// Updates the tags of a service resource of a given managed cluster.
 pub fn (c: ServicesClient) update(resource_group_name: Str, cluster_name: Str, application_name: Str, service_name: Str, parameters: ServiceUpdateParameters, options: ServicesClientUpdateOptions = ServicesClientUpdateOptions{}) -> ServicesClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  services_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = services_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ServicesClientBeginDeleteOptions: the optional parameters of ServicesClient.begin_delete.
@@ -269,14 +277,16 @@ fn (c: ServicesClient) delete_create_request(resource_group_name: Str, cluster_n
 /// Delete a Service Fabric managed service resource with the specified name.
 pub fn (c: ServicesClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, application_name: Str, service_name: Str, options: ServicesClientBeginDeleteOptions = ServicesClientBeginDeleteOptions{}) -> runtime.Poller[ServicesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientDeleteResponse", fn(r: http.Response) -> ServicesClientDeleteResponse ! Str { services_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientDeleteResponse", fn(r: http.Response) -> ServicesClientDeleteResponse ! Str { services_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, application_name, service_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, application_name, service_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientDeleteResponse", fn(r: http.Response) -> ServicesClientDeleteResponse ! Str { services_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientDeleteResponse", fn(r: http.Response) -> ServicesClientDeleteResponse ! Str { services_delete_handle(r) }, traced: true)
 }
 
 /// ServicesClientBeginRestartReplicaOptions: the optional parameters of ServicesClient.begin_restart_replica.
@@ -324,12 +334,14 @@ fn (c: ServicesClient) restart_replica_create_request(resource_group_name: Str, 
 /// A long-running resource action.
 pub fn (c: ServicesClient[fx]) begin_restart_replica(resource_group_name: Str, cluster_name: Str, application_name: Str, service_name: Str, parameters: RestartReplicaRequest, options: ServicesClientBeginRestartReplicaOptions = ServicesClientBeginRestartReplicaOptions{}) -> runtime.Poller[ServicesClientRestartReplicaResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientRestartReplicaResponse", fn(r: http.Response) -> ServicesClientRestartReplicaResponse ! Str { services_restart_replica_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ServicesClientRestartReplicaResponse", fn(r: http.Response) -> ServicesClientRestartReplicaResponse ! Str { services_restart_replica_handle(r) }, traced: true)
   }
-  let req = c.restart_replica_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ServicesClient.BeginRestartReplica", c.setup.pipeline.tracer)
+  let req = c.restart_replica_create_request(resource_group_name, cluster_name, application_name, service_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientRestartReplicaResponse", fn(r: http.Response) -> ServicesClientRestartReplicaResponse ! Str { services_restart_replica_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ServicesClientRestartReplicaResponse", fn(r: http.Response) -> ServicesClientRestartReplicaResponse ! Str { services_restart_replica_handle(r) }, traced: true)
 }

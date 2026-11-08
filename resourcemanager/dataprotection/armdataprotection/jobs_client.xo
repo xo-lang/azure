@@ -57,7 +57,7 @@ fn (c: JobsClient) list_create_request(resource_group_name: Str, vault_name: Str
 /// Returns list of jobs belonging to a backup vault
 pub fn (c: JobsClient[fx]) new_list_pager(resource_group_name: Str, vault_name: Str, options: JobsClientListOptions = JobsClientListOptions{}) -> runtime.Pager[JobsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, vault_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListResponse ! Str { jobs_list_handle(r) }, c.setup.endpoint, fn(r: JobsClientListResponse) -> Str? { r.azure_backup_job_resource_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> JobsClientListResponse ! Str { jobs_list_handle(r) }, c.setup.endpoint, fn(r: JobsClientListResponse) -> Str? { r.azure_backup_job_resource_list.next_link }).traced_as("JobsClientListResponse"))
 }
 
 /// JobsClientGetOptions: the optional parameters of JobsClient.get.
@@ -99,10 +99,13 @@ fn (c: JobsClient) get_create_request(resource_group_name: Str, vault_name: Str,
 
 /// Gets a job with id in a backup vault
 pub fn (c: JobsClient) get(resource_group_name: Str, vault_name: Str, job_id: Str, options: JobsClientGetOptions = JobsClientGetOptions{}) -> JobsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, vault_name, job_id, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "JobsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, vault_name, job_id, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  jobs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = jobs_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

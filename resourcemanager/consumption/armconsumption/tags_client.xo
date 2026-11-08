@@ -44,10 +44,13 @@ fn (c: TagsClient) get_create_request(scope: Str, options: TagsClientGetOptions)
 
 /// Get all available tag keys for the defined scope
 pub fn (c: TagsClient) get(scope: Str, options: TagsClientGetOptions = TagsClientGetOptions{}) -> TagsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(scope, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "TagsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(scope, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  tags_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = tags_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

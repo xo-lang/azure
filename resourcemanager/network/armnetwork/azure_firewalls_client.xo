@@ -49,7 +49,7 @@ fn (c: AzureFirewallsClient) list_all_create_request(options: AzureFirewallsClie
 /// Gets all the Azure Firewalls in a subscription.
 pub fn (c: AzureFirewallsClient[fx]) new_list_all_pager(options: AzureFirewallsClientListAllOptions = AzureFirewallsClientListAllOptions{}) -> runtime.Pager[AzureFirewallsClientListAllResponse, fx] ! azcore.CallErr {
   let req = c.list_all_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureFirewallsClientListAllResponse ! Str { azure_firewalls_list_all_handle(r) }, c.setup.endpoint, fn(r: AzureFirewallsClientListAllResponse) -> Str? { r.azure_firewall_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureFirewallsClientListAllResponse ! Str { azure_firewalls_list_all_handle(r) }, c.setup.endpoint, fn(r: AzureFirewallsClientListAllResponse) -> Str? { r.azure_firewall_list_result.next_link }).traced_as("AzureFirewallsClientListAllResponse"))
 }
 
 /// AzureFirewallsClientListOptions: the optional parameters of AzureFirewallsClient.new_list_pager.
@@ -84,7 +84,7 @@ fn (c: AzureFirewallsClient) list_create_request(resource_group_name: Str, optio
 /// Lists all Azure Firewalls in a resource group.
 pub fn (c: AzureFirewallsClient[fx]) new_list_pager(resource_group_name: Str, options: AzureFirewallsClientListOptions = AzureFirewallsClientListOptions{}) -> runtime.Pager[AzureFirewallsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureFirewallsClientListResponse ! Str { azure_firewalls_list_handle(r) }, c.setup.endpoint, fn(r: AzureFirewallsClientListResponse) -> Str? { r.azure_firewall_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> AzureFirewallsClientListResponse ! Str { azure_firewalls_list_handle(r) }, c.setup.endpoint, fn(r: AzureFirewallsClientListResponse) -> Str? { r.azure_firewall_list_result.next_link }).traced_as("AzureFirewallsClientListResponse"))
 }
 
 /// AzureFirewallsClientGetOptions: the optional parameters of AzureFirewallsClient.get.
@@ -122,12 +122,15 @@ fn (c: AzureFirewallsClient) get_create_request(resource_group_name: Str, azure_
 
 /// Gets the specified Azure Firewall.
 pub fn (c: AzureFirewallsClient) get(resource_group_name: Str, azure_firewall_name: Str, options: AzureFirewallsClientGetOptions = AzureFirewallsClientGetOptions{}) -> AzureFirewallsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, azure_firewall_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, azure_firewall_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  azure_firewalls_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = azure_firewalls_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// AzureFirewallsClientBeginCreateOrUpdateOptions: the optional parameters of AzureFirewallsClient.begin_create_or_update.
@@ -175,14 +178,16 @@ fn (c: AzureFirewallsClient) create_or_update_create_request(resource_group_name
 /// Creates or updates the specified Azure Firewall.
 pub fn (c: AzureFirewallsClient[fx]) begin_create_or_update(resource_group_name: Str, azure_firewall_name: Str, parameters: AzureFirewall, options: AzureFirewallsClientBeginCreateOrUpdateOptions = AzureFirewallsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[AzureFirewallsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientCreateOrUpdateResponse", fn(r: http.Response) -> AzureFirewallsClientCreateOrUpdateResponse ! Str { azure_firewalls_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientCreateOrUpdateResponse", fn(r: http.Response) -> AzureFirewallsClientCreateOrUpdateResponse ! Str { azure_firewalls_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, azure_firewall_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, azure_firewall_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientCreateOrUpdateResponse", fn(r: http.Response) -> AzureFirewallsClientCreateOrUpdateResponse ! Str { azure_firewalls_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientCreateOrUpdateResponse", fn(r: http.Response) -> AzureFirewallsClientCreateOrUpdateResponse ! Str { azure_firewalls_create_or_update_handle(r) }, traced: true)
 }
 
 /// AzureFirewallsClientBeginUpdateTagsOptions: the optional parameters of AzureFirewallsClient.begin_update_tags.
@@ -225,14 +230,16 @@ fn (c: AzureFirewallsClient) update_tags_create_request(resource_group_name: Str
 /// Updates tags of an Azure Firewall resource.
 pub fn (c: AzureFirewallsClient[fx]) begin_update_tags(resource_group_name: Str, azure_firewall_name: Str, parameters: TagsObject, options: AzureFirewallsClientBeginUpdateTagsOptions = AzureFirewallsClientBeginUpdateTagsOptions{}) -> runtime.Poller[AzureFirewallsClientUpdateTagsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientUpdateTagsResponse", fn(r: http.Response) -> AzureFirewallsClientUpdateTagsResponse ! Str { azure_firewalls_update_tags_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientUpdateTagsResponse", fn(r: http.Response) -> AzureFirewallsClientUpdateTagsResponse ! Str { azure_firewalls_update_tags_handle(r) }, traced: true)
   }
-  let req = c.update_tags_create_request(resource_group_name, azure_firewall_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginUpdateTags", c.setup.pipeline.tracer)
+  let req = c.update_tags_create_request(resource_group_name, azure_firewall_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientUpdateTagsResponse", fn(r: http.Response) -> AzureFirewallsClientUpdateTagsResponse ! Str { azure_firewalls_update_tags_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientUpdateTagsResponse", fn(r: http.Response) -> AzureFirewallsClientUpdateTagsResponse ! Str { azure_firewalls_update_tags_handle(r) }, traced: true)
 }
 
 /// AzureFirewallsClientBeginDeleteOptions: the optional parameters of AzureFirewallsClient.begin_delete.
@@ -271,14 +278,16 @@ fn (c: AzureFirewallsClient) delete_create_request(resource_group_name: Str, azu
 /// Deletes the specified Azure Firewall.
 pub fn (c: AzureFirewallsClient[fx]) begin_delete(resource_group_name: Str, azure_firewall_name: Str, options: AzureFirewallsClientBeginDeleteOptions = AzureFirewallsClientBeginDeleteOptions{}) -> runtime.Poller[AzureFirewallsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientDeleteResponse", fn(r: http.Response) -> AzureFirewallsClientDeleteResponse ! Str { azure_firewalls_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientDeleteResponse", fn(r: http.Response) -> AzureFirewallsClientDeleteResponse ! Str { azure_firewalls_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, azure_firewall_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, azure_firewall_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientDeleteResponse", fn(r: http.Response) -> AzureFirewallsClientDeleteResponse ! Str { azure_firewalls_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientDeleteResponse", fn(r: http.Response) -> AzureFirewallsClientDeleteResponse ! Str { azure_firewalls_delete_handle(r) }, traced: true)
 }
 
 /// AzureFirewallsClientBeginListLearnedPrefixesOptions: the optional parameters of AzureFirewallsClient.begin_list_learned_prefixes.
@@ -320,14 +329,16 @@ fn (c: AzureFirewallsClient) list_learned_prefixes_create_request(resource_group
 /// Retrieves a list of all IP prefixes that azure firewall has learned to not SNAT.
 pub fn (c: AzureFirewallsClient[fx]) begin_list_learned_prefixes(resource_group_name: Str, azure_firewall_name: Str, options: AzureFirewallsClientBeginListLearnedPrefixesOptions = AzureFirewallsClientBeginListLearnedPrefixesOptions{}) -> runtime.Poller[AzureFirewallsClientListLearnedPrefixesResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientListLearnedPrefixesResponse", fn(r: http.Response) -> AzureFirewallsClientListLearnedPrefixesResponse ! Str { azure_firewalls_list_learned_prefixes_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientListLearnedPrefixesResponse", fn(r: http.Response) -> AzureFirewallsClientListLearnedPrefixesResponse ! Str { azure_firewalls_list_learned_prefixes_handle(r) }, traced: true)
   }
-  let req = c.list_learned_prefixes_create_request(resource_group_name, azure_firewall_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginListLearnedPrefixes", c.setup.pipeline.tracer)
+  let req = c.list_learned_prefixes_create_request(resource_group_name, azure_firewall_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientListLearnedPrefixesResponse", fn(r: http.Response) -> AzureFirewallsClientListLearnedPrefixesResponse ! Str { azure_firewalls_list_learned_prefixes_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientListLearnedPrefixesResponse", fn(r: http.Response) -> AzureFirewallsClientListLearnedPrefixesResponse ! Str { azure_firewalls_list_learned_prefixes_handle(r) }, traced: true)
 }
 
 /// AzureFirewallsClientBeginPacketCaptureOptions: the optional parameters of AzureFirewallsClient.begin_packet_capture.
@@ -367,14 +378,16 @@ fn (c: AzureFirewallsClient) packet_capture_create_request(resource_group_name: 
 /// Runs a packet capture on AzureFirewall.
 pub fn (c: AzureFirewallsClient[fx]) begin_packet_capture(resource_group_name: Str, azure_firewall_name: Str, parameters: FirewallPacketCaptureParameters, options: AzureFirewallsClientBeginPacketCaptureOptions = AzureFirewallsClientBeginPacketCaptureOptions{}) -> runtime.Poller[AzureFirewallsClientPacketCaptureResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientPacketCaptureResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureResponse ! Str { azure_firewalls_packet_capture_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientPacketCaptureResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureResponse ! Str { azure_firewalls_packet_capture_handle(r) }, traced: true)
   }
-  let req = c.packet_capture_create_request(resource_group_name, azure_firewall_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginPacketCapture", c.setup.pipeline.tracer)
+  let req = c.packet_capture_create_request(resource_group_name, azure_firewall_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientPacketCaptureResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureResponse ! Str { azure_firewalls_packet_capture_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientPacketCaptureResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureResponse ! Str { azure_firewalls_packet_capture_handle(r) }, traced: true)
 }
 
 /// AzureFirewallsClientBeginPacketCaptureOperationOptions: the optional parameters of AzureFirewallsClient.begin_packet_capture_operation.
@@ -417,12 +430,14 @@ fn (c: AzureFirewallsClient) packet_capture_operation_create_request(resource_gr
 /// Runs a packet capture operation on AzureFirewall.
 pub fn (c: AzureFirewallsClient[fx]) begin_packet_capture_operation(resource_group_name: Str, azure_firewall_name: Str, parameters: FirewallPacketCaptureParameters, options: AzureFirewallsClientBeginPacketCaptureOperationOptions = AzureFirewallsClientBeginPacketCaptureOperationOptions{}) -> runtime.Poller[AzureFirewallsClientPacketCaptureOperationResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientPacketCaptureOperationResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureOperationResponse ! Str { azure_firewalls_packet_capture_operation_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "AzureFirewallsClientPacketCaptureOperationResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureOperationResponse ! Str { azure_firewalls_packet_capture_operation_handle(r) }, traced: true)
   }
-  let req = c.packet_capture_operation_create_request(resource_group_name, azure_firewall_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "AzureFirewallsClient.BeginPacketCaptureOperation", c.setup.pipeline.tracer)
+  let req = c.packet_capture_operation_create_request(resource_group_name, azure_firewall_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientPacketCaptureOperationResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureOperationResponse ! Str { azure_firewalls_packet_capture_operation_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "AzureFirewallsClientPacketCaptureOperationResponse", fn(r: http.Response) -> AzureFirewallsClientPacketCaptureOperationResponse ! Str { azure_firewalls_packet_capture_operation_handle(r) }, traced: true)
 }

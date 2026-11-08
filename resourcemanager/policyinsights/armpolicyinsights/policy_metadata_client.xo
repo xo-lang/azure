@@ -50,7 +50,7 @@ fn (c: PolicyMetadataClient) list_create_request(options: PolicyMetadataClientLi
 /// Get a list of the policy metadata resources.
 pub fn (c: PolicyMetadataClient[fx]) new_list_pager(options: PolicyMetadataClientListOptions = PolicyMetadataClientListOptions{}) -> runtime.Pager[PolicyMetadataClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PolicyMetadataClientListResponse ! Str { policy_metadata_list_handle(r) }, c.setup.endpoint, fn(r: PolicyMetadataClientListResponse) -> Str? { r.policy_metadata_collection.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> PolicyMetadataClientListResponse ! Str { policy_metadata_list_handle(r) }, c.setup.endpoint, fn(r: PolicyMetadataClientListResponse) -> Str? { r.policy_metadata_collection.next_link }).traced_as("PolicyMetadataClientListResponse"))
 }
 
 /// PolicyMetadataClientGetResourceOptions: the optional parameters of PolicyMetadataClient.get_resource.
@@ -77,10 +77,13 @@ fn (c: PolicyMetadataClient) get_resource_create_request(resource_name: Str, opt
 
 /// Get policy metadata resource.
 pub fn (c: PolicyMetadataClient) get_resource(resource_name: Str, options: PolicyMetadataClientGetResourceOptions = PolicyMetadataClientGetResourceOptions{}) -> PolicyMetadataClientGetResourceResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_resource_create_request(resource_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "PolicyMetadataClient.GetResource", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_resource_create_request(resource_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  policy_metadata_get_resource_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = policy_metadata_get_resource_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

@@ -67,7 +67,7 @@ fn (c: VolumeSnapshotsClient) list_by_volume_group_create_request(resource_group
 /// List Snapshots in a VolumeGroup or List Snapshots by Volume (name) in a VolumeGroup using filter
 pub fn (c: VolumeSnapshotsClient[fx]) new_list_by_volume_group_pager(resource_group_name: Str, elastic_san_name: Str, volume_group_name: Str, options: VolumeSnapshotsClientListByVolumeGroupOptions = VolumeSnapshotsClientListByVolumeGroupOptions{}) -> runtime.Pager[VolumeSnapshotsClientListByVolumeGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_volume_group_create_request(resource_group_name, elastic_san_name, volume_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VolumeSnapshotsClientListByVolumeGroupResponse ! Str { volume_snapshots_list_by_volume_group_handle(r) }, c.setup.endpoint, fn(r: VolumeSnapshotsClientListByVolumeGroupResponse) -> Str? { r.snapshot_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> VolumeSnapshotsClientListByVolumeGroupResponse ! Str { volume_snapshots_list_by_volume_group_handle(r) }, c.setup.endpoint, fn(r: VolumeSnapshotsClientListByVolumeGroupResponse) -> Str? { r.snapshot_list.next_link }).traced_as("VolumeSnapshotsClientListByVolumeGroupResponse"))
 }
 
 /// VolumeSnapshotsClientGetOptions: the optional parameters of VolumeSnapshotsClient.get.
@@ -113,12 +113,15 @@ fn (c: VolumeSnapshotsClient) get_create_request(resource_group_name: Str, elast
 
 /// Get a Volume Snapshot.
 pub fn (c: VolumeSnapshotsClient) get(resource_group_name: Str, elastic_san_name: Str, volume_group_name: Str, snapshot_name: Str, options: VolumeSnapshotsClientGetOptions = VolumeSnapshotsClientGetOptions{}) -> VolumeSnapshotsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VolumeSnapshotsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  volume_snapshots_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = volume_snapshots_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// VolumeSnapshotsClientBeginCreateOptions: the optional parameters of VolumeSnapshotsClient.begin_create.
@@ -169,14 +172,16 @@ fn (c: VolumeSnapshotsClient) create_create_request(resource_group_name: Str, el
 /// Create a Volume Snapshot.
 pub fn (c: VolumeSnapshotsClient[fx]) begin_create(resource_group_name: Str, elastic_san_name: Str, volume_group_name: Str, snapshot_name: Str, parameters: Snapshot, options: VolumeSnapshotsClientBeginCreateOptions = VolumeSnapshotsClientBeginCreateOptions{}) -> runtime.Poller[VolumeSnapshotsClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VolumeSnapshotsClientCreateResponse", fn(r: http.Response) -> VolumeSnapshotsClientCreateResponse ! Str { volume_snapshots_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VolumeSnapshotsClientCreateResponse", fn(r: http.Response) -> VolumeSnapshotsClientCreateResponse ! Str { volume_snapshots_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VolumeSnapshotsClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VolumeSnapshotsClientCreateResponse", fn(r: http.Response) -> VolumeSnapshotsClientCreateResponse ! Str { volume_snapshots_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VolumeSnapshotsClientCreateResponse", fn(r: http.Response) -> VolumeSnapshotsClientCreateResponse ! Str { volume_snapshots_create_handle(r) }, traced: true)
 }
 
 /// VolumeSnapshotsClientBeginDeleteOptions: the optional parameters of VolumeSnapshotsClient.begin_delete.
@@ -223,12 +228,14 @@ fn (c: VolumeSnapshotsClient) delete_create_request(resource_group_name: Str, el
 /// Delete a Volume Snapshot.
 pub fn (c: VolumeSnapshotsClient[fx]) begin_delete(resource_group_name: Str, elastic_san_name: Str, volume_group_name: Str, snapshot_name: Str, options: VolumeSnapshotsClientBeginDeleteOptions = VolumeSnapshotsClientBeginDeleteOptions{}) -> runtime.Poller[VolumeSnapshotsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VolumeSnapshotsClientDeleteResponse", fn(r: http.Response) -> VolumeSnapshotsClientDeleteResponse ! Str { volume_snapshots_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "VolumeSnapshotsClientDeleteResponse", fn(r: http.Response) -> VolumeSnapshotsClientDeleteResponse ! Str { volume_snapshots_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "VolumeSnapshotsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, elastic_san_name, volume_group_name, snapshot_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "VolumeSnapshotsClientDeleteResponse", fn(r: http.Response) -> VolumeSnapshotsClientDeleteResponse ! Str { volume_snapshots_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "VolumeSnapshotsClientDeleteResponse", fn(r: http.Response) -> VolumeSnapshotsClientDeleteResponse ! Str { volume_snapshots_delete_handle(r) }, traced: true)
 }

@@ -71,12 +71,14 @@ fn (c: GitHubIssuesClient) create_create_request(resource_group_name: Str, secur
 /// Creates a GitHub issue for the specified repository and assessment.
 pub fn (c: GitHubIssuesClient[fx]) begin_create(resource_group_name: Str, security_connector_name: Str, owner_name: Str, repo_name: Str, options: GitHubIssuesClientBeginCreateOptions = GitHubIssuesClientBeginCreateOptions{}) -> runtime.Poller[GitHubIssuesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GitHubIssuesClientCreateResponse", fn(r: http.Response) -> GitHubIssuesClientCreateResponse ! Str { git_hub_issues_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "GitHubIssuesClientCreateResponse", fn(r: http.Response) -> GitHubIssuesClientCreateResponse ! Str { git_hub_issues_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, security_connector_name, owner_name, repo_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "GitHubIssuesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, security_connector_name, owner_name, repo_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "GitHubIssuesClientCreateResponse", fn(r: http.Response) -> GitHubIssuesClientCreateResponse ! Str { git_hub_issues_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "GitHubIssuesClientCreateResponse", fn(r: http.Response) -> GitHubIssuesClientCreateResponse ! Str { git_hub_issues_create_handle(r) }, traced: true)
 }

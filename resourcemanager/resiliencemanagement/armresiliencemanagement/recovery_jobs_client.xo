@@ -52,7 +52,7 @@ fn (c: RecoveryJobsClient) list_create_request(service_group_name: Str, recovery
 /// List RecoveryJob resources by RecoveryPlan
 pub fn (c: RecoveryJobsClient[fx]) new_list_pager(service_group_name: Str, recovery_plan_name: Str, options: RecoveryJobsClientListOptions = RecoveryJobsClientListOptions{}) -> runtime.Pager[RecoveryJobsClientListResponse, fx] ! azcore.CallErr {
   let req = c.list_create_request(service_group_name, recovery_plan_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RecoveryJobsClientListResponse ! Str { recovery_jobs_list_handle(r) }, c.setup.endpoint, fn(r: RecoveryJobsClientListResponse) -> Str? { r.recovery_job_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RecoveryJobsClientListResponse ! Str { recovery_jobs_list_handle(r) }, c.setup.endpoint, fn(r: RecoveryJobsClientListResponse) -> Str? { r.recovery_job_list_result.next_link }).traced_as("RecoveryJobsClientListResponse"))
 }
 
 /// RecoveryJobsClientGetOptions: the optional parameters of RecoveryJobsClient.get.
@@ -90,12 +90,15 @@ fn (c: RecoveryJobsClient) get_create_request(service_group_name: Str, recovery_
 
 /// Get a RecoveryJob
 pub fn (c: RecoveryJobsClient) get(service_group_name: Str, recovery_plan_name: Str, recovery_job_name: Str, options: RecoveryJobsClientGetOptions = RecoveryJobsClientGetOptions{}) -> RecoveryJobsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(service_group_name, recovery_plan_name, recovery_job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RecoveryJobsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(service_group_name, recovery_plan_name, recovery_job_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  recovery_jobs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = recovery_jobs_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// RecoveryJobsClientBeginCancelOptions: the optional parameters of RecoveryJobsClient.begin_cancel.
@@ -139,14 +142,16 @@ fn (c: RecoveryJobsClient) cancel_create_request(service_group_name: Str, operat
 /// This action attempts to cancel the ongoing recovery orchestration job.
 pub fn (c: RecoveryJobsClient[fx]) begin_cancel(service_group_name: Str, operation_id: Str, recovery_plan_name: Str, recovery_job_name: Str, body: RecoveryActionRequest, options: RecoveryJobsClientBeginCancelOptions = RecoveryJobsClientBeginCancelOptions{}) -> runtime.Poller[RecoveryJobsClientCancelResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientCancelResponse", fn(r: http.Response) -> RecoveryJobsClientCancelResponse ! Str { recovery_jobs_cancel_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientCancelResponse", fn(r: http.Response) -> RecoveryJobsClientCancelResponse ! Str { recovery_jobs_cancel_handle(r) }, traced: true)
   }
-  let req = c.cancel_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RecoveryJobsClient.BeginCancel", c.setup.pipeline.tracer)
+  let req = c.cancel_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientCancelResponse", fn(r: http.Response) -> RecoveryJobsClientCancelResponse ! Str { recovery_jobs_cancel_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientCancelResponse", fn(r: http.Response) -> RecoveryJobsClientCancelResponse ! Str { recovery_jobs_cancel_handle(r) }, traced: true)
 }
 
 /// RecoveryJobsClientBeginResumeOptions: the optional parameters of RecoveryJobsClient.begin_resume.
@@ -190,14 +195,16 @@ fn (c: RecoveryJobsClient) resume_create_request(service_group_name: Str, operat
 /// This action resumes the ongoing recovery orchestration job that was paused for required user intervention.
 pub fn (c: RecoveryJobsClient[fx]) begin_resume(service_group_name: Str, operation_id: Str, recovery_plan_name: Str, recovery_job_name: Str, body: RecoveryActionRequest, options: RecoveryJobsClientBeginResumeOptions = RecoveryJobsClientBeginResumeOptions{}) -> runtime.Poller[RecoveryJobsClientResumeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientResumeResponse", fn(r: http.Response) -> RecoveryJobsClientResumeResponse ! Str { recovery_jobs_resume_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientResumeResponse", fn(r: http.Response) -> RecoveryJobsClientResumeResponse ! Str { recovery_jobs_resume_handle(r) }, traced: true)
   }
-  let req = c.resume_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RecoveryJobsClient.BeginResume", c.setup.pipeline.tracer)
+  let req = c.resume_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientResumeResponse", fn(r: http.Response) -> RecoveryJobsClientResumeResponse ! Str { recovery_jobs_resume_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientResumeResponse", fn(r: http.Response) -> RecoveryJobsClientResumeResponse ! Str { recovery_jobs_resume_handle(r) }, traced: true)
 }
 
 /// RecoveryJobsClientBeginRetryOptions: the optional parameters of RecoveryJobsClient.begin_retry.
@@ -240,12 +247,14 @@ fn (c: RecoveryJobsClient) retry_create_request(service_group_name: Str, operati
 /// This action retries the ongoing recovery orchestration job for resources that failed in previous attempts.
 pub fn (c: RecoveryJobsClient[fx]) begin_retry(service_group_name: Str, operation_id: Str, recovery_plan_name: Str, recovery_job_name: Str, options: RecoveryJobsClientBeginRetryOptions = RecoveryJobsClientBeginRetryOptions{}) -> runtime.Poller[RecoveryJobsClientRetryResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientRetryResponse", fn(r: http.Response) -> RecoveryJobsClientRetryResponse ! Str { recovery_jobs_retry_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RecoveryJobsClientRetryResponse", fn(r: http.Response) -> RecoveryJobsClientRetryResponse ! Str { recovery_jobs_retry_handle(r) }, traced: true)
   }
-  let req = c.retry_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RecoveryJobsClient.BeginRetry", c.setup.pipeline.tracer)
+  let req = c.retry_create_request(service_group_name, operation_id, recovery_plan_name, recovery_job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientRetryResponse", fn(r: http.Response) -> RecoveryJobsClientRetryResponse ! Str { recovery_jobs_retry_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RecoveryJobsClientRetryResponse", fn(r: http.Response) -> RecoveryJobsClientRetryResponse ! Str { recovery_jobs_retry_handle(r) }, traced: true)
 }

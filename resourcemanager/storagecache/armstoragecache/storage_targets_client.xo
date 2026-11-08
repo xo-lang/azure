@@ -57,7 +57,7 @@ fn (c: StorageTargetsClient) list_by_cache_create_request(resource_group_name: S
 /// Returns a list of Storage Targets for the specified cache.
 pub fn (c: StorageTargetsClient[fx]) new_list_by_cache_pager(resource_group_name: Str, cache_name: Str, options: StorageTargetsClientListByCacheOptions = StorageTargetsClientListByCacheOptions{}) -> runtime.Pager[StorageTargetsClientListByCacheResponse, fx] ! azcore.CallErr {
   let req = c.list_by_cache_create_request(resource_group_name, cache_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageTargetsClientListByCacheResponse ! Str { storage_targets_list_by_cache_handle(r) }, c.setup.endpoint, fn(r: StorageTargetsClientListByCacheResponse) -> Str? { r.storage_targets_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> StorageTargetsClientListByCacheResponse ! Str { storage_targets_list_by_cache_handle(r) }, c.setup.endpoint, fn(r: StorageTargetsClientListByCacheResponse) -> Str? { r.storage_targets_result.next_link }).traced_as("StorageTargetsClientListByCacheResponse"))
 }
 
 /// StorageTargetsClientGetOptions: the optional parameters of StorageTargetsClient.get.
@@ -99,12 +99,15 @@ fn (c: StorageTargetsClient) get_create_request(resource_group_name: Str, cache_
 
 /// Returns a Storage Target from a cache.
 pub fn (c: StorageTargetsClient) get(resource_group_name: Str, cache_name: Str, storage_target_name: Str, options: StorageTargetsClientGetOptions = StorageTargetsClientGetOptions{}) -> StorageTargetsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cache_name, storage_target_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageTargetsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cache_name, storage_target_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  storage_targets_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = storage_targets_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// StorageTargetsClientBeginCreateOrUpdateOptions: the optional parameters of StorageTargetsClient.begin_create_or_update.
@@ -151,14 +154,16 @@ fn (c: StorageTargetsClient) create_or_update_create_request(resource_group_name
 /// Create or update a Storage Target. This operation is allowed at any time, but if the cache is down or unhealthy, the actual creation/modification of the Storage Target may be delayed until the cache is healthy again.
 pub fn (c: StorageTargetsClient[fx]) begin_create_or_update(resource_group_name: Str, cache_name: Str, storage_target_name: Str, storagetarget: StorageTarget, options: StorageTargetsClientBeginCreateOrUpdateOptions = StorageTargetsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[StorageTargetsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageTargetsClientCreateOrUpdateResponse ! Str { storage_targets_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageTargetsClientCreateOrUpdateResponse ! Str { storage_targets_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cache_name, storage_target_name, storagetarget, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageTargetsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cache_name, storage_target_name, storagetarget, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageTargetsClientCreateOrUpdateResponse ! Str { storage_targets_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientCreateOrUpdateResponse", fn(r: http.Response) -> StorageTargetsClientCreateOrUpdateResponse ! Str { storage_targets_create_or_update_handle(r) }, traced: true)
 }
 
 /// StorageTargetsClientBeginDeleteOptions: the optional parameters of StorageTargetsClient.begin_delete.
@@ -206,14 +211,16 @@ fn (c: StorageTargetsClient) delete_create_request(resource_group_name: Str, cac
 /// Removes a Storage Target from a cache. This operation is allowed at any time, but if the cache is down or unhealthy, the actual removal of the Storage Target may be delayed until the cache is healthy again. Note that if the cache has data to flush to the Storage Target, the data will be flushed before the Storage Target will be deleted.
 pub fn (c: StorageTargetsClient[fx]) begin_delete(resource_group_name: Str, cache_name: Str, storage_target_name: Str, options: StorageTargetsClientBeginDeleteOptions = StorageTargetsClientBeginDeleteOptions{}) -> runtime.Poller[StorageTargetsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientDeleteResponse", fn(r: http.Response) -> StorageTargetsClientDeleteResponse ! Str { storage_targets_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientDeleteResponse", fn(r: http.Response) -> StorageTargetsClientDeleteResponse ! Str { storage_targets_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cache_name, storage_target_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageTargetsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cache_name, storage_target_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientDeleteResponse", fn(r: http.Response) -> StorageTargetsClientDeleteResponse ! Str { storage_targets_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientDeleteResponse", fn(r: http.Response) -> StorageTargetsClientDeleteResponse ! Str { storage_targets_delete_handle(r) }, traced: true)
 }
 
 /// StorageTargetsClientBeginDNSRefreshOptions: the optional parameters of StorageTargetsClient.begin_dns_refresh.
@@ -256,14 +263,16 @@ fn (c: StorageTargetsClient) dns_refresh_create_request(resource_group_name: Str
 /// Tells a storage target to refresh its DNS information.
 pub fn (c: StorageTargetsClient[fx]) begin_dns_refresh(resource_group_name: Str, cache_name: Str, storage_target_name: Str, options: StorageTargetsClientBeginDNSRefreshOptions = StorageTargetsClientBeginDNSRefreshOptions{}) -> runtime.Poller[StorageTargetsClientDNSRefreshResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientDNSRefreshResponse", fn(r: http.Response) -> StorageTargetsClientDNSRefreshResponse ! Str { storage_targets_dns_refresh_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientDNSRefreshResponse", fn(r: http.Response) -> StorageTargetsClientDNSRefreshResponse ! Str { storage_targets_dns_refresh_handle(r) }, traced: true)
   }
-  let req = c.dns_refresh_create_request(resource_group_name, cache_name, storage_target_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageTargetsClient.BeginDNSRefresh", c.setup.pipeline.tracer)
+  let req = c.dns_refresh_create_request(resource_group_name, cache_name, storage_target_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "StorageTargetsClientDNSRefreshResponse", fn(r: http.Response) -> StorageTargetsClientDNSRefreshResponse ! Str { storage_targets_dns_refresh_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "StorageTargetsClientDNSRefreshResponse", fn(r: http.Response) -> StorageTargetsClientDNSRefreshResponse ! Str { storage_targets_dns_refresh_handle(r) }, traced: true)
 }
 
 /// StorageTargetsClientBeginRestoreDefaultsOptions: the optional parameters of StorageTargetsClient.begin_restore_defaults.
@@ -306,12 +315,14 @@ fn (c: StorageTargetsClient) restore_defaults_create_request(resource_group_name
 /// Tells a storage target to restore its settings to their default values.
 pub fn (c: StorageTargetsClient[fx]) begin_restore_defaults(resource_group_name: Str, cache_name: Str, storage_target_name: Str, options: StorageTargetsClientBeginRestoreDefaultsOptions = StorageTargetsClientBeginRestoreDefaultsOptions{}) -> runtime.Poller[StorageTargetsClientRestoreDefaultsResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientRestoreDefaultsResponse", fn(r: http.Response) -> StorageTargetsClientRestoreDefaultsResponse ! Str { storage_targets_restore_defaults_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "StorageTargetsClientRestoreDefaultsResponse", fn(r: http.Response) -> StorageTargetsClientRestoreDefaultsResponse ! Str { storage_targets_restore_defaults_handle(r) }, traced: true)
   }
-  let req = c.restore_defaults_create_request(resource_group_name, cache_name, storage_target_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "StorageTargetsClient.BeginRestoreDefaults", c.setup.pipeline.tracer)
+  let req = c.restore_defaults_create_request(resource_group_name, cache_name, storage_target_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientRestoreDefaultsResponse", fn(r: http.Response) -> StorageTargetsClientRestoreDefaultsResponse ! Str { storage_targets_restore_defaults_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "StorageTargetsClientRestoreDefaultsResponse", fn(r: http.Response) -> StorageTargetsClientRestoreDefaultsResponse ! Str { storage_targets_restore_defaults_handle(r) }, traced: true)
 }

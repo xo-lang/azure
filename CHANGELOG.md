@@ -8,6 +8,16 @@ version has been tagged since.
 
 ## Unreleased
 
+Tracing (decision 0013, step 1): a `tracing` package in the shape of
+azcore's (Provider, Tracer, Span, attributes, kinds, statuses) and
+`policy.ClientOptions.tracing_provider` (none by default: no spans and
+requests unchanged). With a provider, every generated client method,
+pager and poller opens Go's spans, each HTTP try a `HTTP <METHOD>` span
+with Go's attributes, and an ARM client adds `az.namespace`;
+`allowed_query_params` keeps those query values in a span's URL.
+codegen/gorows derives a `span_errors` row from Go's source: which
+errors a method's span records.
+
 `scripts/refresh.sh` (decision 0011): every ARM module is refreshed to
 Go's newest release and checked against it in one command; `--verify`
 regenerates and checks the modules given whether or not their row

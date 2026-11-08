@@ -57,7 +57,7 @@ fn (c: RebalanceJobsClient) list_by_aml_filesystem_create_request(resource_group
 /// Returns all the rebalance jobs the user has access to under an AML File System.
 pub fn (c: RebalanceJobsClient[fx]) new_list_by_aml_filesystem_pager(resource_group_name: Str, aml_filesystem_name: Str, options: RebalanceJobsClientListByAmlFilesystemOptions = RebalanceJobsClientListByAmlFilesystemOptions{}) -> runtime.Pager[RebalanceJobsClientListByAmlFilesystemResponse, fx] ! azcore.CallErr {
   let req = c.list_by_aml_filesystem_create_request(resource_group_name, aml_filesystem_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RebalanceJobsClientListByAmlFilesystemResponse ! Str { rebalance_jobs_list_by_aml_filesystem_handle(r) }, c.setup.endpoint, fn(r: RebalanceJobsClientListByAmlFilesystemResponse) -> Str? { r.rebalance_jobs_list_result.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> RebalanceJobsClientListByAmlFilesystemResponse ! Str { rebalance_jobs_list_by_aml_filesystem_handle(r) }, c.setup.endpoint, fn(r: RebalanceJobsClientListByAmlFilesystemResponse) -> Str? { r.rebalance_jobs_list_result.next_link }).traced_as("RebalanceJobsClientListByAmlFilesystemResponse"))
 }
 
 /// RebalanceJobsClientGetOptions: the optional parameters of RebalanceJobsClient.get.
@@ -99,12 +99,15 @@ fn (c: RebalanceJobsClient) get_create_request(resource_group_name: Str, aml_fil
 
 /// Returns a rebalance job.
 pub fn (c: RebalanceJobsClient) get(resource_group_name: Str, aml_filesystem_name: Str, rebalance_job_name: Str, options: RebalanceJobsClientGetOptions = RebalanceJobsClientGetOptions{}) -> RebalanceJobsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RebalanceJobsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  rebalance_jobs_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = rebalance_jobs_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// RebalanceJobsClientBeginUpdateOptions: the optional parameters of RebalanceJobsClient.begin_update.
@@ -151,14 +154,16 @@ fn (c: RebalanceJobsClient) update_create_request(resource_group_name: Str, aml_
 /// Update a rebalance job instance.
 pub fn (c: RebalanceJobsClient[fx]) begin_update(resource_group_name: Str, aml_filesystem_name: Str, rebalance_job_name: Str, properties: RebalanceJobUpdate, options: RebalanceJobsClientBeginUpdateOptions = RebalanceJobsClientBeginUpdateOptions{}) -> runtime.Poller[RebalanceJobsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RebalanceJobsClientUpdateResponse", fn(r: http.Response) -> RebalanceJobsClientUpdateResponse ! Str { rebalance_jobs_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RebalanceJobsClientUpdateResponse", fn(r: http.Response) -> RebalanceJobsClientUpdateResponse ! Str { rebalance_jobs_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, properties, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RebalanceJobsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, properties, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RebalanceJobsClientUpdateResponse", fn(r: http.Response) -> RebalanceJobsClientUpdateResponse ! Str { rebalance_jobs_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RebalanceJobsClientUpdateResponse", fn(r: http.Response) -> RebalanceJobsClientUpdateResponse ! Str { rebalance_jobs_update_handle(r) }, traced: true)
 }
 
 /// RebalanceJobsClientBeginDeleteOptions: the optional parameters of RebalanceJobsClient.begin_delete.
@@ -201,12 +206,14 @@ fn (c: RebalanceJobsClient) delete_create_request(resource_group_name: Str, aml_
 /// Schedules a rebalance job for deletion.
 pub fn (c: RebalanceJobsClient[fx]) begin_delete(resource_group_name: Str, aml_filesystem_name: Str, rebalance_job_name: Str, options: RebalanceJobsClientBeginDeleteOptions = RebalanceJobsClientBeginDeleteOptions{}) -> runtime.Poller[RebalanceJobsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RebalanceJobsClientDeleteResponse", fn(r: http.Response) -> RebalanceJobsClientDeleteResponse ! Str { rebalance_jobs_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "RebalanceJobsClientDeleteResponse", fn(r: http.Response) -> RebalanceJobsClientDeleteResponse ! Str { rebalance_jobs_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "RebalanceJobsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, aml_filesystem_name, rebalance_job_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "RebalanceJobsClientDeleteResponse", fn(r: http.Response) -> RebalanceJobsClientDeleteResponse ! Str { rebalance_jobs_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "RebalanceJobsClientDeleteResponse", fn(r: http.Response) -> RebalanceJobsClientDeleteResponse ! Str { rebalance_jobs_delete_handle(r) }, traced: true)
 }

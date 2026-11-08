@@ -60,7 +60,7 @@ fn (c: KubernetesVersionsClient) list_by_subscription_create_request(options: Ku
 /// Get a list of Kubernetes version resources in the provided subscription.
 pub fn (c: KubernetesVersionsClient[fx]) new_list_by_subscription_pager(options: KubernetesVersionsClientListBySubscriptionOptions = KubernetesVersionsClientListBySubscriptionOptions{}) -> runtime.Pager[KubernetesVersionsClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesVersionsClientListBySubscriptionResponse ! Str { kubernetes_versions_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: KubernetesVersionsClientListBySubscriptionResponse) -> Str? { r.kubernetes_version_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesVersionsClientListBySubscriptionResponse ! Str { kubernetes_versions_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: KubernetesVersionsClientListBySubscriptionResponse) -> Str? { r.kubernetes_version_list.next_link }).traced_as("KubernetesVersionsClientListBySubscriptionResponse"))
 }
 
 /// KubernetesVersionsClientListByResourceGroupOptions: the optional parameters of KubernetesVersionsClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: KubernetesVersionsClient) list_by_resource_group_create_request(resource_
 /// Get a list of Kubernetes version resources in the provided resource group.
 pub fn (c: KubernetesVersionsClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: KubernetesVersionsClientListByResourceGroupOptions = KubernetesVersionsClientListByResourceGroupOptions{}) -> runtime.Pager[KubernetesVersionsClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesVersionsClientListByResourceGroupResponse ! Str { kubernetes_versions_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: KubernetesVersionsClientListByResourceGroupResponse) -> Str? { r.kubernetes_version_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> KubernetesVersionsClientListByResourceGroupResponse ! Str { kubernetes_versions_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: KubernetesVersionsClientListByResourceGroupResponse) -> Str? { r.kubernetes_version_list.next_link }).traced_as("KubernetesVersionsClientListByResourceGroupResponse"))
 }
 
 /// KubernetesVersionsClientGetOptions: the optional parameters of KubernetesVersionsClient.get.
@@ -144,12 +144,15 @@ fn (c: KubernetesVersionsClient) get_create_request(resource_group_name: Str, ku
 
 /// Retrieve the Kubernetes version resource that describes the available Kubernetes versions for deployment.
 pub fn (c: KubernetesVersionsClient) get(resource_group_name: Str, kubernetes_version_name: Str, options: KubernetesVersionsClientGetOptions = KubernetesVersionsClientGetOptions{}) -> KubernetesVersionsClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, kubernetes_version_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesVersionsClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, kubernetes_version_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  kubernetes_versions_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = kubernetes_versions_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// KubernetesVersionsClientBeginCreateOrUpdateOptions: the optional parameters of KubernetesVersionsClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: KubernetesVersionsClient) create_or_update_create_request(resource_group_
 /// Create the Kubernetes version resource or update its tags. This resource is system managed and should only be created with the name "default".
 pub fn (c: KubernetesVersionsClient[fx]) begin_create_or_update(resource_group_name: Str, kubernetes_version_name: Str, kubernetes_version_parameters: KubernetesVersion, options: KubernetesVersionsClientBeginCreateOrUpdateOptions = KubernetesVersionsClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[KubernetesVersionsClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientCreateOrUpdateResponse ! Str { kubernetes_versions_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientCreateOrUpdateResponse ! Str { kubernetes_versions_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, kubernetes_version_name, kubernetes_version_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesVersionsClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, kubernetes_version_name, kubernetes_version_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientCreateOrUpdateResponse ! Str { kubernetes_versions_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientCreateOrUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientCreateOrUpdateResponse ! Str { kubernetes_versions_create_or_update_handle(r) }, traced: true)
 }
 
 /// KubernetesVersionsClientBeginUpdateOptions: the optional parameters of KubernetesVersionsClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: KubernetesVersionsClient) update_create_request(resource_group_name: Str,
 /// Update tags associated with the Kubernetes version resource. No other properties are supported for update.
 pub fn (c: KubernetesVersionsClient[fx]) begin_update(resource_group_name: Str, kubernetes_version_name: Str, kubernetes_version_patch_parameters: KubernetesVersionPatchParameters, options: KubernetesVersionsClientBeginUpdateOptions = KubernetesVersionsClientBeginUpdateOptions{}) -> runtime.Poller[KubernetesVersionsClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientUpdateResponse ! Str { kubernetes_versions_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientUpdateResponse ! Str { kubernetes_versions_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, kubernetes_version_name, kubernetes_version_patch_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesVersionsClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, kubernetes_version_name, kubernetes_version_patch_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientUpdateResponse ! Str { kubernetes_versions_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientUpdateResponse", fn(r: http.Response) -> KubernetesVersionsClientUpdateResponse ! Str { kubernetes_versions_update_handle(r) }, traced: true)
 }
 
 /// KubernetesVersionsClientBeginDeleteOptions: the optional parameters of KubernetesVersionsClient.begin_delete.
@@ -321,12 +328,14 @@ fn (c: KubernetesVersionsClient) delete_create_request(resource_group_name: Str,
 /// Delete the specified Kubernetes version resource.
 pub fn (c: KubernetesVersionsClient[fx]) begin_delete(resource_group_name: Str, kubernetes_version_name: Str, options: KubernetesVersionsClientBeginDeleteOptions = KubernetesVersionsClientBeginDeleteOptions{}) -> runtime.Poller[KubernetesVersionsClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientDeleteResponse", fn(r: http.Response) -> KubernetesVersionsClientDeleteResponse ! Str { kubernetes_versions_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "KubernetesVersionsClientDeleteResponse", fn(r: http.Response) -> KubernetesVersionsClientDeleteResponse ! Str { kubernetes_versions_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, kubernetes_version_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "KubernetesVersionsClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, kubernetes_version_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientDeleteResponse", fn(r: http.Response) -> KubernetesVersionsClientDeleteResponse ! Str { kubernetes_versions_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "KubernetesVersionsClientDeleteResponse", fn(r: http.Response) -> KubernetesVersionsClientDeleteResponse ! Str { kubernetes_versions_delete_handle(r) }, traced: true)
 }

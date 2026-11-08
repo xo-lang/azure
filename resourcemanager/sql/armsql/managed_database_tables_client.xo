@@ -71,7 +71,7 @@ fn (c: ManagedDatabaseTablesClient) list_by_schema_create_request(resource_group
 /// List managed database tables
 pub fn (c: ManagedDatabaseTablesClient[fx]) new_list_by_schema_pager(resource_group_name: Str, managed_instance_name: Str, database_name: Str, schema_name: Str, options: ManagedDatabaseTablesClientListBySchemaOptions = ManagedDatabaseTablesClientListBySchemaOptions{}) -> runtime.Pager[ManagedDatabaseTablesClientListBySchemaResponse, fx] ! azcore.CallErr {
   let req = c.list_by_schema_create_request(resource_group_name, managed_instance_name, database_name, schema_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedDatabaseTablesClientListBySchemaResponse ! Str { managed_database_tables_list_by_schema_handle(r) }, fn(r: ManagedDatabaseTablesClientListBySchemaResponse) -> Str? { r.database_table_list_result.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> ManagedDatabaseTablesClientListBySchemaResponse ! Str { managed_database_tables_list_by_schema_handle(r) }, fn(r: ManagedDatabaseTablesClientListBySchemaResponse) -> Str? { r.database_table_list_result.next_link }).traced_as("ManagedDatabaseTablesClientListBySchemaResponse"))
 }
 
 /// ManagedDatabaseTablesClientGetOptions: the optional parameters of ManagedDatabaseTablesClient.get.
@@ -121,10 +121,13 @@ fn (c: ManagedDatabaseTablesClient) get_create_request(resource_group_name: Str,
 
 /// Get managed database table
 pub fn (c: ManagedDatabaseTablesClient) get(resource_group_name: Str, managed_instance_name: Str, database_name: Str, schema_name: Str, table_name: Str, options: ManagedDatabaseTablesClientGetOptions = ManagedDatabaseTablesClientGetOptions{}) -> ManagedDatabaseTablesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, managed_instance_name, database_name, schema_name, table_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ManagedDatabaseTablesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, managed_instance_name, database_name, schema_name, table_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  managed_database_tables_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = managed_database_tables_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

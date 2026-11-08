@@ -57,7 +57,7 @@ fn (c: InstancesClient) list_by_account_create_request(resource_group_name: Str,
 /// Returns instances for the given account name.
 pub fn (c: InstancesClient[fx]) new_list_by_account_pager(resource_group_name: Str, account_name: Str, options: InstancesClientListByAccountOptions = InstancesClientListByAccountOptions{}) -> runtime.Pager[InstancesClientListByAccountResponse, fx] ! azcore.CallErr {
   let req = c.list_by_account_create_request(resource_group_name, account_name, options)?
-  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> InstancesClientListByAccountResponse ! Str { instances_list_by_account_handle(r) }, fn(r: InstancesClientListByAccountResponse) -> Str? { r.instance_list.next_link }))
+  Ok(runtime.new_pager(c.setup.pipeline, req, fn(r: http.Response) -> InstancesClientListByAccountResponse ! Str { instances_list_by_account_handle(r) }, fn(r: InstancesClientListByAccountResponse) -> Str? { r.instance_list.next_link }).traced_as("InstancesClientListByAccountResponse"))
 }
 
 /// InstancesClientGetOptions: the optional parameters of InstancesClient.get.
@@ -99,12 +99,15 @@ fn (c: InstancesClient) get_create_request(resource_group_name: Str, account_nam
 
 /// Returns instance details for the given instance and account name.
 pub fn (c: InstancesClient) get(resource_group_name: Str, account_name: Str, instance_name: Str, options: InstancesClientGetOptions = InstancesClientGetOptions{}) -> InstancesClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, account_name, instance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstancesClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, account_name, instance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  instances_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = instances_get_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InstancesClientHeadOptions: the optional parameters of InstancesClient.head.
@@ -146,12 +149,15 @@ fn (c: InstancesClient) head_create_request(resource_group_name: Str, account_na
 
 /// Checks whether instance exists.
 pub fn (c: InstancesClient) head(resource_group_name: Str, account_name: Str, instance_name: Str, options: InstancesClientHeadOptions = InstancesClientHeadOptions{}) -> InstancesClientHeadResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.head_create_request(resource_group_name, account_name, instance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstancesClient.Head", c.setup.pipeline.tracer)
+  let req = sp.on(c.head_create_request(resource_group_name, account_name, instance_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 404].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  instances_head_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = instances_head_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// InstancesClientBeginCreateOptions: the optional parameters of InstancesClient.begin_create.
@@ -198,14 +204,16 @@ fn (c: InstancesClient) create_create_request(resource_group_name: Str, account_
 /// Creates or updates instance.
 pub fn (c: InstancesClient[fx]) begin_create(resource_group_name: Str, account_name: Str, instance_name: Str, instance: Instance, options: InstancesClientBeginCreateOptions = InstancesClientBeginCreateOptions{}) -> runtime.Poller[InstancesClientCreateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InstancesClientCreateResponse", fn(r: http.Response) -> InstancesClientCreateResponse ! Str { instances_create_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InstancesClientCreateResponse", fn(r: http.Response) -> InstancesClientCreateResponse ! Str { instances_create_handle(r) }, traced: true)
   }
-  let req = c.create_create_request(resource_group_name, account_name, instance_name, instance, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstancesClient.BeginCreate", c.setup.pipeline.tracer)
+  let req = c.create_create_request(resource_group_name, account_name, instance_name, instance, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "InstancesClientCreateResponse", fn(r: http.Response) -> InstancesClientCreateResponse ! Str { instances_create_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "azure-async-operation", "InstancesClientCreateResponse", fn(r: http.Response) -> InstancesClientCreateResponse ! Str { instances_create_handle(r) }, traced: true)
 }
 
 /// InstancesClientBeginDeleteOptions: the optional parameters of InstancesClient.begin_delete.
@@ -248,14 +256,16 @@ fn (c: InstancesClient) delete_create_request(resource_group_name: Str, account_
 /// Deletes instance.
 pub fn (c: InstancesClient[fx]) begin_delete(resource_group_name: Str, account_name: Str, instance_name: Str, options: InstancesClientBeginDeleteOptions = InstancesClientBeginDeleteOptions{}) -> runtime.Poller[InstancesClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InstancesClientDeleteResponse", fn(r: http.Response) -> InstancesClientDeleteResponse ! Str { instances_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "InstancesClientDeleteResponse", fn(r: http.Response) -> InstancesClientDeleteResponse ! Str { instances_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, account_name, instance_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstancesClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, account_name, instance_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "location", "InstancesClientDeleteResponse", fn(r: http.Response) -> InstancesClientDeleteResponse ! Str { instances_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "location", "InstancesClientDeleteResponse", fn(r: http.Response) -> InstancesClientDeleteResponse ! Str { instances_delete_handle(r) }, traced: true)
 }
 
 /// InstancesClientUpdateOptions: the optional parameters of InstancesClient.update.
@@ -298,10 +308,13 @@ fn (c: InstancesClient) update_create_request(resource_group_name: Str, account_
 
 /// Updates instance's tags.
 pub fn (c: InstancesClient) update(resource_group_name: Str, account_name: Str, instance_name: Str, tag_update_payload: TagUpdate, options: InstancesClientUpdateOptions = InstancesClientUpdateOptions{}) -> InstancesClientUpdateResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.update_create_request(resource_group_name, account_name, instance_name, tag_update_payload, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "InstancesClient.Update", c.setup.pipeline.tracer)
+  let req = sp.on(c.update_create_request(resource_group_name, account_name, instance_name, tag_update_payload, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.fail(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  instances_update_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = instances_update_handle(resp) ?? e => return Err(sp.fail(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }

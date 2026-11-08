@@ -60,7 +60,7 @@ fn (c: ClustersClient) list_by_subscription_create_request(options: ClustersClie
 /// Get a list of clusters in the provided subscription.
 pub fn (c: ClustersClient[fx]) new_list_by_subscription_pager(options: ClustersClientListBySubscriptionOptions = ClustersClientListBySubscriptionOptions{}) -> runtime.Pager[ClustersClientListBySubscriptionResponse, fx] ! azcore.CallErr {
   let req = c.list_by_subscription_create_request(options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClustersClientListBySubscriptionResponse ! Str { clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClustersClientListBySubscriptionResponse) -> Str? { r.cluster_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClustersClientListBySubscriptionResponse ! Str { clusters_list_by_subscription_handle(r) }, c.setup.endpoint, fn(r: ClustersClientListBySubscriptionResponse) -> Str? { r.cluster_list.next_link }).traced_as("ClustersClientListBySubscriptionResponse"))
 }
 
 /// ClustersClientListByResourceGroupOptions: the optional parameters of ClustersClient.new_list_by_resource_group_pager.
@@ -106,7 +106,7 @@ fn (c: ClustersClient) list_by_resource_group_create_request(resource_group_name
 /// Get a list of clusters in the provided resource group.
 pub fn (c: ClustersClient[fx]) new_list_by_resource_group_pager(resource_group_name: Str, options: ClustersClientListByResourceGroupOptions = ClustersClientListByResourceGroupOptions{}) -> runtime.Pager[ClustersClientListByResourceGroupResponse, fx] ! azcore.CallErr {
   let req = c.list_by_resource_group_create_request(resource_group_name, options)?
-  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClustersClientListByResourceGroupResponse ! Str { clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClustersClientListByResourceGroupResponse) -> Str? { r.cluster_list.next_link }))
+  Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> ClustersClientListByResourceGroupResponse ! Str { clusters_list_by_resource_group_handle(r) }, c.setup.endpoint, fn(r: ClustersClientListByResourceGroupResponse) -> Str? { r.cluster_list.next_link }).traced_as("ClustersClientListByResourceGroupResponse"))
 }
 
 /// ClustersClientGetOptions: the optional parameters of ClustersClient.get.
@@ -144,12 +144,15 @@ fn (c: ClustersClient) get_create_request(resource_group_name: Str, cluster_name
 
 /// Get properties of the provided cluster.
 pub fn (c: ClustersClient) get(resource_group_name: Str, cluster_name: Str, options: ClustersClientGetOptions = ClustersClientGetOptions{}) -> ClustersClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.Get", c.setup.pipeline.tracer)
+  let req = sp.on(c.get_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e)))
+  let resp = c.setup.pipeline.send(req) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  clusters_get_handle(resp) ?? e => Err(azcore.CallErr.Decode(e))
+  let out = clusters_get_handle(resp) ?? e => return Err(sp.close(azcore.CallErr.Decode(e)))
+  sp.end()
+  Ok(out)
 }
 
 /// ClustersClientBeginCreateOrUpdateOptions: the optional parameters of ClustersClient.begin_create_or_update.
@@ -202,14 +205,16 @@ fn (c: ClustersClient) create_or_update_create_request(resource_group_name: Str,
 /// Create a new cluster or update the properties of the cluster if it exists.
 pub fn (c: ClustersClient[fx]) begin_create_or_update(resource_group_name: Str, cluster_name: Str, cluster_parameters: Cluster, options: ClustersClientBeginCreateOrUpdateOptions = ClustersClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[ClustersClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClustersClientCreateOrUpdateResponse ! Str { clusters_create_or_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClustersClientCreateOrUpdateResponse ! Str { clusters_create_or_update_handle(r) }, traced: true)
   }
-  let req = c.create_or_update_create_request(resource_group_name, cluster_name, cluster_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginCreateOrUpdate", c.setup.pipeline.tracer)
+  let req = c.create_or_update_create_request(resource_group_name, cluster_name, cluster_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 201].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClustersClientCreateOrUpdateResponse ! Str { clusters_create_or_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientCreateOrUpdateResponse", fn(r: http.Response) -> ClustersClientCreateOrUpdateResponse ! Str { clusters_create_or_update_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginUpdateOptions: the optional parameters of ClustersClient.begin_update.
@@ -262,14 +267,16 @@ fn (c: ClustersClient) update_create_request(resource_group_name: Str, cluster_n
 /// Patch the properties of the provided cluster, or update the tags associated with the cluster. Properties and tag updates can be done independently.
 pub fn (c: ClustersClient[fx]) begin_update(resource_group_name: Str, cluster_name: Str, cluster_update_parameters: ClusterPatchParameters, options: ClustersClientBeginUpdateOptions = ClustersClientBeginUpdateOptions{}) -> runtime.Poller[ClustersClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientUpdateResponse", fn(r: http.Response) -> ClustersClientUpdateResponse ! Str { clusters_update_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientUpdateResponse", fn(r: http.Response) -> ClustersClientUpdateResponse ! Str { clusters_update_handle(r) }, traced: true)
   }
-  let req = c.update_create_request(resource_group_name, cluster_name, cluster_update_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginUpdate", c.setup.pipeline.tracer)
+  let req = c.update_create_request(resource_group_name, cluster_name, cluster_update_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![200, 202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientUpdateResponse", fn(r: http.Response) -> ClustersClientUpdateResponse ! Str { clusters_update_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientUpdateResponse", fn(r: http.Response) -> ClustersClientUpdateResponse ! Str { clusters_update_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginDeleteOptions: the optional parameters of ClustersClient.begin_delete.
@@ -321,14 +328,16 @@ fn (c: ClustersClient) delete_create_request(resource_group_name: Str, cluster_n
 /// Delete the provided cluster.
 pub fn (c: ClustersClient[fx]) begin_delete(resource_group_name: Str, cluster_name: Str, options: ClustersClientBeginDeleteOptions = ClustersClientBeginDeleteOptions{}) -> runtime.Poller[ClustersClientDeleteResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientDeleteResponse", fn(r: http.Response) -> ClustersClientDeleteResponse ! Str { clusters_delete_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientDeleteResponse", fn(r: http.Response) -> ClustersClientDeleteResponse ! Str { clusters_delete_handle(r) }, traced: true)
   }
-  let req = c.delete_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginDelete", c.setup.pipeline.tracer)
+  let req = c.delete_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202, 204].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientDeleteResponse", fn(r: http.Response) -> ClustersClientDeleteResponse ! Str { clusters_delete_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientDeleteResponse", fn(r: http.Response) -> ClustersClientDeleteResponse ! Str { clusters_delete_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginContinueUpdateVersionOptions: the optional parameters of ClustersClient.begin_continue_update_version.
@@ -371,14 +380,16 @@ fn (c: ClustersClient) continue_update_version_create_request(resource_group_nam
 /// Trigger the continuation of an update for a cluster with a matching update strategy that has paused after completing a segment of the update.
 pub fn (c: ClustersClient[fx]) begin_continue_update_version(resource_group_name: Str, cluster_name: Str, cluster_continue_update_version_parameters: ClusterContinueUpdateVersionParameters, options: ClustersClientBeginContinueUpdateVersionOptions = ClustersClientBeginContinueUpdateVersionOptions{}) -> runtime.Poller[ClustersClientContinueUpdateVersionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientContinueUpdateVersionResponse", fn(r: http.Response) -> ClustersClientContinueUpdateVersionResponse ! Str { clusters_continue_update_version_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientContinueUpdateVersionResponse", fn(r: http.Response) -> ClustersClientContinueUpdateVersionResponse ! Str { clusters_continue_update_version_handle(r) }, traced: true)
   }
-  let req = c.continue_update_version_create_request(resource_group_name, cluster_name, cluster_continue_update_version_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginContinueUpdateVersion", c.setup.pipeline.tracer)
+  let req = c.continue_update_version_create_request(resource_group_name, cluster_name, cluster_continue_update_version_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientContinueUpdateVersionResponse", fn(r: http.Response) -> ClustersClientContinueUpdateVersionResponse ! Str { clusters_continue_update_version_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientContinueUpdateVersionResponse", fn(r: http.Response) -> ClustersClientContinueUpdateVersionResponse ! Str { clusters_continue_update_version_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginDeployOptions: the optional parameters of ClustersClient.begin_deploy.
@@ -427,14 +438,16 @@ fn (c: ClustersClient) deploy_create_request(resource_group_name: Str, cluster_n
 /// Deploy the cluster using the rack configuration provided during creation.
 pub fn (c: ClustersClient[fx]) begin_deploy(resource_group_name: Str, cluster_name: Str, options: ClustersClientBeginDeployOptions = ClustersClientBeginDeployOptions{}) -> runtime.Poller[ClustersClientDeployResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientDeployResponse", fn(r: http.Response) -> ClustersClientDeployResponse ! Str { clusters_deploy_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientDeployResponse", fn(r: http.Response) -> ClustersClientDeployResponse ! Str { clusters_deploy_handle(r) }, traced: true)
   }
-  let req = c.deploy_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginDeploy", c.setup.pipeline.tracer)
+  let req = c.deploy_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientDeployResponse", fn(r: http.Response) -> ClustersClientDeployResponse ! Str { clusters_deploy_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientDeployResponse", fn(r: http.Response) -> ClustersClientDeployResponse ! Str { clusters_deploy_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginInspectOptions: the optional parameters of ClustersClient.begin_inspect.
@@ -483,14 +496,16 @@ fn (c: ClustersClient) inspect_create_request(resource_group_name: Str, cluster_
 /// Trigger an inspection of the cluster to perform validation and optional corrective actions based on the supplied additional actions and filters.
 pub fn (c: ClustersClient[fx]) begin_inspect(resource_group_name: Str, cluster_name: Str, options: ClustersClientBeginInspectOptions = ClustersClientBeginInspectOptions{}) -> runtime.Poller[ClustersClientInspectResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientInspectResponse", fn(r: http.Response) -> ClustersClientInspectResponse ! Str { clusters_inspect_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientInspectResponse", fn(r: http.Response) -> ClustersClientInspectResponse ! Str { clusters_inspect_handle(r) }, traced: true)
   }
-  let req = c.inspect_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginInspect", c.setup.pipeline.tracer)
+  let req = c.inspect_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientInspectResponse", fn(r: http.Response) -> ClustersClientInspectResponse ! Str { clusters_inspect_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientInspectResponse", fn(r: http.Response) -> ClustersClientInspectResponse ! Str { clusters_inspect_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginRotateCredentialOptions: the optional parameters of ClustersClient.begin_rotate_credential.
@@ -533,14 +548,16 @@ fn (c: ClustersClient) rotate_credential_create_request(resource_group_name: Str
 /// Rotate the specified cluster credential.
 pub fn (c: ClustersClient[fx]) begin_rotate_credential(resource_group_name: Str, cluster_name: Str, body: ClusterRotateCredentialParameters, options: ClustersClientBeginRotateCredentialOptions = ClustersClientBeginRotateCredentialOptions{}) -> runtime.Poller[ClustersClientRotateCredentialResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientRotateCredentialResponse", fn(r: http.Response) -> ClustersClientRotateCredentialResponse ! Str { clusters_rotate_credential_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientRotateCredentialResponse", fn(r: http.Response) -> ClustersClientRotateCredentialResponse ! Str { clusters_rotate_credential_handle(r) }, traced: true)
   }
-  let req = c.rotate_credential_create_request(resource_group_name, cluster_name, body, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginRotateCredential", c.setup.pipeline.tracer)
+  let req = c.rotate_credential_create_request(resource_group_name, cluster_name, body, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientRotateCredentialResponse", fn(r: http.Response) -> ClustersClientRotateCredentialResponse ! Str { clusters_rotate_credential_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientRotateCredentialResponse", fn(r: http.Response) -> ClustersClientRotateCredentialResponse ! Str { clusters_rotate_credential_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginScanRuntimeOptions: the optional parameters of ClustersClient.begin_scan_runtime.
@@ -589,14 +606,16 @@ fn (c: ClustersClient) scan_runtime_create_request(resource_group_name: Str, clu
 /// Triggers the execution of a runtime protection scan to detect and remediate detected issues, in accordance with the cluster configuration.
 pub fn (c: ClustersClient[fx]) begin_scan_runtime(resource_group_name: Str, cluster_name: Str, options: ClustersClientBeginScanRuntimeOptions = ClustersClientBeginScanRuntimeOptions{}) -> runtime.Poller[ClustersClientScanRuntimeResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientScanRuntimeResponse", fn(r: http.Response) -> ClustersClientScanRuntimeResponse ! Str { clusters_scan_runtime_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientScanRuntimeResponse", fn(r: http.Response) -> ClustersClientScanRuntimeResponse ! Str { clusters_scan_runtime_handle(r) }, traced: true)
   }
-  let req = c.scan_runtime_create_request(resource_group_name, cluster_name, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginScanRuntime", c.setup.pipeline.tracer)
+  let req = c.scan_runtime_create_request(resource_group_name, cluster_name, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientScanRuntimeResponse", fn(r: http.Response) -> ClustersClientScanRuntimeResponse ! Str { clusters_scan_runtime_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientScanRuntimeResponse", fn(r: http.Response) -> ClustersClientScanRuntimeResponse ! Str { clusters_scan_runtime_handle(r) }, traced: true)
 }
 
 /// ClustersClientBeginUpdateVersionOptions: the optional parameters of ClustersClient.begin_update_version.
@@ -639,12 +658,14 @@ fn (c: ClustersClient) update_version_create_request(resource_group_name: Str, c
 /// Update the version of the provided cluster to one of the available supported versions.
 pub fn (c: ClustersClient[fx]) begin_update_version(resource_group_name: Str, cluster_name: Str, cluster_update_version_parameters: ClusterUpdateVersionParameters, options: ClustersClientBeginUpdateVersionOptions = ClustersClientBeginUpdateVersionOptions{}) -> runtime.Poller[ClustersClientUpdateVersionResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
-    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientUpdateVersionResponse", fn(r: http.Response) -> ClustersClientUpdateVersionResponse ! Str { clusters_update_version_handle(r) })
+    return runtime.resume_poller(c.setup.pipeline, options.resume_token, "ClustersClientUpdateVersionResponse", fn(r: http.Response) -> ClustersClientUpdateVersionResponse ! Str { clusters_update_version_handle(r) }, traced: true)
   }
-  let req = c.update_version_create_request(resource_group_name, cluster_name, cluster_update_version_parameters, options)?
-  let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
+  let sp = runtime.start_span({}, "ClustersClient.BeginUpdateVersion", c.setup.pipeline.tracer)
+  let req = c.update_version_create_request(resource_group_name, cluster_name, cluster_update_version_parameters, options) ?? e => return Err(sp.fail(e))
+  let resp = c.setup.pipeline.send(sp.on(req)) ?? e => return Err(sp.fail(azcore.CallErr.Send(e)))
   if ![202].contains(resp.status) {
-    return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
+    return Err(sp.close(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp))))
   }
-  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientUpdateVersionResponse", fn(r: http.Response) -> ClustersClientUpdateVersionResponse ! Str { clusters_update_version_handle(r) })
+  sp.end()
+  runtime.new_poller(c.setup.pipeline, req, resp, "", "ClustersClientUpdateVersionResponse", fn(r: http.Response) -> ClustersClientUpdateVersionResponse ! Str { clusters_update_version_handle(r) }, traced: true)
 }
