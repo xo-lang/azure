@@ -65,6 +65,13 @@ that name (armchaos' executionDetails); TypeSpec's
 file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
 list and map arguments (armbilling, armcdn, armcognitiveservices).
 
+Every ARM module in the coverage report is now Go-verified (307).
+scripts/refresh.sh verifies a module whose every Go release is
+retracted against its row's pinned version (armedgemarketplace
+v0.1.1), and a custom file's `field_constants` writes a CONSTANT field
+as Go does (armstoragesync's CheckNameAvailabilityParameters.type is
+"string" in Go's typespec-go output).
+
 Generator, from the batch-4d differentials (third part): a client
 parameter `@@clientLocation` moves onto an `@@override` operation (in
 the override's order), a namespace's own operation, or from a spread

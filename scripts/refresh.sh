@@ -77,7 +77,17 @@ for d in $dirs; do
     v=$(awk -v p="$p" '$1 == p { for (i = 2; i <= NF; i++) print $i }' "$work/versions" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1 || true)
     if [ -n "$v" ]; then best="$p@$v"; fi
   done
-  if [ -z "$best" ]; then echo "refresh: $d: no Go release" >&2; continue; fi
+  if [ -z "$best" ]; then
+    # every release retracted (armedgemarketplace's go.mod retracts
+    # v0.1.0 and v0.1.1): the row's pinned one, which is still Go's code
+    pm=$(awk -v d="$d" -F'"' '/^dir *=/ { cur = $2 } /^go_module *=/ && cur == d { m = $2 } /^go_version *=/ && cur == d { print m "@" $2 }' codegen/services.toml)
+    if [ -n "$pm" ]; then
+      echo "refresh: $d: every Go release retracted; the row's $pm" >&2
+      best=$pm
+    else
+      echo "refresh: $d: no Go release" >&2; continue
+    fi
+  fi
   echo "$best" >> "$work/modules"
 done
 $genv $go mod download -json $(cat "$work/modules") > "$work/download.json"
