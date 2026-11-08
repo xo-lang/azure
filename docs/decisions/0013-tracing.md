@@ -113,10 +113,63 @@ Two steps, the first independent of std:
   transport error's method span names `*url.Error`, the type Go's own
   transport returns; and a span starts from no parent, Xo having no
   context to carry one in.
-- Not yet: the hand written data plane clients (azblob, azdatalake,
-  azfile, azqueue, azcosmos, the messaging clients) open no spans yet:
-  their pipelines have the HTTP trace policy, but an HTTP span starts
-  only under a method span, as in Go.
+
+## The hand written data plane clients (2026-11-08)
+
+Go's own data plane modules decide which spans there are, so each was
+read at the pinned version.
+
+- **No spans in Go, none here**: azblob 1.8.3, azdatalake 1.7.1, azfile
+  1.7.2, azqueue/v2 2.1.2, azservicebus 1.11.0, azeventhubs/v2 2.0.2,
+  azeventgrid 1.0.0, aznamespaces 1.0.0, azopenai 0.9.0 and azwebpubsub
+  0.1.1 call no `runtime.StartSpan` and give no pager or poller a
+  tracer. Their pipelines have the HTTP trace policy, and an HTTP span
+  starts only under a method span, so they record nothing, as Go's.
+- **Spans as Go's**, each checked against a Go program over a fake
+  transport with a recording provider (the module's
+  `tracevectors_test.xo`, replayed by `tracing_test.xo`):
+  - aztables 1.4.1 (namespace `Microsoft.Tables`): 15 methods and 2
+    pagers, 256 lines.
+  - azappconfig/v2 2.3.0 (`Microsoft.AppConfig`): 9 methods, 5 pagers
+    and the snapshot poller, 262 lines. The generated layer takes the
+    span through `Client.with_values`: a pipeline whose first policy
+    puts the values on each request (`runtime.Pipeline.with_values`).
+  - monitor: azquery 1.2.0 (3 logs methods, 1 metrics method, 2 pagers;
+    72 lines), query/azlogs 1.2.0 (3 methods; 38), query/azmetrics 1.3.0
+    (1; 11) and ingestion/azlogs 1.1.0 (1; 23). No namespace, as Go's.
+  - azcosmos 1.5.0 (`Microsoft.DocumentDB`): Go's own `<operation> <id>`
+    spans of kind Client with the database attributes
+    (otel_constants.go), and each response's request charge and status
+    code set on them; 781 lines. Go's internal pipeline (the account
+    read) traces with the caller's tracer, so both pipelines here share
+    one (`PipelineOptions.tracer`); Go's partition key range cache reads
+    with its own context, so those reads are in no span here either. Go
+    shares that cache, and the container cache, between clients of one
+    endpoint; the cases that read them use hosts of their own.
+- A hand written method uses `runtime.traced` (Go's StartSpan and its
+  deferred endSpan(err)); its error status names `*errors.errorString`
+  for an invalid input with the message alone (`go_desc`).
+- The recorder (`tracerec_test.xo`) is one file, the same in each of
+  these modules.
+- Differences found and fixed on the way: azcosmos's error code is now
+  the status line, as Go's `NewResponseErrorWithErrorCode(resp,
+  resp.Status)` sets it (the port had kept the service's code); and
+  `tracing.Value.display` prints a whole float as Go's `%v` (`0`).
+- Differences that stay:
+  - An invalid input's error text starts `invalid input: ` (aztables'
+    "you cannot set more than five (5) access policies at a time",
+    azquery's and query/azlogs' "parameter workspaceID cannot be
+    empty"): `azcore.CallErr.display` names the kind of every error,
+    and changing it would change every client's error text. The span's
+    status has Go's text, the message alone.
+  - aztables' entity that is not JSON fails with std/json's message
+    (`at $: invalid JSON: EOF`), not encoding/json's (`unexpected end of
+    JSON input`), in the error and in the AddEntity span's status (whose
+    type, `*json.SyntaxError`, is Go's). Matching it would mean
+    reproducing encoding/json's messages for every syntax error.
+  - azcosmos sets the request charge as a float32; `tracing.Value` has
+    one float, 64 bits, so the recorder prints `float64`. OpenTelemetry
+    exports both as a double.
 
 ## Alternatives
 

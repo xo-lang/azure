@@ -1,5 +1,12 @@
 # azappconfig changes
 
+## Unreleased
+
+Tracing (decision 0013): with `policy.ClientOptions.tracing_provider`,
+every method opens Go's span (`Client.GetSetting`, ...), the five
+pagers theirs and the snapshot poller its own, with `az.namespace`
+`Microsoft.AppConfig`, checked against Go azappconfig/v2 v2.3.0.
+
 ## v0.1.0
 
 First release: a port of Go's `sdk/data/azappconfig/v2` v2.3.0 (REST

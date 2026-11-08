@@ -1,5 +1,16 @@
 # azcosmos changes
 
+## Unreleased
+
+Tracing (decision 0013): with `policy.ClientOptions.tracing_provider`,
+every operation opens Go's span (`create_item c1`, kind Client, with
+the `db.*` and `server.*` attributes, and each response's request
+charge and status code), checked against Go azcosmos v1.5.0.
+
+Behavior fix: a failed operation's `ResponseError.error_code` is the
+status line (`404 Not Found`), as Go's; before, it was the service's
+code from the body (`NotFound`).
+
 ## v0.2.0
 
 Behavior fix: a response header that repeats is read as Go's

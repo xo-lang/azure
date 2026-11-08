@@ -1,5 +1,12 @@
 # aztables changes
 
+## Unreleased
+
+Tracing (decision 0013): with `policy.ClientOptions.tracing_provider`,
+every method opens Go's span (`ServiceClient.CreateTable`,
+`Client.AddEntity`, ...) and both pagers theirs, with `az.namespace`
+`Microsoft.Tables`, checked against Go aztables v1.4.1.
+
 ## v0.2.0
 
 Behavior fix: a response header that repeats is read as Go's

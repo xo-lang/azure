@@ -18,6 +18,14 @@ with Go's attributes, and an ARM client adds `az.namespace`;
 codegen/gorows derives a `span_errors` row from Go's source: which
 errors a method's span records.
 
+The hand written data plane clients open Go's spans where Go's do
+(aztables, azappconfig, azcosmos and the four monitor modules; the
+others have none in Go). `runtime.traced` is Go's StartSpan around a
+hand written method, `runtime.Pipeline.with_values` carries a span
+through a generated layer, and `PipelineOptions.tracer` lets a second
+pipeline share a client's tracer. `tracing.Value.display` prints a
+whole float as Go's `%v` does (`0`, not `0.0`).
+
 `scripts/refresh.sh` (decision 0011): every ARM module is refreshed to
 Go's newest release and checked against it in one command; `--verify`
 regenerates and checks the modules given whether or not their row
