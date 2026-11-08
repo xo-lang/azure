@@ -7,7 +7,7 @@ deleted.
 
 - [0001](0001-architecture-and-module-layout.md): a core module plus azidentity and one module per service, at azure-sdk-for-go's paths without `sdk/`, each tagged `<dir>/vX.Y.Z` (Accepted)
 - [0002](0002-spec-source-and-generator.md): read the OpenAPI 2.0 JSON of azure-rest-api-specs (hand written and TypeSpec emitted), at the api-versions azure-sdk-for-go ships, with a generator in Xo and committed output (Accepted)
-- [0003](0003-core.md): the hand written core: azcore's pipeline and policies, errors, pagers, pollers, ARM extras, the Entra ID credentials without MSAL, Storage, Key Vault and Cosmos signing (Accepted; amendment 1, a public token cache, request values and final send errors, Accepted)
+- [0003](0003-core.md): the hand written core: azcore's pipeline and policies, errors, pagers, pollers, ARM extras, the Entra ID credentials without MSAL, Storage, Key Vault and Cosmos signing (Accepted; amendment 1, a public token cache, request values and final send errors, Accepted; amendment 2, public clients and the user flows (device code, username and password, interactive browser through a caller callback, authentication record), Proposed)
 - [0004](0004-api-shape.md): azure-sdk-for-go's shape in Xo style: clients, options structs, pagers, pollers, snake_case names (Accepted)
 - [0005](0005-testing.md): testing without real Azure: fakes, signing vectors, replayed Go recordings, Azurite and the Cosmos emulator, loopback-only networks (Accepted)
 - [0006](0006-xo-gaps.md): Xo gaps: AMQP 1.0, PKCS#12, JWT header fields, closures with effects, hex formatting (Accepted)

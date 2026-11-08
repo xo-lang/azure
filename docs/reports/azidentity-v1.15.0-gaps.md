@@ -180,9 +180,10 @@ refresh token by home account, environment and client, or family `1`).
     into `AuthenticationRequiredError` with its `TokenRequestOptions`
     instead of starting the flow.
 
-Porting 15 to 18 needs decision 0003 amended (public clients and the
-account model by hand, as 0003 did the client credentials grant), and
-for 16 a decision on starting the browser.
+Porting 15 to 18 needs decision 0003 amended: its Amendment 2
+(Proposed, 2026-11-07) adds public clients and the account model by
+hand, as 0003 did the client credentials grant, and gives 16 the
+authorize URL through a caller callback instead of starting a browser.
 
 ### Waiting on a token-cache decision
 
