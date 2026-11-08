@@ -1,0 +1,279 @@
+// Decision 0013: aztables' spans against Go's. A Go program (aztables
+// v1.4.1, azcore v1.24.0, a recording tracing.Provider over a fake
+// transport; local only) printed TRACE_GO (tracevectors_test.xo). The
+// recorder is armstorage's (tracing_test.xo there).
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/tracing
+
+const TR_EP: Str = "https://acct.table.example.test/"
+
+const TR_SPAN: Str = "test.span"
+
+struct TrRec {
+  pub parent: Int
+  pub name: Str
+  pub kind: Int
+  pub lines: List[Str] = []
+  pub status: Str = ""
+  pub ended: Bool = false
+}
+
+struct TrReply {
+  pub status: Int = 200
+  pub body: Str = ""
+  pub headers: Map[Str, Str] = {}
+}
+
+struct TrLog {
+  out: Mutex[List[Str]]
+  spans: Mutex[List[TrRec]]
+  replies: Mutex[List[TrReply]]
+}
+
+fn tr_note(log: TrLog, s: Str) {
+  log.out.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn tr_update(log: TrLog, id: Int, f: fn(TrRec) -> TrRec) {
+  log.spans.with(fn(var l: List[TrRec]) { l[id - 1] = f(l[id - 1]) })
+}
+
+/// An attribute as the Go program prints it: `key=<Go type>:<value>`,
+/// the User-Agent as UA and the client request id as ID.
+fn tr_attr(a: tracing.Attribute) -> Str {
+  let (t, v) = match a.value {
+    tracing.Value.Str(s) => ("string", s)
+    tracing.Value.Int(i) => ("int", "${i}")
+    tracing.Value.Float(x) => ("float64", "${x}")
+    tracing.Value.Bool(b) => ("bool", if b { "true" } else { "false" })
+  }
+  let shown = if a.key == "http.user_agent" { "UA" } else if a.key == "az.client_request_id" { "ID" } else { v }
+  "${a.key}=${t}:${shown}"
+}
+
+fn tr_span_id(ctx: tracing.Context) -> Int {
+  match ctx.values.get(TR_SPAN) {
+    Some(v) => Int.parse(v) ?? 0
+    None => 0
+  }
+}
+
+fn tr_span(log: TrLog, id: Int) -> tracing.Span {
+  tracing.new_span(tracing.SpanImpl{
+    end: Some(fn() { tr_update(log, id, fn(r: TrRec) -> TrRec { r with {ended: true} }) }),
+    set_attributes: Some(fn(attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + attrs.map(fn(a: tracing.Attribute) -> Str { "    ATTR +${tr_attr(a)}" })} })
+    }),
+    add_event: Some(fn(name: Str, attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + ["    EVENT ${name}"]} })
+    }),
+    set_status: Some(fn(code: tracing.SpanStatus, desc: Str) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {status: "${code.code()} ${tr_q(desc)}"} })
+    }),
+  })
+}
+
+/// A provider recording every tracer it makes and every span.
+fn tr_provider(log: TrLog) -> tracing.Provider {
+  tracing.new_provider(fn(module: Str, version: Str) -> tracing.Tracer {
+    tr_note(log, "TRACER ${module} ${version}")
+    let start = fn(ctx: tracing.Context, name: Str, opts: tracing.SpanOptions) -> (tracing.Context, tracing.Span) {
+      let rec = TrRec{parent: tr_span_id(ctx), name: name, kind: opts.kind.code(), lines: opts.attributes.map(fn(a: tracing.Attribute) -> Str { "    ATTR ${tr_attr(a)}" })}
+      let id = log.spans.with(fn(var l: List[TrRec]) -> Int {
+        l.push(rec)
+        l.len()
+      })
+      var vs = ctx.values
+      vs.put(TR_SPAN, "${id}")
+      (tracing.Context{values: vs}, tr_span(log, id))
+    }
+    tracing.new_tracer(start, span_from_context: Some(fn(ctx: tracing.Context) -> tracing.Span {
+      let id = tr_span_id(ctx)
+      if id == 0 { tracing.Span{} } else { tr_span(log, id) }
+    }))
+  })
+}
+
+/// Go's %q of printable ASCII text with `\n`.
+fn tr_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+/// The case's error and spans, as the Go program dumps them, then a
+/// fresh span list.
+fn tr_dump(log: TrLog, name: Str, err: azcore.CallErr?) {
+  tr_note(log, "CASE ${name} err=${if err.is_some() { "true" } else { "false" }}")
+  if let Some(e) = err {
+    tr_note(log, "  ERR ${tr_q(e.display())}")
+  }
+  let spans = log.spans.with(fn(var l: List[TrRec]) -> List[TrRec] {
+    let out = l
+    l = []
+    out
+  })
+  var i = 0
+  for r in spans {
+    i += 1
+    tr_note(log, "  SPAN ${i} parent=${r.parent} ${tr_q(r.name)} kind=${r.kind} ended=${if r.ended { "true" } else { "false" }} status=${r.status}")
+    for line in r.lines {
+      tr_note(log, line)
+    }
+  }
+}
+
+fn tr_err[T](r: Result[T, azcore.CallErr]) -> azcore.CallErr? {
+  match r {
+    Ok(_) => None
+    Err(e) => Some(e)
+  }
+}
+fn tr_compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
+  var g = got
+  for (go_line, ours) in known {
+    let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
+    let j = g.index_of(ours) ?? fault("KNOWN line not in ours: ${ours}")
+    if i != j {
+      fault("KNOWN line ${go_line} at ${i}, ours at ${j}")
+    }
+    g[j] = go_line
+  }
+  var k = 0
+  while k < want.len() || k < g.len() {
+    let a = want.get(k) ?? "<end>"
+    let b = g.get(k) ?? "<end>"
+    if a != b {
+      fault("line ${k}:\n  go:   ${a}\n  ours: ${b}")
+    }
+    k += 1
+  }
+}
+
+fn tr_new_log(net: testing.FakeNet) -> TrLog {
+  let log = TrLog{out: Mutex[List[Str]].new([]), spans: Mutex[List[TrRec]].new([]), replies: Mutex[List[TrReply]].new([])}
+  let h = fn(req: http.Request) -> http.Response {
+    let q = req.raw_query()
+    tr_note(log, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+    let r = log.replies.with(fn(var l: List[TrReply]) -> TrReply {
+      if l.is_empty() {
+        return TrReply{}
+      }
+      let first = l[0]
+      l = l[1..l.len()]
+      first
+    })
+    var hs: Map[Str, Str] = {"Content-Type": "application/json"}
+    for (k, v) in r.headers {
+      hs.put(k, v)
+    }
+    http.Response{status: r.status, headers: hs, body: r.body.bytes()}
+  }
+  for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+    net.handle("${m} https://acct.table.example.test/{rest...}", h)
+  }
+  log
+}
+
+fn tr_replies(log: TrLog, rs: List[TrReply]) {
+  log.replies.with(fn(var l: List[TrReply]) { l = rs })
+}
+
+fn tr_svc(net: Net, clock: Clock, rand: Rand, log: TrLog) -> ServiceClient[()] {
+  new_service_client_with_no_credential(net, clock, rand, TR_EP, ClientOptions{client: policy.ClientOptions{tracing_provider: tr_provider(log), retry: policy.RetryOptions{max_retries: -1}}})
+}
+
+fn tr_r(status: Int, body: Str = "", headers: Map[Str, Str] = {}) -> TrReply {
+  TrReply{status: status, body: body, headers: headers}
+}
+
+const TR_NOT_FOUND: Str = "{\"odata.error\":{\"code\":\"ResourceNotFound\",\"message\":{\"lang\":\"en-US\",\"value\":\"The specified resource does not exist.\"}}}"
+const TR_ENTITY: Str = "{\"PartitionKey\":\"p1\",\"RowKey\":\"r1\",\"Value\":1}"
+const TR_PROPS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceProperties><Logging><Version>1.0</Version><Delete>false</Delete><Read>false</Read><Write>false</Write><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></Logging></StorageServiceProperties>"
+const TR_STATS: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><StorageServiceStats><GeoReplication><Status>live</Status><LastSyncTime>Wed, 01 Jan 2025 00:00:00 GMT</LastSyncTime></GeoReplication></StorageServiceStats>"
+const TR_ACL: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><SignedIdentifiers><SignedIdentifier><Id>id1</Id><AccessPolicy><Start>2025-01-01T00:00:00.0000000Z</Start><Expiry>2025-01-02T00:00:00.0000000Z</Expiry><Permission>r</Permission></AccessPolicy></SignedIdentifier></SignedIdentifiers>"
+
+test "spans as Go's aztables v1.4.1 makes them" {
+  let log = tr_new_log(os.net)
+  let xml: Map[Str, Str] = {"Content-Type": "application/xml"}
+
+  tr_replies(log, [tr_r(201, "{\"TableName\":\"t1\"}")])
+  tr_dump(log, "service create table", tr_err(tr_svc(os.net, os.clock, os.rand, log).create_table("t1")))
+
+  tr_replies(log, [tr_r(409, "{\"odata.error\":{\"code\":\"TableAlreadyExists\",\"message\":{\"lang\":\"en-US\",\"value\":\"The table specified already exists.\"}}}")])
+  tr_dump(log, "client create table 409", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").create_table()))
+
+  tr_replies(log, [tr_r(204)])
+  tr_dump(log, "client delete", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").delete()))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "service delete table 404", tr_err(tr_svc(os.net, os.clock, os.rand, log).delete_table("t1")))
+
+  tr_replies(log, [tr_r(201, TR_ENTITY, {"ETag": "W/\"1\""})])
+  tr_dump(log, "add entity", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").add_entity(TR_ENTITY)))
+
+  tr_replies(log, [])
+  tr_dump(log, "add entity bad json", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").add_entity("{")))
+
+  tr_replies(log, [tr_r(200, TR_ENTITY, {"ETag": "W/\"1\""})])
+  tr_dump(log, "get entity", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").get_entity("p1", "r1")))
+
+  tr_replies(log, [tr_r(404, TR_NOT_FOUND)])
+  tr_dump(log, "get entity 404", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").get_entity("p1", "r1")))
+
+  tr_replies(log, [tr_r(204, "", {"ETag": "W/\"2\""})])
+  tr_dump(log, "update entity", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").update_entity(TR_ENTITY)))
+
+  tr_replies(log, [tr_r(204, "", {"ETag": "W/\"3\""})])
+  tr_dump(log, "upsert entity", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").upsert_entity(TR_ENTITY)))
+
+  tr_replies(log, [tr_r(204)])
+  tr_dump(log, "delete entity", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").delete_entity("p1", "r1")))
+
+  tr_replies(log, [tr_r(200, TR_PROPS, xml)])
+  tr_dump(log, "get properties", tr_err(tr_svc(os.net, os.clock, os.rand, log).get_properties()))
+
+  tr_replies(log, [tr_r(202)])
+  tr_dump(log, "set properties", tr_err(tr_svc(os.net, os.clock, os.rand, log).set_properties(ServiceProperties{})))
+
+  tr_replies(log, [tr_r(200, TR_STATS, xml)])
+  tr_dump(log, "get statistics", tr_err(tr_svc(os.net, os.clock, os.rand, log).get_statistics()))
+
+  tr_replies(log, [tr_r(200, TR_ACL, xml)])
+  tr_dump(log, "get access policy", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").get_access_policy()))
+
+  let ids = [0, 1, 2, 3, 4, 5].map(fn(i: Int) -> SignedIdentifier { SignedIdentifier{id: Some("id${i}"), access_policy: Some(AccessPolicy{permission: Some("r")})} })
+  tr_replies(log, [tr_r(400, "{\"odata.error\":{\"code\":\"InvalidXmlDocument\",\"message\":{\"lang\":\"en-US\",\"value\":\"XML specified is not syntactically valid.\"}}}")])
+  tr_dump(log, "set access policy too many", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").set_access_policy(ids)))
+
+  tr_replies(log, [tr_r(200, "{\"value\":[{\"TableName\":\"a\"}]}", {"x-ms-continuation-NextTableName": "b"}), tr_r(200, "{\"value\":[{\"TableName\":\"b\"}]}")])
+  var tp = tr_svc(os.net, os.clock, os.rand, log).new_list_tables_pager()
+  var terr: azcore.CallErr? = None
+  while tp.more() {
+    if let Err(e) = tp.next_page() {
+      terr = Some(e)
+      break
+    }
+  }
+  tr_dump(log, "list tables two pages", terr)
+
+  tr_replies(log, [tr_r(500, "{}")])
+  var ep = tr_svc(os.net, os.clock, os.rand, log).new_client("t1").new_list_entities_pager()
+  tr_dump(log, "list entities error", tr_err(ep.next_page()))
+
+  tr_replies(log, [tr_r(400, TR_NOT_FOUND)])
+  tr_dump(log, "submit transaction 400", tr_err(tr_svc(os.net, os.clock, os.rand, log).new_client("t1").submit_transaction([TransactionAction{action_type: "add", entity: TR_ENTITY}])))
+
+  let got = log.out.with(fn(var l: List[Str]) -> List[Str] { l })
+  // Known differences: an entity that is not JSON fails with std's JSON
+  // message (aztables' errors already say it so), and an invalid input's
+  // error says "invalid input: " first (azcore.CallErr's display); a
+  // span's status has the message alone, as Go's.
+  tr_compare(got, TRACE_GO, known: [
+    ("  ERR \"you cannot set more than five (5) access policies at a time\"", "  ERR \"invalid input: you cannot set more than five (5) access policies at a time\""),
+    ("  ERR \"unexpected end of JSON input\"", "  ERR \"invalid input: at $: invalid JSON: EOF\""),
+    ("  SPAN 1 parent=0 \"Client.AddEntity\" kind=1 ended=true status=1 \"*json.SyntaxError:\\nunexpected end of JSON input\"", "  SPAN 1 parent=0 \"Client.AddEntity\" kind=1 ended=true status=1 \"*json.SyntaxError:\\nat $: invalid JSON: EOF\""),
+  ])
+}

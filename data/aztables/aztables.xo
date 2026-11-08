@@ -128,7 +128,7 @@ fn new_core[fx: Effects](net: Net, clock: Clock, rand: Rand, endpoint: Str, auth
   if is_cosmos_endpoint(endpoint) {
     per_call.push(CosmosPatchTransformPolicy{})
   }
-  Core{endpoint: endpoint, pipeline: runtime.new_pipeline("aztables", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: per_call, per_retry: auth}, opts.client), cred: cred, rand: rand}
+  Core{endpoint: endpoint, pipeline: runtime.new_pipeline("aztables", VERSION, net, clock, rand, runtime.PipelineOptions{per_call: per_call, per_retry: auth, tracing_namespace: "Microsoft.Tables"}, opts.client), cred: cred, rand: rand}
 }
 
 /// `base` with `segment` joined to its path, its query kept
@@ -157,12 +157,45 @@ fn with_query(u: Str, query: List[(Str, Str)]) -> Str {
   if q == "" { base } else { "${base}?${q}" }
 }
 
-fn (c: Core) send(req: policy.Request, ok: List[Int]) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+/// Sends `req` carrying the method span's values `vs` (Go's ctx).
+fn (c: Core) send(req0: policy.Request, ok: List[Int], vs: Map[Str, Str] = {}) -> http.Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  var values = req0.values
+  for (k, v) in vs {
+    values.put(k, v)
+  }
+  let req = req0 with {values: values}
   let resp = c.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if !ok.contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
   }
   Ok(resp)
+}
+
+/// Go's runtime.StartSpan around a method (decision 0013): the span
+/// `name` from the values `vs` in progress, ended with the method's
+/// error (Go's deferred endSpan(err)). `f` gets the values its requests
+/// and nested calls carry, so a nested method opens no second span.
+fn traced[T, fx: Effects](c: Core[fx], vs: Map[Str, Str], name: Str, f: fn(Map[Str, Str]) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx)) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let sp = runtime.start_span(vs, name, c.pipeline.tracer)
+  let r = f(sp.values)
+  match r {
+    Ok(_) => sp.end()
+    Err(e) => sp.end(Some(span_desc(e)))
+  }
+  r
+}
+
+/// The errors aztables makes with errors.New.
+const GO_PLAIN_ERRORS: List[Str] = [ERR_EMPTY_TRANSACTION, ERR_TOO_MANY_ACCESS_POLICIES, ERR_PARTITION_KEY_ROW_KEY, ERR_INVALID_UPDATE_MODE, ERR_MISSING_SHARED_KEY]
+
+/// A method span's error status as Go's endSpan writes it (`%T:\n%s`):
+/// an invalid input is one of aztables' errors.New errors, or the entity's
+/// JSON failing to parse (Go's *json.SyntaxError).
+fn span_desc(e: azcore.CallErr) -> Str {
+  match e {
+    azcore.CallErr.InvalidInput(m) => if GO_PLAIN_ERRORS.contains(m) { "*errors.errorString:\n${m}" } else { "*json.SyntaxError:\n${m}" }
+    _ => runtime.error_desc(e)
+  }
 }
 
 /// The ETag response header, "" when absent.
