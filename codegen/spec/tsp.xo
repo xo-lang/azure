@@ -368,6 +368,11 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
   let alt_param = regexp.compile("(?:^|[^@])@alternateType\\(\\s*([A-Za-z0-9_]+)\\s*,\\s*\"([^\"]*)\"\\s*\\)\\s*(?:@[A-Za-z]+(?:\\([^)]*\\))?\\s*)*([A-Za-z0-9_]+)\\??\\s*:") ?? e => return Err(e.display())
   let unscoped_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*\"?([A-Za-z0-9_]+)\"?\\s*,?\\s*\\)") ?? e => return Err(e.display())
   let override_re = regexp.compile("@@(?:Azure\\.ClientGenerator\\.Core\\.)?override\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
+  // `@@clientLocation(Model.prop, Iface.op)`: a property of a parameter
+  // model the operation spreads (armreservations'
+  // Quota.QuotaPutBaseParam.subscriptionId onto
+  // Quota.CurrentQuotaLimitBases.createOrUpdate)
+  let prop_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\.([A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_.]*\\.[a-z][A-Za-z0-9_]*)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let param_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)::parameters\\.([A-Za-z0-9_]+)\\s*,\\s*([A-Za-z0-9_.]+)\\s*(?:,\\s*\"([^\"]*)\"\\s*)?\\)") ?? e => return Err(e.display())
   let client_loc = regexp.compile("@@clientLocation\\(\\s*([A-Za-z0-9_.]+)\\s*,\\s*(?:\"([^\"]+)\"|([A-Za-z0-9_.]+))\\s*,\\s*\"([^\"]*)\"\\s*\\)") ?? e => return Err(e.display())
   let body_root = regexp.compile("([A-Za-z0-9_]+)\\s+is\\s+ArmResourceAction[A-Za-z]*<\\s*[A-Za-z0-9_.]+\\s*,\\s*\\{\\s*(?:/\\*\\*([^*]*)\\*/\\s*)?@bodyRoot\\s+([A-Za-z0-9_]+)\\s*:\\s*([A-Za-z0-9_.]+)\\s*;\\s*\\}") ?? e => return Err(e.display())
@@ -764,13 +769,49 @@ pub fn renames(texts: List[Str]) -> Renames ! Str {
       if (scope != "" && !for_go(scope)) || (m[1] ?? "") != (m[3] ?? "") {
         continue
       }
-      let segs = (m[1] ?? "").split(".")
+      var segs = (m[1] ?? "").split(".")
       if segs.len() < 2 {
+        // an `@@override` operation: the one it overrides
+        // (armpolicyinsights' componentPolicyStatesListQueryResultsForResourceGroup,
+        // ComponentPolicyStatesOperationGroup.listQueryResultsForResourceGroup)
+        for t in texts {
+          for ow in override_re.find_all(t) {
+            let o = override_re.captures(ow) ?? continue
+            if (o[2] ?? "") == (m[1] ?? "") && ((o[3] ?? "") == "" || for_go(o[3] ?? "")) {
+              segs = (o[1] ?? "").split(".")
+            }
+          }
+        }
+        if segs.len() < 2 {
+          continue
+        }
+      }
+      let iface = segs[segs.len() - 2]
+      let op = segs[segs.len() - 1]
+      // a namespace's own operation keeps its bare operationId
+      // (armreservations' Reservations.getAppliedReservationList,
+      // GetAppliedReservationList)
+      let own = !texts.any(fn(t: Str) -> Bool { t.contains("interface ${iface} ") || t.contains("interface ${iface}\n") })
+      let id = ids.get("${iface}.${op}".to_lower()) ?? (if own { moved_id("", op) } else { moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, op) })
+      r.method_params.push("${id.to_lower()}#${m[2] ?? ""}")
+    }
+    for whole in prop_loc.find_all(text) {
+      let m = prop_loc.captures(whole) ?? continue
+      let scope = m[4] ?? ""
+      if scope != "" && !for_go(scope) {
+        continue
+      }
+      let model = (m[1] ?? "").split(".").last() ?? ""
+      let segs = (m[3] ?? "").split(".")
+      if segs.len() < 2 || model == "" || model[0..1] < "A" || model[0..1] > "Z" {
         continue
       }
       let iface = segs[segs.len() - 2]
       let op = segs[segs.len() - 1]
-      let id = ids.get("${iface}.${op}".to_lower()) ?? "${iface}_${op[0..1].to_upper()}${op[1..op.len()]}"
+      if !texts.any(fn(t: Str) -> Bool { t.contains("interface ${iface} ") }) {
+        continue
+      }
+      let id = ids.get("${iface}.${op}".to_lower()) ?? moved_id(moved.get("${iface}.${op}".to_lower()) ?? iface, op)
       r.method_params.push("${id.to_lower()}#${m[2] ?? ""}")
     }
     for whole in client_init.find_all(text) {
@@ -1069,11 +1110,15 @@ fn override_path_order(text: Str, name: Str) -> List[Str] {
       // the spread's own name, its namespace and type arguments dropped
       // (`...ResourceGroupParameter` in armappservice,
       // `...Azure.ResourceManager.CommonTypes.ResourceGroupNameParameter`
-      // in armdataboxedge); the subscription is the client's, not the
-      // method's
+      // in armdataboxedge); the subscription is the client's unless a
+      // `@@clientLocation` moves it onto the method (armpolicyinsights'
+      // policyEventsListQueryResultsForResourceGroup: policyEventsResource,
+      // then subscriptionID), and only a method's parameters are reordered
       let spread = (l.trim_prefix("...").trim_suffix(",").split("<").get(0) ?? "").split(".").last() ?? ""
       if spread == "ResourceGroupParameter" || spread == "ResourceGroupNameParameter" {
         out.push("resourceGroupName")
+      } else if spread == "SubscriptionIdParameter" {
+        out.push("subscriptionId")
       }
       path = false
       other = false

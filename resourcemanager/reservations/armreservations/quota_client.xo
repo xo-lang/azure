@@ -13,12 +13,11 @@ use github.com/xo-lang/azure/runtime
 /// QuotaClient: the Quota operations (Go's armreservations.QuotaClient).
 pub struct QuotaClient[fx: Effects] {
   setup: arm.Setup[fx]
-  subscription_id: Str
 }
 
-pub fn new_quota_client[fx: Effects](net: Net, clock: Clock, rand: Rand, subscription_id: Str, cred: azcore.TokenCredential[fx], opts: arm.ClientOptions[fx] = arm.ClientOptions{}) -> QuotaClient[fx] ! Str {
+pub fn new_quota_client[fx: Effects](net: Net, clock: Clock, rand: Rand, cred: azcore.TokenCredential[fx], opts: arm.ClientOptions[fx] = arm.ClientOptions{}) -> QuotaClient[fx] ! Str {
   let setup = arm.new_pipeline(MODULE, VERSION, net, clock, rand, cred, opts)?
-  Ok(QuotaClient{setup: setup, subscription_id: subscription_id})
+  Ok(QuotaClient{setup: setup})
 }
 
 /// QuotaClientListOptions: the optional parameters of QuotaClient.new_list_pager.
@@ -36,12 +35,12 @@ fn quota_list_handle(resp: http.Response) -> QuotaClientListResponse ! Str {
   Ok(QuotaClientListResponse{quota_limits: v, etag: runtime.header_value(resp, "ETag")})
 }
 
-fn (c: QuotaClient) list_create_request(provider_id: Str, location: Str, options: QuotaClientListOptions) -> policy.Request ! azcore.CallErr {
+fn (c: QuotaClient) list_create_request(subscription_id: Str, provider_id: Str, location: Str, options: QuotaClientListOptions) -> policy.Request ! azcore.CallErr {
   var path = "/subscriptions/{subscriptionId}/providers/Microsoft.Capacity/resourceProviders/{providerId}/locations/{location}/serviceLimits"
-  if c.subscription_id == "" {
+  if subscription_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter subscriptionID cannot be empty"))
   }
-  path = path.replace("{subscriptionId}", url.path_escape(c.subscription_id))
+  path = path.replace("{subscriptionId}", url.path_escape(subscription_id))
   if provider_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter providerID cannot be empty"))
   }
@@ -57,8 +56,8 @@ fn (c: QuotaClient) list_create_request(provider_id: Str, location: Str, options
 }
 
 /// Gets a list of current quotas (service limits) and usage for all resources. The response from the list quota operation can be leveraged to request quota updates.
-pub fn (c: QuotaClient[fx]) new_list_pager(provider_id: Str, location: Str, options: QuotaClientListOptions = QuotaClientListOptions{}) -> runtime.Pager[QuotaClientListResponse, fx] ! azcore.CallErr {
-  let req = c.list_create_request(provider_id, location, options)?
+pub fn (c: QuotaClient[fx]) new_list_pager(subscription_id: Str, provider_id: Str, location: Str, options: QuotaClientListOptions = QuotaClientListOptions{}) -> runtime.Pager[QuotaClientListResponse, fx] ! azcore.CallErr {
+  let req = c.list_create_request(subscription_id, provider_id, location, options)?
   Ok(runtime.new_next_link_pager(c.setup.pipeline, req, fn(r: http.Response) -> QuotaClientListResponse ! Str { quota_list_handle(r) }, c.setup.endpoint, fn(r: QuotaClientListResponse) -> Str? { r.quota_limits.next_link }))
 }
 
@@ -77,12 +76,12 @@ fn quota_get_handle(resp: http.Response) -> QuotaClientGetResponse ! Str {
   Ok(QuotaClientGetResponse{current_quota_limit_base: v, etag: runtime.header_value(resp, "ETag")})
 }
 
-fn (c: QuotaClient) get_create_request(provider_id: Str, location: Str, resource_name: Str, options: QuotaClientGetOptions) -> policy.Request ! azcore.CallErr {
+fn (c: QuotaClient) get_create_request(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, options: QuotaClientGetOptions) -> policy.Request ! azcore.CallErr {
   var path = "/subscriptions/{subscriptionId}/providers/Microsoft.Capacity/resourceProviders/{providerId}/locations/{location}/serviceLimits/{resourceName}"
-  if c.subscription_id == "" {
+  if subscription_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter subscriptionID cannot be empty"))
   }
-  path = path.replace("{subscriptionId}", url.path_escape(c.subscription_id))
+  path = path.replace("{subscriptionId}", url.path_escape(subscription_id))
   if provider_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter providerID cannot be empty"))
   }
@@ -102,8 +101,8 @@ fn (c: QuotaClient) get_create_request(provider_id: Str, location: Str, resource
 }
 
 /// Get the current quota (service limit) and usage of a resource. You can use the response from the GET operation to submit quota update request.
-pub fn (c: QuotaClient) get(provider_id: Str, location: Str, resource_name: Str, options: QuotaClientGetOptions = QuotaClientGetOptions{}) -> QuotaClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = c.get_create_request(provider_id, location, resource_name, options)?
+pub fn (c: QuotaClient) get(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, options: QuotaClientGetOptions = QuotaClientGetOptions{}) -> QuotaClientGetResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let req = c.get_create_request(subscription_id, provider_id, location, resource_name, options)?
   let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if ![200].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
@@ -127,12 +126,12 @@ fn quota_create_or_update_handle(resp: http.Response) -> QuotaClientCreateOrUpda
   Ok(QuotaClientCreateOrUpdateResponse{current_quota_limit_base: v})
 }
 
-fn (c: QuotaClient) create_or_update_create_request(provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginCreateOrUpdateOptions) -> policy.Request ! azcore.CallErr {
+fn (c: QuotaClient) create_or_update_create_request(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginCreateOrUpdateOptions) -> policy.Request ! azcore.CallErr {
   var path = "/subscriptions/{subscriptionId}/providers/Microsoft.Capacity/resourceProviders/{providerId}/locations/{location}/serviceLimits/{resourceName}"
-  if c.subscription_id == "" {
+  if subscription_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter subscriptionID cannot be empty"))
   }
-  path = path.replace("{subscriptionId}", url.path_escape(c.subscription_id))
+  path = path.replace("{subscriptionId}", url.path_escape(subscription_id))
   if provider_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter providerID cannot be empty"))
   }
@@ -153,11 +152,11 @@ fn (c: QuotaClient) create_or_update_create_request(provider_id: Str, location: 
 }
 
 /// Create or update the quota (service limits) of a resource to the requested value. Steps: 1. Make the Get request to get the quota information for specific resource. 2. To increase the quota, update the limit field in the response from Get request to new value. 3. Submit the JSON to the quota request API to update the quota. The Create quota request may be constructed as follows. The PUT operation can be used to update the quota.
-pub fn (c: QuotaClient[fx]) begin_create_or_update(provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginCreateOrUpdateOptions = QuotaClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[QuotaClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+pub fn (c: QuotaClient[fx]) begin_create_or_update(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginCreateOrUpdateOptions = QuotaClientBeginCreateOrUpdateOptions{}) -> runtime.Poller[QuotaClientCreateOrUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
     return runtime.resume_poller(c.setup.pipeline, options.resume_token, "QuotaClientCreateOrUpdateResponse", fn(r: http.Response) -> QuotaClientCreateOrUpdateResponse ! Str { quota_create_or_update_handle(r) })
   }
-  let req = c.create_or_update_create_request(provider_id, location, resource_name, create_quota_request, options)?
+  let req = c.create_or_update_create_request(subscription_id, provider_id, location, resource_name, create_quota_request, options)?
   let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if ![200, 201].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))
@@ -181,12 +180,12 @@ fn quota_update_handle(resp: http.Response) -> QuotaClientUpdateResponse ! Str {
   Ok(QuotaClientUpdateResponse{current_quota_limit_base: v})
 }
 
-fn (c: QuotaClient) update_create_request(provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginUpdateOptions) -> policy.Request ! azcore.CallErr {
+fn (c: QuotaClient) update_create_request(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginUpdateOptions) -> policy.Request ! azcore.CallErr {
   var path = "/subscriptions/{subscriptionId}/providers/Microsoft.Capacity/resourceProviders/{providerId}/locations/{location}/serviceLimits/{resourceName}"
-  if c.subscription_id == "" {
+  if subscription_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter subscriptionID cannot be empty"))
   }
-  path = path.replace("{subscriptionId}", url.path_escape(c.subscription_id))
+  path = path.replace("{subscriptionId}", url.path_escape(subscription_id))
   if provider_id == "" {
     return Err(azcore.CallErr.InvalidInput("parameter providerID cannot be empty"))
   }
@@ -207,11 +206,11 @@ fn (c: QuotaClient) update_create_request(provider_id: Str, location: Str, resou
 }
 
 /// Update the quota (service limits) of this resource to the requested value. • To get the quota information for specific resource, send a GET request. • To increase the quota, update the limit field from the GET response to a new value. • To update the quota value, submit the JSON response to the quota request API to update the quota. • To update the quota. use the PATCH operation.
-pub fn (c: QuotaClient[fx]) begin_update(provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginUpdateOptions = QuotaClientBeginUpdateOptions{}) -> runtime.Poller[QuotaClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+pub fn (c: QuotaClient[fx]) begin_update(subscription_id: Str, provider_id: Str, location: Str, resource_name: Str, create_quota_request: CurrentQuotaLimitBase, options: QuotaClientBeginUpdateOptions = QuotaClientBeginUpdateOptions{}) -> runtime.Poller[QuotaClientUpdateResponse, fx] ! azcore.CallErr uses (net.dial, clock, rand, fx) {
   if options.resume_token != "" {
     return runtime.resume_poller(c.setup.pipeline, options.resume_token, "QuotaClientUpdateResponse", fn(r: http.Response) -> QuotaClientUpdateResponse ! Str { quota_update_handle(r) })
   }
-  let req = c.update_create_request(provider_id, location, resource_name, create_quota_request, options)?
+  let req = c.update_create_request(subscription_id, provider_id, location, resource_name, create_quota_request, options)?
   let resp = c.setup.pipeline.send(req) ?? e => return Err(azcore.CallErr.Send(e))
   if ![200, 201].contains(resp.status) {
     return Err(azcore.CallErr.Response(azcore.response_error(req.method, req.url, resp)))

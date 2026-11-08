@@ -116,7 +116,7 @@ test "@@override for go: the custom operation's path parameter order" {
   let main = "interface Defs {\n  @operationId(\"SqlResources_GetSqlRoleDefinition\")\n  getSqlRoleDefinition is ArmResourceRead<D>;\n}\n"
   let client = "op getCustomized(\n  ...Azure.ResourceManager.ApiVersionParameter,\n  ...Azure.ResourceManager.SubscriptionIdParameter,\n  ...Azure.ResourceManager.Legacy.Provider,\n\n  #suppress \"x\" \"y\"\n  @path\n  roleDefinitionId: string,\n\n  ...Azure.ResourceManager.ResourceGroupParameter,\n\n  @path\n  @pattern(\"^[a-z]+$\")\n  accountName: string,\n): ArmResponse<D>;\n\n@@override(Defs.getSqlRoleDefinition, getCustomized, \"go,java\");\n@@override(Defs.other, getCustomized, \"java\");\n"
   let r = renames([main, client]) ?? e => fault(e)
-  expect(r.param_order.get("sqlresources_getsqlroledefinition")) == Some(["roleDefinitionId", "resourceGroupName", "accountName"])
+  expect(r.param_order.get("sqlresources_getsqlroledefinition")) == Some(["subscriptionId", "roleDefinitionId", "resourceGroupName", "accountName"])
   expect(r.param_order.len()) == 1
 }
 
@@ -124,14 +124,14 @@ test "@@override for go keyed by an unscoped @@clientLocation's operationId" {
   let ops = "interface DefsGroup {\n  getDef is ArmResourceRead<D>;\n}\n@@clientLocation(\n  DefsGroup.getDef,\n  SqlResources\n);\n"
   let client = "op getCustomized(\n  ...Azure.ResourceManager.SubscriptionIdParameter,\n  @path\n  defId: string,\n  ...Azure.ResourceManager.ResourceGroupParameter,\n): ArmResponse<D>;\n@@override(DefsGroup.getDef, getCustomized, \"go\");\n"
   let r = renames([ops, client]) ?? e => fault(e)
-  expect(r.param_order.get("sqlresources_getdef")) == Some(["defId", "resourceGroupName"])
+  expect(r.param_order.get("sqlresources_getdef")) == Some(["subscriptionId", "defId", "resourceGroupName"])
 }
 
 test "@@override keyed by a negation-scoped move, and of a namespace's own operation (armdatabox)" {
   let ops = "interface JobResources {\n  markDevicesShipped is ArmResourceActionSync<J, R, NoContentResponse>;\n}\n@@clientLocation(JobResources.markDevicesShipped, \"Jobs\", \"!csharp\");\n"
   let client = "op shipCustomized(\n  ...Azure.ResourceManager.SubscriptionIdParameter,\n  @path\n  jobName: string,\n  ...Azure.ResourceManager.ResourceGroupParameter,\n): NoContentResponse;\nop mitigateCustomized(\n  @path\n  jobName: string,\n  ...Azure.ResourceManager.ResourceGroupParameter,\n): NoContentResponse;\n@@override(JobResources.markDevicesShipped, shipCustomized);\n@@override(mitigate, mitigateCustomized);\n"
   let r = renames([ops, client]) ?? e => fault(e)
-  expect(r.param_order.get("jobs_markdevicesshipped")) == Some(["jobName", "resourceGroupName"])
+  expect(r.param_order.get("jobs_markdevicesshipped")) == Some(["subscriptionId", "jobName", "resourceGroupName"])
   expect(r.param_order.get("mitigate")) == Some(["jobName", "resourceGroupName"])
 }
 
@@ -139,7 +139,7 @@ test "@@override's resource group spread by its bare or CommonTypes name (armapp
   let ops = "interface Users {\n  @operationId(\"Users_Get\")\n  get is ArmResourceRead<U>;\n  @operationId(\"Users_List\")\n  list is ArmResourceListByParent<U>;\n}\n"
   let client = "op getCustomized(\n  ...Azure.ResourceManager.CommonTypes.SubscriptionIdParameter,\n  @path\n  deviceName: string,\n  @path name: string,\n  ...Azure.ResourceManager.CommonTypes.ResourceGroupNameParameter,\n): U;\nop listCustomized(\n  ...ResourceGroupParameter,\n  @path\n  deviceName: string,\n): U;\n@@override(Users.get, getCustomized, \"python,go\");\n@@override(\n  Users.list,\n  listCustomized\n);\n"
   let r = renames([ops, client]) ?? e => fault(e)
-  expect(r.param_order.get("users_get")) == Some(["deviceName", "name", "resourceGroupName"])
+  expect(r.param_order.get("users_get")) == Some(["subscriptionId", "deviceName", "name", "resourceGroupName"])
   expect(r.param_order.get("users_list")) == Some(["resourceGroupName", "deviceName"])
 }
 
@@ -285,4 +285,19 @@ test "an ArmProviderAction operation, by its moved operationId (armmonitor)" {
   let r = renames([routes, compat]) ?? e => fault(e)
   expect(r.provider_action_ops) == ["alertruleincidents_listbyalertrule"]
   expect(r.content_type_ops) == []
+}
+
+test "a subscriptionId moved onto an @@override operation, in its order (armpolicyinsights)" {
+  let client = "op policyEventsListForRg(\n  ...ApiVersionParameter,\n\n  @path\n  @segment(\"policyEvents\")\n  policyEventsResource: PolicyEventsResourceType,\n\n  ...SubscriptionIdParameter,\n  ...ResourceGroupParameter,\n): R;\n@@override(\n  PolicyEventsOperationGroup.listQueryResultsForResourceGroup,\n  policyEventsListForRg,\n  \"!java,!python\"\n);\n@@clientLocation(\n  policyEventsListForRg::parameters.subscriptionId,\n  policyEventsListForRg\n);\n@@clientLocation(PolicyEventsOperationGroup.listQueryResultsForResourceGroup, \"PolicyEvents\");\n"
+  let ops = "interface PolicyEventsOperationGroup {\n  @list\n  listQueryResultsForResourceGroup(...ApiVersionParameter): R;\n}\n"
+  let r = renames([client, ops]) ?? e => fault(e)
+  expect(r.method_params) == ["policyevents_listqueryresultsforresourcegroup#subscriptionId"]
+  expect(r.param_order.get("policyevents_listqueryresultsforresourcegroup")) == Some(["policyEventsResource", "subscriptionId", "resourceGroupName"])
+}
+
+test "a subscriptionId moved onto a namespace's operation or from a parameter model (armreservations)" {
+  let client = "@@clientLocation(getAppliedReservationList, \"AzureReservationAPIClient\", \"go\");\n@@clientLocation(\n  Reservations.getAppliedReservationList::parameters.subscriptionId,\n  Reservations.getAppliedReservationList\n);\n@@clientLocation(\n  Quota.QuotaPutBaseParam.subscriptionId,\n  Quota.CurrentQuotaLimitBases.createOrUpdate\n);\n"
+  let ops = "namespace Quota;\ninterface CurrentQuotaLimitBases {\n  @operationId(\"Quota_CreateOrUpdate\")\n  createOrUpdate is ArmResourceCreateOrReplaceAsync<CurrentQuotaLimitBase>;\n}\n"
+  let r = renames([client, ops]) ?? e => fault(e)
+  expect(r.method_params) == ["getappliedreservationlist#subscriptionId", "quota_createorupdate#subscriptionId"]
 }
