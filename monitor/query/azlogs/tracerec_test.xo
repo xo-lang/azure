@@ -1,0 +1,189 @@
+// A recording tracing.Provider, as decision 0013 compares spans with
+// Go: armstorage's and aztables' recorder (tracing_test.xo there),
+// with the fake answering any of the given hosts. The four monitor
+// modules carry the same copy of this file.
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/tracing
+
+const TR_SPAN: Str = "test.span"
+
+struct TrRec {
+  pub parent: Int
+  pub name: Str
+  pub kind: Int
+  pub lines: List[Str] = []
+  pub status: Str = ""
+  pub ended: Bool = false
+}
+
+struct TrReply {
+  pub status: Int = 200
+  pub body: Str = ""
+  pub headers: Map[Str, Str] = {}
+}
+
+struct TrLog {
+  out: Mutex[List[Str]]
+  spans: Mutex[List[TrRec]]
+  replies: Mutex[List[TrReply]]
+}
+
+fn tr_note(log: TrLog, s: Str) {
+  log.out.with(fn(var l: List[Str]) { l.push(s) })
+}
+
+fn tr_update(log: TrLog, id: Int, f: fn(TrRec) -> TrRec) {
+  log.spans.with(fn(var l: List[TrRec]) { l[id - 1] = f(l[id - 1]) })
+}
+
+/// An attribute as the Go program prints it: `key=<Go type>:<value>`,
+/// the User-Agent as UA and the client request id as ID.
+fn tr_attr(a: tracing.Attribute) -> Str {
+  let (t, v) = match a.value {
+    tracing.Value.Str(s) => ("string", s)
+    tracing.Value.Int(i) => ("int", "${i}")
+    tracing.Value.Float(x) => ("float64", "${x}")
+    tracing.Value.Bool(b) => ("bool", if b { "true" } else { "false" })
+  }
+  let shown = if a.key == "http.user_agent" { "UA" } else if a.key == "az.client_request_id" { "ID" } else { v }
+  "${a.key}=${t}:${shown}"
+}
+
+fn tr_span_id(ctx: tracing.Context) -> Int {
+  match ctx.values.get(TR_SPAN) {
+    Some(v) => Int.parse(v) ?? 0
+    None => 0
+  }
+}
+
+fn tr_span(log: TrLog, id: Int) -> tracing.Span {
+  tracing.new_span(tracing.SpanImpl{
+    end: Some(fn() { tr_update(log, id, fn(r: TrRec) -> TrRec { r with {ended: true} }) }),
+    set_attributes: Some(fn(attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + attrs.map(fn(a: tracing.Attribute) -> Str { "    ATTR +${tr_attr(a)}" })} })
+    }),
+    add_event: Some(fn(name: Str, attrs: List[tracing.Attribute]) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {lines: r.lines + ["    EVENT ${name}"]} })
+    }),
+    set_status: Some(fn(code: tracing.SpanStatus, desc: Str) {
+      tr_update(log, id, fn(r: TrRec) -> TrRec { r with {status: "${code.code()} ${tr_q(desc)}"} })
+    }),
+  })
+}
+
+/// A provider recording every tracer it makes and every span.
+fn tr_provider(log: TrLog) -> tracing.Provider {
+  tracing.new_provider(fn(module: Str, version: Str) -> tracing.Tracer {
+    tr_note(log, "TRACER ${module} ${version}")
+    let start = fn(ctx: tracing.Context, name: Str, opts: tracing.SpanOptions) -> (tracing.Context, tracing.Span) {
+      let rec = TrRec{parent: tr_span_id(ctx), name: name, kind: opts.kind.code(), lines: opts.attributes.map(fn(a: tracing.Attribute) -> Str { "    ATTR ${tr_attr(a)}" })}
+      let id = log.spans.with(fn(var l: List[TrRec]) -> Int {
+        l.push(rec)
+        l.len()
+      })
+      var vs = ctx.values
+      vs.put(TR_SPAN, "${id}")
+      (tracing.Context{values: vs}, tr_span(log, id))
+    }
+    tracing.new_tracer(start, span_from_context: Some(fn(ctx: tracing.Context) -> tracing.Span {
+      let id = tr_span_id(ctx)
+      if id == 0 { tracing.Span{} } else { tr_span(log, id) }
+    }))
+  })
+}
+
+/// Go's %q of printable ASCII text with `\n`.
+fn tr_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+}
+
+/// The case's error and spans, as the Go program dumps them, then a
+/// fresh span list.
+fn tr_dump(log: TrLog, name: Str, err: azcore.CallErr?) {
+  tr_note(log, "CASE ${name} err=${if err.is_some() { "true" } else { "false" }}")
+  if let Some(e) = err {
+    tr_note(log, "  ERR ${tr_q(e.display())}")
+  }
+  let spans = log.spans.with(fn(var l: List[TrRec]) -> List[TrRec] {
+    let out = l
+    l = []
+    out
+  })
+  var i = 0
+  for r in spans {
+    i += 1
+    tr_note(log, "  SPAN ${i} parent=${r.parent} ${tr_q(r.name)} kind=${r.kind} ended=${if r.ended { "true" } else { "false" }} status=${r.status}")
+    for line in r.lines {
+      tr_note(log, line)
+    }
+  }
+}
+
+fn tr_err[T](r: Result[T, azcore.CallErr]) -> azcore.CallErr? {
+  match r {
+    Ok(_) => None
+    Err(e) => Some(e)
+  }
+}
+fn tr_compare(got: List[Str], want: List[Str], known: List[(Str, Str)] = []) {
+  var g = got
+  for (go_line, ours) in known {
+    let i = want.index_of(go_line) ?? fault("KNOWN line not in Go's output: ${go_line}")
+    let j = g.index_of(ours) ?? fault("KNOWN line not in ours: ${ours}")
+    if i != j {
+      fault("KNOWN line ${go_line} at ${i}, ours at ${j}")
+    }
+    g[j] = go_line
+  }
+  var k = 0
+  while k < want.len() || k < g.len() {
+    let a = want.get(k) ?? "<end>"
+    let b = g.get(k) ?? "<end>"
+    if a != b {
+      fault("line ${k}:\n  go:   ${a}\n  ours: ${b}")
+    }
+    k += 1
+  }
+}
+
+fn tr_new_log(net: testing.FakeNet, hosts: List[Str]) -> TrLog {
+  let log = TrLog{out: Mutex[List[Str]].new([]), spans: Mutex[List[TrRec]].new([]), replies: Mutex[List[TrReply]].new([])}
+  let h = fn(req: http.Request) -> http.Response {
+    let q = req.raw_query()
+    tr_note(log, "REQ ${req.method} ${req.url.scheme}://${req.url.host}${req.escaped_path()}${if q == "" { "" } else { "?${q}" }}")
+    let r = log.replies.with(fn(var l: List[TrReply]) -> TrReply {
+      if l.is_empty() {
+        return TrReply{}
+      }
+      let first = l[0]
+      l = l[1..l.len()]
+      first
+    })
+    var hs: Map[Str, Str] = {"Content-Type": "application/json"}
+    for (k, v) in r.headers {
+      hs.put(k, v)
+    }
+    http.Response{status: r.status, headers: hs, body: r.body.bytes()}
+  }
+  for host in hosts {
+    for m in ["GET", "PUT", "POST", "PATCH", "DELETE"] {
+      net.handle("${m} https://${host}/{rest...}", h)
+    }
+  }
+  log
+}
+
+fn tr_replies(log: TrLog, rs: List[TrReply]) {
+  log.replies.with(fn(var l: List[TrReply]) { l = rs })
+}
+
+fn tr_r(status: Int, body: Str = "", headers: Map[Str, Str] = {}) -> TrReply {
+  TrReply{status: status, body: body, headers: headers}
+}
+
+fn tr_got(log: TrLog) -> List[Str] {
+  log.out.with(fn(var l: List[Str]) -> List[Str] { l })
+}

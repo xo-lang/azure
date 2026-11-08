@@ -80,8 +80,8 @@ fn (c: Client) query_request(url_path: Str, body: QueryBody, options: QueryOptio
   policy.Request{method: "POST", url: join_paths("${c.endpoint}/${API_VERSION}", url_path), headers: headers, body: body.to_json().bytes()}
 }
 
-fn (c: Client) send_query(req: policy.Request) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
-  let resp = c.send(req)?
+fn (c: Client) send_query(vs: Map[Str, Str], req: policy.Request) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = c.send(runtime.with_values(req, vs))?
   parse_query_results(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type QueryResults: ${e}"))
 }
 
@@ -97,25 +97,31 @@ fn (c: Client) send(req: policy.Request) -> http.Response ! azcore.CallErr uses 
 /// `additional_workspaces`). A partial failure is a success whose
 /// `error` is set.
 pub fn (c: Client) query_workspace(workspace_id: Str, body: QueryBody, options: QueryWorkspaceOptions = QueryWorkspaceOptions{}) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
-  if workspace_id == "" {
-    return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
-  }
-  c.send_query(c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+  runtime.traced(c.pipeline.tracer, {}, "Client.QueryWorkspace", fn(vs: Map[Str, Str]) -> QueryResults ! azcore.CallErr uses net.dial, clock, rand, fx {
+    if workspace_id == "" {
+      return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
+    }
+    c.send_query(vs, c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+  })
 }
 
 /// Runs `body`'s query against the Azure resource `resource_id`
 /// (`/subscriptions/.../providers/...`). As Go, the ID is put in the path
 /// as it is, unescaped and unchecked.
 pub fn (c: Client) query_resource(resource_id: Str, body: QueryBody, options: QueryResourceOptions = QueryResourceOptions{}) -> QueryResults ! azcore.CallErr uses (net.dial, clock, rand) {
-  c.send_query(c.query_request("/${resource_id}/query", body, options.options))
+  runtime.traced(c.pipeline.tracer, {}, "Client.QueryResource", fn(vs: Map[Str, Str]) -> QueryResults ! azcore.CallErr uses net.dial, clock, rand, fx {
+    c.send_query(vs, c.query_request("/${resource_id}/query", body, options.options))
+  })
 }
 
 /// Runs several workspace queries in one request; each answer has its own
 /// status, and a failed one is not an error of the call.
 pub fn (c: Client) query_batch(body: BatchRequest, options: QueryBatchOptions = QueryBatchOptions{}) -> BatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = policy.Request{method: "POST", url: join_paths("${c.endpoint}/${API_VERSION}", "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes()}
-  let resp = c.send(req)?
-  parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+  runtime.traced(c.pipeline.tracer, {}, "Client.QueryBatch", fn(vs: Map[Str, Str]) -> BatchResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let req = policy.Request{method: "POST", url: join_paths("${c.endpoint}/${API_VERSION}", "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes(), values: vs}
+    let resp = c.send(req)?
+    parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+  })
 }
 
 /// `root` with `segment` joined to its path, its query kept after it

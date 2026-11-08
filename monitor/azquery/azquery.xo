@@ -126,8 +126,8 @@ fn (c: LogsClient) query_request(url_path: Str, body: Body, options: LogsQueryOp
   policy.Request{method: "POST", url: runtime.join_paths(c.host, url_path), headers: headers, body: body.to_json().bytes()}
 }
 
-fn (c: LogsClient) send_query(req: policy.Request) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
-  let resp = send(c.pipeline, req)?
+fn (c: LogsClient) send_query(vs: Map[Str, Str], req: policy.Request) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = send(c.pipeline, runtime.with_values(req, vs))?
   parse_results(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type Results: ${e}"))
 }
 
@@ -143,25 +143,31 @@ fn send[fx: Effects](p: runtime.Pipeline[fx], req: policy.Request) -> http.Respo
 /// `additional_workspaces`). A partial failure is a success whose
 /// `error` is set.
 pub fn (c: LogsClient) query_workspace(workspace_id: Str, body: Body, options: LogsClientQueryWorkspaceOptions = LogsClientQueryWorkspaceOptions{}) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
-  if workspace_id == "" {
-    return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
-  }
-  c.send_query(c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+  runtime.traced(c.pipeline.tracer, {}, "LogsClient.QueryWorkspace", fn(vs: Map[Str, Str]) -> Results ! azcore.CallErr uses net.dial, clock, rand, fx {
+    if workspace_id == "" {
+      return Err(azcore.CallErr.InvalidInput("parameter workspaceID cannot be empty"))
+    }
+    c.send_query(vs, c.query_request("/workspaces/${url.path_escape(workspace_id)}/query", body, options.options))
+  })
 }
 
 /// Runs `body`'s query against the Azure resource `resource_id`
 /// (`/subscriptions/.../providers/...`). As Go, the ID is put in the path
 /// as it is, unescaped and unchecked.
 pub fn (c: LogsClient) query_resource(resource_id: Str, body: Body, options: LogsClientQueryResourceOptions = LogsClientQueryResourceOptions{}) -> Results ! azcore.CallErr uses (net.dial, clock, rand) {
-  c.send_query(c.query_request("/${resource_id}/query", body, options.options))
+  runtime.traced(c.pipeline.tracer, {}, "LogsClient.QueryResource", fn(vs: Map[Str, Str]) -> Results ! azcore.CallErr uses net.dial, clock, rand, fx {
+    c.send_query(vs, c.query_request("/${resource_id}/query", body, options.options))
+  })
 }
 
 /// Runs several workspace queries in one request; each answer has its own
 /// status, and a failed one is not an error of the call.
 pub fn (c: LogsClient) query_batch(body: BatchRequest, options: LogsClientQueryBatchOptions = LogsClientQueryBatchOptions{}) -> BatchResponse ! azcore.CallErr uses (net.dial, clock, rand) {
-  let req = policy.Request{method: "POST", url: runtime.join_paths(c.host, "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes()}
-  let resp = send(c.pipeline, req)?
-  parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+  runtime.traced(c.pipeline.tracer, {}, "LogsClient.QueryBatch", fn(vs: Map[Str, Str]) -> BatchResponse ! azcore.CallErr uses net.dial, clock, rand, fx {
+    let req = policy.Request{method: "POST", url: runtime.join_paths(c.host, "/\$batch"), headers: [("Accept", "application/json"), ("Content-Type", "application/json")], body: body.to_json().bytes(), values: vs}
+    let resp = send(c.pipeline, req)?
+    parse_batch_response(resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type BatchResponse: ${e}"))
+  })
 }
 
 /// Options of MetricsClient.query_resource: each is a query parameter
@@ -219,6 +225,10 @@ fn (c: MetricsClient) get_request(resource_uri: Str, suffix: Str, q: url.Values)
 /// The metrics of the Azure resource `resource_uri`
 /// (`subscriptions/.../providers/...`, put in the path as it is).
 pub fn (c: MetricsClient) query_resource(resource_uri: Str, options: MetricsClientQueryResourceOptions = MetricsClientQueryResourceOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  runtime.traced(c.pipeline.tracer, {}, "MetricsClient.QueryResource", fn(vs: Map[Str, Str]) -> Response ! azcore.CallErr uses net.dial, clock, rand, fx { c.query_resource_in(vs, resource_uri, options) })
+}
+
+fn (c: MetricsClient) query_resource_in(vs: Map[Str, Str], resource_uri: Str, options: MetricsClientQueryResourceOptions) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
   let o = options
   var q = url.values()
   if let Some(x) = o.filter {
@@ -239,7 +249,7 @@ pub fn (c: MetricsClient) query_resource(resource_uri: Str, options: MetricsClie
       q.set(name, x)
     }
   }
-  let req = c.get_request(resource_uri, "/providers/Microsoft.Insights/metrics", q)
+  let req = runtime.with_values(c.get_request(resource_uri, "/providers/Microsoft.Insights/metrics", q), vs)
   let resp = send(c.pipeline, req)?
   json.decode_str[Response](resp.body.to_str_lossy()) ?? e => Err(azcore.CallErr.Decode("unmarshalling type Response: ${e.display()}"))
 }
@@ -255,7 +265,7 @@ pub fn (c: MetricsClient[fx]) new_list_definitions_pager(resource_uri: Str, opti
   let first = c.get_request(resource_uri, "/providers/Microsoft.Insights/metricDefinitions", q)
   runtime.new_pager_with(c.pipeline, first, fn(r: http.Response) -> MetricDefinitionCollection ! Str {
     json.decode_str[MetricDefinitionCollection](r.body.to_str_lossy()) ?? e => Err("unmarshalling type MetricDefinitionCollection: ${e.display()}")
-  }, fn(prev: policy.Request, page: MetricDefinitionCollection) -> policy.Request? { None })
+  }, fn(prev: policy.Request, page: MetricDefinitionCollection) -> policy.Request? { None }).traced_as("MetricsClientListDefinitionsResponse")
 }
 
 /// The metric namespaces of the resource `resource_uri`: one page, as
@@ -269,5 +279,5 @@ pub fn (c: MetricsClient[fx]) new_list_namespaces_pager(resource_uri: Str, optio
   let first = c.get_request(resource_uri, "/providers/microsoft.insights/metricNamespaces", q)
   runtime.new_pager_with(c.pipeline, first, fn(r: http.Response) -> MetricNamespaceCollection ! Str {
     json.decode_str[MetricNamespaceCollection](r.body.to_str_lossy()) ?? e => Err("unmarshalling type MetricNamespaceCollection: ${e.display()}")
-  }, fn(prev: policy.Request, page: MetricNamespaceCollection) -> policy.Request? { None })
+  }, fn(prev: policy.Request, page: MetricNamespaceCollection) -> policy.Request? { None }).traced_as("MetricsClientListNamespacesResponse")
 }

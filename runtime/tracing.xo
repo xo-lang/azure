@@ -96,6 +96,41 @@ pub fn (a: ActiveSpan) close(e: azcore.CallErr) -> azcore.CallErr {
   e
 }
 
+/// Go's runtime.StartSpan around a hand written method (decision 0013):
+/// the span `name` of `tracer` from the values `vs` in progress, ended
+/// with the method's error as `desc` describes it (Go's deferred
+/// endSpan(err)). `f` gets the values its requests and nested calls
+/// carry, so a nested method opens no second span.
+pub fn traced[T, fx: Effects](tracer: tracing.Tracer, vs: Map[Str, Str], name: Str, f: fn(Map[Str, Str]) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx), desc: fn(azcore.CallErr) -> Str = go_desc) -> T ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let sp = start_span(vs, name, tracer)
+  let r = f(sp.values)
+  match r {
+    Ok(_) => sp.end()
+    Err(e) => sp.end(Some(desc(e)))
+  }
+  r
+}
+
+/// `req` carrying the values `vs` of the method span in progress.
+pub fn with_values(req: policy.Request, vs: Map[Str, Str]) -> policy.Request {
+  var values = req.values
+  for (k, v) in vs {
+    values.put(k, v)
+  }
+  req with {values: values}
+}
+
+/// A hand written method's error as Go's endSpan writes it: an invalid
+/// input or an undecodable response is Go's errors.New or fmt.Errorf
+/// text alone (`*errors.errorString`), without CallErr's display prefix.
+pub fn go_desc(e: azcore.CallErr) -> Str {
+  match e {
+    azcore.CallErr.InvalidInput(m) => "*errors.errorString:\n${m}"
+    azcore.CallErr.Decode(m) => "*errors.errorString:\n${m}"
+    _ => error_desc(e)
+  }
+}
+
 /// Go's span status of a method's error: `<type>:\n<message>`, the type
 /// as Go's `%T` names the error the method returns (`*exported.` read as
 /// `*azcore.`).

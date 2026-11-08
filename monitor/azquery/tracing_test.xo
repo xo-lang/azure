@@ -1,0 +1,69 @@
+// Decision 0013: azquery's spans against Go's. A Go program (azquery
+// v1.2.0, azcore v1.24.0, a recording tracing.Provider over a fake
+// transport; local only) printed TRACE_GO (tracevectors_test.xo).
+
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const TR_BAD: Str = "{\"error\":{\"code\":\"BadArgumentError\",\"message\":\"bad query\"}}"
+const TR_RESULTS: Str = "{\"tables\":[{\"name\":\"PrimaryResult\",\"columns\":[{\"name\":\"x\",\"type\":\"long\"}],\"rows\":[[1]]}]}"
+const TR_RES: Str = "subscriptions/s1/resourceGroups/g/providers/P/x/n"
+
+fn tr_co(log: TrLog) -> policy.ClientOptions {
+  let c = cloud.Configuration{authority_host: "https://login.example.test/", services: {
+    SERVICE_NAME_LOGS: cloud.ServiceConfiguration{audience: "https://logs.example.test", endpoint: "https://logs.example.test/v1"},
+    SERVICE_NAME_METRICS: cloud.ServiceConfiguration{audience: "https://management.example.test", endpoint: "https://management.example.test"},
+  }}
+  policy.ClientOptions{cloud: c, tracing_provider: tr_provider(log), retry: policy.RetryOptions{max_retries: -1}}
+}
+
+fn tr_logs(net: Net, clock: Clock, rand: Rand, log: TrLog) -> LogsClient[()] {
+  new_logs_client(net, clock, rand, Cred{log: Mutex[List[Str]].new([])}, LogsClientOptions{client: tr_co(log)}).ok() ?? fault("logs client")
+}
+
+fn tr_metrics(net: Net, clock: Clock, rand: Rand, log: TrLog) -> MetricsClient[()] {
+  new_metrics_client(net, clock, rand, Cred{log: Mutex[List[Str]].new([])}, MetricsClientOptions{client: tr_co(log)}).ok() ?? fault("metrics client")
+}
+
+test "spans as Go's azquery v1.2.0 makes them" {
+  let log = tr_new_log(os.net, ["logs.example.test", "management.example.test"])
+  let q = Body{query: Some("T | take 1")}
+
+  tr_replies(log, [tr_r(200, TR_RESULTS)])
+  tr_dump(log, "azquery query workspace", tr_err(tr_logs(os.net, os.clock, os.rand, log).query_workspace("ws1", q)))
+
+  tr_replies(log, [])
+  tr_dump(log, "azquery query workspace empty id", tr_err(tr_logs(os.net, os.clock, os.rand, log).query_workspace("", q)))
+
+  tr_replies(log, [tr_r(400, TR_BAD)])
+  tr_dump(log, "azquery query resource 400", tr_err(tr_logs(os.net, os.clock, os.rand, log).query_resource(TR_RES, q)))
+
+  tr_replies(log, [tr_r(200, "{\"responses\":[]}")])
+  tr_dump(log, "azquery query batch", tr_err(tr_logs(os.net, os.clock, os.rand, log).query_batch(BatchRequest{requests: [BatchQueryRequest{body: Some(q), correlation_id: Some("1"), workspace_id: Some("ws1")}]})))
+
+  tr_replies(log, [tr_r(200, "{\"timespan\":\"t\",\"value\":[]}")])
+  tr_dump(log, "azquery metrics query resource", tr_err(tr_metrics(os.net, os.clock, os.rand, log).query_resource(TR_RES)))
+
+  tr_replies(log, [tr_r(200, "{\"value\":[]}")])
+  var dp = tr_metrics(os.net, os.clock, os.rand, log).new_list_definitions_pager(TR_RES)
+  var derr: azcore.CallErr? = None
+  while dp.more() {
+    if let Err(e) = dp.next_page() {
+      derr = Some(e)
+      break
+    }
+  }
+  tr_dump(log, "azquery list definitions", derr)
+
+  tr_replies(log, [tr_r(500, "{}")])
+  var np = tr_metrics(os.net, os.clock, os.rand, log).new_list_namespaces_pager(TR_RES)
+  tr_dump(log, "azquery list namespaces error", tr_err(np.next_page()))
+
+  // Known difference: an invalid input's error says "invalid input: "
+  // first (azcore.CallErr's display, decision 0013); the span's status
+  // has the message alone, as Go's.
+  tr_compare(tr_got(log), TRACE_GO, known: [
+    ("  ERR \"parameter workspaceID cannot be empty\"", "  ERR \"invalid input: parameter workspaceID cannot be empty\""),
+  ])
+}
