@@ -65,6 +65,28 @@ that name (armchaos' executionDetails); TypeSpec's
 file's `RUpdate` variant (armcommvaultcontentstore). The Go vector program now fills
 list and map arguments (armbilling, armcdn, armcognitiveservices).
 
+Generator, from the batch-4d differentials (second part): a TypeSpec
+header property named `xMs...` keeps its `x-ms-` prefix in Go's field
+(armstoragesync's XMSRequestID, armoperationalinsights'
+XMSStatusLocation), and no other header property is renamed by the rule;
+`@@Legacy.nextLinkVerb` pages by POST (armpanngfw); a TypeSpec response's
+`@header contentType` is Go's ContentType field (armpeering); an
+operation moved to a namespace by `@@clientLocation` keeps its bare
+operationId (armrecoveryservicesbackup); an LRO's
+`final-state-schema` is its result (armpostgresqlflexibleservers,
+armnetworkcloud); `@@alternateType` of a library model's property
+(`Azure.ResourceManager.CommonTypes.AccessRuleProperties.subscriptions`)
+counts, and its inline item model is still emitted (armmonitor); a
+combined TypeSpec client routes an `ArmProviderAction` operation by its
+first project's provider namespace (armmonitor's
+AlertRuleIncidents_ListByAlertRule, Microsoft.Insights); a PATCH body
+keeps Go's AdditionalProperties (armoperationalinsights'
+WorkspaceFeatures). codegen/gorows prefers the file a project's
+tspconfig.yaml emits over a hand-written file of the same paths
+(armmonitor's 2016-09-01 serviceDiagnosticsSettings.json) and takes the
+readme's last default tag, as autorest does (armstorageimportexport's
+package-preview-2021-01).
+
 Generator, from the batch-4d differentials against Go: an operation with
 no `produces` takes the document's, and Accept lists every JSON type
 (armfeatures, armscheduler); a `format: byte` query value is standard
