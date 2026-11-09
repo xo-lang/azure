@@ -199,17 +199,22 @@ tenants" for a request's other tenant) are not ported yet.
 
 ### Waiting on a token-cache decision
 
-19. **The persistent `Cache` and `azidentity/cache`** wait on decision
-    [0012](../decisions/0012-persistent-token-cache.md) (step a, the
-    optional store, Accepted; step b, the per-OS file, Deferred; owner,
-    2026-11-07): MSAL's `ExportReplace` (`Replace` before each lookup,
-    `Export` after each token response) over MSAL's shared cache schema,
-    stored at `.IdentityService/<name>` (and `<name>.cae`) with a
-    `.lockfile`, in the macOS keychain, under Windows DPAPI, or as
-    A128CBC-HS256 JWE with its key in the Linux user keyring. Its first
-    step (an optional store on `runtime.TokenCache`, access tokens only)
-    does not need 15 to 18; refresh tokens and accounts surviving a
-    restart do.
+19. **The persistent `Cache` and `azidentity/cache`**, decision
+    [0012](../decisions/0012-persistent-token-cache.md). Status
+    (2026-11-09): step a is done (`azidentity/cache.xo`): `Options.cache`
+    takes a `Cache` of caller-supplied `TokenStore`s, and every
+    credential Go gives `Cache` runs MSAL's `ExportReplace` protocol over
+    MSAL's shared cache schema (access tokens for the confidential
+    credentials; refresh tokens, ID tokens, accounts and app metadata
+    for the user flows), checked against Go (`cache_run_test.xo`). Not
+    yet: step b (Deferred, owner 2026-11-07), the per-OS store at
+    `.IdentityService/<name>` (and `<name>.cae`) with a `.lockfile`, in
+    the macOS keychain, under Windows DPAPI, or as A128CBC-HS256 JWE with
+    its key in the Linux user keyring; MSAL's upgrade of v1.0 keys (an
+    upper-case key renamed when read) and its parse errors for an entry
+    whose time is not a number (this port reads it as no time); MSAL's
+    partitioned cache for on-behalf-of (Go gives that credential no
+    `Cache`).
 
 ## Already the same as Go (checked by the same program)
 

@@ -7,6 +7,25 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- A persistent token cache (decision 0012 step a, gap item 19), Go's
+  `Cache` option: `Options.cache` takes a `Cache` (`new_cache`, from a
+  factory of `TokenStore`s the caller supplies: `replace(hint)` and
+  `export(hint, json)`, one store for CAE requests and one for the
+  rest, each made on first use). As MSAL Go v1.10.1 does, a credential
+  reads the store before each lookup (not for a request with claims)
+  and reads, merges and writes it after each token response, in MSAL's
+  shared cache schema under MSAL's partition hints
+  (`<client>_<tenant>_AppTokenCache` for an app; the account's home id
+  for a user), so other MSAL programs read the same cache. Lookups
+  match entries by their fields as MSAL does (environment aliases from
+  instance metadata), access tokens are written only when good for 5
+  minutes or more, and entries this module doesn't write are kept.
+  The user flows store refresh tokens, ID tokens and the account, so
+  an AuthenticationRecord signs the user in silently in a new process.
+  `Options` and the credentials Go gives `Cache` take an effect
+  parameter for the store's effects (`[()]` for none). Decision 0012's
+  text is corrected: the store sits at the credential, not on
+  `runtime.TokenCache`.
 - UsernamePasswordCredential (gap item 17, decision 0003 Amendment 2),
   deprecated as Go's is (it can't support multifactor authentication;
   https://aka.ms/azsdk/identity/mfa), as azidentity v1.15.0 runs it

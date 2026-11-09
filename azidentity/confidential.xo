@@ -400,6 +400,16 @@ pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenReq
   })
 }
 
+/// The access token of a token response (`resp` its JSON, `t` as
+/// parsed, `secs` now) as MSAL's Write keeps it: the granted scopes
+/// (MSAL's ComputeScope: the requested ones when the response names
+/// none), the times as Unix seconds.
+fn (c: Confidential[fx]) granted(home: Str, tenant: Str, opts: azcore.TokenRequestOptions, resp: json.Value, t: azcore.AccessToken, secs: Int) -> Granted {
+  let scope = str_field(resp, "scope")
+  let after = fn(k: Str) -> Int { num_field(resp, k).map(fn(n: Int) -> Int { secs + n }) ?? 0 }
+  Granted{home: home, environment: c.host(), realm: tenant, client: c.client_id, target: if scope == "" { opts.scopes.join(" ") } else { scope }, secret: t.token.reveal(), token_type: str_field(resp, "token_type"), cached_at: secs, expires_on: t.expires_on.unix_millis() / 1000, ext_expires_on: after("ext_expires_in"), refresh_on: after("refresh_in")}
+}
+
 /// MSAL's partition key of an app's tokens.
 fn (c: Confidential[fx]) app_hint(tenant: Str) -> Str {
   "${c.client_id}_${tenant}_AppTokenCache"
@@ -436,11 +446,8 @@ fn (c: Confidential[fx]) keep(p: Cache[fx], tenant: Str, opts: azcore.TokenReque
   let hint = c.app_hint(tenant)
   c.replace(s, hint, cae)?
   let secs = now.unix_millis() / 1000
-  let granted = str_field(resp, "scope")
-  let target = if granted == "" { opts.scopes.join(" ") } else { granted.split(" ").filter(fn(x: Str) -> Bool { x != "" }).join(" ") }
-  let after = fn(k: Str) -> Int { num_field(resp, k).map(fn(n: Int) -> Int { secs + n }) ?? 0 }
-  let g = Granted{home: "", environment: c.host(), realm: tenant, client: c.client_id, target: target, secret: t.token.reveal(), token_type: str_field(resp, "token_type"), cached_at: secs, expires_on: t.expires_on.unix_millis() / 1000, ext_expires_on: after("ext_expires_in"), refresh_on: after("refresh_in")}
-  let d = write_access_token(c.doc(cae), g, secs)
+  let g = c.granted("", tenant, opts, resp, t, secs)
+  let d = write_app_metadata(write_access_token(c.doc(cae), g, secs), g.environment, g.client, str_field(resp, "foci"))
   c.set_doc(cae, d)
   (s.export)(hint, encode_contract(d))
 }

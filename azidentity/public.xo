@@ -98,13 +98,46 @@ fn rt_key(cae: Bool, home: Str) -> Str {
   "${cae}|${home}"
 }
 
+/// With a persistent cache, its store for `cae` requests: made when the
+/// MSAL client is (Go makes one per CAE flag on first use).
+fn (p: Public[fx]) begin(cae: Bool) uses (fx) {
+  if let Some(pc) = p.c.persist {
+    // a factory that fails fails again where the store is needed, and
+    // the error is returned there
+    if pc.store(cae).is_err() {
+      return
+    }
+  }
+}
+
 /// MSAL's AcquireTokenSilent for the account: the cached access token
 /// (not with claims), else the refresh token grant. Err when neither
-/// gives a token; the caller then runs its flow.
+/// gives a token; the caller then runs its flow. With a persistent
+/// cache, both come from the store's contract (`Replace` under the
+/// account's home id).
 fn (p: Public[fx]) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! () uses (net.dial, clock, rand, fx) {
+  p.begin(opts.enable_cae)
   let home = p.record().home_account_id
   if home == "" {
     return Err(())
+  }
+  if let Some(pc) = p.c.persist {
+    let cae = opts.enable_cae
+    let s = pc.store(cae) ?? _ => return Err(())
+    p.c.replace(s, home, cae) ?? _ => return Err(())
+    let aliases = p.c.read_metadata(tenant, cae) ?? return Err(())
+    let doc = p.c.doc(cae)
+    if opts.claims == "" {
+      if let Some(t) = find_access_token(doc, home, aliases, tenant, p.c.client_id, opts.scopes, p.c.clock.now()) {
+        return Ok(t)
+      }
+    }
+    let rt = find_refresh_token(doc, home, aliases, p.c.client_id) ?? return Err(())
+    let resp = p.post_token(tenant, opts, [("refresh_token", rt)], "refresh_token") ?? _ => return Err(())
+    if resp.status != 200 {
+      return Err(())
+    }
+    return p.accept(tenant, opts, resp, home) ?? _ => Err(())
   }
   let key = key_of(tenant, opts.scopes, opts.enable_cae)
   if let Some(t) = p.c.cached(tenant, key, opts) {
@@ -148,9 +181,12 @@ fn (p: Public[fx]) post_token(tenant: Str, opts: azcore.TokenRequestOptions, fie
 
 /// A 200 token response as MSAL takes it: no requested scope declined,
 /// the access token cached, the refresh token kept for the account, and
-/// the account recorded (Go's newAuthenticationRecord).
-fn (p: Public[fx]) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: http.Response) -> azcore.AccessToken ! azcore.AuthErr {
-  let t = parse_token_response(p.c.name, resp, p.c.clock.now())?
+/// the account recorded (Go's newAuthenticationRecord). With a
+/// persistent cache, MSAL's Replace (`hint`: the home id of the account
+/// the request was for, "" for none), Write and Export.
+fn (p: Public[fx]) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: http.Response, hint: Str = "") -> azcore.AccessToken ! azcore.AuthErr uses (clock, fx) {
+  let now = p.c.clock.now()
+  let t = parse_token_response(p.c.name, resp, now)?
   let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => json.Value.Object([])
   let granted = str_field(doc, "scope").split(" ").filter(fn(s: Str) -> Bool { s != "" }).map(fn(s: Str) -> Str { s.to_lower() })
   if !granted.is_empty() {
@@ -160,6 +196,11 @@ fn (p: Public[fx]) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: h
     }
   }
   let rec = record_of(doc, p.c.authority_host) ?? e => return Err(failed_text(p.c.name, e))
+  if let Some(pc) = p.c.persist {
+    p.keep_user(pc, hint, tenant, opts, doc, t, now) ?? e => return Err(failed_text(p.c.name, e))
+    p.account.with(fn(var r: AuthenticationRecord) { r = rec })
+    return Ok(t)
+  }
   let key = key_of(tenant, opts.scopes, opts.enable_cae)
   p.c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {
     xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
@@ -171,6 +212,43 @@ fn (p: Public[fx]) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: h
   }
   p.account.with(fn(var r: AuthenticationRecord) { r = rec })
   Ok(t)
+}
+
+/// MSAL's Replace, Write and Export of a user's token response.
+fn (p: Public[fx]) keep_user(pc: Cache[fx], hint: Str, tenant: Str, opts: azcore.TokenRequestOptions, doc: json.Value, t: azcore.AccessToken, now: Time) -> () ! Str uses (fx) {
+  let cae = opts.enable_cae
+  let s = pc.store(cae)?
+  p.c.replace(s, hint, cae)?
+  let secs = now.unix_millis() / 1000
+  let raw_id = str_field(doc, "id_token")
+  let idt = jwt_claims(raw_id)
+  let home = msal_home(doc, idt)
+  let g = p.c.granted(home, tenant, opts, doc, t, secs)
+  var local = str_field(idt, "oid")
+  if local == "" {
+    local = str_field(idt, "sub")
+  }
+  var user = str_field(idt, "preferred_username")
+  if user == "" {
+    user = str_field(idt, "upn")
+  }
+  let u = UserGranted{home: home, environment: g.environment, realm: tenant, client: p.c.client_id, refresh_token: str_field(doc, "refresh_token"), family: str_field(doc, "foci"), id_token: raw_id, local_account_id: local, authority_type: if tenant == ADFS_TENANT { "ADFS" } else { "MSSTS" }, username: user}
+  let d = write_user(p.c.doc(cae), u, g, secs)
+  p.c.set_doc(cae, d)
+  (s.export)(hint, encode_contract(d))
+}
+
+/// MSAL's HomeAccountID of a token response: client_info's
+/// `<uid>.<utid>` (the uid twice when it has no utid), else the ID
+/// token's subject.
+fn msal_home(doc: json.Value, idt: json.Value) -> Str {
+  let ci = jwt_claims("x.${str_field(doc, "client_info")}")
+  let uid = str_field(ci, "uid")
+  if uid == "" {
+    return str_field(idt, "sub")
+  }
+  let utid = str_field(ci, "utid")
+  "${uid}.${if utid == "" { uid } else { utid }}"
 }
 
 /// The JSON of a JWT's payload, unverified (MSAL reads the ID token so).
@@ -302,6 +380,7 @@ const MAX_POLL: Duration = 5s
 /// DeviceCode.AuthenticationResult).
 fn (d: DeviceCodeCredential[fx]) flow(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
   let p = d.p
+  p.begin(opts.enable_cae)
   let name = p.c.name
   let tenant = p.c.tenant_for(opts)?
   let token_ep = p.c.endpoint(tenant, opts.enable_cae)?

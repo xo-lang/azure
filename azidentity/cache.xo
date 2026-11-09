@@ -191,31 +191,92 @@ struct Granted {
   refresh_on: Int
 }
 
-/// `doc` with the access token of `g` written as MSAL's Write writes it
-/// (only when it is good for 5 minutes or more, MSAL's Validate), and
-/// the client's app metadata.
+/// `doc` with the access token of `g` written as MSAL's Write writes it:
+/// only when it is good for 5 minutes or more (MSAL's Validate).
 fn write_access_token(doc: json.Value, g: Granted, now: Int) -> json.Value {
-  var d = doc
-  if g.cached_at <= now && g.expires_on >= now + 300 {
-    var f: List[(Str, json.Value)] = []
-    let s = fn(k: Str, v: Str) -> (Str, json.Value) { (k, json.Value.Str(v)) }
-    if g.home != "" {
-      f.push(s("home_account_id", g.home))
-    }
-    f = f + [s("environment", g.environment), s("realm", g.realm), s("credential_type", "AccessToken"), s("client_id", g.client), s("secret", g.secret), s("target", g.target)]
-    if g.refresh_on != 0 {
-      f.push(s("refresh_on", "${g.refresh_on}"))
-    }
-    f.push(s("expires_on", "${g.expires_on}"))
-    if g.ext_expires_on != 0 {
-      f.push(s("extended_expires_on", "${g.ext_expires_on}"))
-    }
-    f = f + [s("cached_at", "${g.cached_at}"), s("token_type", g.token_type)]
-    var key = [g.home, g.environment, "accesstoken", g.client, g.realm, g.target]
-    if g.token_type.to_lower() != "bearer" {
-      key.push(g.token_type)
-    }
-    d = put_entry(d, "AccessToken", key.join("-").to_lower(), json.Value.Object(f))
+  if g.cached_at > now || g.expires_on < now + 300 {
+    return doc
   }
-  put_entry(d, "AppMetadata", "appmetadata-${g.environment}-${g.client}", json.Value.Object([("client_id", json.Value.Str(g.client)), ("environment", json.Value.Str(g.environment))]))
+  var f: List[(Str, json.Value)] = []
+  let s = fn(k: Str, v: Str) -> (Str, json.Value) { (k, json.Value.Str(v)) }
+  if g.home != "" {
+    f.push(s("home_account_id", g.home))
+  }
+  f = f + [s("environment", g.environment), s("realm", g.realm), s("credential_type", "AccessToken"), s("client_id", g.client), s("secret", g.secret), s("target", g.target)]
+  if g.refresh_on != 0 {
+    f.push(s("refresh_on", "${g.refresh_on}"))
+  }
+  f.push(s("expires_on", "${g.expires_on}"))
+  if g.ext_expires_on != 0 {
+    f.push(s("extended_expires_on", "${g.ext_expires_on}"))
+  }
+  f = f + [s("cached_at", "${g.cached_at}"), s("token_type", g.token_type)]
+  var key = [g.home, g.environment, "accesstoken", g.client, g.realm, g.target]
+  if g.token_type.to_lower() != "bearer" {
+    key.push(g.token_type)
+  }
+  put_entry(doc, "AccessToken", key.join("-").to_lower(), json.Value.Object(f))
+}
+
+/// An entry of MSAL's: its fields in order, those empty left out (Go's
+/// omitempty).
+fn entry_of(fields: List[(Str, Str)]) -> json.Value {
+  json.Value.Object(fields.filter(fn(f: (Str, Str)) -> Bool { f.1 != "" }).map(fn(f: (Str, Str)) -> (Str, json.Value) { (f.0, json.Value.Str(f.1)) }))
+}
+
+/// `doc` with the client's app metadata (MSAL's AppMetaData).
+fn write_app_metadata(doc: json.Value, environment: Str, client: Str, family: Str) -> json.Value {
+  put_entry(doc, "AppMetadata", "appmetadata-${environment}-${client}".to_lower(), entry_of([("family_id", family), ("client_id", client), ("environment", environment)]))
+}
+
+/// What MSAL keeps of a user's token response besides the access token.
+struct UserGranted {
+  home: Str
+  environment: Str
+  realm: Str
+  client: Str
+  refresh_token: Str
+  family: Str
+  /// The raw ID token, "" for none.
+  id_token: Str
+  local_account_id: Str
+  authority_type: Str
+  username: Str
+}
+
+/// `doc` with a user's refresh token, ID token and account written as
+/// MSAL's Write writes them (before the access token, which
+/// `write_access_token` writes), and the app metadata.
+fn write_user(doc: json.Value, u: UserGranted, at: Granted, now: Int) -> json.Value {
+  var d = doc
+  if u.refresh_token != "" {
+    let fourth = if u.family == "" { u.client } else { u.family }
+    d = put_entry(d, "RefreshToken", [u.home, u.environment, "refreshtoken", fourth].join("-").to_lower(), entry_of([("home_account_id", u.home), ("environment", u.environment), ("credential_type", "RefreshToken"), ("client_id", u.client), ("family_id", u.family), ("secret", u.refresh_token)]))
+  }
+  d = write_access_token(d, at, now)
+  if u.id_token != "" {
+    d = put_entry(d, "IdToken", [u.home, u.environment, "idtoken", u.client, u.realm].join("-").to_lower(), entry_of([("home_account_id", u.home), ("environment", u.environment), ("realm", u.realm), ("credential_type", "IdToken"), ("client_id", u.client), ("secret", u.id_token)]))
+    d = put_entry(d, "Account", [u.home, u.environment, u.realm].join("-").to_lower(), entry_of([("home_account_id", u.home), ("environment", u.environment), ("realm", u.realm), ("local_account_id", u.local_account_id), ("authority_type", u.authority_type), ("username", u.username)]))
+  }
+  write_app_metadata(d, u.environment, u.client, u.family)
+}
+
+/// MSAL's readRefreshToken (when its readAppMetaData finds the client's
+/// metadata): the account's refresh token for this client, else a
+/// family one; by the client first unless the metadata names a family.
+fn find_refresh_token(doc: json.Value, home: Str, aliases: List[Str], client: Str) -> Str? {
+  let meta = section_of(doc, "AppMetadata").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }).filter(fn(x: (Str, json.Value)) -> Bool { aliases.contains(entry_str(x.1, "environment")) && entry_str(x.1, "client_id") == client }).first() ?? return None
+  let rts = section_of(doc, "RefreshToken").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 })
+  let ours = fn(e: json.Value) -> Bool { entry_str(e, "home_account_id") == home && aliases.contains(entry_str(e, "environment")) }
+  let by_client = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "client_id") == client }
+  let by_family = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "family_id") != "" }
+  let order = if entry_str(meta.1, "family_id") == "" { [by_client, by_family] } else { [by_family, by_client] }
+  for m in order {
+    for (_, e) in rts {
+      if m(e) {
+        return Some(entry_str(e, "secret"))
+      }
+    }
+  }
+  None
 }

@@ -151,3 +151,67 @@ test "a confidential credential's persistent cache is MSAL Go's" {
 
   pc_compare(f, ["cs1", "cs2", "cs3", "cs4", "cs5", "cs6"], GO_CACHE_LINES)
 }
+
+fn cs_user_opts(c: Cache[()]) -> Options[()] {
+  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}}, disable_instance_discovery: true, cache: Some(c)}
+}
+
+fn cs_device(f: PcFake, e: UpEnv, c: Cache[()], rec: AuthenticationRecord) -> DeviceCodeCredential[()] ! azcore.AuthErr {
+  let prompt = fn(m: DeviceCodeMessage) -> () ! Str {
+    pc_note(f, "${pc_sec(f)}: PROMPT")
+    Ok(())
+  }
+  new_device_code_credential(prompt, e.net, e.clock, e.rand, DeviceCodeCredentialOptions{opts: cs_user_opts(c), tenant_id: "tenant-a", client_id: "client-1", authentication_record: rec})
+}
+
+fn cs_user_start(f: PcFake, section: Str) {
+  cs_start(f, section)
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/devicecode", [(200, "{\"device_code\":\"dev-code-1\",\"user_code\":\"ABCD-EFGH\",\"verification_uri\":\"https://login.example.test/device\",\"expires_in\":900,\"interval\":1,\"message\":\"m\"}")])
+  pc_on(f, "GET /common/UserRealm/user@example.com", [(200, UP_MANAGED)])
+}
+
+fn cs_user_token(at: Str, scope: Str) -> (Int, Str) {
+  (200, pc_token(at, "rt-${at}", "${scope} openid profile offline_access"))
+}
+
+test "a public credential's persistent cache is MSAL Go's" {
+  let f = pc_serve(os.net)
+  let e = UpEnv{net: os.net, clock: os.clock, rand: os.rand}
+  let t0 = os.clock.now().unix()
+  let (uc, _, _) = cs_cache(f, "user", t0)
+
+  cs_user_start(f, "dc1")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [cs_user_token("at-d1", CS_S1)])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [cs_user_token("at-d2", CS_S2)])
+  let d = cs_device(f, e, uc, AuthenticationRecord{})?
+  let rec = match d.authenticate(tro([CS_S1])) {
+    Ok(r) => {
+      pc_note(f, "dc1: authenticate: err=<nil>")
+      r
+    }
+    Err(x) => {
+      pc_note(f, "dc1: authenticate: err=${x.display()}")
+      AuthenticationRecord{}
+    }
+  }
+  pc_show(f, "other scope", d.get_token(tro([CS_S2])))
+
+  cs_user_start(f, "dc2")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [cs_user_token("at-d3", CS_S1)])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [cs_user_token("at-d4", CS_S1)])
+  let d2 = cs_device(f, e, uc, rec)?
+  pc_show(f, "new credential with record", d2.get_token(tro([CS_S1])))
+  pc_show(f, "new credential, other scope", d2.get_token(tro([CS_S2])))
+  pc_show(f, "new credential, cae", d2.get_token(tro([CS_S1], cae: true)))
+
+  cs_user_start(f, "dc3")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token device_code", [cs_user_token("at-d5", CS_S1)])
+  pc_show(f, "new credential without record", cs_device(f, e, uc, AuthenticationRecord{})?.get_token(tro([CS_S1])))
+
+  cs_user_start(f, "up1")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token password", [cs_user_token("at-u1", CS_S1)])
+  let u = new_username_password_credential("tenant-a", "client-1", "user@example.com", "pw", e.net, e.clock, e.rand, UsernamePasswordCredentialOptions{opts: cs_user_opts(uc)})?
+  pc_show(f, "password into the user cache", u.get_token(tro([CS_S1])))
+
+  pc_compare(f, ["dc1", "dc2", "dc3", "up1"], GO_CACHE_LINES)
+}

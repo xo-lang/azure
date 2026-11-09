@@ -1,9 +1,10 @@
 # 0012: A persistent token cache (azidentity/cache)
 
-Status: Option 1, step a (an optional store on `runtime.TokenCache`
-in MSAL's cache schema) Accepted; step b (the per-OS protected file)
-Deferred (owner, 2026-11-07, through the lead; drafted by Xo Azure 1 at
-the Xo Lead's request).
+Status: Option 1, step a (an optional store in MSAL's cache schema)
+Accepted and done (2026-11-09, at the credential: see the correction
+under 1a); step b (the per-OS protected file) Deferred (owner,
+2026-11-07, through the lead; drafted by Xo Azure 1 at the Xo Lead's
+request).
 
 ## Context
 
@@ -52,14 +53,32 @@ keychain access, no DPAPI and no keyctl.
 Three options, in the order the drafter recommends:
 
 1. **Port it in two steps, behind its own module `azidentity/cache`.**
-   a. `runtime.TokenCache` gets an optional store (`TokenStore[fx]`:
-      `replace() -> Bytes` and `export(Bytes)`), its effect parameter as
-      in [0009](0009-token-credential-effects.md), so only a credential
-      given a store needs `fs.read`/`fs.write`. Entries are written in
-      MSAL's schema (access tokens only, as Go's confidential
-      credentials write them), checked against a Go program that runs
-      MSAL with an in-memory `ExportReplace` and prints what it
-      exports.
+   a. A credential's options get an optional store, as Go's `Cache`
+      option on azidentity's options (`Options.cache: Cache[fx]?`, a
+      `Cache` made by `new_cache` from a factory of `TokenStore[fx]`s:
+      `replace(hint) -> Str` and `export(hint, Str)`, one store for CAE
+      requests and one for the rest, each made on first use), its
+      effect parameter as in [0009](0009-token-credential-effects.md),
+      so only a credential given a store performs the store's effects
+      (`fs.read`/`fs.write` for a file). MSAL's protocol around it: the
+      store is read (`Replace`) before each lookup, except for a
+      request with claims, and read again, merged and written
+      (`Export`) after each token response; the partition hint is
+      `<client>_<tenant>_AppTokenCache` for an app, the account's home
+      id (or "" before there is one) for a user. Entries are written in
+      MSAL's schema: access tokens for confidential credentials;
+      refresh tokens, ID tokens and accounts too for the user flows.
+      Entries this module doesn't write (other clients', other MSAL
+      programs', unknown fields and sections) are kept as they came.
+      Checked against a Go program that runs MSAL with an in-memory
+      `ExportReplace` and prints each Replace and Export.
+
+      Correction (2026-11-09): this step first named
+      `runtime.TokenCache` as the store's home. That was the wrong
+      home: the bearer token policy's cache is keyed by scopes and
+      claims and has no client, tenant or account, all of which MSAL's
+      schema and its partition hints need, so the store sits at the
+      credential, where Go puts it.
    b. `azidentity/cache.new(name)` gives the per-OS store above. It
       waits on std: AES-CBC with HMAC-SHA256 (JWE A128CBC-HS256), a
       Linux keyctl binding, the macOS keychain (Security framework) and
@@ -74,11 +93,18 @@ Three options, in the order the drafter recommends:
 
 ## Consequences
 
-- Option 1a changes no existing signature: the store is optional and
-  defaults to none, so every current credential keeps its effects.
+- Option 1a adds an effect parameter to `Options` and to each
+  credential that takes a cache (as Go: client secret, certificate,
+  assertion, workload identity, Azure Pipelines, device code,
+  interactive browser, username and password; not on-behalf-of or
+  managed identity). The store is optional and defaults to none, so a
+  credential without one performs no new effect; a caller naming the
+  types writes `[()]` for none.
 - A shared cache file read by other MSAL programs makes the schema a
   compatibility surface: a field written differently from MSAL can break
-  another program on the same machine, so 1a's vectors are byte-exact.
+  another program on the same machine, so 1a's vectors compare each
+  exported cache whole (with its object keys sorted, since Go writes
+  its maps in no fixed order) and each stored cache's byte length.
 - The user flows' remainder (gap list, "Waiting on MSAL behaviour")
   depends on this decision for refresh tokens and accounts surviving a
   restart; their in-process behaviour does not.
