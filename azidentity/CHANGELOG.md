@@ -7,6 +7,20 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- Tenants as azidentity v1.15.0 and MSAL Go v1.10.1 resolve them.
+  azidentity's resolveTenant: "ADFS doesn't support tenants" for a
+  credential at `adfs` asked for another tenant, Go's invalid tenant ID
+  error, and any tenant for a credential at `organizations` (or "")
+  that has no allow list. MSAL's WithTenantID check: an ADFS authority
+  takes no other tenant, an AAD one no `common`, `consumers` or
+  `organizations` request, and a `consumers` client no other tenant.
+  Device code returns these as MSAL's text; the other credentials
+  return them as authentication failures. MSAL reads the authority in
+  lower case, so a tenant `ADFS` is an ADFS authority (a confidential
+  credential there fails every request, as in Go), and the persistent
+  cache's realm and partition hint are the tenant in lower case. A
+  client certificate at an ADFS authority signs its assertion with
+  RS256 and sends the SHA-1 thumbprint as `x5t`, as MSAL does.
 - The persistent cache reads a stored cache as MSAL Go v1.10.1 decodes
   it: each section and entry must be an object, a known string field a
   string, a Unix time an integer Go's Atoi reads (as a string or a

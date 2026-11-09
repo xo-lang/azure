@@ -156,15 +156,65 @@ pub fn confidential[fx: Effects](name: Str, tenant_id: Str, client_id: Str, net:
   })
 }
 
-/// The tenant a request is for: the credential's, or an allowed other.
+/// The tenant a confidential credential's request is for: azidentity's
+/// resolveTenant, then MSAL's WithTenantID check of it (azidentity's
+/// confidential client always passes the tenant), whose error azidentity
+/// returns as an authentication failure.
 pub fn (c: Confidential[fx]) tenant_for(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
-  if opts.tenant_id == "" || opts.tenant_id == c.tenant_id {
+  let t = c.resolve_tenant(opts.tenant_id)?
+  c.with_tenant(t) ?? e => return Err(failed_text(c.name, e))
+  Ok(t)
+}
+
+/// azidentity's resolveTenant: the credential's tenant, or `specified`
+/// when the credential allows it (an allow list naming it or "*"; with
+/// no list, any tenant for a credential whose tenant is "" or
+/// organizations). An ADFS credential (tenant "adfs", as written)
+/// takes no other tenant.
+pub fn (c: Confidential[fx]) resolve_tenant(specified: Str) -> Str ! azcore.AuthErr {
+  if specified == "" || specified == c.tenant_id {
     return Ok(c.tenant_id)
   }
-  if c.allowed.contains("*") || c.allowed.contains(opts.tenant_id) {
-    return Ok(opts.tenant_id)
+  if c.tenant_id == ADFS_TENANT {
+    return Err(azcore.AuthErr{credential: c.name, msg: "ADFS doesn't support tenants", text: "ADFS doesn't support tenants"})
   }
-  Err(azcore.AuthErr{credential: c.name, msg: "tenant ${opts.tenant_id} is not allowed", text: "${c.name} isn't configured to acquire tokens for tenant ${json.encode_str(opts.tenant_id)}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant"})
+  if !valid_tenant(specified) {
+    return Err(azcore.AuthErr{credential: c.name, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  if c.allowed.contains("*") || c.allowed.contains(specified) {
+    return Ok(specified)
+  }
+  if c.allowed.is_empty() && (c.tenant_id == "" || c.tenant_id == "organizations") {
+    return Ok(specified)
+  }
+  Err(azcore.AuthErr{credential: c.name, msg: "tenant ${specified} is not allowed", text: "${c.name} isn't configured to acquire tokens for tenant ${json.encode_str(specified)}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant"})
+}
+
+/// MSAL's AuthParams.WithTenant check of a request's tenant `id` (""
+/// for the client's own): MSAL's authority tenant is the credential's
+/// in lower case, an ADFS authority takes no other, and an AAD one no
+/// unspecific tenant, nor any other from a consumers client.
+pub fn (c: Confidential[fx]) with_tenant(id: Str) -> () ! Str {
+  let own = c.tenant_id.to_lower()
+  if id == "" || id == own {
+    return Ok(())
+  }
+  if own == ADFS_TENANT {
+    return Err("ADFS authority doesn't support tenants")
+  }
+  if id == "common" || id == "consumers" || id == "organizations" {
+    return Err("tenant ID must be a specific tenant, not ${json.encode_str(id)}")
+  }
+  if own == "consumers" {
+    return Err("client is configured to authenticate only personal Microsoft accounts, via the \"consumers\" endpoint")
+  }
+  Ok(())
+}
+
+/// Whether MSAL takes `tenant` as an ADFS authority (its authority URL
+/// is read in lower case).
+pub fn is_adfs(tenant: Str) -> Bool {
+  tenant.to_lower() == ADFS_TENANT
 }
 
 /// The hosts MSAL Go trusts without instance discovery (its
@@ -299,7 +349,7 @@ pub fn (c: Confidential[fx]) endpoint(tenant: Str, cae: Bool = false) -> Str ! a
   }
   let h = c.host()
   let authority = "${c.authority_host}${tenant}/"
-  let adfs = tenant == ADFS_TENANT
+  let adfs = is_adfs(tenant)
   // an ADFS authority's configuration is at the host's /adfs/, with no
   // instance discovery
   var oidc = if adfs { "https://${h}/adfs/.well-known/openid-configuration" } else { "${authority}v2.0/.well-known/openid-configuration" }
@@ -386,7 +436,7 @@ pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenReq
     let s = p.store(opts.enable_cae) ?? _ => return None
     c.replace(s, c.app_hint(tenant), opts.enable_cae) ?? _ => return None
     let aliases = c.read_metadata(tenant, opts.enable_cae) ?? return None
-    let (d, t) = find_access_token(c.doc(opts.enable_cae), "", aliases, tenant, c.client_id, opts.scopes, c.clock.now())
+    let (d, t) = find_access_token(c.doc(opts.enable_cae), "", aliases, tenant.to_lower(), c.client_id, opts.scopes, c.clock.now())
     c.set_doc(opts.enable_cae, d)
     return t
   }
@@ -409,12 +459,13 @@ pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenReq
 fn (c: Confidential[fx]) granted(home: Str, tenant: Str, opts: azcore.TokenRequestOptions, resp: json.Value, t: azcore.AccessToken, secs: Int) -> Granted {
   let scope = str_field(resp, "scope")
   let after = fn(k: Str) -> Int { num_field(resp, k).map(fn(n: Int) -> Int { secs + n }) ?? 0 }
-  Granted{home: home, environment: c.host(), realm: tenant, client: c.client_id, target: if scope == "" { opts.scopes.join(" ") } else { scope }, secret: t.token.reveal(), token_type: str_field(resp, "token_type"), cached_at: secs, expires_on: t.expires_on.unix_millis() / 1000, ext_expires_on: after("ext_expires_in"), refresh_on: after("refresh_in")}
+  Granted{home: home, environment: c.host(), realm: tenant.to_lower(), client: c.client_id, target: if scope == "" { opts.scopes.join(" ") } else { scope }, secret: t.token.reveal(), token_type: str_field(resp, "token_type"), cached_at: secs, expires_on: t.expires_on.unix_millis() / 1000, ext_expires_on: after("ext_expires_in"), refresh_on: after("refresh_in")}
 }
 
-/// MSAL's partition key of an app's tokens.
+/// MSAL's partition key of an app's tokens (MSAL's tenant is in lower
+/// case).
 fn (c: Confidential[fx]) app_hint(tenant: Str) -> Str {
-  "${c.client_id}_${tenant}_AppTokenCache"
+  "${c.client_id}_${tenant.to_lower()}_AppTokenCache"
 }
 
 /// The contract of the MSAL client for `cae` requests.

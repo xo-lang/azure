@@ -193,9 +193,22 @@ the WS-Trust 1.3 request: a mex document whose only username endpoint
 is 2005 fails with MSAL's "WS Trust 2005 support is not implemented",
 and the port keeps that. The ADFS authority (tenant `adfs`) is handled
 where 17 needs it (the OpenID configuration at `/adfs/`, no instance
-discovery, the password grant with no realm); MSAL's other ADFS rules
-(the per-domain endpoint cache, "ADFS authority doesn't support
-tenants" for a request's other tenant) are not ported yet.
+discovery, the password grant with no realm). The other ADFS and
+tenant rules are ported too (2026-11-09, checked against a Go program,
+`adfs_run_test.xo`): MSAL reads the authority in lower case, so `ADFS`
+in any case is an ADFS authority, and a cache's realm and partition
+hint are the tenant in lower case; azidentity's resolveTenant ("ADFS
+doesn't support tenants" for a credential at `adfs` asked for another
+tenant, the invalid tenant ID check, any tenant for a credential at
+`organizations` or "" with no allow list) and MSAL's WithTenantID check
+("ADFS authority doesn't support tenants", "tenant ID must be a
+specific tenant", the consumers rule; returned as it is by device code,
+as an authentication failure by the others; a confidential credential
+at `ADFS` in upper case fails every request so, as in Go); and the
+client assertion an ADFS authority gets (RS256, with the certificate's
+SHA-1 thumbprint as `x5t`). MSAL's per-domain ADFS endpoint cache is
+not ported because it changes nothing: MSAL returns the cached
+endpoints whether or not the user's domain is listed.
 
 ### Waiting on a token-cache decision
 

@@ -117,6 +117,10 @@ fn (p: Public[fx]) begin(cae: Bool) uses (fx) {
 /// account's home id).
 fn (p: Public[fx]) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! () uses (net.dial, clock, rand, fx) {
   p.begin(opts.enable_cae)
+  // MSAL's WithTenantID check fails the silent request too
+  if p.c.with_tenant(if tenant == p.c.tenant_id { "" } else { tenant }).is_err() {
+    return Err(())
+  }
   let home = p.record().home_account_id
   if home == "" {
     return Err(())
@@ -127,8 +131,9 @@ fn (p: Public[fx]) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azco
     p.c.replace(s, home, cae) ?? _ => return Err(())
     let aliases = p.c.read_metadata(tenant, cae) ?? return Err(())
     // MSAL's Read: the access token, then the rest of the account
-    let (d, t) = find_access_token(p.c.doc(cae), home, aliases, tenant, p.c.client_id, opts.scopes, p.c.clock.now())
-    let (d2, rt_found) = read_account(d, home, aliases, tenant, p.c.client_id)
+    let realm = tenant.to_lower()
+    let (d, t) = find_access_token(p.c.doc(cae), home, aliases, realm, p.c.client_id, opts.scopes, p.c.clock.now())
+    let (d2, rt_found) = read_account(d, home, aliases, realm, p.c.client_id)
     p.c.set_doc(cae, d2)
     if opts.claims == "" {
       if let Some(at) = t {
@@ -235,7 +240,7 @@ fn (p: Public[fx]) keep_user(pc: Cache[fx], hint: Str, tenant: Str, opts: azcore
   if user == "" {
     user = str_field(idt, "upn")
   }
-  let u = UserGranted{home: home, environment: g.environment, realm: tenant, client: p.c.client_id, refresh_token: str_field(doc, "refresh_token"), family: str_field(doc, "foci"), id_token: raw_id, local_account_id: local, authority_type: if tenant == ADFS_TENANT { "ADFS" } else { "MSSTS" }, username: user}
+  let u = UserGranted{home: home, environment: g.environment, realm: tenant.to_lower(), client: p.c.client_id, refresh_token: str_field(doc, "refresh_token"), family: str_field(doc, "foci"), id_token: raw_id, local_account_id: local, authority_type: if is_adfs(tenant) { "ADFS" } else { "MSSTS" }, username: user}
   let d = write_user(p.c.doc(cae), u, g, secs)
   p.c.set_doc(cae, d)
   (s.export)(hint, encode_contract(d))
@@ -296,7 +301,18 @@ fn (p: Public[fx]) check(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthE
   if opts.scopes.is_empty() {
     return Err(azcore.AuthErr{credential: p.c.name, msg: "requires at least one scope", text: "${p.c.name}.GetToken() requires at least one scope"})
   }
-  p.c.tenant_for(opts)
+  p.c.resolve_tenant(opts.tenant_id)
+}
+
+/// The tenant of a public credential's token request: azidentity's
+/// resolveTenant, then MSAL's WithTenantID check (azidentity passes ""
+/// for the credential's own tenant). Device code returns MSAL's error
+/// as it is; the other flows as an authentication failure.
+fn (p: Public[fx]) flow_tenant(opts: azcore.TokenRequestOptions, raw: Bool = false) -> Str ! azcore.AuthErr {
+  let t = p.c.resolve_tenant(opts.tenant_id)?
+  let id = if t == p.c.tenant_id { "" } else { t }
+  p.c.with_tenant(id) ?? e => return Err(if raw { azcore.AuthErr{credential: p.c.name, msg: e, text: e} } else { failed_text(p.c.name, e) })
+  Ok(t)
 }
 
 /// Authenticate's scopes: the caller's, else the cloud's default.
@@ -385,7 +401,7 @@ fn (d: DeviceCodeCredential[fx]) flow(opts: azcore.TokenRequestOptions) -> azcor
   let p = d.p
   p.begin(opts.enable_cae)
   let name = p.c.name
-  let tenant = p.c.tenant_for(opts)?
+  let tenant = p.flow_tenant(opts, raw: true)?
   let token_ep = p.c.endpoint(tenant, opts.enable_cae)?
   // MSAL derives the device code endpoint from the token endpoint
   let dc_ep = token_ep.replace("token", "devicecode")

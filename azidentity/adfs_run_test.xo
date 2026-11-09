@@ -1,0 +1,286 @@
+// Replays the Go program's ADFS and tenant cases (adfsvectors_test.xo)
+// against the same fake: one token host, reply queues per
+// "METHOD path[ grant]" (a token path's trailing `/` allowed, as ADFS
+// writes it), the last reply repeating; a client assertion decoded as
+// the Go program decodes it.
+
+use std/base64
+use std/crypto
+use std/http
+use std/json
+use std/regexp
+use std/testing
+use std/x509
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+const AD_OPENID: Str = "{\"authorization_endpoint\":\"https://login.example.test/adfs/oauth2/authorize/\",\"token_endpoint\":\"https://login.example.test/adfs/oauth2/token/\",\"device_authorization_endpoint\":\"https://login.example.test/adfs/oauth2/devicecode\",\"issuer\":\"https://login.example.test/adfs\",\"jwks_uri\":\"https://login.example.test/adfs/discovery/keys\"}"
+
+/// The certificate and key the assertions are signed with.
+struct AdCert {
+  cert: x509.Certificate
+  key: crypto.PrivateKey
+}
+
+/// A JSON text as Go's json.Marshal writes it: `<`, `>` and `&` escaped.
+fn ad_go_json(v: json.Value) -> Str {
+  cs_canon(v).encode().replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+}
+
+/// The Go program's assertion line: header and claims masked, and the
+/// signature checked under its alg.
+fn ad_assertion(c: AdCert, a: Str) -> Str {
+  let parts = a.split(".")
+  if parts.len() != 3 {
+    return "not a JWT"
+  }
+  let dec = fn(s: Str) -> json.Value { json.parse_value((base64.decode(s, base64.Base64.RawUrl).ok() ?? b"").to_str_lossy()) ?? _ => json.Value.Object([]) }
+  let sha1 = crypto.digest(crypto.Hash.Sha1, c.cert.raw).to_base64()
+  let sha256 = crypto.digest(crypto.Hash.Sha256, c.cert.raw).to_base64()
+  let header = match dec(parts[0]) {
+    json.Value.Object(xs) => json.Value.Object(xs.map(fn(x: (Str, json.Value)) -> (Str, json.Value) {
+      match x.1 {
+        json.Value.Str(v) if (x.0 == "x5t" || x.0 == "x5t#S256") && v == sha1 => (x.0, json.Value.Str("<sha1>"))
+        json.Value.Str(v) if (x.0 == "x5t" || x.0 == "x5t#S256") && v == sha256 => (x.0, json.Value.Str("<sha256>"))
+        _ => x
+      }
+    }))
+    v => v
+  }
+  let claims = dec(parts[1])
+  let num = fn(k: Str) -> Int {
+    match claims.get(k) {
+      Some(json.Value.Int(n)) => n
+      _ => 0
+    }
+  }
+  let uuid_re = regexp.must("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+  let masked = match claims {
+    json.Value.Object(xs) => json.Value.Object(xs.map(fn(x: (Str, json.Value)) -> (Str, json.Value) {
+      match x.0 {
+        "jti" => match x.1 {
+          json.Value.Str(v) if uuid_re.is_match(v) => (x.0, json.Value.Str("<uuid>"))
+          _ => x
+        }
+        "nbf" => (x.0, json.Value.Str("<nbf>"))
+        "exp" => {
+          let d = num("exp") - num("nbf")
+          (x.0, json.Value.Str("<nbf${if d < 0 { "" } else { "+" }}${d}>"))
+        }
+        _ => x
+      }
+    }))
+    v => v
+  }
+  let sig = base64.decode(parts[2], base64.Base64.RawUrl).ok() ?? b""
+  let msg = "${parts[0]}.${parts[1]}".bytes()
+  let pubkey = c.key.public_key()
+  let ok = match header.get("alg") {
+    Some(json.Value.Str("RS256")) => crypto.verify(pubkey, crypto.Hash.Sha256, msg, sig)
+    Some(json.Value.Str("PS256")) => crypto.verify_pss(pubkey, crypto.Hash.Sha256, msg, sig)
+    _ => false
+  }
+  "header=${ad_go_json(header)} claims=${ad_go_json(masked)} sig=${if ok { "ok" } else { "bad" }}"
+}
+
+fn ad_answer(f: PcFake, c: AdCert, req: http.Request) -> http.Response {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk != "user-agent" && lk != "accept-encoding" && lk != "x-ms-client-request-id" && lk != "content-length" {
+      hs.push("${lk}=${if lk == "client-request-id" { "<uuid>" } else { v }}")
+    }
+  }
+  var body = req.body.to_str_lossy()
+  var assertion = ""
+  var grant = ""
+  for kv in body.split("&") {
+    if kv.starts_with("client_assertion=") {
+      assertion = kv.trim_prefix("client_assertion=")
+    }
+    if kv.starts_with("grant_type=") {
+      grant = kv.trim_prefix("grant_type=")
+    }
+  }
+  if assertion != "" {
+    body = body.replace("client_assertion=${assertion}", "client_assertion=<jwt>")
+  }
+  let path = req.escaped_path()
+  let qs = req.raw_query()
+  pc_note(f, "${pc_sec(f)}: REQ ${req.method} https://${req.url.host}${path}${if qs == "" { "" } else { "?${qs}" }}")
+  pc_note(f, "  H ${hs.sort().join(" | ")}")
+  pc_note(f, "  B ${body}")
+  if assertion != "" {
+    pc_note(f, "  A ${ad_assertion(c, assertion)}")
+  }
+  var key = "${req.method} ${req.url.path}"
+  if req.method == "POST" && req.url.path.trim_suffix("/").ends_with("/token") {
+    key = "${key} ${grant}"
+  }
+  let r = f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) -> (Int, Str)? {
+    let rs = m.get(key) ?? return None
+    if rs.is_empty() {
+      return None
+    }
+    if rs.len() > 1 {
+      m[key] = rs[1..rs.len()]
+    }
+    Some(rs[0])
+  })
+  match r {
+    Some((st, b)) => http.text(st, b)
+    None => {
+      pc_note(f, "${pc_sec(f)}: NO REPLY for ${key}")
+      http.text(404, "{}")
+    }
+  }
+}
+
+fn ad_serve(net: testing.FakeNet, c: AdCert) -> PcFake {
+  let f = PcFake{section: Mutex[Str].new(""), log: Mutex[List[Str]].new([]), q: Mutex[Map[Str, List[(Int, Str)]]].new({})}
+  let h = fn(req: http.Request) -> http.Response { ad_answer(f, c, req) }
+  net.handle("GET https://login.example.test/{rest...}", h)
+  net.handle("POST https://login.example.test/{rest...}", h)
+  f
+}
+
+/// The Go program's newFake for a section.
+fn ad_start(f: PcFake, section: Str) {
+  f.section.with(fn(var s: Str) { s = section })
+  f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) {
+    m = {}
+    for t in ["tenant-a", "tenant-b", "Tenant-A"] {
+      m["GET /${t}/v2.0/.well-known/openid-configuration"] = [(200, pc_openid(t))]
+    }
+    m["GET /adfs/.well-known/openid-configuration"] = [(200, AD_OPENID)]
+  })
+}
+
+fn ad_opts(allowed: List[Str], c: Cache[()]? = None) -> Options[()] {
+  Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}}, additionally_allowed_tenants: allowed, disable_instance_discovery: true, cache: c}
+}
+
+fn ad_secret(e: UpEnv, tenant: Str, allowed: List[Str], c: Cache[()]? = None) -> ClientSecretCredential[()] ! azcore.AuthErr {
+  new_client_secret_credential(tenant, "client-1", "secret-1", e.net, e.clock, e.rand, ad_opts(allowed, c))
+}
+
+fn ad_up(e: UpEnv, tenant: Str, allowed: List[Str]) -> UsernamePasswordCredential[()] ! azcore.AuthErr {
+  new_username_password_credential(tenant, "client-1", "user@example.com", "pw", e.net, e.clock, e.rand, UsernamePasswordCredentialOptions{opts: ad_opts(allowed)})
+}
+
+fn ad_device(e: UpEnv, tenant: Str) -> DeviceCodeCredential[()] ! azcore.AuthErr {
+  let prompt = fn(m: DeviceCodeMessage) -> () ! Str { Ok(()) }
+  new_device_code_credential(prompt, e.net, e.clock, e.rand, DeviceCodeCredentialOptions{opts: ad_opts(["*"]), tenant_id: tenant, client_id: "client-1"})
+}
+
+/// The Go program's mc1 store: logs each Replace, and each exported
+/// access token's key and realm.
+fn ad_cache(f: PcFake) -> Cache[()] {
+  let data = Mutex[Str].new("")
+  let s = TokenStore{
+    replace: fn(hint: Str) -> Str ! Str {
+      pc_note(f, "${pc_sec(f)}: REPLACE hint=${hint}")
+      Ok(data.with_read(fn(x: Str) -> Str { x }))
+    },
+    export: fn(hint: Str, j: Str) -> () ! Str {
+      data.with(fn(var x: Str) { x = j })
+      let doc = json.parse_value(j) ?? _ => json.Value.Object([])
+      let ats = match doc.get("AccessToken") {
+        Some(json.Value.Object(xs)) => xs
+        _ => []
+      }
+      for (k, v) in ats.sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }) {
+        let realm = match v.get("realm") {
+          Some(json.Value.Str(r)) => r
+          _ => "<nil>"
+        }
+        pc_note(f, "${pc_sec(f)}: EXPORT hint=${hint} AccessToken ${k} realm=${realm}")
+      }
+      Ok(())
+    },
+  }
+  new_cache(fn(cae: Bool) -> TokenStore[()] ! Str { Ok(s) })
+}
+
+test "ADFS authorities and tenants as azidentity and MSAL Go resolve them" {
+  let key = crypto.generate_key(os.rand, crypto.KeyAlg.Rsa)?
+  let now = os.clock.now()
+  let tmpl = x509.Template{serial: b"\x01", subject: x509.Name{common_name: "client-1"}, not_before: Time.from_unix_millis(now.unix_millis() - 3600000), not_after: Time.from_unix_millis(now.unix_millis() + 3600000)}
+  let cert = x509.create_certificate(os.rand, tmpl, key.public_key(), None, key)?
+  let ac = AdCert{cert: cert, key: key}
+  let f = ad_serve(os.net, ac)
+  let e = UpEnv{net: os.net, clock: os.clock, rand: os.rand}
+  let s1 = PC_S1
+  let o = tro([s1])
+  let ob = tro([s1], tenant: "tenant-b")
+  let cert_cred = fn(tenant: Str) -> ClientCertificateCredential[()] ! azcore.AuthErr {
+    new_client_certificate_credential(tenant, "client-1", [cert], key, e.net, e.clock, e.rand, opts: ad_opts(["*"]))
+  }
+
+  ad_start(f, "ad1")
+  pc_on(f, "POST /adfs/oauth2/token/ client_credentials", [cs_app_token("at-ad1")])
+  let c1 = ad_secret(e, "adfs", ["*"])?
+  pc_show(f, "adfs", c1.get_token(o))
+  pc_show(f, "adfs, other tenant", c1.get_token(ob))
+
+  ad_start(f, "ad2")
+  pc_on(f, "POST /adfs/oauth2/token/ client_credentials", [cs_app_token("at-ad2")])
+  let c2 = ad_secret(e, "ADFS", ["*"])?
+  pc_show(f, "ADFS", c2.get_token(o))
+  pc_show(f, "ADFS, other tenant", c2.get_token(ob))
+
+  ad_start(f, "ad3")
+  pc_on(f, "POST /adfs/oauth2/token/ client_credentials", [cs_app_token("at-ad3")])
+  pc_show(f, "certificate at adfs", cert_cred("adfs")?.get_token(o))
+
+  ad_start(f, "ad4")
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token client_credentials", [cs_app_token("at-ad4")])
+  pc_show(f, "certificate at a tenant", cert_cred("tenant-a")?.get_token(o))
+
+  ad_start(f, "ad5")
+  pc_on(f, "POST /adfs/oauth2/token/ password", [(200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"access_token\":\"at-ad5\",\"refresh_token\":\"rt-ad5\",\"scope\":\"https://svc.example.test/.default openid profile offline_access\"}")])
+  pc_show(f, "password at ADFS", ad_up(e, "ADFS", [])?.get_token(o))
+
+  ad_start(f, "ad6")
+  pc_show(f, "device code at adfs, other tenant", ad_device(e, "adfs")?.get_token(ob))
+
+  ad_start(f, "rt1")
+  pc_show(f, "invalid tenant", ad_secret(e, "tenant-a", ["*"])?.get_token(tro([s1], tenant: "bad/tenant")))
+
+  ad_start(f, "rt2")
+  pc_on(f, "POST /tenant-b/oauth2/v2.0/token client_credentials", [cs_app_token("at-rt2")])
+  pc_show(f, "organizations, no allow list", ad_secret(e, "organizations", [])?.get_token(ob))
+
+  ad_start(f, "rt3")
+  pc_show(f, "a tenant, no allow list", ad_secret(e, "tenant-a", [])?.get_token(ob))
+
+  ad_start(f, "rt4")
+  pc_on(f, "POST /tenant-b/oauth2/v2.0/token client_credentials", [cs_app_token("at-rt4")])
+  pc_show(f, "organizations, an allow list", ad_secret(e, "organizations", ["tenant-c"])?.get_token(ob))
+
+  ad_start(f, "rt5")
+  pc_show(f, "a specific tenant needed", ad_secret(e, "tenant-a", ["*"])?.get_token(tro([s1], tenant: "common")))
+
+  ad_start(f, "rt6")
+  pc_show(f, "consumers, other tenant", ad_secret(e, "consumers", ["*"])?.get_token(ob))
+
+  ad_start(f, "rt7")
+  pc_on(f, "POST /tenant-b/oauth2/v2.0/token device_code", [(400, "{\"error\":\"x\"}")])
+  pc_on(f, "POST /tenant-b/oauth2/v2.0/devicecode", [(400, "{\"error\":\"x\"}")])
+  let dd = ad_device(e, "Tenant-A")?
+  pc_show(f, "public, common", dd.get_token(tro([s1], tenant: "common")))
+  pc_show(f, "public, other tenant", dd.get_token(ob))
+  pc_show(f, "password, common", ad_up(e, "tenant-a", ["*"])?.get_token(tro([s1], tenant: "common")))
+  pc_show(f, "password at adfs, other tenant", ad_up(e, "adfs", ["*"])?.get_token(ob))
+  pc_show(f, "password at ADFS, other tenant", ad_up(e, "ADFS", ["*"])?.get_token(ob))
+
+  ad_start(f, "mc1")
+  pc_on(f, "POST /Tenant-A/oauth2/v2.0/token client_credentials", [cs_app_token("at-mc1")])
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token client_credentials", [cs_app_token("at-mc1-lower")])
+  let mc = ad_secret(e, "Tenant-A", ["*"], Some(ad_cache(f)))?
+  pc_show(f, "mixed case tenant", mc.get_token(o))
+  pc_show(f, "mixed case tenant, cached", mc.get_token(o))
+
+  pc_compare(f, ["ad1", "ad2", "ad3", "ad4", "ad5", "ad6", "rt1", "rt2", "rt3", "rt4", "rt5", "rt6", "rt7", "mc1"], GO_ADFS_LINES)
+}
