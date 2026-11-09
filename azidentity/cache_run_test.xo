@@ -1,0 +1,153 @@
+// Replays the Go program's persistent cache cases (cachevectors_test.xo)
+// against the same fake: one token host, reply queues per
+// "METHOD path[ grant]", the last reply repeating; each Cache's two
+// stores (`name`, `name.cae`) in memory, logging each Replace and
+// Export as the Go program's do.
+
+use std/json
+use std/regexp
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/cloud
+use github.com/xo-lang/azure/policy
+
+/// One storage location (the Go program's `store`).
+struct CsStore {
+  name: Str
+  data: Mutex[Str]
+}
+
+/// A JSON value with every object's keys sorted (the Go program's
+/// canonical form).
+fn cs_canon(v: json.Value) -> json.Value {
+  match v {
+    json.Value.Object(xs) => json.Value.Object(xs.map(fn(x: (Str, json.Value)) -> (Str, json.Value) { (x.0, cs_canon(x.1)) }).sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }))
+    json.Value.List(xs) => json.Value.List(xs.map(cs_canon))
+    _ => v
+  }
+}
+
+/// The Go program's maskTimes: each quoted Unix time as its offset from
+/// `t0`, rounded to 10 s.
+fn cs_mask(s: Str, t0: Int) -> Str {
+  let re = regexp.must("\"1[0-9]{9}\"")
+  var out = ""
+  var rest = s
+  while let Some((a, b)) = re.find_index(rest) {
+    let d = (Int.parse(rest[a + 1..b - 1]) ?? 0) - t0
+    let r = if d < 0 { -((-d + 5) / 10 * 10) } else { (d + 5) / 10 * 10 }
+    out = out + rest[0..a] + "\"<t0${if r < 0 { "" } else { "+" }}${r}>\""
+    rest = rest[b..rest.len()]
+  }
+  out + rest
+}
+
+/// The Go program's newCache: a Cache over two stores, `name` and
+/// `name.cae`, made by a factory that logs.
+fn cs_cache(f: PcFake, name: Str, t0: Int) -> (Cache[()], CsStore, CsStore) {
+  let plain = CsStore{name: name, data: Mutex.new("")}
+  let cae = CsStore{name: "${name}.cae", data: Mutex.new("")}
+  let as_store = fn(s: CsStore) -> TokenStore[()] {
+    TokenStore{
+      replace: fn(hint: Str) -> Str ! Str {
+        let d = s.data.with_read(fn(x: Str) -> Str { x })
+        pc_note(f, "${pc_sec(f)}: REPLACE ${s.name} hint=${hint} (${d.bytes().len()} bytes)")
+        Ok(d)
+      },
+      export: fn(hint: Str, j: Str) -> () ! Str {
+        s.data.with(fn(var x: Str) { x = j })
+        let canon = match json.parse_value(j) {
+          Ok(v) => cs_canon(v).encode()
+          Err(e) => "unparseable: ${e.msg}"
+        }
+        pc_note(f, "${pc_sec(f)}: EXPORT ${s.name} hint=${hint}\n  J ${cs_mask(canon, t0)}")
+        Ok(())
+      },
+    }
+  }
+  let c = new_cache(fn(want_cae: Bool) -> TokenStore[()] ! Str {
+    pc_note(f, "${pc_sec(f)}: FACTORY cae=${want_cae}")
+    Ok(as_store(if want_cae { cae } else { plain }))
+  })
+  (c, plain, cae)
+}
+
+fn cs_secret(e: UpEnv, c: Cache[()], client: Str) -> ClientSecretCredential[()] ! azcore.AuthErr {
+  let o: Options[()] = Options{client: policy.ClientOptions{cloud: cloud.Configuration{authority_host: GV_AUTHORITY}}, additionally_allowed_tenants: ["*"], disable_instance_discovery: true, cache: Some(c)}
+  new_client_secret_credential("tenant-a", client, "secret-1", e.net, e.clock, e.rand, o)
+}
+
+fn cs_app_token(at: Str) -> (Int, Str) {
+  (200, "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"ext_expires_in\":3600,\"access_token\":${json_q(at)}}")
+}
+
+fn cs_start(f: PcFake, section: Str) {
+  f.section.with(fn(var s: Str) { s = section })
+  f.q.with(fn(var m: Map[Str, List[(Int, Str)]]) {
+    m = {}
+    m["GET /tenant-a/v2.0/.well-known/openid-configuration"] = [(200, pc_openid("tenant-a"))]
+    m["GET /tenant-b/v2.0/.well-known/openid-configuration"] = [(200, pc_openid("tenant-b"))]
+  })
+}
+
+const CS_S1: Str = PC_S1
+const CS_S2: Str = PC_S2
+
+test "a confidential credential's persistent cache is MSAL Go's" {
+  let f = pc_serve(os.net)
+  let e = UpEnv{net: os.net, clock: os.clock, rand: os.rand}
+  let t0 = os.clock.now().unix()
+  let tok = "POST /tenant-a/oauth2/v2.0/token client_credentials"
+
+  cs_start(f, "cs1")
+  let (c, _, _) = cs_cache(f, "app", t0)
+  pc_on(f, tok, [cs_app_token("at-1"), cs_app_token("at-2"), cs_app_token("at-3")])
+  pc_on(f, "POST /tenant-b/oauth2/v2.0/token client_credentials", [cs_app_token("at-b")])
+  let cr = cs_secret(e, c, "client-1")?
+  pc_show(f, "first", cr.get_token(tro([CS_S1])))
+  pc_show(f, "cached", cr.get_token(tro([CS_S1])))
+  pc_show(f, "other scope", cr.get_token(tro([CS_S2])))
+  pc_show(f, "cae", cr.get_token(tro([CS_S1], cae: true)))
+  pc_show(f, "other tenant", cr.get_token(tro([CS_S1], tenant: "tenant-b")))
+
+  cs_start(f, "cs2")
+  pc_show(f, "new credential, same cache", cs_secret(e, c, "client-1")?.get_token(tro([CS_S1])))
+  pc_show(f, "new credential, cae", cs_secret(e, c, "client-1")?.get_token(tro([CS_S1], cae: true)))
+
+  cs_start(f, "cs3")
+  pc_on(f, tok, [cs_app_token("at-c2")])
+  pc_show(f, "other client, same cache", cs_secret(e, c, "client-2")?.get_token(tro([CS_S1])))
+
+  cs_start(f, "cs4")
+  pc_on(f, tok, [cs_app_token("at-4")])
+  pc_show(f, "claims skip the cache", cs_secret(e, c, "client-1")?.get_token(tro([CS_S1], claims: "{\"access_token\":{\"nbf\":{\"essential\":true,\"value\":\"1700000000\"}}}")))
+
+  cs_start(f, "cs5")
+  let (ec, est, _) = cs_cache(f, "expiring", t0)
+  pc_on(f, tok, [(200, "{\"token_type\":\"Bearer\",\"expires_in\":200,\"ext_expires_in\":200,\"access_token\":\"at-short\"}"), cs_app_token("at-5")])
+  pc_show(f, "short token", cs_secret(e, ec, "client-1")?.get_token(tro([CS_S1])))
+  pc_show(f, "inside the refresh window", cs_secret(e, ec, "client-1")?.get_token(tro([CS_S1])))
+  est.data.with(fn(var x: Str) { x = "{\"AccessToken\":{},\"bad\":" })
+  pc_show(f, "unreadable store", cs_secret(e, ec, "client-1")?.get_token(tro([CS_S1])))
+
+  cs_start(f, "cs6")
+  let (sc, sst, _) = cs_cache(f, "seeded", t0)
+  let old = "${t0 - 7200}"
+  let soon = "${t0 + 120}"
+  let later = "${t0 + 3000}"
+  sst.data.with(fn(var x: Str) {
+    x = "{\"AccessToken\":{" +
+      "\"-login.example.test-accesstoken-client-1-tenant-a-https://svc.example.test/.default\":{\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"AccessToken\",\"client_id\":\"client-1\",\"secret\":\"at-expired\",\"target\":\"https://svc.example.test/.default\",\"expires_on\":\"${old}\",\"extended_expires_on\":\"${old}\",\"cached_at\":\"${old}\",\"token_type\":\"Bearer\"}," +
+      "\"-login.example.test-accesstoken-client-1-tenant-a-https://soon.example.test/.default\":{\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"AccessToken\",\"client_id\":\"client-1\",\"secret\":\"at-soon\",\"target\":\"https://soon.example.test/.default\",\"expires_on\":\"${soon}\",\"cached_at\":\"${old}\",\"token_type\":\"Bearer\"}," +
+      "\"-login.example.test-accesstoken-client-9-tenant-a-https://svc.example.test/.default\":{\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"AccessToken\",\"client_id\":\"client-9\",\"secret\":\"at-foreign\",\"target\":\"https://svc.example.test/.default\",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\",\"token_type\":\"Bearer\",\"foo\":{\"bar\":[1,2]}}," +
+      "\"weird-key\":{\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"AccessToken\",\"client_id\":\"client-1\",\"secret\":\"at-weird\",\"target\":\"https://weird.example.test/.default\",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\",\"token_type\":\"Bearer\"}}," +
+      "\"RefreshToken\":{\"other-rt\":{\"home_account_id\":\"x.y\",\"environment\":\"login.example.test\",\"credential_type\":\"RefreshToken\",\"client_id\":\"client-9\",\"secret\":\"rt-foreign\",\"extra\":true}}," +
+      "\"Extra\":{\"a\":1},\"AppMetadata\":{}}"
+  })
+  pc_on(f, tok, [cs_app_token("at-6"), cs_app_token("at-7")])
+  let sc1 = cs_secret(e, sc, "client-1")?
+  pc_show(f, "expired entry", sc1.get_token(tro([CS_S1])))
+  pc_show(f, "entry under a key MSAL would not write", sc1.get_token(tro(["https://weird.example.test/.default"])))
+  pc_show(f, "entry inside 5 minutes", sc1.get_token(tro(["https://soon.example.test/.default"])))
+
+  pc_compare(f, ["cs1", "cs2", "cs3", "cs4", "cs5", "cs6"], GO_CACHE_LINES)
+}

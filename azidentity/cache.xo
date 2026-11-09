@@ -7,6 +7,9 @@
 // performs its own effects `fx` (a file needs fs.read and fs.write), so
 // only a credential given a cache performs them.
 
+use std/json
+use github.com/xo-lang/azure/azcore
+
 /// One storage location of a cache (Go's cache.ExportReplace).
 pub struct TokenStore[fx: Effects] {
   /// The stored cache, "" when nothing is stored yet; `hint` is MSAL's
@@ -40,4 +43,179 @@ fn (c: Cache[fx]) store(cae: Bool) -> TokenStore[fx] ! Str uses (fx) {
   let s = (c.factory)(cae)?
   c.made.with(fn(var xs: List[(Bool, TokenStore[fx])]) { xs.push((cae, s)) })
   Ok(s)
+}
+
+// MSAL's cache contract (MSAL Go's storage.Contract), kept as the JSON
+// the store gave: entries this module doesn't write (other clients',
+// other MSAL programs', fields it doesn't know) go back as they came.
+
+/// The contract in `text`: an empty contract for nothing stored; else
+/// the JSON object, or MSAL's error for what is not one.
+fn parse_contract(text: Str) -> json.Value ! Str {
+  if text == "" {
+    return Ok(json.Value.Object([]))
+  }
+  let v = json.parse_value(text) ?? e => return Err(go_token_err(e))
+  match v {
+    json.Value.Object(_) => Ok(v)
+    _ => Err("Unmarshal expected opening {, received ${token_text_of(v)}")
+  }
+}
+
+/// How Go's %v prints the first token of a value that isn't an object.
+fn token_text_of(v: json.Value) -> Str {
+  match v {
+    json.Value.List(_) => "["
+    json.Value.Str(s) => s
+    json.Value.Null => "<nil>"
+    json.Value.Bool(b) => "${b}"
+    _ => v.encode()
+  }
+}
+
+/// The entries of a contract's section, by key.
+fn section_of(doc: json.Value, name: Str) -> List[(Str, json.Value)] {
+  match doc.get(name) {
+    Some(json.Value.Object(xs)) => xs
+    _ => []
+  }
+}
+
+/// `doc` with its section `name`'s entry `key` set to `entry` (a new
+/// section when it had none).
+fn put_entry(doc: json.Value, name: Str, key: Str, entry: json.Value) -> json.Value {
+  let fields = match doc {
+    json.Value.Object(xs) => xs
+    _ => []
+  }
+  let entries = section_of(doc, name).filter(fn(e: (Str, json.Value)) -> Bool { e.0 != key }) + [(key, entry)]
+  var out = fields.filter(fn(f: (Str, json.Value)) -> Bool { f.0 != name })
+  out.push((name, json.Value.Object(entries)))
+  json.Value.Object(out)
+}
+
+/// The sections MSAL Go writes, in its order; then any others, sorted.
+const CONTRACT_SECTIONS: List[Str] = ["AccessToken", "RefreshToken", "IdToken", "Account", "AppMetadata"]
+
+/// The contract's JSON as MSAL Go writes it: every section (empty ones
+/// too), each section's entries sorted by key (Go writes its maps in no
+/// fixed order), an entry's fields as stored.
+fn encode_contract(doc: json.Value) -> Str {
+  let fields = match doc {
+    json.Value.Object(xs) => xs
+    _ => []
+  }
+  let sorted = fn(xs: List[(Str, json.Value)]) -> json.Value { json.Value.Object(xs.sort_by(fn(e: (Str, json.Value)) -> Str { e.0 })) }
+  var out: List[(Str, json.Value)] = []
+  for s in CONTRACT_SECTIONS {
+    out.push((s, sorted(section_of(doc, s))))
+  }
+  for (k, v) in fields.sort_by(fn(e: (Str, json.Value)) -> Str { e.0 }) {
+    if !CONTRACT_SECTIONS.contains(k) {
+      out.push((k, v))
+    }
+  }
+  json.Value.Object(out).encode()
+}
+
+fn entry_str(e: json.Value, k: Str) -> Str {
+  match e.get(k) {
+    Some(json.Value.Str(s)) => s
+    _ => ""
+  }
+}
+
+/// A stored Unix time (MSAL writes seconds as a string); None for none
+/// or zero.
+fn entry_time(e: json.Value, k: Str) -> Time? {
+  let n = match e.get(k) {
+    Some(json.Value.Str(s)) => Int.parse(s) ?? 0
+    Some(json.Value.Int(n)) => n
+    _ => 0
+  }
+  if n == 0 { None } else { Some(Time.from_unix_millis(n * 1000)) }
+}
+
+/// MSAL's isMatchingScopes: every requested scope in the entry's
+/// target, ignoring case.
+fn scopes_match(requested: List[Str], target: Str) -> Bool {
+  let have = target.split(" ").map(fn(s: Str) -> Str { s.to_lower() })
+  requested.all(fn(s: Str) -> Bool { have.contains(s.to_lower()) })
+}
+
+/// MSAL's readAccessToken, then its checks of the token: the first entry
+/// (by key; Go's map order is random) for the account (`home` "" for an
+/// app), an environment in `aliases`, the realm, client and a bearer
+/// token type, whose target holds the scopes; usable when it was cached
+/// in the past and expires more than 5 minutes from now, before its
+/// refresh time.
+fn find_access_token(doc: json.Value, home: Str, aliases: List[Str], realm: Str, client: Str, scopes: List[Str], now: Time) -> azcore.AccessToken? {
+  for (_, e) in section_of(doc, "AccessToken").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }) {
+    let tt = entry_str(e, "token_type")
+    let bearer = (tt.to_lower() == "bearer" && entry_str(e, "keyid") == "") || tt == ""
+    if entry_str(e, "home_account_id") != home || entry_str(e, "realm") != realm || entry_str(e, "client_id") != client || !bearer {
+      continue
+    }
+    if !aliases.contains(entry_str(e, "environment")) || !scopes_match(scopes, entry_str(e, "target")) || entry_str(e, "ext_cache_key") != "" {
+      continue
+    }
+    let cached = entry_time(e, "cached_at") ?? return None
+    let expires = entry_time(e, "expires_on") ?? return None
+    if cached.unix_millis() > now.unix_millis() || expires.unix_millis() < now.unix_millis() + 5 * 60 * 1000 {
+      return None
+    }
+    let refresh = entry_time(e, "refresh_on")
+    if let Some(r) = refresh {
+      if now.unix_millis() > r.unix_millis() {
+        return None
+      }
+    }
+    return Some(azcore.AccessToken{token: Secret.new(entry_str(e, "secret")), expires_on: expires, refresh_on: refresh})
+  }
+  None
+}
+
+/// What MSAL keeps of a token response.
+struct Granted {
+  home: Str
+  environment: Str
+  realm: Str
+  client: Str
+  target: Str
+  secret: Str
+  token_type: Str
+  /// Unix seconds; 0 for none.
+  cached_at: Int
+  expires_on: Int
+  ext_expires_on: Int
+  refresh_on: Int
+}
+
+/// `doc` with the access token of `g` written as MSAL's Write writes it
+/// (only when it is good for 5 minutes or more, MSAL's Validate), and
+/// the client's app metadata.
+fn write_access_token(doc: json.Value, g: Granted, now: Int) -> json.Value {
+  var d = doc
+  if g.cached_at <= now && g.expires_on >= now + 300 {
+    var f: List[(Str, json.Value)] = []
+    let s = fn(k: Str, v: Str) -> (Str, json.Value) { (k, json.Value.Str(v)) }
+    if g.home != "" {
+      f.push(s("home_account_id", g.home))
+    }
+    f = f + [s("environment", g.environment), s("realm", g.realm), s("credential_type", "AccessToken"), s("client_id", g.client), s("secret", g.secret), s("target", g.target)]
+    if g.refresh_on != 0 {
+      f.push(s("refresh_on", "${g.refresh_on}"))
+    }
+    f.push(s("expires_on", "${g.expires_on}"))
+    if g.ext_expires_on != 0 {
+      f.push(s("extended_expires_on", "${g.ext_expires_on}"))
+    }
+    f = f + [s("cached_at", "${g.cached_at}"), s("token_type", g.token_type)]
+    var key = [g.home, g.environment, "accesstoken", g.client, g.realm, g.target]
+    if g.token_type.to_lower() != "bearer" {
+      key.push(g.token_type)
+    }
+    d = put_entry(d, "AccessToken", key.join("-").to_lower(), json.Value.Object(f))
+  }
+  put_entry(d, "AppMetadata", "appmetadata-${g.environment}-${g.client}", json.Value.Object([("client_id", json.Value.Str(g.client)), ("environment", json.Value.Str(g.environment))]))
 }

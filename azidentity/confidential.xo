@@ -47,14 +47,16 @@ pub struct Confidential[fx: Effects] {
   disable_discovery: Bool
   /// Hosts whose instance metadata a cache read has fetched, per MSAL
   /// client (`cae|host`).
-  hosts: Mutex[Map[Str, Bool]]
+  hosts: Mutex[Map[Str, List[Str]]]
   /// Token endpoints resolved per MSAL client and tenant (`cae|tenant`).
   endpoints: Mutex[Map[Str, Str]]
   /// Workload identity's Azure Kubernetes token proxy: every request
   /// goes to it.
   pub proxy: TokenProxy? = None
-  /// The persistent cache, if any (decision 0012).
-  store: Cache[fx]? = None
+  /// The persistent cache, if any (decision 0012), and each MSAL
+  /// client's contract (`true`: the CAE client's) that it replaces.
+  persist: Cache[fx]? = None
+  docs: Mutex[List[(Bool, json.Value)]]
 }
 
 /// `u` as sent: to the token proxy when there is one.
@@ -149,7 +151,8 @@ pub fn confidential[fx: Effects](name: Str, tenant_id: Str, client_id: Str, net:
     disable_discovery: opts.disable_instance_discovery,
     hosts: Mutex.new({}),
     endpoints: Mutex.new({}),
-    store: opts.cache,
+    persist: opts.cache,
+    docs: Mutex.new([]),
   })
 }
 
@@ -211,25 +214,78 @@ fn failed_text(name: Str, msg: Str) -> azcore.AuthErr {
   azcore.AuthErr{credential: name, msg: msg, text: "${name}: ${msg}${tail}", failed: true}
 }
 
-/// MSAL's cache read: the first for a host (per MSAL client) asks for
-/// the host's instance metadata, unless discovery is off. Its failure
-/// is not the caller's: MSAL goes on to ask for a token, and keeps a
-/// fallback entry unless the host was invalid.
-fn (c: Confidential[fx]) read_metadata(tenant: Str, cae: Bool) uses (net.dial, clock, rand) {
+/// MSAL's cache read: the environments a cached entry may name (MSAL's
+/// aliases of the host). The first read for a host (per MSAL client)
+/// asks for the host's instance metadata, unless discovery is off. Its
+/// failure is not the caller's: MSAL goes on to ask for a token, and
+/// keeps a fallback entry (its known aliases of a cloud's host, else the
+/// host) unless the host was invalid (None: no entry matches).
+fn (c: Confidential[fx]) read_metadata(tenant: Str, cae: Bool) -> List[Str]? uses (net.dial, clock, rand) {
+  let h = c.host()
   if c.disable_discovery {
-    return
+    return Some([h])
   }
-  let k = "${cae}|${c.host()}"
-  if c.hosts.with_read(fn(m: Map[Str, Bool]) -> Bool { m.contains(k) }) {
-    return
+  let k = "${cae}|${h}"
+  if let Some(a) = c.hosts.with_read(fn(m: Map[Str, List[Str]]) -> List[Str]? { m.get(k) }) {
+    return Some(a)
   }
-  let keep = match c.msal_get(c.discovery_url(tenant)) {
-    Ok(r) => !(r.status == 400 && r.body.to_str_lossy().contains("invalid_instance"))
-    Err(_) => true
+  let aliases = match c.msal_get(c.discovery_url(tenant)) {
+    Ok(r) => {
+      let text = r.body.to_str_lossy()
+      if r.status == 400 && text.contains("invalid_instance") {
+        return None
+      }
+      match json.parse_value(text) {
+        Ok(doc) if r.status == 200 => discovered_aliases(doc, h)
+        _ => known_aliases(h)
+      }
+    }
+    Err(_) => known_aliases(h)
   }
-  if keep {
-    c.hosts.with(fn(var m: Map[Str, Bool]) { m[k] = true })
+  c.hosts.with(fn(var m: Map[Str, List[Str]]) { m[k] = aliases })
+  Some(aliases)
+}
+
+/// The aliases of `host` in an instance discovery response: those of
+/// the last metadata entry naming it (MSAL keeps each alias's last), or
+/// none.
+fn discovered_aliases(doc: json.Value, host: Str) -> List[Str] {
+  let entries = match doc.get("metadata") {
+    Some(json.Value.List(xs)) => xs
+    _ => []
   }
+  var found: List[Str] = []
+  for e in entries {
+    let names = match e.get("aliases") {
+      Some(json.Value.List(xs)) => xs.map(fn(x: json.Value) -> Str {
+        match x {
+          json.Value.Str(n) => n
+          _ => ""
+        }
+      })
+      _ => []
+    }
+    if names.contains(host) {
+      found = names
+    }
+  }
+  found
+}
+
+/// MSAL's fallback aliases of a host (its GetKnownMetadata, else the
+/// host alone).
+fn known_aliases(host: Str) -> List[Str] {
+  let clouds: List[List[Str]] = [
+    ["login.microsoftonline.com", "login.windows.net", "login.microsoft.com", "sts.windows.net"],
+    ["login.partner.microsoftonline.cn", "login.chinacloudapi.cn"],
+    ["login.microsoftonline.us", "login.usgovcloudapi.net"],
+  ]
+  for xs in clouds {
+    if xs.contains(host) {
+      return xs
+    }
+  }
+  [host]
 }
 
 /// The token endpoint of `tenant`, resolved as MSAL Go does once per
@@ -318,13 +374,21 @@ fn issuer_matches(issuer: Str, authority: Str, aliases: List[Str]) -> Bool {
 }
 
 /// A cached token for `opts`, if still fresh; never for a request with
-/// claims (MSAL's WithClaims skips the cache). The read is MSAL's: the
-/// first for the host fetches its instance metadata.
-pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses (net.dial, clock, rand) {
+/// claims (MSAL's WithClaims skips the cache). The read is MSAL's: with
+/// a persistent cache, the store's contract first (`Replace`; a store
+/// that fails is a miss), then the first read for the host fetches its
+/// instance metadata.
+pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses (net.dial, clock, rand, fx) {
   if opts.claims != "" {
     return None
   }
-  c.read_metadata(tenant, opts.enable_cae)
+  if let Some(p) = c.persist {
+    let s = p.store(opts.enable_cae) ?? _ => return None
+    c.replace(s, c.app_hint(tenant), opts.enable_cae) ?? _ => return None
+    let aliases = c.read_metadata(tenant, opts.enable_cae) ?? return None
+    return find_access_token(c.doc(opts.enable_cae), "", aliases, tenant, c.client_id, opts.scopes, c.clock.now())
+  }
+  let _ = c.read_metadata(tenant, opts.enable_cae)
   let now = c.clock.now()
   c.cache.with_read(fn(xs: List[(Str, azcore.AccessToken)]) -> azcore.AccessToken? {
     for (k, t) in xs {
@@ -334,6 +398,51 @@ pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenReq
     }
     None
   })
+}
+
+/// MSAL's partition key of an app's tokens.
+fn (c: Confidential[fx]) app_hint(tenant: Str) -> Str {
+  "${c.client_id}_${tenant}_AppTokenCache"
+}
+
+/// The contract of the MSAL client for `cae` requests.
+fn (c: Confidential[fx]) doc(cae: Bool) -> json.Value {
+  c.docs.with_read(fn(xs: List[(Bool, json.Value)]) -> json.Value? { xs.filter(fn(x: (Bool, json.Value)) -> Bool { x.0 == cae }).first().map(fn(x: (Bool, json.Value)) -> json.Value { x.1 }) }) ?? json.Value.Object([])
+}
+
+fn (c: Confidential[fx]) set_doc(cae: Bool, d: json.Value) {
+  c.docs.with(fn(var xs: List[(Bool, json.Value)]) {
+    xs = xs.filter(fn(x: (Bool, json.Value)) -> Bool { x.0 != cae })
+    xs.push((cae, d))
+  })
+}
+
+/// MSAL's Replace: the stored contract replaces the client's; nothing
+/// stored keeps it, and so does one that fails to parse.
+fn (c: Confidential[fx]) replace(s: TokenStore[fx], hint: Str, cae: Bool) -> () ! Str uses (fx) {
+  let text = (s.replace)(hint)?
+  if text == "" {
+    return Ok(())
+  }
+  c.set_doc(cae, parse_contract(text)?)
+  Ok(())
+}
+
+/// After a token response, with a persistent cache: Replace, MSAL's
+/// Write of the app token (`resp` the response's JSON) and Export.
+fn (c: Confidential[fx]) keep(p: Cache[fx], tenant: Str, opts: azcore.TokenRequestOptions, resp: json.Value, t: azcore.AccessToken, now: Time) -> () ! Str uses (fx) {
+  let cae = opts.enable_cae
+  let s = p.store(cae)?
+  let hint = c.app_hint(tenant)
+  c.replace(s, hint, cae)?
+  let secs = now.unix_millis() / 1000
+  let granted = str_field(resp, "scope")
+  let target = if granted == "" { opts.scopes.join(" ") } else { granted.split(" ").filter(fn(x: Str) -> Bool { x != "" }).join(" ") }
+  let after = fn(k: Str) -> Int { num_field(resp, k).map(fn(n: Int) -> Int { secs + n }) ?? 0 }
+  let g = Granted{home: "", environment: c.host(), realm: tenant, client: c.client_id, target: target, secret: t.token.reveal(), token_type: str_field(resp, "token_type"), cached_at: secs, expires_on: t.expires_on.unix_millis() / 1000, ext_expires_on: after("ext_expires_in"), refresh_on: after("refresh_in")}
+  let d = write_access_token(c.doc(cae), g, secs)
+  c.set_doc(cae, d)
+  (s.export)(hint, encode_contract(d))
 }
 
 /// MSAL Go's scopes on every token request, after the caller's.
@@ -348,12 +457,12 @@ pub const MSAL_SCOPES: List[Str] = ["openid", "offline_access", "profile"]
 /// type (an on-behalf-of request's is the JWT bearer grant), and every
 /// grant but client credentials, or a client assertion, adds MSAL's
 /// `client_info=1`.
-pub fn (c: Confidential[fx]) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
   Ok(c.request_rt(tenant, key, opts, fields, grant)?.0)
 }
 
 /// `request`, with the response's `refresh_token` ("" when it has none).
-pub fn (c: Confidential[fx]) request_rt(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> (azcore.AccessToken, Str) ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) request_rt(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> (azcore.AccessToken, Str) ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
   var form: List[(Str, Str)] = [("client_id", c.client_id), ("grant_type", grant), ("scope", (opts.scopes + MSAL_SCOPES).join(" "))]
   form = form + fields
   if grant != "client_credentials" || fields.any(fn(f: (Str, Str)) -> Bool { f.0 == "client_assertion" }) {
@@ -374,15 +483,17 @@ pub fn (c: Confidential[fx]) request_rt(tenant: Str, key: Str, opts: azcore.Toke
   if resp.status != 200 {
     return Err(auth_failed(c.name, req.method, c.target(req.url), resp))
   }
-  let t = parse_token_response(c.name, resp, c.clock.now())?
-  c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {
-    xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
-    xs.push((key, t))
-  })
-  let rt = match json.parse_value(resp.body.to_str_lossy()) {
-    Ok(doc) => str_field(doc, "refresh_token")
-    Err(_) => ""
+  let now = c.clock.now()
+  let t = parse_token_response(c.name, resp, now)?
+  let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => json.Value.Object([])
+  match c.persist {
+    Some(p) => c.keep(p, tenant, opts, doc, t, now) ?? e => return Err(failed_text(c.name, e))
+    None => c.cache.with(fn(var xs: List[(Str, azcore.AccessToken)]) {
+      xs = xs.filter(fn(e: (Str, azcore.AccessToken)) -> Bool { e.0 != key })
+      xs.push((key, t))
+    })
   }
+  let rt = str_field(doc, "refresh_token")
   Ok((t, rt))
 }
 
