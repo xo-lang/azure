@@ -3,6 +3,8 @@
 Azure OpenAI's extensions to the OpenAI API, for Xo: a port of Go's
 `sdk/ai/azopenai` v0.9.0. Go's module has no client of its own: it is
 used with OpenAI's Go library (openai-go v3), which sends the requests.
+Its Xo port, with the `azure` package, is github.com/xo-lang/openai
+(in progress; decision 0014).
 This port has the Azure parts, which work on the JSON of those requests
 and responses:
 
