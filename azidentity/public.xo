@@ -60,8 +60,8 @@ const SCOPE_REQUIRED: Str = "authenticating in this environment requires specify
 /// The state every public credential shares: the confidential client's
 /// endpoints, pipeline and access token cache, the account, and its
 /// refresh tokens per MSAL client (`<cae>|<home account>`).
-pub struct Public {
-  c: Confidential
+pub struct Public[fx: Effects] {
+  c: Confidential[fx]
   account: Mutex[AuthenticationRecord]
   refresh: Mutex[Map[Str, Secret[Str]]]
   default_scope: List[Str]
@@ -69,7 +69,7 @@ pub struct Public {
 }
 
 /// A public client named `name` (Go's newPublicClient).
-pub fn public_client(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options, record: AuthenticationRecord, disable_auto: Bool) -> Public ! azcore.AuthErr {
+pub fn public_client[fx: Effects](name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options[fx], record: AuthenticationRecord, disable_auto: Bool) -> Public[fx] ! azcore.AuthErr {
   let c = confidential(name, tenant_id, client_id, net, clock, rand, opts)?
   // the default scope of Authenticate: the cloud's Resource Manager
   // audience, as Go finds it (the configuration's, else one of the
@@ -90,7 +90,7 @@ pub fn public_client(name: Str, tenant_id: Str, client_id: Str, net: Net, clock:
 }
 
 /// The account signed in last (or given), as an AuthenticationRecord.
-pub fn (p: Public) record() -> AuthenticationRecord {
+pub fn (p: Public[fx]) record() -> AuthenticationRecord {
   p.account.with_read(fn(r: AuthenticationRecord) -> AuthenticationRecord { r })
 }
 
@@ -101,7 +101,7 @@ fn rt_key(cae: Bool, home: Str) -> Str {
 /// MSAL's AcquireTokenSilent for the account: the cached access token
 /// (not with claims), else the refresh token grant. Err when neither
 /// gives a token; the caller then runs its flow.
-fn (p: Public) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! () uses (net.dial, clock, rand) {
+fn (p: Public[fx]) silent(tenant: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! () uses (net.dial, clock, rand) {
   let home = p.record().home_account_id
   if home == "" {
     return Err(())
@@ -130,7 +130,7 @@ fn msal_body(opts: azcore.TokenRequestOptions, fields: List[(Str, Str)]) -> Str 
 }
 
 /// POSTs MSAL's form to `u`.
-fn (p: Public) post(u: Str, body: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
+fn (p: Public[fx]) post(u: Str, body: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
   let headers = [
     ("Content-Type", "application/x-www-form-urlencoded; charset=utf-8"),
     ("client-request-id", uuid.v4(p.c.rand).display()),
@@ -141,7 +141,7 @@ fn (p: Public) post(u: Str, body: Str) -> http.Response ! azcore.AuthErr uses (n
 
 /// A token request of `grant` with `fields`, to `tenant`'s token
 /// endpoint; its response, whatever its status.
-fn (p: Public) post_token(tenant: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
+fn (p: Public[fx]) post_token(tenant: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str) -> http.Response ! azcore.AuthErr uses (net.dial, clock, rand) {
   let body = msal_body(opts, fields + [("client_id", p.c.client_id), ("client_info", "1"), ("grant_type", grant)]) ?? e => return Err(azcore.AuthErr{credential: p.c.name, msg: e})
   p.post(p.c.endpoint(tenant, opts.enable_cae)?, body)
 }
@@ -149,7 +149,7 @@ fn (p: Public) post_token(tenant: Str, opts: azcore.TokenRequestOptions, fields:
 /// A 200 token response as MSAL takes it: no requested scope declined,
 /// the access token cached, the refresh token kept for the account, and
 /// the account recorded (Go's newAuthenticationRecord).
-fn (p: Public) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: http.Response) -> azcore.AccessToken ! azcore.AuthErr {
+fn (p: Public[fx]) accept(tenant: Str, opts: azcore.TokenRequestOptions, resp: http.Response) -> azcore.AccessToken ! azcore.AuthErr {
   let t = parse_token_response(p.c.name, resp, p.c.clock.now())?
   let doc = json.parse_value(resp.body.to_str_lossy()) ?? _ => json.Value.Object([])
   let granted = str_field(doc, "scope").split(" ").filter(fn(s: Str) -> Bool { s != "" }).map(fn(s: Str) -> Str { s.to_lower() })
@@ -206,12 +206,12 @@ fn record_of(doc: json.Value, authority_host: Str) -> AuthenticationRecord ! Str
 }
 
 /// Go's AuthenticationRequiredError for `opts`.
-fn (p: Public) required(opts: azcore.TokenRequestOptions) -> azcore.AuthErr {
+fn (p: Public[fx]) required(opts: azcore.TokenRequestOptions) -> azcore.AuthErr {
   azcore.AuthErr{credential: p.c.name, msg: "authentication required", text: "${p.c.name} can't acquire a token without user interaction. Call Authenticate to authenticate a user interactively", unavailable: true, required: Some(opts)}
 }
 
 /// What GetToken checks before any request: a scope, an allowed tenant.
-fn (p: Public) check(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
+fn (p: Public[fx]) check(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
   if opts.scopes.is_empty() {
     return Err(azcore.AuthErr{credential: p.c.name, msg: "requires at least one scope", text: "${p.c.name}.GetToken() requires at least one scope"})
   }
@@ -219,7 +219,7 @@ fn (p: Public) check(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
 }
 
 /// Authenticate's scopes: the caller's, else the cloud's default.
-fn (p: Public) auth_opts(opts: azcore.TokenRequestOptions) -> azcore.TokenRequestOptions ! azcore.AuthErr {
+fn (p: Public[fx]) auth_opts(opts: azcore.TokenRequestOptions) -> azcore.TokenRequestOptions ! azcore.AuthErr {
   if !opts.scopes.is_empty() {
     return Ok(opts)
   }
@@ -239,8 +239,8 @@ pub struct DeviceCodeMessage {
 }
 
 /// DeviceCodeCredential's options (Go's DeviceCodeCredentialOptions).
-pub struct DeviceCodeCredentialOptions {
-  pub opts: Options = Options{}
+pub struct DeviceCodeCredentialOptions[fx: Effects] {
+  pub opts: Options[fx] = Options{}
   pub tenant_id: Str = ORGANIZATIONS_TENANT
   pub client_id: Str = DEVELOPER_SIGN_ON_CLIENT_ID
   /// An account signed in before, to start from silently.
@@ -256,11 +256,11 @@ pub struct DeviceCodeCredentialOptions {
 /// credential polls until the user has entered it. Unlike Go's, there
 /// is no default prompt: printing is the caller's effect `fx`.
 pub struct DeviceCodeCredential[fx: Effects] {
-  p: Public
+  p: Public[fx]
   user_prompt: fn(DeviceCodeMessage) -> () ! Str uses (fx)
 }
 
-pub fn new_device_code_credential[fx: Effects](user_prompt: fn(DeviceCodeMessage) -> () ! Str uses (fx), net: Net, clock: Clock, rand: Rand, o: DeviceCodeCredentialOptions = DeviceCodeCredentialOptions{}) -> DeviceCodeCredential[fx] ! azcore.AuthErr {
+pub fn new_device_code_credential[fx: Effects](user_prompt: fn(DeviceCodeMessage) -> () ! Str uses (fx), net: Net, clock: Clock, rand: Rand, o: DeviceCodeCredentialOptions[fx] = DeviceCodeCredentialOptions{}) -> DeviceCodeCredential[fx] ! azcore.AuthErr {
   let p = public_client("DeviceCodeCredential", o.tenant_id, o.client_id, net, clock, rand, o.opts, o.authentication_record, o.disable_automatic_authentication)?
   Ok(DeviceCodeCredential{p: p, user_prompt: user_prompt})
 }

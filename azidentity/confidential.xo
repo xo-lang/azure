@@ -16,7 +16,7 @@ use github.com/xo-lang/azure/runtime
 pub const VERSION: Str = "v0.1.0"
 
 /// Options every credential takes.
-pub struct Options {
+pub struct Options[fx: Effects] {
   /// The pipeline options of the credential's own requests; `cloud`
   /// gives the authority host.
   pub client: policy.ClientOptions[()] = policy.ClientOptions{}
@@ -28,10 +28,13 @@ pub struct Options {
   /// (Go's DisableInstanceDiscovery; for disconnected clouds and Azure
   /// Stack).
   pub disable_instance_discovery: Bool = false
+  /// Where the credential keeps its tokens between processes (Go's
+  /// Cache); none: in memory only.
+  pub cache: Cache[fx]? = None
 }
 
 /// A credential that asks the token endpoint for an app's tokens.
-pub struct Confidential {
+pub struct Confidential[fx: Effects] {
   pub name: Str
   pub tenant_id: Str
   pub client_id: Str
@@ -50,10 +53,12 @@ pub struct Confidential {
   /// Workload identity's Azure Kubernetes token proxy: every request
   /// goes to it.
   pub proxy: TokenProxy? = None
+  /// The persistent cache, if any (decision 0012).
+  store: Cache[fx]? = None
 }
 
 /// `u` as sent: to the token proxy when there is one.
-fn (c: Confidential) target(u: Str) -> Str {
+fn (c: Confidential[fx]) target(u: Str) -> Str {
   match c.proxy {
     Some(p) => p.rewrite(u)
     None => u
@@ -63,7 +68,7 @@ fn (c: Confidential) target(u: Str) -> Str {
 /// Sends `req` through the pipeline; with a token proxy, to the proxy
 /// on its client, with the URL's own authority as the Host (Go's
 /// transport keeps Request.Host while it rewrites the URL).
-fn (c: Confidential) send(req: policy.Request) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (c: Confidential[fx]) send(req: policy.Request) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   match c.proxy {
     Some(p) => policy.Next{policies: c.pipeline.policies, transport: p.current()}.send(req with {url: p.rewrite(req.url), host: authority_of(req.url)})
     None => c.pipeline.send(req)
@@ -126,7 +131,7 @@ pub fn valid_tenant(t: Str) -> Bool {
   t != "" && t.runes().all(fn(r: Rune) -> Bool { (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.' })
 }
 
-pub fn confidential(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options) -> Confidential ! azcore.AuthErr {
+pub fn confidential[fx: Effects](name: Str, tenant_id: Str, client_id: Str, net: Net, clock: Clock, rand: Rand, opts: Options[fx]) -> Confidential[fx] ! azcore.AuthErr {
   if !valid_tenant(tenant_id) {
     return Err(azcore.AuthErr{credential: name, msg: "invalid tenantID", text: INVALID_TENANT})
   }
@@ -144,11 +149,12 @@ pub fn confidential(name: Str, tenant_id: Str, client_id: Str, net: Net, clock: 
     disable_discovery: opts.disable_instance_discovery,
     hosts: Mutex.new({}),
     endpoints: Mutex.new({}),
+    store: opts.cache,
   })
 }
 
 /// The tenant a request is for: the credential's, or an allowed other.
-pub fn (c: Confidential) tenant_for(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
+pub fn (c: Confidential[fx]) tenant_for(opts: azcore.TokenRequestOptions) -> Str ! azcore.AuthErr {
   if opts.tenant_id == "" || opts.tenant_id == c.tenant_id {
     return Ok(c.tenant_id)
   }
@@ -177,14 +183,14 @@ pub const TRUSTED_HOSTS: List[Str] = [
 ]
 
 /// The authority's host (with its port), lower case.
-fn (c: Confidential) host() -> Str {
+fn (c: Confidential[fx]) host() -> Str {
   let rest = c.authority_host.cut("://").map(fn(p: (Str, Str)) -> Str { p.1 }) ?? c.authority_host
   (rest.cut("/").map(fn(p: (Str, Str)) -> Str { p.0 }) ?? rest).to_lower()
 }
 
 /// MSAL's instance discovery request for `tenant`: at the authority's
 /// host when MSAL trusts it, else at login.microsoftonline.com.
-fn (c: Confidential) discovery_url(tenant: Str) -> Str {
+fn (c: Confidential[fx]) discovery_url(tenant: Str) -> Str {
   let h = c.host()
   let at = if TRUSTED_HOSTS.contains(h) { h } else { "login.microsoftonline.com" }
   "https://${at}/common/discovery/instance?api-version=1.1&authorization_endpoint=${url.query_escape("https://${h}/${tenant}/oauth2/v2.0/authorize")}"
@@ -193,7 +199,7 @@ fn (c: Confidential) discovery_url(tenant: Str) -> Str {
 /// A GET as MSAL sends one (its client-request-id headers). Go's URL
 /// for the OpenID configuration ends in an empty query (`?`); Xo's URL
 /// has no empty query, so that `?` is not sent.
-fn (c: Confidential) msal_get(u: Str) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+fn (c: Confidential[fx]) msal_get(u: Str) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
   c.send(policy.Request{method: "GET", url: u, headers: [("client-request-id", uuid.v4(c.rand).display()), ("return-client-request-id", "false")]})
 }
 
@@ -209,7 +215,7 @@ fn failed_text(name: Str, msg: Str) -> azcore.AuthErr {
 /// the host's instance metadata, unless discovery is off. Its failure
 /// is not the caller's: MSAL goes on to ask for a token, and keeps a
 /// fallback entry unless the host was invalid.
-fn (c: Confidential) read_metadata(tenant: Str, cae: Bool) uses (net.dial, clock, rand) {
+fn (c: Confidential[fx]) read_metadata(tenant: Str, cae: Bool) uses (net.dial, clock, rand) {
   if c.disable_discovery {
     return
   }
@@ -230,7 +236,7 @@ fn (c: Confidential) read_metadata(tenant: Str, cae: Bool) uses (net.dial, clock
 /// tenant (per MSAL client): instance discovery for a host MSAL does not
 /// trust (unless off), then the tenant's OpenID configuration, whose
 /// fields and issuer are checked.
-pub fn (c: Confidential) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
   let k = "${cae}|${tenant}"
   if let Some(e) = c.endpoints.with_read(fn(m: Map[Str, Str]) -> Str? { m.get(k) }) {
     return Ok(e)
@@ -290,7 +296,7 @@ pub fn (c: Confidential) endpoint(tenant: Str, cae: Bool = false) -> Str ! azcor
 
 /// The tenant's authorization endpoint, from the same OpenID
 /// configuration as `endpoint` (MSAL's AuthCodeURL).
-pub fn (c: Confidential) authorize_endpoint(tenant: Str, cae: Bool = false) -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) authorize_endpoint(tenant: Str, cae: Bool = false) -> Str ! azcore.AuthErr uses (net.dial, clock, rand) {
   c.endpoint(tenant, cae)?
   Ok(c.endpoints.with_read(fn(m: Map[Str, Str]) -> Str? { m.get("authorize|${cae}|${tenant}") }) ?? "")
 }
@@ -314,7 +320,7 @@ fn issuer_matches(issuer: Str, authority: Str, aliases: List[Str]) -> Bool {
 /// A cached token for `opts`, if still fresh; never for a request with
 /// claims (MSAL's WithClaims skips the cache). The read is MSAL's: the
 /// first for the host fetches its instance metadata.
-pub fn (c: Confidential) cached(tenant: Str, key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) cached(tenant: Str, key: Str, opts: azcore.TokenRequestOptions) -> azcore.AccessToken? uses (net.dial, clock, rand) {
   if opts.claims != "" {
     return None
   }
@@ -342,12 +348,12 @@ pub const MSAL_SCOPES: List[Str] = ["openid", "offline_access", "profile"]
 /// type (an on-behalf-of request's is the JWT bearer grant), and every
 /// grant but client credentials, or a client assertion, adds MSAL's
 /// `client_info=1`.
-pub fn (c: Confidential) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) request(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand) {
   Ok(c.request_rt(tenant, key, opts, fields, grant)?.0)
 }
 
 /// `request`, with the response's `refresh_token` ("" when it has none).
-pub fn (c: Confidential) request_rt(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> (azcore.AccessToken, Str) ! azcore.AuthErr uses (net.dial, clock, rand) {
+pub fn (c: Confidential[fx]) request_rt(tenant: Str, key: Str, opts: azcore.TokenRequestOptions, fields: List[(Str, Str)], grant: Str = "client_credentials") -> (azcore.AccessToken, Str) ! azcore.AuthErr uses (net.dial, clock, rand) {
   var form: List[(Str, Str)] = [("client_id", c.client_id), ("grant_type", grant), ("scope", (opts.scopes + MSAL_SCOPES).join(" "))]
   form = form + fields
   if grant != "client_credentials" || fields.any(fn(f: (Str, Str)) -> Bool { f.0 == "client_assertion" }) {

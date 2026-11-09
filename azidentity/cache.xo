@@ -1,0 +1,43 @@
+// A credential's persistent token cache (decision 0012, step a): Go's
+// `Cache` option. MSAL Go v1.10.1 reads the stored cache before each
+// lookup (`Replace`) and writes the whole cache after each token
+// response (`Export`), in MSAL's shared cache schema, which MSAL .NET,
+// Python and Java read too (MIT, Copyright (c) Microsoft Corporation;
+// NOTICE.md). Where the bytes live is the caller's: a `TokenStore`
+// performs its own effects `fx` (a file needs fs.read and fs.write), so
+// only a credential given a cache performs them.
+
+/// One storage location of a cache (Go's cache.ExportReplace).
+pub struct TokenStore[fx: Effects] {
+  /// The stored cache, "" when nothing is stored yet; `hint` is MSAL's
+  /// partition key (`<client>_<tenant>_AppTokenCache`, or the user's
+  /// home account id).
+  pub replace: fn(Str) -> Str ! Str uses (fx)
+  /// Stores the whole cache (`hint`, then the JSON).
+  pub export: fn(Str, Str) -> () ! Str uses (fx)
+}
+
+/// The stores a credential's tokens go to (Go's azidentity.Cache): one
+/// for requests with continuous access evaluation, one for the rest,
+/// as MSAL's cache doesn't look at a token's claims. `factory` makes
+/// each the first time it is needed (`true`: the CAE one).
+pub struct Cache[fx: Effects] {
+  factory: fn(Bool) -> TokenStore[fx] ! Str uses (fx)
+  made: Mutex[List[(Bool, TokenStore[fx])]]
+}
+
+/// A cache whose stores `factory` makes (Go's internal.NewCache, which
+/// azidentity/cache.New calls with its per-OS store).
+pub fn new_cache[fx: Effects](factory: fn(Bool) -> TokenStore[fx] ! Str uses (fx)) -> Cache[fx] {
+  Cache{factory: factory, made: Mutex.new([])}
+}
+
+/// The store for `cae` requests, made on first use.
+fn (c: Cache[fx]) store(cae: Bool) -> TokenStore[fx] ! Str uses (fx) {
+  if let Some(s) = c.made.with_read(fn(xs: List[(Bool, TokenStore[fx])]) -> TokenStore[fx]? { xs.filter(fn(x: (Bool, TokenStore[fx])) -> Bool { x.0 == cae }).first().map(fn(x: (Bool, TokenStore[fx])) -> TokenStore[fx] { x.1 }) }) {
+    return Ok(s)
+  }
+  let s = (c.factory)(cae)?
+  c.made.with(fn(var xs: List[(Bool, TokenStore[fx])]) { xs.push((cae, s)) })
+  Ok(s)
+}
