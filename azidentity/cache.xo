@@ -49,17 +49,116 @@ fn (c: Cache[fx]) store(cae: Bool) -> TokenStore[fx] ! Str uses (fx) {
 // the store gave: entries this module doesn't write (other clients',
 // other MSAL programs', fields it doesn't know) go back as they came.
 
-/// The contract in `text`: an empty contract for nothing stored; else
-/// the JSON object, or MSAL's error for what is not one.
+/// The contract in `text` as MSAL's Unmarshal reads it: an empty
+/// contract for nothing stored; else a JSON object whose sections MSAL
+/// knows hold objects of entries, each entry's known fields decoded to
+/// their Go types (`normalize_entry`); MSAL's error text for what it
+/// can't decode. Everything else is kept; text after the object is
+/// ignored, as MSAL's decoder never reads it.
 fn parse_contract(text: Str) -> json.Value ! Str {
   if text == "" {
     return Ok(json.Value.Object([]))
   }
-  let v = json.parse_value(text) ?? e => return Err(go_token_err(e))
-  match v {
-    json.Value.Object(_) => Ok(v)
-    _ => Err("Unmarshal expected opening {, received ${token_text_of(v)}")
+  // MSAL's decoder reads one value; what follows it is never read
+  var r = json.tokens(text.bytes())
+  let v = r.value() ?? e => return Err(go_token_err(e))
+  let fields = match v {
+    json.Value.Object(xs) => xs
+    _ => return Err(not_object(v))
   }
+  var out: List[(Str, json.Value)] = []
+  for (k, sv) in fields {
+    if !CONTRACT_SECTIONS.contains(k) {
+      out.push((k, sv))
+      continue
+    }
+    let entries = match sv {
+      json.Value.Object(es) => es
+      _ => return Err(not_object(sv))
+    }
+    var norm: List[(Str, json.Value)] = []
+    for (ek, e) in entries {
+      let ef = match e {
+        json.Value.Object(f) => f
+        _ => return Err(not_object(e))
+      }
+      norm.push((ek, normalize_entry(k, ef)?))
+    }
+    out.push((k, json.Value.Object(norm)))
+  }
+  Ok(json.Value.Object(out))
+}
+
+/// MSAL's error for a value where its decoder wants an object.
+fn not_object(v: json.Value) -> Str {
+  "Unmarshal expected opening {, received ${token_text_of(v)}"
+}
+
+/// The access token fields MSAL keeps as Unix times (its time.Unix).
+const UNIX_FIELDS: List[Str] = ["refresh_on", "expires_on", "extended_expires_on", "cached_at"]
+
+/// The string fields of each section's entries, as MSAL's structs name
+/// them; any other field is MSAL's AdditionalFields, kept as it is.
+fn string_fields(section: Str) -> List[Str] {
+  match section {
+    "AccessToken" => ["home_account_id", "environment", "realm", "credential_type", "client_id", "secret", "target", "user_assertion_hash", "token_type", "keyid", "ext_cache_key"]
+    "RefreshToken" => ["home_account_id", "environment", "credential_type", "client_id", "family_id", "secret", "realm", "target", "user_assertion_hash"]
+    "IdToken" => ["home_account_id", "environment", "realm", "credential_type", "client_id", "secret", "user_assertion_hash"]
+    "Account" => ["home_account_id", "environment", "realm", "local_account_id", "authority_type", "username", "given_name", "family_name", "middle_name", "name", "alternative_account_id", "client_info", "user_assertion_hash"]
+    "AppMetadata" => ["family_id", "client_id", "environment"]
+    _ => []
+  }
+}
+
+/// An entry as MSAL decodes it and writes it back: a string field that
+/// is empty or null left out (Go's omitempty), a Unix time as its
+/// seconds in a string; Go's error for a value of another type.
+fn normalize_entry(section: Str, fields: List[(Str, json.Value)]) -> json.Value ! Str {
+  let strings = string_fields(section)
+  var out: List[(Str, json.Value)] = []
+  for (f, x) in fields {
+    if section == "AccessToken" && UNIX_FIELDS.contains(f) {
+      out.push((f, json.Value.Str("${unix_field(x)?}")))
+    } else if strings.contains(f) {
+      match x {
+        json.Value.Str(v) => if v != "" { out.push((f, x)) }
+        json.Value.Null => ()
+        _ => return Err("json: cannot unmarshal ${go_kind(x)} into Go value of type string")
+      }
+    } else {
+      out.push((f, x))
+    }
+  }
+  Ok(json.Value.Object(out))
+}
+
+/// The JSON kind Go's errors name.
+fn go_kind(v: json.Value) -> Str {
+  match v {
+    json.Value.Bool(_) => "bool"
+    json.Value.Int(_) => "number"
+    json.Value.Num(_) => "number"
+    json.Value.List(_) => "array"
+    json.Value.Object(_) => "object"
+    _ => "string"
+  }
+}
+
+/// MSAL's time.Unix UnmarshalJSON: the value's text with its quotes
+/// trimmed, read by Go's strconv.Atoi.
+fn unix_field(x: json.Value) -> Int ! Str {
+  let raw = x.encode()
+  let text = raw.trim_chars("\"")
+  let digits = if text.starts_with("+") || text.starts_with("-") { text[1..text.len()] } else { text }
+  let why = if digits == "" || !digits.runes().all(fn(r: Rune) -> Bool { r >= '0' && r <= '9' }) {
+    "invalid syntax"
+  } else {
+    match Int.parse(text.trim_start_chars("+")) {
+      Some(n) => return Ok(n)
+      None => "value out of range"
+    }
+  }
+  Err("unix time(${raw}) could not be converted from string to int: strconv.Atoi: parsing ${json.encode_str(text)}: ${why}")
 }
 
 /// How Go's %v prints the first token of a value that isn't an object.
@@ -125,15 +224,52 @@ fn entry_str(e: json.Value, k: Str) -> Str {
   }
 }
 
-/// A stored Unix time (MSAL writes seconds as a string); None for none
-/// or zero.
+/// A stored Unix time (seconds in a string, as `parse_contract` leaves
+/// it); None for none. Zero is the Unix epoch, as in Go.
 fn entry_time(e: json.Value, k: Str) -> Time? {
-  let n = match e.get(k) {
-    Some(json.Value.Str(s)) => Int.parse(s) ?? 0
-    Some(json.Value.Int(n)) => n
-    _ => 0
+  match e.get(k) {
+    Some(json.Value.Str(s)) => Int.parse(s).map(fn(n: Int) -> Time { Time.from_unix_millis(n * 1000) })
+    _ => None
   }
-  if n == 0 { None } else { Some(Time.from_unix_millis(n * 1000)) }
+}
+
+/// MSAL's needsUpgrade: a key of the v1.0 schema has an upper-case
+/// letter (v1.1 keys are lower case).
+fn needs_upgrade(key: Str) -> Bool {
+  key.runes().any(fn(r: Rune) -> Bool { r >= 'A' && r <= 'Z' })
+}
+
+/// MSAL's upgrade of the v1.0 entry `key` of `section`: the entry moves
+/// to its lower-case key, unless one is there already, which MSAL
+/// prefers (a newer MSAL wrote it); the v1.0 entry is removed. Gives the
+/// contract and the entry now under the lower-case key.
+fn upgrade(doc: json.Value, section: Str, key: Str) -> (json.Value, json.Value) {
+  let lower = key.to_lower()
+  let entries = section_of(doc, section)
+  let find = fn(k: Str) -> json.Value? { entries.filter(fn(x: (Str, json.Value)) -> Bool { x.0 == k }).first().map(fn(x: (Str, json.Value)) -> json.Value { x.1 }) }
+  let v = find(lower) ?? find(key) ?? json.Value.Object([])
+  let fields = match doc {
+    json.Value.Object(xs) => xs
+    _ => []
+  }
+  let kept = entries.filter(fn(x: (Str, json.Value)) -> Bool { x.0 != key && x.0 != lower }) + [(lower, v)]
+  (json.Value.Object(fields.map(fn(f: (Str, json.Value)) -> (Str, json.Value) { if f.0 == section { (f.0, json.Value.Object(kept)) } else { f } })), v)
+}
+
+/// The first entry of `section` (by key; Go's map order is random) that
+/// `matches`, upgraded when its key is v1.0's, as MSAL's read functions
+/// take it.
+fn take_entry(doc: json.Value, section: Str, matches: fn(json.Value) -> Bool) -> (json.Value, json.Value?) {
+  for (k, e) in section_of(doc, section).sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }) {
+    if matches(e) {
+      if needs_upgrade(k) {
+        let (d, v) = upgrade(doc, section, k)
+        return (d, Some(v))
+      }
+      return (doc, Some(e))
+    }
+  }
+  (doc, None)
 }
 
 /// MSAL's isMatchingScopes: every requested scope in the entry's
@@ -144,35 +280,32 @@ fn scopes_match(requested: List[Str], target: Str) -> Bool {
 }
 
 /// MSAL's readAccessToken, then its checks of the token: the first entry
-/// (by key; Go's map order is random) for the account (`home` "" for an
-/// app), an environment in `aliases`, the realm, client and a bearer
-/// token type, whose target holds the scopes; usable when it was cached
-/// in the past and expires more than 5 minutes from now, before its
-/// refresh time.
-fn find_access_token(doc: json.Value, home: Str, aliases: List[Str], realm: Str, client: Str, scopes: List[Str], now: Time) -> azcore.AccessToken? {
-  for (_, e) in section_of(doc, "AccessToken").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }) {
+/// for the account (`home` "" for an app), an environment in `aliases`,
+/// the realm, client and a bearer token type, whose target holds the
+/// scopes (upgraded when its key is v1.0's, which may give the entry
+/// already under the lower-case key); usable when it was cached in the
+/// past and expires 5 minutes from now or later, before its refresh
+/// time. Gives the contract as the read left it.
+fn find_access_token(doc: json.Value, home: Str, aliases: List[Str], realm: Str, client: Str, scopes: List[Str], now: Time) -> (json.Value, azcore.AccessToken?) {
+  let matches = fn(e: json.Value) -> Bool {
     let tt = entry_str(e, "token_type")
     let bearer = (tt.to_lower() == "bearer" && entry_str(e, "keyid") == "") || tt == ""
-    if entry_str(e, "home_account_id") != home || entry_str(e, "realm") != realm || entry_str(e, "client_id") != client || !bearer {
-      continue
-    }
-    if !aliases.contains(entry_str(e, "environment")) || !scopes_match(scopes, entry_str(e, "target")) || entry_str(e, "ext_cache_key") != "" {
-      continue
-    }
-    let cached = entry_time(e, "cached_at") ?? return None
-    let expires = entry_time(e, "expires_on") ?? return None
-    if cached.unix_millis() > now.unix_millis() || expires.unix_millis() < now.unix_millis() + 5 * 60 * 1000 {
-      return None
-    }
-    let refresh = entry_time(e, "refresh_on")
-    if let Some(r) = refresh {
-      if now.unix_millis() > r.unix_millis() {
-        return None
-      }
-    }
-    return Some(azcore.AccessToken{token: Secret.new(entry_str(e, "secret")), expires_on: expires, refresh_on: refresh})
+    entry_str(e, "home_account_id") == home && entry_str(e, "realm") == realm && entry_str(e, "client_id") == client && bearer && aliases.contains(entry_str(e, "environment")) && scopes_match(scopes, entry_str(e, "target")) && entry_str(e, "ext_cache_key") == ""
   }
-  None
+  let (d, found) = take_entry(doc, "AccessToken", matches)
+  let e = found ?? return (d, None)
+  let cached = entry_time(e, "cached_at") ?? return (d, None)
+  let expires = entry_time(e, "expires_on") ?? return (d, None)
+  if cached.unix_millis() > now.unix_millis() || expires.unix_millis() < now.unix_millis() + 5 * 60 * 1000 {
+    return (d, None)
+  }
+  let refresh = entry_time(e, "refresh_on")
+  if let Some(r) = refresh {
+    if now.unix_millis() > r.unix_millis() {
+      return (d, None)
+    }
+  }
+  (d, Some(azcore.AccessToken{token: Secret.new(entry_str(e, "secret")), expires_on: expires, refresh_on: refresh}))
 }
 
 /// What MSAL keeps of a token response.
@@ -261,22 +394,32 @@ fn write_user(doc: json.Value, u: UserGranted, at: Granted, now: Int) -> json.Va
   write_app_metadata(d, u.environment, u.client, u.family)
 }
 
-/// MSAL's readRefreshToken (when its readAppMetaData finds the client's
-/// metadata): the account's refresh token for this client, else a
-/// family one; by the client first unless the metadata names a family.
-fn find_refresh_token(doc: json.Value, home: Str, aliases: List[Str], client: Str) -> Str? {
-  let meta = section_of(doc, "AppMetadata").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 }).filter(fn(x: (Str, json.Value)) -> Bool { aliases.contains(entry_str(x.1, "environment")) && entry_str(x.1, "client_id") == client }).first() ?? return None
-  let rts = section_of(doc, "RefreshToken").sort_by(fn(x: (Str, json.Value)) -> Str { x.0 })
-  let ours = fn(e: json.Value) -> Bool { entry_str(e, "home_account_id") == home && aliases.contains(entry_str(e, "environment")) }
-  let by_client = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "client_id") == client }
-  let by_family = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "family_id") != "" }
-  let order = if entry_str(meta.1, "family_id") == "" { [by_client, by_family] } else { [by_family, by_client] }
-  for m in order {
-    for (_, e) in rts {
-      if m(e) {
-        return Some(entry_str(e, "secret"))
+/// The rest of MSAL's Read for an account, after the access token: the
+/// ID token, the app metadata and (when that is found) the refresh
+/// token, then the account, each upgraded when its key is v1.0's. Gives
+/// the contract as the read left it and the refresh token: the
+/// account's for this client, else a family one, by the client first
+/// unless the metadata names a family (MSAL's readRefreshToken).
+fn read_account(doc: json.Value, home: Str, aliases: List[Str], realm: Str, client: Str) -> (json.Value, Str?) {
+  let env_ok = fn(e: json.Value) -> Bool { aliases.contains(entry_str(e, "environment")) }
+  var (d, _) = take_entry(doc, "IdToken", fn(e: json.Value) -> Bool { entry_str(e, "home_account_id") == home && entry_str(e, "realm") == realm && entry_str(e, "client_id") == client && env_ok(e) })
+  let (d2, meta) = take_entry(d, "AppMetadata", fn(e: json.Value) -> Bool { env_ok(e) && entry_str(e, "client_id") == client })
+  d = d2
+  var rt: Str? = None
+  if let Some(m) = meta {
+    let ours = fn(e: json.Value) -> Bool { entry_str(e, "home_account_id") == home && env_ok(e) }
+    let by_client = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "client_id") == client }
+    let by_family = fn(e: json.Value) -> Bool { ours(e) && entry_str(e, "family_id") != "" }
+    let order = if entry_str(m, "family_id") == "" { [by_client, by_family] } else { [by_family, by_client] }
+    for f in order {
+      let (d3, found) = take_entry(d, "RefreshToken", f)
+      d = d3
+      if let Some(e) = found {
+        rt = Some(entry_str(e, "secret"))
+        break
       }
     }
   }
-  None
+  let (d4, _) = take_entry(d, "Account", fn(e: json.Value) -> Bool { entry_str(e, "home_account_id") == home && env_ok(e) && entry_str(e, "realm") == realm })
+  (d4, rt)
 }

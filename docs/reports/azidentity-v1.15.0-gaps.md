@@ -210,11 +210,15 @@ tenants" for a request's other tenant) are not ported yet.
     yet: step b (Deferred, owner 2026-11-07), the per-OS store at
     `.IdentityService/<name>` (and `<name>.cae`) with a `.lockfile`, in
     the macOS keychain, under Windows DPAPI, or as A128CBC-HS256 JWE with
-    its key in the Linux user keyring; MSAL's upgrade of v1.0 keys (an
-    upper-case key renamed when read) and its parse errors for an entry
-    whose time is not a number (this port reads it as no time); MSAL's
-    partitioned cache for on-behalf-of (Go gives that credential no
-    `Cache`).
+    its key in the Linux user keyring; MSAL's partitioned cache for
+    on-behalf-of (Go gives that credential no `Cache`). Done since
+    (2026-11-09, from more oracle cases): a stored cache is decoded as
+    MSAL decodes it (each section and entry an object, string fields
+    strings, Unix times read by Go's Atoi, with Go's error texts; empty
+    and null strings dropped and times written back as strings; text
+    after the object ignored), and v1.0 keys (with an upper-case
+    letter) are upgraded to lower case when a read matches them, an
+    existing lower-case entry winning.
 
 ## Already the same as Go (checked by the same program)
 

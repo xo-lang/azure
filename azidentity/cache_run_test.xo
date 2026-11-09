@@ -14,6 +14,8 @@ use github.com/xo-lang/azure/policy
 struct CsStore {
   name: Str
   data: Mutex[Str]
+  /// Replace gives the data once, then forgets it
+  once: Mutex[Bool]
 }
 
 /// A JSON value with every object's keys sorted (the Go program's
@@ -44,13 +46,16 @@ fn cs_mask(s: Str, t0: Int) -> Str {
 /// The Go program's newCache: a Cache over two stores, `name` and
 /// `name.cae`, made by a factory that logs.
 fn cs_cache(f: PcFake, name: Str, t0: Int) -> (Cache[()], CsStore, CsStore) {
-  let plain = CsStore{name: name, data: Mutex.new("")}
-  let cae = CsStore{name: "${name}.cae", data: Mutex.new("")}
+  let plain = CsStore{name: name, data: Mutex.new(""), once: Mutex.new(false)}
+  let cae = CsStore{name: "${name}.cae", data: Mutex.new(""), once: Mutex.new(false)}
   let as_store = fn(s: CsStore) -> TokenStore[()] {
     TokenStore{
       replace: fn(hint: Str) -> Str ! Str {
         let d = s.data.with_read(fn(x: Str) -> Str { x })
         pc_note(f, "${pc_sec(f)}: REPLACE ${s.name} hint=${hint} (${d.bytes().len()} bytes)")
+        if s.once.with_read(fn(o: Bool) -> Bool { o }) {
+          s.data.with(fn(var x: Str) { x = "" })
+        }
         Ok(d)
       },
       export: fn(hint: Str, j: Str) -> () ! Str {
@@ -214,4 +219,100 @@ test "a public credential's persistent cache is MSAL Go's" {
   pc_show(f, "password into the user cache", u.get_token(tro([CS_S1])))
 
   pc_compare(f, ["dc1", "dc2", "dc3", "up1"], GO_CACHE_LINES)
+}
+
+/// The Go program's seeded: a ClientSecretCredential for client-1 over a
+/// new cache whose plain store holds `data`.
+fn cs_seeded(f: PcFake, e: UpEnv, name: Str, data: Str, once: Bool, t0: Int) -> ClientSecretCredential[()] ! azcore.AuthErr {
+  let (c, st, _) = cs_cache(f, name, t0)
+  st.data.with(fn(var x: Str) { x = data })
+  st.once.with(fn(var o: Bool) { o = once })
+  cs_secret(e, c, "client-1")
+}
+
+/// The Go program's atEntry.
+fn cs_at(target: Str, sec: Str, extra: Str) -> Str {
+  "{\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"AccessToken\",\"client_id\":\"client-1\",\"secret\":\"${sec}\",\"target\":\"${target}\",\"token_type\":\"Bearer\"${extra}}"
+}
+
+const CS_SVC_KEY: Str = "-login.example.test-accesstoken-client-1-tenant-a-https://svc.example.test/.default"
+
+test "a persistent cache reads stored entries as MSAL Go decodes them" {
+  let f = pc_serve(os.net)
+  let e = UpEnv{net: os.net, clock: os.clock, rand: os.rand}
+  let t0 = os.clock.now().unix()
+  let tok = "POST /tenant-a/oauth2/v2.0/token client_credentials"
+  let old = "${t0 - 7200}"
+  let later = "${t0 + 3000}"
+  let times = ",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\""
+
+  cs_start(f, "nm1")
+  pc_on(f, tok, [cs_app_token("at-n1")])
+  let c = cs_seeded(f, e, "norm", "{\"AccessToken\":{\"${CS_SVC_KEY}\":${cs_at(CS_S1, "at-num", ",\"expires_on\":${later},\"cached_at\":${old},\"home_account_id\":\"\",\"u1\":null,\"u2\":1.50,\"u3\":[],\"u4\":{},\"u5\":\"x\",\"u6\":false")}},\"AppMetadata\":{\"appmetadata-login.example.test-client-1\":{\"client_id\":\"client-1\",\"environment\":\"login.example.test\",\"family_id\":\"\"}}}", false, t0)?
+  pc_show(f, "number times", c.get_token(tro([CS_S1])))
+  pc_show(f, "other scope", c.get_token(tro([CS_S2])))
+
+  let bad: List[(Str, Str)] = [
+    ("tp1", ",\"expires_on\":\"abc\",\"cached_at\":\"${old}\""),
+    ("tp2", ",\"expires_on\":\"${later}\",\"cached_at\":\"\""),
+    ("tp3", ",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\",\"refresh_on\":\"1.5\""),
+    ("tp4", ",\"expires_on\":true,\"cached_at\":\"${old}\""),
+    ("tp5", ",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\",\"extended_expires_on\":null"),
+    ("tp6", ",\"expires_on\":\"-5\",\"cached_at\":\"${old}\""),
+    ("tp7", ",\"expires_on\":\" 99\",\"cached_at\":\"${old}\""),
+    ("tp8", "${times},\"secret\":5"),
+    ("tp9", "${times},\"home_account_id\":null"),
+  ]
+  for (name, extra) in bad {
+    cs_start(f, name)
+    pc_on(f, tok, [cs_app_token("at-${name}")])
+    pc_show(f, "stored entry", cs_seeded(f, e, name, "{\"AccessToken\":{\"${CS_SVC_KEY}\":${cs_at(CS_S1, "at-stored", extra)}}}", false, t0)?.get_token(tro([CS_S1])))
+  }
+  cs_start(f, "tp10")
+  pc_on(f, tok, [cs_app_token("at-tp10")])
+  pc_show(f, "section not an object", cs_seeded(f, e, "tp10", "{\"AccessToken\":[],\"RefreshToken\":{}}", false, t0)?.get_token(tro([CS_S1])))
+  cs_start(f, "tp11")
+  pc_on(f, tok, [cs_app_token("at-tp11")])
+  pc_show(f, "entry not an object", cs_seeded(f, e, "tp11", "{\"AccessToken\":{\"k\":5}}", false, t0)?.get_token(tro([CS_S1])))
+
+  let more: List[(Str, Str)] = [
+    ("tp12", "{\"AccessToken\":null,\"Account\":{\"a\":null}}"),
+    ("tp13", "{\"AccessToken\":{\"${CS_SVC_KEY}\":${cs_at(CS_S1, "at-stored", ",\"expires_on\":\"${later}\",\"cached_at\":\"${old}\",\"refresh_on\":\"0\"")}}}"),
+    ("tp14", "{\"AccessToken\":{\"${CS_SVC_KEY}\":${cs_at(CS_S1, "at-stored", ",\"expires_on\":\"${later}\",\"cached_at\":\"0\"")}},\"accesstoken\":{\"x\":1}}"),
+    ("tp17", "{\"AccessToken\":{}} {\"x\":"),
+    ("tp16", "{\"Account\":{\"a\":null},\"AppMetadata\":{\"m\":{\"client_id\":7}}}"),
+    ("tp15", "{\"AccessToken\":{\"${CS_SVC_KEY}\":${cs_at(CS_S1, "at-stored", ",\"expires_on\":\"99999999999999999999\",\"cached_at\":\"${old}\"")}}}"),
+  ]
+  for (name, data) in more {
+    cs_start(f, name)
+    pc_on(f, tok, [cs_app_token("at-${name}")])
+    pc_show(f, "stored", cs_seeded(f, e, name, data, false, t0)?.get_token(tro([CS_S1])))
+  }
+
+  cs_start(f, "ku1")
+  pc_on(f, tok, [cs_app_token("at-k1")])
+  let k1 = cs_seeded(f, e, "upgrade", "{\"AccessToken\":{\"-login.example.test-AccessToken-client-1-tenant-a-https://svc.example.test/.default\":${cs_at(CS_S1, "at-upper", times)},\"-login.example.test-AccessToken-client-1-tenant-a-https://unread.example.test/.default\":${cs_at("https://unread.example.test/.default", "at-unread", times)}}}", true, t0)?
+  pc_show(f, "v1.0 key", k1.get_token(tro([CS_S1])))
+  pc_show(f, "store forgot, other scope", k1.get_token(tro([CS_S2])))
+
+  cs_start(f, "ku2")
+  pc_on(f, tok, [cs_app_token("at-k2")])
+  let k2 = cs_seeded(f, e, "both", "{\"AccessToken\":{\"-login.example.test-AccessToken-client-1-tenant-a-https://svc.example.test/.default\":${cs_at(CS_S1, "at-upper", times)},\"${CS_SVC_KEY}\":${cs_at("https://elsewhere.example.test/.default", "at-lower", times)}}}", true, t0)?
+  pc_show(f, "v1.0 and v1.1 keys", k2.get_token(tro([CS_S1])))
+  pc_show(f, "store forgot, other scope", k2.get_token(tro([CS_S2])))
+
+  cs_start(f, "ku3")
+  let (pc, pst, _) = cs_cache(f, "puser", t0)
+  pst.once.with(fn(var o: Bool) { o = true })
+  pst.data.with(fn(var x: Str) {
+    x = "{\"RefreshToken\":{\"UID-1.TENANT-A-login.example.test-RefreshToken-client-1\":{\"home_account_id\":\"uid-1.tenant-a\",\"environment\":\"login.example.test\",\"credential_type\":\"RefreshToken\",\"client_id\":\"client-1\",\"secret\":\"rt-upper\"}}," +
+      "\"IdToken\":{\"uid-1.tenant-a-login.example.test-IdToken-client-1-tenant-a\":{\"home_account_id\":\"uid-1.tenant-a\",\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"credential_type\":\"IdToken\",\"client_id\":\"client-1\",\"secret\":\"${pc_id_token("tenant-a")}\"}}," +
+      "\"Account\":{\"UID-1.tenant-a-login.example.test-tenant-a\":{\"home_account_id\":\"uid-1.tenant-a\",\"environment\":\"login.example.test\",\"realm\":\"tenant-a\",\"local_account_id\":\"oid-1\",\"authority_type\":\"MSSTS\",\"username\":\"user@example.com\"}}," +
+      "\"AppMetadata\":{\"AppMetadata-login.example.test-client-1\":{\"client_id\":\"client-1\",\"environment\":\"login.example.test\"}}}"
+  })
+  pc_on(f, "POST /tenant-a/oauth2/v2.0/token refresh_token", [cs_user_token("at-k3", CS_S1)])
+  let rec = AuthenticationRecord{authority: "https://login.example.test/tenant-a", client_id: "client-1", home_account_id: "uid-1.tenant-a", tenant_id: "tenant-a", username: "user@example.com", version: "1.0"}
+  pc_show(f, "v1.0 refresh token", cs_device(f, e, pc, rec)?.get_token(tro([CS_S1])))
+
+  pc_compare(f, ["nm1", "tp1", "tp2", "tp3", "tp4", "tp5", "tp6", "tp7", "tp8", "tp9", "tp10", "tp11", "tp12", "tp13", "tp14", "tp15", "tp16", "tp17", "ku1", "ku2", "ku3"], GO_CACHE_LINES)
 }

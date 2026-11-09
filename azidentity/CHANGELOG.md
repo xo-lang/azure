@@ -7,6 +7,18 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- The persistent cache reads a stored cache as MSAL Go v1.10.1 decodes
+  it: each section and entry must be an object, a known string field a
+  string, a Unix time an integer Go's Atoi reads (as a string or a
+  number); Go's error texts otherwise ("unix time(...) could not be
+  converted from string to int: ...", "json: cannot unmarshal number
+  into Go value of type string", "Unmarshal expected opening {,
+  received ..."). Known fields are written back as MSAL writes them
+  (times as strings, empty and null strings left out), a time of 0 is
+  the Unix epoch, and text after the object is ignored. Entries under
+  v1.0 keys (with an upper-case letter) are upgraded to lower case
+  when a read matches them, an existing lower-case entry winning, as
+  MSAL does.
 - A persistent token cache (decision 0012 step a, gap item 19), Go's
   `Cache` option: `Options.cache` takes a `Cache` (`new_cache`, from a
   factory of `TokenStore`s the caller supplies: `replace(hint)` and
