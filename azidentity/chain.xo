@@ -168,39 +168,14 @@ fn reporter(name: Str, e: azcore.AuthErr) -> Unavailable {
 /// DefaultAzureCredential as Go's: Environment, Workload identity, then
 /// Managed identity. AZURE_TOKEN_CREDENTIALS set to `prod` keeps these
 /// three; set to one's name (any case) keeps only it; unset keeps them
-/// too (Go adds the developer tools, which this SDK does not have), and
-/// is an error with `require_azure_token_credentials`. `dev` and the
+/// too (Go adds the developer tools: new_default_azure_credential_with_dev),
+/// and is an error with `require_azure_token_credentials`. `dev` and the
 /// developer tools' names are refused here; any other value is Go's
 /// error. A source that cannot be built stays in the chain as
 /// unavailable, with its reason.
 pub fn new_default_azure_credential(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, opts: DefaultAzureCredentialOptions = DefaultAzureCredentialOptions{}) -> ChainedTokenCredential[fs.read] ! azcore.AuthErr uses (env, fs.read) {
-  let names = [ENV_NAME, WI_NAME, MI_NAME]
-  var selected = names
-  match env.get("AZURE_TOKEN_CREDENTIALS") {
-    Some(v) => {
-      let dev = ["AzureCLICredential", "AzureDeveloperCLICredential", "AzurePowerShellCredential"]
-      if v == "prod" {
-        selected = names
-      } else if let Some(n) = names.find(fn(n: Str) -> Bool { n.equal_fold(v) }) {
-        selected = [n]
-      } else if v == "dev" || dev.any(fn(n: Str) -> Bool { n.equal_fold(v) }) {
-        return Err(dac_err("AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)} selects developer credentials (${dev.join(", ")}), which this SDK does not include. Use \"prod\" or one of ${names.join(", ")}. ${DAC_DOCS}"))
-      } else {
-        return Err(dac_err("invalid AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)}. Valid values are \"dev\", \"prod\", or the name of any credential type in the default chain. ${DAC_DOCS}"))
-      }
-    }
-    None => if opts.require_azure_token_credentials {
-      return Err(dac_err("AZURE_TOKEN_CREDENTIALS must be set when RequireAzureTokenCredentials is true. ${DAC_DOCS}"))
-    }
-  }
-  var tenants = opts.additionally_allowed_tenants
-  if tenants.is_empty() {
-    let t = env.get("AZURE_ADDITIONALLY_ALLOWED_TENANTS") ?? ""
-    if t != "" {
-      tenants = t.split(";")
-    }
-  }
-  let o = options_from_env(env, Options{client: opts.client, disable_instance_discovery: opts.disable_instance_discovery}) with {additionally_allowed_tenants: tenants}
+  let selected = dac_selected(env, opts, false)?
+  let o = dac_options(env, opts)
   var chain: List[azcore.TokenCredential[fs.read]] = []
   if selected.contains(ENV_NAME) {
     chain.push(match new_environment_credential(env, fs, net, clock, rand, o) {
@@ -224,6 +199,111 @@ pub fn new_default_azure_credential(env: Env, fs: Fs, net: Net, clock: Clock, ra
     })
   }
   new_chained_token_credential(chain, name: "DefaultAzureCredential")
+}
+
+/// DefaultAzureCredential with the developer tools (decision 0015), as
+/// Go's: Environment, Workload identity, Managed identity, then
+/// AzureCLICredential, AzureDeveloperCLICredential and
+/// AzurePowerShellCredential, which run `az`, `azd` and `pwsh` through
+/// `proc`. AZURE_TOKEN_CREDENTIALS `dev` keeps the last three, `prod` the
+/// first three, a name (any case) only it. In the chain a developer
+/// tool's failure lets the chain go on (Go's unavailableIfInDAC).
+pub fn new_default_azure_credential_with_dev(env: Env, fs: Fs, net: Net, clock: Clock, rand: Rand, proc: Proc, opts: DefaultAzureCredentialOptions = DefaultAzureCredentialOptions{}) -> ChainedTokenCredential[(fs.read, proc)] ! azcore.AuthErr uses (env, fs.read) {
+  let selected = dac_selected(env, opts, true)?
+  let o = dac_options(env, opts)
+  var chain: List[azcore.TokenCredential[(fs.read, proc)]] = []
+  if selected.contains(ENV_NAME) {
+    chain.push(match new_environment_credential(env, fs, net, clock, rand, o) {
+      Ok(c) => Widened[fs.read]{c: c}
+      Err(e) => Widened[fs.read]{c: reporter(ENV_NAME, e)}
+    })
+  }
+  if selected.contains(WI_NAME) {
+    let wi = new_workload_identity_credential_from_env(env, fs, net, clock, rand, WorkloadIdentityOptions{tenant_id: opts.tenant_id, opts: o})
+    chain.push(match wi {
+      Ok(c) => Widened[fs.read]{c: c}
+      Err(e) => Widened[fs.read]{c: reporter(WI_NAME, e)}
+    })
+  }
+  if selected.contains(MI_NAME) {
+    let id = env.get("AZURE_CLIENT_ID").map(fn(c: Str) -> UserAssigned { UserAssigned.ClientId(c) })
+    chain.push(match new_managed_identity_credential(env, fs, net, clock, rand, ManagedIdentityOptions{id: id, client: o.client, probe: selected.len() > 1, chained: true}) {
+      Ok(c) => Widened[fs.read]{c: c}
+      Err(e) => Widened[fs.read]{c: reporter(MI_NAME, e)}
+    })
+  }
+  let d = DevToolOptions{additionally_allowed_tenants: o.additionally_allowed_tenants, tenant_id: opts.tenant_id, chained: true}
+  if selected.contains(AZURE_CLI_NAME) {
+    chain.push(match new_azure_cli_credential(proc, clock, env, d) {
+      Ok(c) => c
+      Err(e) => reporter(AZURE_CLI_NAME, e)
+    })
+  }
+  if selected.contains(AZD_NAME) {
+    chain.push(match new_azure_developer_cli_credential(proc, clock, env, d) {
+      Ok(c) => c
+      Err(e) => reporter(AZD_NAME, e)
+    })
+  }
+  if selected.contains(PWSH_NAME) {
+    chain.push(match new_azure_powershell_credential(proc, clock, env, d) {
+      Ok(c) => c
+      Err(e) => reporter(PWSH_NAME, e)
+    })
+  }
+  new_chained_token_credential(chain, name: "DefaultAzureCredential")
+}
+
+/// The chain's credentials named by AZURE_TOKEN_CREDENTIALS (Go's
+/// selection); `dev_ok` allows the developer tools.
+/// A credential of fewer effects in a chain of more (a boxed
+/// TokenCredential does not widen by itself).
+struct Widened[fx: Effects] {
+  c: azcore.TokenCredential[fx]
+}
+
+fn (w: Widened[fx]) get_token(opts: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, fx) {
+  w.c.get_token(opts)
+}
+
+fn dac_selected(env: Env, opts: DefaultAzureCredentialOptions, dev_ok: Bool) -> List[Str] ! azcore.AuthErr uses env {
+  let names = [ENV_NAME, WI_NAME, MI_NAME]
+  let dev = [AZURE_CLI_NAME, AZD_NAME, PWSH_NAME]
+  let all = if dev_ok { names + dev } else { names }
+  match env.get("AZURE_TOKEN_CREDENTIALS") {
+    Some(v) => {
+      if v == "prod" {
+        return Ok(names)
+      }
+      if v == "dev" && dev_ok {
+        return Ok(dev)
+      }
+      if let Some(n) = all.find(fn(n: Str) -> Bool { n.equal_fold(v) }) {
+        return Ok([n])
+      }
+      if v == "dev" || dev.any(fn(n: Str) -> Bool { n.equal_fold(v) }) {
+        return Err(dac_err("AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)} selects developer credentials (${dev.join(", ")}), which new_default_azure_credential does not include; use new_default_azure_credential_with_dev, \"prod\", or one of ${names.join(", ")}. ${DAC_DOCS}"))
+      }
+      Err(dac_err("invalid AZURE_TOKEN_CREDENTIALS value ${json.encode_str(v)}. Valid values are \"dev\", \"prod\", or the name of any credential type in the default chain. ${DAC_DOCS}"))
+    }
+    None => {
+      if opts.require_azure_token_credentials {
+        return Err(dac_err("AZURE_TOKEN_CREDENTIALS must be set when RequireAzureTokenCredentials is true. ${DAC_DOCS}"))
+      }
+      Ok(all)
+    }
+  }
+}
+
+fn dac_options(env: Env, opts: DefaultAzureCredentialOptions) -> Options[()] uses env {
+  var tenants = opts.additionally_allowed_tenants
+  if tenants.is_empty() {
+    let t = env.get("AZURE_ADDITIONALLY_ALLOWED_TENANTS") ?? ""
+    if t != "" {
+      tenants = t.split(";")
+    }
+  }
+  options_from_env(env, Options{client: opts.client, disable_instance_discovery: opts.disable_instance_discovery}) with {additionally_allowed_tenants: tenants}
 }
 
 /// The ARM scope of `c` (`<audience>/.default`).

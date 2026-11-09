@@ -1,0 +1,454 @@
+// The developer-tool credentials (decision 0015): AzureCLICredential,
+// AzureDeveloperCLICredential and AzurePowerShellCredential, which ask
+// `az`, `azd` and PowerShell for a token, as azidentity v1.15.0 does
+// (azure_cli_credential.go, azure_developer_cli_credential.go,
+// azure_powershell_credential.go, developer_credential_util*.go).
+
+use std/base64
+use std/charset
+use std/json
+use std/task
+use std/time
+use std/timego
+use github.com/xo-lang/azure/azcore
+
+pub const AZURE_CLI_NAME: Str = "AzureCLICredential"
+pub const AZD_NAME: Str = "AzureDeveloperCLICredential"
+pub const PWSH_NAME: Str = "AzurePowerShellCredential"
+
+/// Go's cliTimeout, used when no task.with_timeout deadline is in force.
+const CLI_TIMEOUT: Duration = 10s
+const NO_AZ_ACCOUNT_MODULE: Str = "Az.Accounts module not found"
+const MFA_REQUIRED: Str = "Azure Developer CLI requires multifactor authentication or additional claims"
+const DEFAULT_SUFFIX: Str = "/.default"
+
+/// Go's executor: runs `command` for the credential `name` and gives its
+/// standard output. Tests replace it, as Go's do.
+pub type Exec = fn(Str, Str) -> Bytes ! azcore.AuthErr uses (proc, clock)
+
+fn tool_failed(name: Str, msg: Str) -> azcore.AuthErr {
+  let anchor = match name {
+    "AzureCLICredential" => "azure-cli"
+    "AzureDeveloperCLICredential" => "azd"
+    _ => "azure-pwsh"
+  }
+  azcore.AuthErr{credential: name, msg: msg, text: "${name}: ${msg}${if msg.ends_with(".") { " " } else { ". " }}To troubleshoot, visit https://aka.ms/azsdk/go/identity/troubleshoot#${anchor}", failed: true}
+}
+
+fn tool_unavailable(name: Str, msg: Str) -> azcore.AuthErr {
+  azcore.AuthErr{credential: name, msg: msg, unavailable: true}
+}
+
+/// A plain error (Go's errors.New and fmt.Errorf): the text as written.
+fn plain(name: Str, text: Str) -> azcore.AuthErr {
+  azcore.AuthErr{credential: name, msg: text, text: text}
+}
+
+/// Go's extractAzdError: the first JSON line's `error`, else the first
+/// `data.message`, else the text.
+fn extract_azd_error(msg: Str) -> Str {
+  var fallback = ""
+  for line0 in msg.split("\n") {
+    let line = line0.trim()
+    let v = json.parse_value(line).ok() ?? continue
+    match v.get("error") {
+      Some(json.Value.Str(e)) => if e != "" {
+        return e
+      }
+      _ => {}
+    }
+    if fallback == "" {
+      match v.get("data").and_then(fn(d: json.Value) -> json.Value? { d.get("message") }) {
+        Some(json.Value.Str(m)) => fallback = m.trim()
+        _ => {}
+      }
+    }
+  }
+  if fallback != "" { fallback } else { msg }
+}
+
+/// Go's shellExec: `/bin/sh -c command` in `/bin` (on Windows `cmd.exe /c
+/// command` in `%SYSTEMROOT%`, given as `system_root`), ten seconds unless
+/// a deadline is in force, and Go's error rules.
+pub fn shell_exec(p: Proc, clock: Clock, system_root: Str = "") -> Exec {
+  fn(name: Str, command: Str) -> Bytes ! azcore.AuthErr uses proc, clock {
+    let c = match target.os {
+      Windows => {
+        if system_root == "" {
+          return Err(tool_unavailable(name, "environment variable \"SYSTEMROOT\" has no value"))
+        }
+        p.cmd("cmd.exe", ["/c", command]).dir(system_root)
+      }
+      Linux | Darwin | Wasi => p.cmd("/bin/sh", ["-c", command]).dir("/bin")
+    }
+    let run = fn() -> ProcOutput ! ProcErr uses proc { c.output() }
+    let r = if task.deadline(clock) == None { task.with_timeout(clock, CLI_TIMEOUT, run) } else { run().map_err(fn(e: ProcErr) -> task.Timed[ProcErr] { task.Timed.Failed(e) }) }
+    let (out, fail) = match r {
+      Ok(o) => if o.code == 0 { (o, "") } else if o.code < 0 { (o, "signal: killed") } else { (o, "exit status ${o.code}") }
+      Err(task.Timed.TimedOut) => (ProcOutput{code: -1, stdout: b"", stderr: b""}, "signal: killed")
+      Err(task.Timed.Failed(e)) => (ProcOutput{code: -1, stdout: b"", stderr: b""}, e.display())
+    }
+    if fail == "" {
+      return Ok(out.stdout)
+    }
+    var msg = trim_line_ends(out.stderr.to_str_lossy())
+    if out.code == 127 || msg.contains("' is not recognized") {
+      return Err(tool_unavailable(name, "executable not found on path"))
+    }
+    if name == AZD_NAME {
+      msg = extract_azd_error(msg)
+    } else if name == PWSH_NAME {
+      if msg.contains("Connect-AzAccount") {
+        msg = "Please run \"Connect-AzAccount\" to set up an account"
+      }
+      if msg.contains(NO_AZ_ACCOUNT_MODULE) {
+        msg = NO_AZ_ACCOUNT_MODULE
+      }
+    }
+    if msg == "" {
+      msg = fail
+    }
+    Err(tool_failed(name, msg))
+  }
+}
+
+/// Go's alphanumeric: ASCII letters and digits.
+fn alphanumeric(r: Rune) -> Bool {
+  (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+/// Go's strings.Trim(s, "\r\n").
+fn trim_line_ends(s: Str) -> Str {
+  var t = s
+  while t.starts_with("\r") || t.starts_with("\n") {
+    t = t[1..t.len()]
+  }
+  while t.ends_with("\r") || t.ends_with("\n") {
+    t = t[0..t.len() - 1]
+  }
+  t
+}
+
+/// Go's validScope.
+fn valid_scope(s: Str) -> Bool {
+  s.runes().all(fn(r: Rune) -> Bool { alphanumeric(r) || r == '.' || r == '-' || r == '_' || r == '/' || r == ':' })
+}
+
+/// Go's resolveTenant for a credential with no client of its own.
+fn tool_tenant(name: Str, default: Str, specified: Str, allowed: List[Str]) -> Str ! azcore.AuthErr {
+  if specified == "" || specified == default {
+    return Ok(default)
+  }
+  if default == ADFS_TENANT {
+    return Err(plain(name, "ADFS doesn't support tenants"))
+  }
+  if !valid_tenant(specified) {
+    return Err(azcore.AuthErr{credential: name, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  if allowed.contains("*") || allowed.contains(specified) {
+    return Ok(specified)
+  }
+  if allowed.is_empty() && (default == "" || default == "organizations") {
+    return Ok(specified)
+  }
+  Err(azcore.AuthErr{credential: name, msg: "tenant ${specified} is not allowed", text: "${name} isn't configured to acquire tokens for tenant ${json.encode_str(specified)}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant"})
+}
+
+/// Go's unavailableIfInDAC: in DefaultAzureCredential every failure lets
+/// the chain go on.
+fn in_chain(e: azcore.AuthErr, chained: Bool) -> azcore.AuthErr {
+  if chained && !e.unavailable {
+    return azcore.AuthErr{credential: e.credential, msg: e.display(), text: e.display(), unavailable: true}
+  }
+  e
+}
+
+fn allowed_tenants(ts: List[Str]) -> List[Str] {
+  if ts.contains("*") { ["*"] } else { ts }
+}
+
+/// The options of the three credentials (Go's AzureCLICredentialOptions
+/// and the others; `subscription` is the CLI's only).
+pub struct DevToolOptions {
+  pub additionally_allowed_tenants: List[Str] = []
+  pub tenant_id: Str = ""
+  pub subscription: Str = ""
+  chained: Bool = false
+}
+
+/// AzureCLICredential: `az account get-access-token`.
+pub struct AzureCLICredential {
+  opts: DevToolOptions
+  zone: time.Zone
+  exec: Exec
+  mu: Mutex[()]
+}
+
+/// Go's NewAzureCLICredential. `proc` runs the shell; `env` gives the
+/// local time zone (the CLI's `expiresOn` is local time) and, on Windows,
+/// SYSTEMROOT.
+pub fn new_azure_cli_credential(proc: Proc, clock: Clock, env: Env, opts: DevToolOptions = DevToolOptions{}) -> AzureCLICredential ! azcore.AuthErr uses env {
+  for r in opts.subscription.runes() {
+    if !(alphanumeric(r) || r == '-' || r == '_' || r == ' ' || r == '.') {
+      return Err(plain(AZURE_CLI_NAME, "${AZURE_CLI_NAME}: Subscription ${json.encode_str(opts.subscription)} contains invalid characters. If this is the name of a subscription, use its ID instead"))
+    }
+  }
+  if opts.tenant_id != "" && !valid_tenant(opts.tenant_id) {
+    return Err(azcore.AuthErr{credential: AZURE_CLI_NAME, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  Ok(AzureCLICredential{opts: opts with {additionally_allowed_tenants: allowed_tenants(opts.additionally_allowed_tenants)}, zone: time.local(env).ok() ?? time.utc(), exec: shell_exec(proc, clock, env.get("SYSTEMROOT") ?? ""), mu: Mutex.new(())})
+}
+
+pub fn (c: AzureCLICredential) get_token(o: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, proc) {
+  let name = AZURE_CLI_NAME
+  if o.scopes.len() != 1 {
+    return Err(plain(name, "${name}: GetToken() requires exactly one scope"))
+  }
+  if !valid_scope(o.scopes[0]) {
+    return Err(plain(name, "${name}.GetToken(): invalid scope ${json.encode_str(o.scopes[0])}"))
+  }
+  let tenant = tool_tenant(name, c.opts.tenant_id, o.tenant_id, c.opts.additionally_allowed_tenants)?
+  let resource = o.scopes[0].trim_suffix(DEFAULT_SUFFIX)
+  var command = "az account get-access-token -o json --resource ${resource}"
+  let tenant_arg = if tenant != "" { " --tenant ${tenant}" } else { "" }
+  command = command + tenant_arg
+  if c.opts.subscription != "" {
+    command = command + " --subscription \"${c.opts.subscription}\""
+  }
+  if o.claims != "" {
+    return Err(plain(name, "${name}.GetToken(): Azure CLI requires multifactor authentication or additional claims. Run this command then retry the operation: az login${tenant_arg} --claims-challenge ${base64.encode(o.claims.bytes())}"))
+  }
+  let r = c.mu.with(fn(_: ()) -> Bytes ! azcore.AuthErr uses proc, clock { (c.exec)(name, command) })
+  let b = r.map_err(fn(e: azcore.AuthErr) -> azcore.AuthErr { in_chain(e, c.opts.chained) })?
+  cli_token(b, c.zone).map_err(fn(e: azcore.AuthErr) -> azcore.AuthErr { in_chain(e, c.opts.chained) })
+}
+
+/// Go's createAccessToken for the CLI: `expires_on` (Unix seconds), else
+/// `expiresOn` in local time.
+fn cli_token(b: Bytes, zone: time.Zone) -> azcore.AccessToken ! azcore.AuthErr {
+  let v = json.parse_value(b.to_str_lossy()) ?? e => return Err(plain(AZURE_CLI_NAME, json_err_text(e)))
+  let tok = str_field(v, "accessToken")
+  let secs = int_field(v, "expires_on")
+  if secs != 0 {
+    return Ok(azcore.AccessToken{token: Secret.new(tok), expires_on: Time.from_unix(secs)})
+  }
+  let s = str_field(v, "expiresOn")
+  let layout = "2006-01-02 15:04:05.999999"
+  let t = timego.parse(s, layout, zone) ?? e => return Err(plain(AZURE_CLI_NAME, "${AZURE_CLI_NAME}: error parsing token expiration time ${json.encode_str(s)}: ${go_time_err(s, layout, e.at)}"))
+  Ok(azcore.AccessToken{token: Secret.new(tok), expires_on: t})
+}
+
+/// Go's time.ParseError text for a fixed-width layout of 2006, 01, 02,
+/// 15, 04, 05 and .999999 with literals between (the two layouts here):
+/// the layout element at byte `at` of the input, and the input from
+/// there. (std's ParseErr does not carry Go's text.)
+fn go_time_err(input: Str, layout: Str, at: Int) -> Str {
+  let elems = ["2006", "01", "02", "15", "04", "05", ".999999"]
+  var chunks: List[Str] = []
+  var lit = ""
+  var i = 0
+  while i < layout.len() {
+    let rest = layout[i..layout.len()]
+    if let Some(el) = elems.find(fn(el: Str) -> Bool { rest.starts_with(el) }) {
+      if lit != "" {
+        chunks.push(lit)
+        lit = ""
+      }
+      chunks.push(el)
+      i = i + el.len()
+    } else {
+      lit = lit + layout[i..i + 1]
+      i = i + 1
+    }
+  }
+  if lit != "" {
+    chunks.push(lit)
+  }
+  var pos = 0
+  for (k, ch) in chunks.indexed() {
+    if at < pos + ch.len() || k == chunks.len() - 1 {
+      let from = if pos <= input.len() { pos } else { input.len() }
+      return "parsing time ${json.encode_str(input)} as ${json.encode_str(layout)}: cannot parse ${json.encode_str(input[from..input.len()])} as ${json.encode_str(ch)}"
+    }
+    pos = pos + ch.len()
+  }
+  "parsing time ${json.encode_str(input)} as ${json.encode_str(layout)}"
+}
+
+/// An integer field (Go's int64), 0 when absent.
+fn int_field(v: json.Value, k: Str) -> Int {
+  match v.get(k) {
+    Some(json.Value.Int(n)) => n
+    Some(json.Value.Num(n)) => Int(n)
+    _ => 0
+  }
+}
+
+/// encoding/json's syntax error text for a body that is not JSON.
+fn json_err_text(e: json.DecodeErr) -> Str {
+  e.msg.trim_prefix("invalid JSON: ")
+}
+
+/// AzureDeveloperCLICredential: `azd auth token`.
+pub struct AzureDeveloperCLICredential {
+  opts: DevToolOptions
+  exec: Exec
+  mu: Mutex[()]
+}
+
+/// Go's NewAzureDeveloperCLICredential (no subscription; it is ignored).
+pub fn new_azure_developer_cli_credential(proc: Proc, clock: Clock, env: Env, opts: DevToolOptions = DevToolOptions{}) -> AzureDeveloperCLICredential ! azcore.AuthErr uses env {
+  if opts.tenant_id != "" && !valid_tenant(opts.tenant_id) {
+    return Err(azcore.AuthErr{credential: AZD_NAME, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  Ok(AzureDeveloperCLICredential{opts: opts, exec: shell_exec(proc, clock, env.get("SYSTEMROOT") ?? ""), mu: Mutex.new(())})
+}
+
+pub fn (c: AzureDeveloperCLICredential) get_token(o: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, proc) {
+  let name = AZD_NAME
+  if o.scopes.is_empty() {
+    return Err(plain(name, "${name}: GetToken() requires at least one scope"))
+  }
+  var command = "azd auth token -o json --no-prompt"
+  for s in o.scopes {
+    if !valid_scope(s) {
+      return Err(plain(name, "${name}.GetToken(): invalid scope ${json.encode_str(s)}"))
+    }
+    command = command + " --scope ${s}"
+  }
+  let tenant = tool_tenant(name, c.opts.tenant_id, o.tenant_id, c.opts.additionally_allowed_tenants)?
+  if tenant != "" {
+    command = command + " --tenant-id ${tenant}"
+  }
+  let no_claims = command
+  if o.claims != "" {
+    command = command + " --claims ${base64.encode(o.claims.bytes())}"
+  }
+  let r = c.mu.with(fn(_: ()) -> Bytes ! azcore.AuthErr uses proc, clock { (c.exec)(name, command) })
+  let res = match r {
+    Ok(b) => azd_token(b)
+    Err(e) => Err(e)
+  }
+  match res {
+    Ok(t) => Ok(t)
+    Err(e) => {
+      var err = e
+      if e.display().contains("unknown flag: --claims") {
+        err = tool_failed(name, "${MFA_REQUIRED}, however the installed version doesn't support this. Upgrade to version 1.18.1 or later")
+      } else if o.claims != "" {
+        err = tool_failed(name, "${MFA_REQUIRED}. Run this command then retry the operation: ${no_claims}")
+      }
+      Err(in_chain(err, c.opts.chained))
+    }
+  }
+}
+
+fn azd_token(b: Bytes) -> azcore.AccessToken ! azcore.AuthErr {
+  let v = json.parse_value(b.to_str_lossy()) ?? e => return Err(plain(AZD_NAME, json_err_text(e)))
+  let s = str_field(v, "expiresOn")
+  let t = timego.parse(s, "2006-01-02T15:04:05Z", time.utc()) ?? e => return Err(plain(AZD_NAME, "error parsing token expiration time ${json.encode_str(s)}: ${go_time_err(s, "2006-01-02T15:04:05Z", e.at)}"))
+  Ok(azcore.AccessToken{token: Secret.new(str_field(v, "token")), expires_on: t})
+}
+
+/// AzurePowerShellCredential: Az.Accounts' Get-AzAccessToken through
+/// `pwsh -EncodedCommand`.
+pub struct AzurePowerShellCredential {
+  opts: DevToolOptions
+  exe: Str
+  exec: Exec
+  mu: Mutex[()]
+}
+
+/// Go's NewAzurePowerShellCredential. On Windows the executable is
+/// `pwsh.exe` when PATH has it, else `powershell.exe` (Go looks each call;
+/// this port looks once, with `has_pwsh`).
+pub fn new_azure_powershell_credential(proc: Proc, clock: Clock, env: Env, opts: DevToolOptions = DevToolOptions{}, has_pwsh: Bool = true) -> AzurePowerShellCredential ! azcore.AuthErr uses env {
+  if opts.tenant_id != "" && !valid_tenant(opts.tenant_id) {
+    return Err(azcore.AuthErr{credential: PWSH_NAME, msg: "invalid tenantID", text: INVALID_TENANT})
+  }
+  let exe = match target.os {
+    Windows => if has_pwsh { "pwsh.exe" } else { "powershell.exe" }
+    Linux | Darwin | Wasi => "pwsh"
+  }
+  Ok(AzurePowerShellCredential{opts: opts with {additionally_allowed_tenants: allowed_tenants(opts.additionally_allowed_tenants)}, exe: exe, exec: shell_exec(proc, clock, env.get("SYSTEMROOT") ?? ""), mu: Mutex.new(())})
+}
+
+/// Go's script, with its tab before WarningAction kept.
+fn pwsh_script(resource: Str, tenant: Str) -> Str {
+  [
+    "",
+    "$ErrorActionPreference = 'Stop'",
+    "[version]$minimumVersion = '2.2.0'",
+    "",
+    "$mod = Import-Module Az.Accounts -MinimumVersion $minimumVersion -PassThru -ErrorAction SilentlyContinue",
+    "",
+    "if (-not $mod) {",
+    "    Write-Error '${NO_AZ_ACCOUNT_MODULE}'",
+    "}",
+    "",
+    "$params = @{",
+    "    ResourceUrl   = '${resource}'",
+    "\tWarningAction = 'Ignore'",
+    "}",
+    "",
+    "# Only force AsSecureString for Az.Accounts versions > 2.17.0 and < 5.0.0 which return plain text token by default.",
+    "# Newer Az.Accounts versions return SecureString token by default and no longer use AsSecureString parameter.",
+    "if ($mod.Version -ge [version]'2.17.0' -and $mod.Version -lt [version]'5.0.0') {",
+    "    $params['AsSecureString'] = $true",
+    "}",
+    "",
+    "$tenantId = '${tenant}'",
+    "if ($tenantId.Length -gt 0) {",
+    "    $params['TenantId'] = '${tenant}'",
+    "}",
+    "",
+    "$token = Get-AzAccessToken @params",
+    "",
+    "$customToken = New-Object -TypeName psobject",
+    "",
+    "# The following .NET interop pattern is supported in all PowerShell versions and safely converts SecureString to plain text.",
+    "if ($token.Token -is [System.Security.SecureString]) {",
+    "    $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($token.Token)",
+    "    try {",
+    "        $plainToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr)",
+    "    } finally {",
+    "        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr)",
+    "    }",
+    "    $customToken | Add-Member -MemberType NoteProperty -Name Token -Value $plainToken",
+    "} else {",
+    "    $customToken | Add-Member -MemberType NoteProperty -Name Token -Value $token.Token",
+    "}",
+    "$customToken | Add-Member -MemberType NoteProperty -Name ExpiresOn -Value $token.ExpiresOn.ToUnixTimeSeconds()",
+    "",
+    "$jsonToken = $customToken | ConvertTo-Json",
+    "return $jsonToken",
+    "",
+  ].join("\n")
+}
+
+/// Go's base64EncodeUTF16LE.
+fn utf16le_base64(s: Str) -> Str {
+  base64.encode(charset.encode(s, charset.Charset.Utf16Le).ok() ?? b"")
+}
+
+pub fn (c: AzurePowerShellCredential) get_token(o: azcore.TokenRequestOptions) -> azcore.AccessToken ! azcore.AuthErr uses (net.dial, clock, rand, proc) {
+  let name = PWSH_NAME
+  if o.scopes.len() != 1 {
+    return Err(plain(name, "${name}: GetToken() requires exactly one scope"))
+  }
+  if !valid_scope(o.scopes[0]) {
+    return Err(plain(name, "${name}.GetToken(): invalid scope ${json.encode_str(o.scopes[0])}"))
+  }
+  let tenant = tool_tenant(name, c.opts.tenant_id, o.tenant_id, c.opts.additionally_allowed_tenants)?
+  let resource = o.scopes[0].trim_suffix(DEFAULT_SUFFIX)
+  let tenant_arg = if tenant != "" { " -TenantId '${tenant}'" } else { "" }
+  if o.claims != "" {
+    return Err(plain(name, "${name}.GetToken(): Azure PowerShell requires multifactor authentication or additional claims. Run this command then retry the operation: Connect-AzAccount${tenant_arg} -ClaimsChallenge '${base64.encode(o.claims.bytes())}'"))
+  }
+  let command = "${c.exe} -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand ${utf16le_base64(pwsh_script(resource, tenant))}"
+  let r = c.mu.with(fn(_: ()) -> Bytes ! azcore.AuthErr uses proc, clock { (c.exec)(name, command) })
+  let b = r.map_err(fn(e: azcore.AuthErr) -> azcore.AuthErr { in_chain(e, c.opts.chained) })?
+  let v = json.parse_value(b.to_str_lossy()) ?? e => return Err(in_chain(plain(name, json_err_text(e)), c.opts.chained))
+  let secs = int_field(v, "ExpiresOn")
+  Ok(azcore.AccessToken{token: Secret.new(str_field(v, "Token")), expires_on: Time.from_unix(secs)})
+}

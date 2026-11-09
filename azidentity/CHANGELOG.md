@@ -7,6 +7,15 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- The developer-tool credentials (decision 0015): AzureCLICredential,
+  AzureDeveloperCLICredential and AzurePowerShellCredential, as
+  azidentity v1.15.0 runs `az`, `azd` and `pwsh` (`/bin/sh -c` in `/bin`,
+  `cmd.exe /c` in `%SYSTEMROOT%`, ten seconds unless a deadline is in
+  force), with Go's command lines, scope, subscription, tenant and claims
+  checks and errors. `new_default_azure_credential_with_dev` is Go's full
+  chain with them and accepts `AZURE_TOKEN_CREDENTIALS=dev`; the old
+  constructor keeps refusing it and names the new one. Checked against a
+  Go program run with fake tools on PATH (`devcredvectors_test.xo`).
 - Tenants as azidentity v1.15.0 and MSAL Go v1.10.1 resolve them.
   azidentity's resolveTenant: "ADFS doesn't support tenants" for a
   credential at `adfs` asked for another tenant, Go's invalid tenant ID

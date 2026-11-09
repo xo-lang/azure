@@ -70,7 +70,8 @@ Ranked by how many callers meet the gap first.
 7. **DefaultAzureCredential's options and selection.**
    `RequireAzureTokenCredentials` (error text checked against Go),
    `TenantID`, and `AZURE_TOKEN_CREDENTIALS=dev`, which Go accepts and
-   which our chain can only reject (the developer credentials are out),
+   which `new_default_azure_credential` rejects and
+   `new_default_azure_credential_with_dev` accepts (decision 0015),
    with Go's message for an unknown value (`invalid
    AZURE_TOKEN_CREDENTIALS value "bogus". Valid values are "dev", "prod",
    or the name of any credential type in the default chain. See ...`).
@@ -130,8 +131,8 @@ grant code.
 ## Out by decision (no change proposed)
 
 AzureCLICredential, AzureDeveloperCLICredential and
-AzurePowerShellCredential (owner: not without the owner's word; the CLI
-may come as an opt-in through its own decision record). The user flows
+AzurePowerShellCredential were here until decision 0015 (2026-11-09)
+brought them in. The user flows
 and the persistent cache below are out by decision 0003 (no MSAL port,
 no interactive flows, no shared cache file); each lists exactly what it
 waits on, read from azidentity v1.15.0 over MSAL Go v1.10.1 and
