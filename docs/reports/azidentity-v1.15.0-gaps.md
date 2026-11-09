@@ -185,10 +185,17 @@ Decision 0003's Amendment 2 (Accepted by the owner, 2026-11-07) allows
 hand, as 0003 did the client credentials grant, and gives 16 the
 authorize URL through a caller callback instead of starting a browser.
 
-Status (2026-11-08): 15, 16 and 18 are done (`azidentity/public.xo`,
-`azidentity/interactive.xo`, checked against Go programs over fakes:
-16's with a scratch hook passing MSAL's WithOpenURL, so no browser
-starts); 17 is next.
+Status (2026-11-08): 15 to 18 are done (`azidentity/public.xo`,
+`azidentity/interactive.xo`, `azidentity/usernamepassword.xo`, checked
+against Go programs over fakes: 16's with a scratch hook passing MSAL's
+WithOpenURL, so no browser starts). For 17, MSAL Go v1.10.1 sends only
+the WS-Trust 1.3 request: a mex document whose only username endpoint
+is 2005 fails with MSAL's "WS Trust 2005 support is not implemented",
+and the port keeps that. The ADFS authority (tenant `adfs`) is handled
+where 17 needs it (the OpenID configuration at `/adfs/`, no instance
+discovery, the password grant with no realm); MSAL's other ADFS rules
+(the per-domain endpoint cache, "ADFS authority doesn't support
+tenants" for a request's other tenant) are not ported yet.
 
 ### Waiting on a token-cache decision
 

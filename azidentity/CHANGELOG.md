@@ -7,6 +7,35 @@ the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
 ## Unreleased
 
+- UsernamePasswordCredential (gap item 17, decision 0003 Amendment 2),
+  deprecated as Go's is (it can't support multifactor authentication;
+  https://aka.ms/azsdk/identity/mfa), as azidentity v1.15.0 runs it
+  through MSAL Go v1.10.1's AcquireTokenByUsernamePassword: the silent
+  request first, then `GET <host>/common/UserRealm/<user>?api-version=1.0`
+  (read as MSAL's JSON decoder reads it: a token at a time, an empty
+  body an empty realm, exact field names, then MSAL's checks of the
+  realm). A `Managed` account posts `grant_type=password` with
+  `username` and `password`. A `Federated` one GETs the mex document,
+  takes its WS-Trust username endpoint as MSAL's NewFromDef does (the
+  policies with a transport binding and a user name token, their SOAP
+  over HTTP bindings, the ports' addresses, a 1.3 endpoint over a 2005
+  one), POSTs the WS-Trust 1.3 request as Go's xml.Marshal writes it
+  (`SOAPAction`, a ten minute timestamp, two fresh UUIDs, the user name
+  and password escaped as Go's EscapeText), and posts the response's
+  SAML assertion (the raw content of its RequestedSecurityToken, base64)
+  with `grant_type` `urn:ietf:params:oauth:grant-type:saml1_1-bearer` or
+  `saml2-bearer` by the assertion's `xmlns:saml`. The XML is read as Go's
+  encoding/xml Unmarshal reads MSAL's structs (local names in any
+  namespace, the last attribute of a name, nothing after the root
+  element). MSAL's errors are kept: "problem getting user realm from
+  authority", "problem getting mex doc from federated url(...)",
+  "problem getting SAML token info", "unknown account type", and a
+  response that is not 200 or 201 as azidentity's authentication failed
+  error. Checked line for line against a Go program over a fake token
+  host and a fake WS-Trust host (`upvectors_test.xo`, 50 sections).
+- The ADFS authority: tenant `adfs` reads the OpenID configuration at
+  `https://<host>/adfs/.well-known/openid-configuration`, with no instance
+  discovery, as MSAL does, for every credential.
 - InteractiveBrowserCredential (gap item 16, decision 0003 Amendment 2),
   as azidentity v1.15.0 runs it through MSAL Go v1.10.1's
   AcquireTokenInteractive: the silent request first, then a PKCE
