@@ -3,10 +3,13 @@
 Changes to the root module (`github.com/xo-lang/azure`: `azcore`,
 `runtime`, `policy`, `cloud` and the other packages at the root), newest
 first. Each module under it (`storage/azblob`, `data/azcosmos`, ...) keeps
-its own CHANGELOG. Every module requires the root at v0.1.0; no root
-version has been tagged since.
+its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit (notes:
+[docs/releases/v0.1.0.md](docs/releases/v0.1.0.md)).
 
 Tracing (decision 0013, step 1): a `tracing` package in the shape of
 azcore's (Provider, Tracer, Span, attributes, kinds, statuses) and

@@ -1,6 +1,9 @@
 # azqueue changes
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
 
 Follows Go's `sdk/storage/azqueue/v2` v2.1.2 (was azqueue v1.0.1). The
 Go programs behind every vector file were rerun on v2.1.2 and the
@@ -33,7 +36,12 @@ correlation IDs), checked against Go v2.1.2's own SignWithUserDelegation
 (`udvectors_test.xo`), and `ServiceClient.get_user_delegation_credential`
 with `KeyInfo`, beyond Go (see the README).
 
-## v0.4.0
+### Before the first release
+
+Milestones of the port, never tagged; their numbers are not module
+versions.
+
+#### v0.4.0 (untagged milestone)
 
 Behavior fix: a response header that repeats is read as Go's
 `resp.Header.Get` reads it, its first field. Before, the fields were
@@ -44,7 +52,7 @@ number, date or boolean did not parse.
   entry. The Go vector test reruns with every response header field
   repeated, which leaves Go azqueue v1.0.1's output unchanged.
 
-## v0.3.0
+#### v0.3.0 (untagged milestone)
 
 - `parse_url` reads the URL with azblob's Go url.Parse port (ports,
   IPv6 literals, host bytes, user info, control bytes, fragments) and
@@ -53,7 +61,7 @@ number, date or boolean did not parse.
   azqueue's own copy of the quoting did not escape `\n`, `\t` or
   `\r`, and now forwards to azblob's.
 
-## v0.2.0
+#### v0.2.0 (untagged milestone)
 
 Constructors and URLs, at Go azqueue v1.0.1 parity on captured
 vectors (with the SAS and URL, challenge policy and response work
@@ -100,7 +108,7 @@ Responses and errors, at Go azqueue v1.0.1 parity on captured vectors.
 - `ListQueuesSegmentResponse.response`: each list page's request ID,
   version and date.
 
-## v0.1.0
+#### v0.1.0 (untagged milestone)
 
 The service and queue clients, messages, SAS, connection strings and
 queueerror, requests byte for byte with Go azqueue v1.0.1's.

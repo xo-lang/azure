@@ -5,7 +5,10 @@ azidentity v1.15.0 (with MSAL Go v1.10.1) item by item, as listed in
 `docs/reports/azidentity-v1.15.0-gaps.md`; each change is checked against
 the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
 
 - The developer-tool credentials (decision 0015): AzureCLICredential,
   AzureDeveloperCLICredential and AzurePowerShellCredential, as

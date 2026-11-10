@@ -14,21 +14,31 @@ checked against Go's own code (full table:
   module is generated from the spec Go's own release pins, and every
   call of every client is checked against a local Go program's
   requests and results over a fake transport.
-- **Data plane: 27 of Go's 36 library modules ported** (the other 4
+- **Data plane: 28 of Go's 36 library modules ported** (the other 4
   of its 40 are support and sample modules), each at Go's latest
-  release except azidentity, a subset (see its
-  [gap list](docs/reports/azidentity-v1.15.0-gaps.md)): azcore, Storage (blob,
-  Data Lake, files, queues), Cosmos DB, Tables, App Configuration,
-  Service Bus, Event Hubs, Event Grid, Web PubSub, Key Vault, Monitor
-  query and ingestion, Container Registry, Batch and Azure OpenAI's
-  Azure types. Each is checked against Go's vectors from the released
-  code and local fakes.
+  release: azcore, azidentity, Storage (blob, Data Lake, files,
+  queues), Cosmos DB, Tables, App Configuration, Service Bus, Event
+  Hubs, Event Grid, Web PubSub, Key Vault, Monitor query and ingestion,
+  Container Registry, Batch, tracing/azotel and Azure OpenAI's Azure
+  types. Each is checked against Go's vectors from the released code
+  and local fakes.
 - **Not ported yet:** azidentity/cache's per-OS protected file (see
   decision [0012](docs/decisions/0012-persistent-token-cache.md)); the
-  rest are deprecated Go modules. tracing/azotel maps the SDK's spans
-  onto std/trace (decision [0013](docs/decisions/0013-tracing.md)).
+  other 7 are modules Go marks deprecated.
 - No test calls Azure: every check runs against fakes and recorded Go
   output.
+
+## Install
+
+Every module is tagged v0.1.0 (the first release, with Xo 0.46.0). Get
+the modules your program uses; each requires the root:
+
+    xo get github.com/xo-lang/azure@v0.1.0
+    xo get github.com/xo-lang/azure/azidentity@v0.1.0
+    xo get github.com/xo-lang/azure/storage/azblob@v0.1.0
+
+Requires Xo 0.45.0 or later. Release notes:
+[docs/releases/v0.1.0.md](docs/releases/v0.1.0.md).
 
 Design: accepted ([docs/decisions](docs/decisions/README.md),
 2026-11-05).

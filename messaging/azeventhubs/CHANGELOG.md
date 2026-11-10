@@ -3,7 +3,10 @@
 Newest first. The module's Xo version is v0.1.0; each entry names the Go
 release it follows.
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
 
 Follows Go's `sdk/messaging/azeventhubs/v2` v2.0.2 (was v1.4.0). Each
 change is checked against the lines Go v2.0.2's own functions print for

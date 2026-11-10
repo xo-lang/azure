@@ -1,6 +1,9 @@
 # azblob changes
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
 
 Moved to the root module's azcore, unchanged: `exported.parse_go_url`,
 `GoUrl` and its `to_str`, `go_query`, `go_escape_path`, `go_quote`,
@@ -19,7 +22,12 @@ Tests only, no change to the module:
 
 The tests need xo c8d1eb2f2 (`Fs.open_rw`) or later.
 
-## v0.12.0
+### Before the first release
+
+Milestones of the port, never tagged; their numbers are not module
+versions.
+
+#### v0.12.0 (untagged milestone)
 
 New: the block blob client and file transfers, as azblob v1.8.3's.
 
@@ -51,7 +59,7 @@ New: the block blob client and file transfers, as azblob v1.8.3's.
   MiB for one Upload). Not ported: `Progress` and
   `TransactionalValidation`.
 
-## v0.11.0
+#### v0.11.0 (untagged milestone)
 
 Behavior fix (URLs change): the `Client` calls and the list pagers
 write the query as Go's generated request code does. The client URL's
@@ -70,7 +78,7 @@ marker with a space was `+` where Go writes `%20`.
 - azqueue already did (its two list pages with a SAS checked against
   azqueue v1.0.1 in its `client_test.xo`).
 
-## v0.10.0
+#### v0.10.0 (untagged milestone)
 
 Behavior fix: a response header that repeats is read as Go's
 `resp.Header.Get` reads it, its first field. Before, the fields were
@@ -86,7 +94,7 @@ number, date or boolean did not parse.
   each Go vector test reruns with every response header field repeated
   (a second field "zz"), which leaves Go's output unchanged.
 
-## v0.9.0
+#### v0.9.0 (untagged milestone)
 
 - `exported.parse_go_url` reads a URL as Go's url.Parse does, errors
   included: a port must be digits; a bracketed host must be an IPv6
@@ -103,7 +111,7 @@ number, date or boolean did not parse.
 - `exported.go_quote` writes control bytes as Go's strconv.Quote does
   (`\a`, `\b`, `\f`, `\v`, `\xNN`), checked on every ASCII byte.
 
-## v0.8.0
+#### v0.8.0 (untagged milestone)
 
 - `exported.all_bytes`, `has_byte` and `is_unreserved` are public, for
   azdatalake's Go path escaping. azfile's sas time and IP helpers and
@@ -111,7 +119,7 @@ number, date or boolean did not parse.
   instead of keeping copies (they were the same code; no behavior
   change).
 
-## v0.7.0
+#### v0.7.0 (untagged milestone)
 
 - `new_shared_key_credential`: a key that is not base64 reads
   `decode account key: ...`, Go's text in every storage module.
@@ -122,7 +130,7 @@ number, date or boolean did not parse.
   `is_ip_endpoint` and `go_quote`: URLs read and written as Go's
   net/url does for storage URLs, shared by azqueue.
 
-## v0.6.0
+#### v0.6.0 (untagged milestone)
 
 - `exported.new_storage_challenge_policy` and
   `exported.parse_storage_challenge`: Go's storage challenge policy (a
@@ -134,20 +142,20 @@ number, date or boolean did not parse.
   passes them on to service.NewClient; it asked for Storage's scope
   before.
 
-## v0.5.0
+#### v0.5.0 (untagged milestone)
 
 - `BlobClient.download_stream_with_response`: the download and the
   response it was read from (a 304's too), for a client that reads
   more of its headers (azdatalake's file download reads its encryption
   context and ACL from it).
 
-## v0.4.0
+#### v0.4.0 (untagged milestone)
 
 - `BlobClient.get_properties_with_response`: the properties and the
   response they were read from, for a client that reads more of its
   headers (azdatalake's paths read their owner and ACL from it).
 
-## v0.3.0
+#### v0.3.0 (untagged milestone)
 
 Adds Go v1.8.3's service, container, blob and lease clients for what
 azdatalake needs. `Client` and its calls are unchanged.
@@ -163,7 +171,7 @@ azdatalake needs. `Client` and its calls are unchanged.
   hash header that is absent is None, as Go leaves it nil.
 - Each call's request and response match Go's on captured vectors.
 
-## v0.2.0
+#### v0.2.0 (untagged milestone)
 
 Moves the port from Go azblob v1.6.1 to v1.8.3.
 
@@ -180,6 +188,6 @@ Moves the port from Go azblob v1.6.1 to v1.8.3.
 - `UserDelegationKey.signed_delegated_user_tenant_id` (default `""`).
 - The signing vectors are captured from v1.8.3.
 
-## v0.1.0
+#### v0.1.0 (untagged milestone)
 
 The first port, of Go azblob v1.6.1.

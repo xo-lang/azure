@@ -1,6 +1,9 @@
 # azfile changes
 
-## Unreleased
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
 
 Follows Go's azfile v1.7.2 (was v1.7.1). Go v1.7.2's one fix, SAS
 start and expiry times converted to UTC before they are written and
@@ -11,7 +14,12 @@ share, file and user delegation SAS and each client's `get_sas_url`
 (`saszonevectors_test.xo`). Go v1.7.1 wrote those times' wall clocks
 with a `Z`, signing another instant.
 
-## v0.3.0
+### Before the first release
+
+Milestones of the port, never tagged; their numbers are not module
+versions.
+
+#### v0.3.0 (untagged milestone)
 
 Behavior fix: a response header that repeats is read as Go's
 `resp.Header.Get` reads it, its first field. Before, the fields were
@@ -22,7 +30,7 @@ number, date or boolean did not parse.
   entry. The Go vector tests rerun with every response header field
   repeated, which leaves Go azfile v1.7.1's output unchanged.
 
-## v0.2.0
+#### v0.2.0 (untagged milestone)
 
 Behavior fix: `parse_url` and `URLParts.to_url` are Go's
 sas.ParseURL and URLParts.String, checked on 77 URLs and 12 built

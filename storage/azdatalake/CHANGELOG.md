@@ -1,6 +1,17 @@
 # azdatalake changes
 
-## v0.9.0
+## v0.1.0
+
+The first tagged release: every module of github.com/xo-lang/azure is
+tagged v0.1.0 at one commit.
+
+
+### Before the first release
+
+Milestones of the port, never tagged; their numbers are not module
+versions.
+
+#### v0.9.0 (untagged milestone)
 
 Behavior fix: a response header that repeats is read as Go's
 `resp.Header.Get` reads it, its first field. Before, the fields were
@@ -12,25 +23,25 @@ number, date or boolean did not parse.
   response header field repeated, which leaves Go azdatalake v1.7.1's
   output unchanged.
 
-## v0.8.0
+#### v0.8.0 (untagged milestone)
 
 - Error texts quote a value as Go's strconv.Quote, control bytes
   included (azblob v0.9.0's `exported.go_quote`).
 
-## v0.7.0
+#### v0.7.0 (untagged milestone)
 
 - The dfs pipeline's token policy is the storage challenge policy
   (azblob's `exported.new_storage_challenge_policy`), as Go's: a 401
   bearer challenge naming a `resource_id` gets a token for that
   resource, kept for later calls.
 
-## v0.6.0
+#### v0.6.0 (untagged milestone)
 
 - `datalakeerror`: Go azdatalake v1.7.1's error codes, `has_code` and
   its error messages. Each of Go's azdatalake packages now has its Xo
   form; what is not ported within them is listed in the README.
 
-## v0.5.0
+#### v0.5.0 (untagged milestone)
 
 SAS, at Go azdatalake v1.7.1 parity on captured vectors.
 
@@ -41,7 +52,7 @@ SAS, at Go azdatalake v1.7.1 parity on captured vectors.
   clients; `ServiceClient.get_user_delegation_credential` (`KeyInfo`);
   `parse_url` and `URLParts`.
 
-## v0.4.0
+#### v0.4.0 (untagged milestone)
 
 Leases, at Go azdatalake v1.7.1 parity on captured vectors.
 
@@ -49,7 +60,7 @@ Leases, at Go azdatalake v1.7.1 parity on captured vectors.
   file's): acquire, break, change, release and renew, with Go's
   condition mapping and DFS error codes.
 
-## v0.3.0
+#### v0.3.0 (untagged milestone)
 
 File data, at Go azdatalake v1.7.1 parity on captured vectors.
 
@@ -58,7 +69,7 @@ File data, at Go azdatalake v1.7.1 parity on captured vectors.
   (`LEASE_ACTION_*`), `MAX_APPEND_BYTES` and `MAX_FILE_SIZE`.
 - Needs azblob v0.5.0 (`download_stream_with_response`).
 
-## v0.2.0
+#### v0.2.0 (untagged milestone)
 
 Paths and ACLs, at Go azdatalake v1.7.1 parity on captured vectors.
 
@@ -72,7 +83,7 @@ Paths and ACLs, at Go azdatalake v1.7.1 parity on captured vectors.
 - `ServiceClient` and `FileSystemClient` keep how to make a blob client
   with their credential, for the paths they make.
 
-## v0.1.0
+#### v0.1.0 (untagged milestone)
 
 The first port, of Go azdatalake v1.7.1: the service and file system
 clients' calls that go to azblob, and the file system, path, directory
