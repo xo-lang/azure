@@ -1,0 +1,95 @@
+// azotel: azcore's tracing onto OpenTelemetry spans, as Go's
+// tracing/azotel v0.4.0 (otel.go) maps them, over std/trace's Recorder
+// (OpenTelemetry's span model; std/otlp exports what its Ring holds).
+
+use std/trace
+use github.com/xo-lang/azure/tracing
+
+/// The schema URL of every tracer (Go's semconv v1.17.0 SchemaURL).
+pub const SCHEMA_URL: Str = "https://opentelemetry.io/schemas/1.17.0"
+
+/// Where a span's ids travel in tracing.Context: its children's parent.
+const TRACE_KEY: Str = "azotel.trace_id"
+const SPAN_KEY: Str = "azotel.span_id"
+
+/// Go's TracingProviderOptions (none yet).
+pub struct TracingProviderOptions {}
+
+/// Go's NewTracingProvider: a tracing.Provider whose tracers start spans
+/// with `rec`, each tracer's scope the module and its version, with Go's
+/// schema URL. A span started from a context holding a span is its
+/// child; `span_from_context` finds the span a context holds while it is
+/// in progress (an ended one is a span that does nothing, as an ended
+/// OpenTelemetry span ignores calls).
+pub fn new_tracing_provider(rec: trace.Recorder, opts: TracingProviderOptions = TracingProviderOptions{}) -> tracing.Provider {
+  let live: Mutex[Map[Str, trace.Active]] = Mutex.new({})
+  tracing.new_provider(fn(namespace: Str, version: Str) -> tracing.Tracer {
+    let start = fn(ctx: tracing.Context, name: Str, o: tracing.SpanOptions) -> (tracing.Context, tracing.Span) uses clock, rand {
+      let parent = match (ctx.values.get(TRACE_KEY), ctx.values.get(SPAN_KEY)) {
+        (Some(t), Some(s)) => Some((t, s))
+        _ => None
+      }
+      let a = rec.start(name, parent: parent, kind: convert_kind(o.kind), attributes: convert_attributes(o.attributes), scope: namespace, scope_version: version, schema_url: SCHEMA_URL)
+      let (tid, sid) = a.ids()
+      live.with(fn(var m: Map[Str, trace.Active]) { m[sid] = a })
+      var vs = ctx.values
+      vs[TRACE_KEY] = tid
+      vs[SPAN_KEY] = sid
+      (ctx with {values: vs}, convert_span(a, sid, live))
+    }
+    let from_context = fn(ctx: tracing.Context) -> tracing.Span {
+      let sid = ctx.values.get(SPAN_KEY) ?? return tracing.Span{}
+      match live.with_read(fn(m: Map[Str, trace.Active]) -> trace.Active? { m.get(sid) }) {
+        Some(a) => convert_span(a, sid, live)
+        None => tracing.Span{}
+      }
+    }
+    tracing.new_tracer(start, span_from_context: Some(from_context))
+  })
+}
+
+/// Go's convertSpan.
+fn convert_span(a: trace.Active, sid: Str, live: Mutex[Map[Str, trace.Active]]) -> tracing.Span {
+  tracing.new_span(tracing.SpanImpl{
+    end: Some(fn() uses clock {
+      a.end()
+      live.with(fn(var m: Map[Str, trace.Active]) { m.remove(sid) })
+    }),
+    set_attributes: Some(fn(attrs: List[tracing.Attribute]) { a.set_attributes(convert_attributes(attrs)) }),
+    add_event: Some(fn(name: Str, attrs: List[tracing.Attribute]) uses clock { a.add_event(name, attributes: convert_attributes(attrs)) }),
+    set_status: Some(fn(code: tracing.SpanStatus, desc: Str) { a.set_status(convert_status(code), message: desc) }),
+  })
+}
+
+/// Go's convertAttributes (Xo's values are Go's int, int64, float64,
+/// bool and string cases; there is no `%v` case).
+fn convert_attributes(attrs: List[tracing.Attribute]) -> List[trace.Attr] {
+  attrs.map(fn(kv: tracing.Attribute) -> trace.Attr {
+    trace.Attr{key: kv.key, value: match kv.value {
+      tracing.Value.Str(s) => trace.AttrValue.Str(s)
+      tracing.Value.Int(i) => trace.AttrValue.Int(i)
+      tracing.Value.Float(f) => trace.AttrValue.Float(f)
+      tracing.Value.Bool(b) => trace.AttrValue.Bool(b)
+    }}
+  })
+}
+
+/// Go's convertSpanKind.
+fn convert_kind(k: tracing.SpanKind) -> trace.SpanKind {
+  match k {
+    tracing.SpanKind.Server => trace.SpanKind.Server
+    tracing.SpanKind.Client => trace.SpanKind.Client
+    tracing.SpanKind.Producer => trace.SpanKind.Producer
+    tracing.SpanKind.Consumer => trace.SpanKind.Consumer
+    tracing.SpanKind.Internal => trace.SpanKind.Internal
+  }
+}
+
+/// Go's convertStatus.
+fn convert_status(s: tracing.SpanStatus) -> trace.StatusCode {
+  match s {
+    tracing.SpanStatus.Error => trace.StatusCode.Error
+    tracing.SpanStatus.Ok => trace.StatusCode.Ok
+    tracing.SpanStatus.Unset => trace.StatusCode.Unset
+  }
+}

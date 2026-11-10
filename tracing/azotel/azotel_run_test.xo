@@ -1,0 +1,109 @@
+// Replays the Go program's calls (vectors_test.xo) through azotel onto a
+// std/trace Recorder and prints the spans as the Go program prints the
+// OpenTelemetry SDK's.
+
+use std/json
+use std/trace
+use github.com/xo-lang/azure/tracing
+
+fn type_emit(v: trace.AttrValue) -> Str {
+  match v {
+    trace.AttrValue.Str(s) => "STRING:${s}"
+    trace.AttrValue.Int(i) => "INT64:${i}"
+    trace.AttrValue.Float(f) => "FLOAT64:${tracing.Value.Float(f).display()}"
+    trace.AttrValue.Bool(b) => "BOOL:${if b { "true" } else { "false" }}"
+  }
+}
+
+fn attrs_text(a: List[trace.Attr]) -> Str {
+  "[${a.map(fn(kv: trace.Attr) -> Str { "${kv.key}=${type_emit(kv.value)}" }).join(" ")}]"
+}
+
+fn kind_text(k: trace.SpanKind?) -> Str {
+  match k {
+    Some(trace.SpanKind.Server) => "server"
+    Some(trace.SpanKind.Client) => "client"
+    Some(trace.SpanKind.Producer) => "producer"
+    Some(trace.SpanKind.Consumer) => "consumer"
+    Some(trace.SpanKind.Internal) | Some(trace.SpanKind.Unspecified) | None => "internal"
+  }
+}
+
+fn status_text(c: trace.StatusCode?) -> Str {
+  match c {
+    Some(trace.StatusCode.Ok) => "Ok"
+    Some(trace.StatusCode.Error) => "Error"
+    Some(trace.StatusCode.Unset) | None => "Unset"
+  }
+}
+
+fn sid(ctx: tracing.Context) -> Str {
+  ctx.values.get(SPAN_KEY) ?? ""
+}
+
+test "azotel maps azcore's spans as Go's onto OpenTelemetry" {
+  let ring = trace.ring()
+  let p = new_tracing_provider(trace.recorder(ring, os.clock, os.rand))
+  let tr = p.new_tracer("Microsoft.Storage", "v1.2.3")
+  let ctx = tracing.Context{}
+  var started: List[Str] = []
+
+  let (ctx1, s1) = tr.start(ctx, "AccountsClient.Get", tracing.SpanOptions{kind: tracing.SpanKind.Client, attributes: [
+    tracing.str_attr("s", "text"),
+    tracing.int_attr("i", 42),
+    tracing.int_attr("i64", -7),
+    tracing.Attribute{key: "f", value: tracing.Value.Float(2.5)},
+    tracing.Attribute{key: "b", value: tracing.Value.Bool(true)},
+  ]})
+  started.push(sid(ctx1))
+  s1.set_attributes([tracing.str_attr("late", "x"), tracing.int_attr("i", 43)])
+  s1.add_event("retry", [tracing.int_attr("attempt", 1)])
+  s1.add_event("bare")
+  let (c2, s2) = tr.start(ctx1, "HTTP GET")
+  started.push(sid(c2))
+  s2.set_status(tracing.SpanStatus.Ok, "fine")
+  s2.end()
+  tr.span_from_context(ctx1).add_event("from-context")
+  s1.set_status(tracing.SpanStatus.Error, "boom")
+  s1.end()
+
+  for k in [tracing.SpanKind.Server, tracing.SpanKind.Producer, tracing.SpanKind.Consumer, tracing.SpanKind.Internal] {
+    let (c, s) = tr.start(ctx, "kind-${k.code()}", tracing.SpanOptions{kind: k})
+    started.push(sid(c))
+    s.set_status(tracing.SpanStatus.Unset, "ignored")
+    s.end()
+  }
+  let (c4, s4) = tr.start(ctx, "error-then-unset")
+  started.push(sid(c4))
+  s4.set_status(tracing.SpanStatus.Error, "first")
+  s4.set_status(tracing.SpanStatus.Unset, "")
+  s4.end()
+
+  let tr2 = p.new_tracer("Microsoft.KeyVault", "v0.1.0").with_attributes([tracing.str_attr("az.namespace", "Microsoft.KeyVault")])
+  let (c5, s5) = tr2.start(ctx, "Client.GetSecret", tracing.SpanOptions{kind: tracing.SpanKind.Client})
+  started.push(sid(c5))
+  s5.end()
+
+  var got: List[Str] = []
+  for sp in ring.spans(0s, 0).reverse() {
+    let idx = started.index_of(sp.span_id) ?? -1
+    // Go's: the parent's start index when it is a span of this run, else -
+    let parent = match started.index_of(sp.parent_id) {
+      Some(n) => "${n}"
+      None => "-"
+    }
+    got.push("span ${idx} ${json.encode_str(sp.name)} scope=${sp.scope}@${sp.scope_version} schema=${sp.schema_url} kind=${kind_text(sp.kind)} parent=${parent}")
+    got.push("  attrs ${attrs_text(sp.attributes)}")
+    for e in sp.events {
+      got.push("  event ${json.encode_str(e.name)} ${attrs_text(e.attributes)}")
+    }
+    got.push("  status ${status_text(sp.status_code)} ${json.encode_str(sp.status_message)}")
+  }
+  var i = 0
+  while i < got.len() || i < GO_AZOTEL_LINES.len() {
+    let w = if i < GO_AZOTEL_LINES.len() { GO_AZOTEL_LINES[i] } else { "<none>" }
+    let g = if i < got.len() { got[i] } else { "<none>" }
+    expect((i, g)) == (i, w)
+    i = i + 1
+  }
+}

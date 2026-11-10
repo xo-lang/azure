@@ -3,7 +3,8 @@
 Status: Step 1 (azcore's tracing layer) Accepted; step 2
 (tracing/azotel over a std span API) Deferred (owner, 2026-11-07,
 through the lead; drafted by Xo Azure 1 when porting tracing/azotel
-v0.4.0 found nothing to adapt).
+v0.4.0 found nothing to adapt), then Accepted with Amendment 1 (lead,
+2026-11-09, once Xo 0.45.0 shipped std/trace's spans).
 
 ## Context
 
@@ -189,3 +190,32 @@ read at the pinned version.
   reaches a span.
 - Step 2 waits on std; step 1 does not wait on it and gives
   applications a recording provider of their own meanwhile.
+
+## Amendment 1 (2026-11-09): step 2 over std/trace's Recorder
+
+Xo 0.45.0 has OpenTelemetry's span model in std/trace (decision 0580 of
+the Xo repository): `Recorder.start` with a parent, kind, attributes and
+scope (name, version, schema URL), `Active.set_attributes`, `add_event`,
+`set_status` and `end`, with the SDK's rules (last value wins at the
+key's first place, an Ok status drops its description, Unset after Error
+keeps the Error), into a Ring that std/otlp exports.
+
+1. **tracing/azotel** is its own module, as Go's: `new_tracing_provider(
+   recorder)` maps azcore's spans onto the Recorder as Go's
+   NewTracingProvider maps them onto a TracerProvider: one scope per
+   module and version, the schema URL of semconv v1.17.0, Go's kind and
+   status tables, the four value kinds. The parent travels in
+   `tracing.Context.values` (the span's trace and span ids);
+   `span_from_context` finds a span in progress (an ended one does
+   nothing, as an ended OpenTelemetry span ignores calls).
+2. **The tracing callbacks declare their effects.** A Recorder takes
+   ids from `rand` and times from `clock`, so `Tracer.start` and its
+   callback use `(clock, rand)`, and `Span.end` and `Span.add_event` use
+   `clock`; runtime's `start_span` and `ActiveSpan.end`, `end_with`,
+   `fail` and `close` say so too. Generated methods, pagers and pollers
+   already use both, so no generated code changes.
+3. **Checked against Go**: a Go program runs azotel v0.4.0 over the
+   OpenTelemetry SDK with an in-memory span recorder (no exporter, no
+   network) and prints every span (scope, name, kind, parent, attributes
+   with their types, events, status); the Xo test replays the same calls
+   and prints the Ring's spans the same way.

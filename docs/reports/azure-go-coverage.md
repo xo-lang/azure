@@ -74,7 +74,7 @@ Found: 40 data-plane and support families and 308 ARM families.
 | storage/azqueue | v2.1.2 (`v2`) | stable | 3277 | 6066 | v2.1.2 | 1305 |  |
 | storage/internal | v0.1.0 | v0 | 989 | 989 | n/a (support module) |  |  |
 | template/aztemplate | v0.6.6 | v0 | 138 | 190 | n/a (sample) |  |  |
-| tracing/azotel | v0.4.0 | v0 | 123 | 123 | missing |  |  |
+| tracing/azotel | v0.4.0 | v0 | 123 | 123 | yes (over std/trace) | 69 |  |
 
 ### Drift refresh (2026-11-07)
 

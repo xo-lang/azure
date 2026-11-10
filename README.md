@@ -23,10 +23,10 @@ checked against Go's own code (full table:
   query and ingestion, Container Registry, Batch and Azure OpenAI's
   Azure types. Each is checked against Go's vectors from the released
   code and local fakes.
-- **Not ported yet:** azidentity/cache and tracing/azotel (see
-  decisions [0012](docs/decisions/0012-persistent-token-cache.md) and
-  [0013](docs/decisions/0013-tracing.md)); the rest are deprecated Go
-  modules.
+- **Not ported yet:** azidentity/cache's per-OS protected file (see
+  decision [0012](docs/decisions/0012-persistent-token-cache.md)); the
+  rest are deprecated Go modules. tracing/azotel maps the SDK's spans
+  onto std/trace (decision [0013](docs/decisions/0013-tracing.md)).
 - No test calls Azure: every check runs against fakes and recorded Go
   output.
 
