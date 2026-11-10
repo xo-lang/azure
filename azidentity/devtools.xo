@@ -79,7 +79,7 @@ pub fn shell_exec(p: Proc, clock: Clock, system_root: Str = "") -> Exec {
         }
         p.cmd("cmd.exe", ["/c", command]).dir(system_root)
       }
-      Linux | Darwin | Wasi => p.cmd("/bin/sh", ["-c", command]).dir("/bin")
+      Linux | Darwin | Wasi | FreeBSD => p.cmd("/bin/sh", ["-c", command]).dir("/bin")
     }
     let run = fn() -> ProcOutput ! ProcErr uses proc { c.output() }
     let r = if task.deadline(clock) == None { task.with_timeout(clock, CLI_TIMEOUT, run) } else { run().map_err(fn(e: ProcErr) -> task.Timed[ProcErr] { task.Timed.Failed(e) }) }
@@ -234,45 +234,8 @@ fn cli_token(b: Bytes, zone: time.Zone) -> azcore.AccessToken ! azcore.AuthErr {
   }
   let s = str_field(v, "expiresOn")
   let layout = "2006-01-02 15:04:05.999999"
-  let t = timego.parse(s, layout, zone) ?? e => return Err(plain(AZURE_CLI_NAME, "${AZURE_CLI_NAME}: error parsing token expiration time ${json.encode_str(s)}: ${go_time_err(s, layout, e.at)}"))
+  let t = timego.parse(s, layout, zone) ?? e => return Err(plain(AZURE_CLI_NAME, "${AZURE_CLI_NAME}: error parsing token expiration time ${json.encode_str(s)}: ${timego.go_text(e)}"))
   Ok(azcore.AccessToken{token: Secret.new(tok), expires_on: t})
-}
-
-/// Go's time.ParseError text for a fixed-width layout of 2006, 01, 02,
-/// 15, 04, 05 and .999999 with literals between (the two layouts here):
-/// the layout element at byte `at` of the input, and the input from
-/// there. (std's ParseErr does not carry Go's text.)
-fn go_time_err(input: Str, layout: Str, at: Int) -> Str {
-  let elems = ["2006", "01", "02", "15", "04", "05", ".999999"]
-  var chunks: List[Str] = []
-  var lit = ""
-  var i = 0
-  while i < layout.len() {
-    let rest = layout[i..layout.len()]
-    if let Some(el) = elems.find(fn(el: Str) -> Bool { rest.starts_with(el) }) {
-      if lit != "" {
-        chunks.push(lit)
-        lit = ""
-      }
-      chunks.push(el)
-      i = i + el.len()
-    } else {
-      lit = lit + layout[i..i + 1]
-      i = i + 1
-    }
-  }
-  if lit != "" {
-    chunks.push(lit)
-  }
-  var pos = 0
-  for (k, ch) in chunks.indexed() {
-    if at < pos + ch.len() || k == chunks.len() - 1 {
-      let from = if pos <= input.len() { pos } else { input.len() }
-      return "parsing time ${json.encode_str(input)} as ${json.encode_str(layout)}: cannot parse ${json.encode_str(input[from..input.len()])} as ${json.encode_str(ch)}"
-    }
-    pos = pos + ch.len()
-  }
-  "parsing time ${json.encode_str(input)} as ${json.encode_str(layout)}"
 }
 
 /// An integer field (Go's int64), 0 when absent.
@@ -346,7 +309,7 @@ pub fn (c: AzureDeveloperCLICredential) get_token(o: azcore.TokenRequestOptions)
 fn azd_token(b: Bytes) -> azcore.AccessToken ! azcore.AuthErr {
   let v = json.parse_value(b.to_str_lossy()) ?? e => return Err(plain(AZD_NAME, json_err_text(e)))
   let s = str_field(v, "expiresOn")
-  let t = timego.parse(s, "2006-01-02T15:04:05Z", time.utc()) ?? e => return Err(plain(AZD_NAME, "error parsing token expiration time ${json.encode_str(s)}: ${go_time_err(s, "2006-01-02T15:04:05Z", e.at)}"))
+  let t = timego.parse(s, "2006-01-02T15:04:05Z", time.utc()) ?? e => return Err(plain(AZD_NAME, "error parsing token expiration time ${json.encode_str(s)}: ${timego.go_text(e)}"))
   Ok(azcore.AccessToken{token: Secret.new(str_field(v, "token")), expires_on: t})
 }
 
@@ -368,7 +331,7 @@ pub fn new_azure_powershell_credential(proc: Proc, clock: Clock, env: Env, opts:
   }
   let exe = match target.os {
     Windows => if has_pwsh { "pwsh.exe" } else { "powershell.exe" }
-    Linux | Darwin | Wasi => "pwsh"
+    Linux | Darwin | Wasi | FreeBSD => "pwsh"
   }
   Ok(AzurePowerShellCredential{opts: opts with {additionally_allowed_tenants: allowed_tenants(opts.additionally_allowed_tenants)}, exe: exe, exec: shell_exec(proc, clock, env.get("SYSTEMROOT") ?? ""), mu: Mutex.new(())})
 }

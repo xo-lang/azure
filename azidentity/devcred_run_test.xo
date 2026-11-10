@@ -1,9 +1,9 @@
 // Replays the Go program's developer-tool calls (devcredvectors_test.xo):
-// FakeProc answers `/bin/sh` as each fake script did, and the executor
-// hook (Go's, for its own tests) records the arguments the shell would
-// give the tool.
+// FakeProc answers `/bin/sh` as each fake script did, and its runs()
+// give the arguments the shell would give the tool.
 
 use std/json
+use std/testing
 use std/time
 use github.com/xo-lang/azure/azcore
 
@@ -40,8 +40,9 @@ fn sh_words(c: Str) -> List[Str] {
 }
 
 struct Rec {
-  sec: Mutex[Str]
   log: Mutex[List[Str]]
+  /// How many of the FakeProc's runs are logged already.
+  seen: Mutex[Int]
   /// The tool is on PATH (the fake writes its ARGV line).
   found: Mutex[Bool]
 }
@@ -50,18 +51,27 @@ fn rec_note(r: Rec, s: Str) {
   r.log.with(fn(var l: List[Str]) { l.push(s) })
 }
 
-fn rec_sec(r: Rec) -> Str {
-  r.sec.with_read(fn(s: Str) -> Str { s })
-}
-
-/// shell_exec over the FakeProc, with each command's words logged first.
-fn recording(r: Rec, inner: Exec) -> Exec {
-  fn(name: Str, command: Str) -> Bytes ! azcore.AuthErr uses proc, clock {
-    if r.found.with_read(fn(f: Bool) -> Bool { f }) {
-      let w = sh_words(command)
-      rec_note(r, "${rec_sec(r)}:   ARGV ${w[0]}${w[1..w.len()].map(fn(a: Str) -> Str { " [${a}]" }).join("")}")
+/// The FakeProc's new runs as the fake tools' ARGV lines: each run is
+/// `/bin/sh -c "COMMAND"` (strconv.Quote), COMMAND split as the shell
+/// splits it.
+fn log_runs(r: Rec, p: testing.FakeProc, sec: Str) {
+  let all = p.runs()
+  let from = r.seen.with(fn(var n: Int) -> Int {
+    let f = n
+    n = all.len()
+    f
+  })
+  if !r.found.with_read(fn(f: Bool) -> Bool { f }) {
+    return
+  }
+  for run in all[from..all.len()] {
+    let q = run.trim_prefix("/bin/sh -c ")
+    let cmd = match json.parse_value(q) {
+      Ok(json.Value.Str(c)) => c
+      _ => q
     }
-    inner(name, command)
+    let w = sh_words(cmd)
+    rec_note(r, "${sec}:   ARGV ${w[0]}${w[1..w.len()].map(fn(a: Str) -> Str { " [${a}]" }).join("")}")
   }
 }
 
@@ -73,7 +83,8 @@ fn rfc3339(t: Time) -> Str {
   time.format(t, time.utc(), "{year}-{month}-{day}T{hour}:{minute}:{second}Z")
 }
 
-fn shown(r: Rec, sec: Str, res: Result[azcore.AccessToken, azcore.AuthErr]) {
+fn shown(r: Rec, p: testing.FakeProc, sec: Str, res: Result[azcore.AccessToken, azcore.AuthErr]) {
+  log_runs(r, p, sec)
   match res {
     Ok(t) => rec_note(r, "${sec}: token=${t.token.reveal()} expires=${rfc3339(t.expires_on)}")
     Err(e) => rec_note(r, "${sec}: error ${kind(e)}: ${json.encode_str(e.display())}")
@@ -85,43 +96,31 @@ fn dtro(scopes: List[Str], tenant: Str = "", claims: Str = "") -> azcore.TokenRe
 }
 
 test "azidentity's developer-tool credentials against Go's fake tools" {
-  let r = Rec{sec: Mutex.new(""), log: Mutex.new([]), found: Mutex.new(true)}
+  let r = Rec{log: Mutex.new([]), seen: Mutex.new(0), found: Mutex.new(true)}
   let env = os.env
   env.set("TZ", "UTC")
   let p = os.proc
   let answer = fn(out: Str, err: Str, code: Int) {
     p.on_run("/bin/sh", ProcOutput{code: code, stdout: out.bytes(), stderr: err.bytes()})
   }
-  let hook = recording(r, shell_exec(p, os.clock))
-  let at = fn(s: Str) { r.sec.with(fn(var x: Str) { x = s }) }
   let cerr = fn(sec: Str, e: azcore.AuthErr) { rec_note(r, "${sec}: constructor error: ${json.encode_str(e.display())}") }
 
-  let cli = new_azure_cli_credential(p, os.clock, env)? with {exec: hook}
-  at("cli1")
+  let cli = new_azure_cli_credential(p, os.clock, env)?
   answer("{\"accessToken\":\"cli-tok\",\"expires_on\":1700000000,\"expiresOn\":\"2023-11-14 22:13:20.000000\"}", "", 0)
-  shown(r, "cli1", cli.get_token(dtro([ARM])))
-  at("cli2")
+  shown(r, p, "cli1", cli.get_token(dtro([ARM])))
   answer("{\"accessToken\":\"cli-tok2\",\"expiresOn\":\"2030-01-02 03:04:05.123456\"}", "", 0)
-  shown(r, "cli2", cli.get_token(dtro([ARM])))
-  let sub = new_azure_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1, subscription: "my sub-1.x_y"})? with {exec: hook}
-  at("cli3")
+  shown(r, p, "cli2", cli.get_token(dtro([ARM])))
+  let sub = new_azure_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1, subscription: "my sub-1.x_y"})?
   answer("{\"accessToken\":\"cli-tok3\",\"expires_on\":1700000003}", "", 0)
-  shown(r, "cli3", sub.get_token(dtro(["api://my-app/.default"])))
-  at("cli3b")
-  shown(r, "cli3b", sub.get_token(dtro([ARM], tenant: T2)))
-  let allow = new_azure_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1, additionally_allowed_tenants: ["*"]})? with {exec: hook}
-  at("cli4")
-  shown(r, "cli4", allow.get_token(dtro([ARM], tenant: T2)))
-  at("cli5")
-  shown(r, "cli5", cli.get_token(dtro([ARM], claims: "{\"access_token\":{\"acrs\":{\"essential\":true,\"value\":\"p1\"}}}")))
-  at("cli5b")
-  shown(r, "cli5b", allow.get_token(dtro([ARM], claims: "c")))
-  at("cli6")
-  shown(r, "cli6", cli.get_token(dtro([ARM, "b"])))
-  at("cli7")
-  shown(r, "cli7", cli.get_token(dtro(["a b"])))
-  at("cli7b")
-  shown(r, "cli7b", cli.get_token(dtro(["https://x/.default;rm"])))
+  shown(r, p, "cli3", sub.get_token(dtro(["api://my-app/.default"])))
+  shown(r, p, "cli3b", sub.get_token(dtro([ARM], tenant: T2)))
+  let allow = new_azure_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1, additionally_allowed_tenants: ["*"]})?
+  shown(r, p, "cli4", allow.get_token(dtro([ARM], tenant: T2)))
+  shown(r, p, "cli5", cli.get_token(dtro([ARM], claims: "{\"access_token\":{\"acrs\":{\"essential\":true,\"value\":\"p1\"}}}")))
+  shown(r, p, "cli5b", allow.get_token(dtro([ARM], claims: "c")))
+  shown(r, p, "cli6", cli.get_token(dtro([ARM, "b"])))
+  shown(r, p, "cli7", cli.get_token(dtro(["a b"])))
+  shown(r, p, "cli7b", cli.get_token(dtro(["https://x/.default;rm"])))
   match new_azure_cli_credential(p, os.clock, env, DevToolOptions{subscription: "bad;sub"}) {
     Ok(_) => rec_note(r, "cli8: no error")
     Err(e) => cerr("cli8", e)
@@ -130,90 +129,69 @@ test "azidentity's developer-tool credentials against Go's fake tools" {
     Ok(_) => rec_note(r, "cli8b: no error")
     Err(e) => cerr("cli8b", e)
   }
-  at("cli9")
   answer("", "ERROR: Please run 'az login' to setup account.\r\n", 1)
-  shown(r, "cli9", cli.get_token(dtro([ARM])))
-  at("cli9b")
+  shown(r, p, "cli9", cli.get_token(dtro([ARM])))
   answer("", "", 2)
-  shown(r, "cli9b", cli.get_token(dtro([ARM])))
-  at("cli9c")
+  shown(r, p, "cli9b", cli.get_token(dtro([ARM])))
   answer("not json", "", 0)
-  shown(r, "cli9c", cli.get_token(dtro([ARM])))
-  at("cli9d")
+  shown(r, p, "cli9c", cli.get_token(dtro([ARM])))
   answer("{\"accessToken\":\"x\",\"expiresOn\":\"tomorrow\"}", "", 0)
-  shown(r, "cli9d", cli.get_token(dtro([ARM])))
-  at("cli10")
+  shown(r, p, "cli9d", cli.get_token(dtro([ARM])))
   r.found.with(fn(var f: Bool) { f = false })
   answer("", "/bin/sh: az: command not found\n", 127)
-  shown(r, "cli10", cli.get_token(dtro([ARM])))
+  shown(r, p, "cli10", cli.get_token(dtro([ARM])))
   r.found.with(fn(var f: Bool) { f = true })
 
-  let azd = new_azure_developer_cli_credential(p, os.clock, env)? with {exec: hook}
-  at("azd1")
+  let azd = new_azure_developer_cli_credential(p, os.clock, env)?
   answer("{\"token\":\"azd-tok\",\"expiresOn\":\"2030-01-02T03:04:05Z\"}", "", 0)
-  shown(r, "azd1", azd.get_token(dtro([ARM, "api://x/.default"])))
-  let azdt = new_azure_developer_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1})? with {exec: hook}
-  at("azd2")
-  shown(r, "azd2", azdt.get_token(dtro([ARM])))
-  at("azd3")
-  shown(r, "azd3", azd.get_token(dtro([])))
-  at("azd3b")
-  shown(r, "azd3b", azd.get_token(dtro(["a b"])))
-  at("azd4")
+  shown(r, p, "azd1", azd.get_token(dtro([ARM, "api://x/.default"])))
+  let azdt = new_azure_developer_cli_credential(p, os.clock, env, DevToolOptions{tenant_id: T1})?
+  shown(r, p, "azd2", azdt.get_token(dtro([ARM])))
+  shown(r, p, "azd3", azd.get_token(dtro([])))
+  shown(r, p, "azd3b", azd.get_token(dtro(["a b"])))
   answer("", "Error: unknown flag: --claims\n", 1)
-  shown(r, "azd4", azd.get_token(dtro([ARM], claims: "claims!")))
-  at("azd5")
+  shown(r, p, "azd4", azd.get_token(dtro([ARM], claims: "claims!")))
   answer("", "some failure\n", 1)
-  shown(r, "azd5", azd.get_token(dtro([ARM], claims: "claims!")))
-  at("azd6")
+  shown(r, p, "azd5", azd.get_token(dtro([ARM], claims: "claims!")))
   answer("", "{\"type\":\"consoleMessage\",\"data\":{\"message\":\"  first message  \"}}\n{\"error\":\"not logged in, run azd auth login\"}\n", 1)
-  shown(r, "azd6", azd.get_token(dtro([ARM])))
-  at("azd6b")
+  shown(r, p, "azd6", azd.get_token(dtro([ARM])))
   answer("", "{\"data\":{\"message\":\"only data\"}}\n", 1)
-  shown(r, "azd6b", azd.get_token(dtro([ARM])))
-  at("azd6c")
+  shown(r, p, "azd6b", azd.get_token(dtro([ARM])))
   answer("", "plain failure\n", 1)
-  shown(r, "azd6c", azd.get_token(dtro([ARM])))
-  at("azd7")
+  shown(r, p, "azd6c", azd.get_token(dtro([ARM])))
   answer("{\"token\":\"t\",\"expiresOn\":\"2030-01-02 03:04:05\"}", "", 0)
-  shown(r, "azd7", azd.get_token(dtro([ARM])))
+  shown(r, p, "azd7", azd.get_token(dtro([ARM])))
 
-  let ps = new_azure_powershell_credential(p, os.clock, env)? with {exec: hook}
-  at("ps1")
+  let ps = new_azure_powershell_credential(p, os.clock, env)?
   answer("{\"Token\":\"ps-tok\",\"ExpiresOn\":1700000009}", "", 0)
-  shown(r, "ps1", ps.get_token(dtro([ARM])))
-  let pst = new_azure_powershell_credential(p, os.clock, env, DevToolOptions{tenant_id: T1})? with {exec: hook}
-  at("ps2")
-  shown(r, "ps2", pst.get_token(dtro([ARM])))
-  at("ps3")
-  shown(r, "ps3", pst.get_token(dtro([ARM], claims: "cl")))
-  at("ps3b")
-  shown(r, "ps3b", ps.get_token(dtro([ARM], claims: "cl")))
-  at("ps4")
+  shown(r, p, "ps1", ps.get_token(dtro([ARM])))
+  let pst = new_azure_powershell_credential(p, os.clock, env, DevToolOptions{tenant_id: T1})?
+  shown(r, p, "ps2", pst.get_token(dtro([ARM])))
+  shown(r, p, "ps3", pst.get_token(dtro([ARM], claims: "cl")))
+  shown(r, p, "ps3b", ps.get_token(dtro([ARM], claims: "cl")))
   answer("", "Run Connect-AzAccount to login.\n", 1)
-  shown(r, "ps4", ps.get_token(dtro([ARM])))
-  at("ps5")
+  shown(r, p, "ps4", ps.get_token(dtro([ARM])))
   answer("", "Write-Error: Az.Accounts module not found\n", 1)
-  shown(r, "ps5", ps.get_token(dtro([ARM])))
-  at("ps6")
-  shown(r, "ps6", ps.get_token(dtro([ARM, ARM])))
+  shown(r, p, "ps5", ps.get_token(dtro([ARM])))
+  shown(r, p, "ps6", ps.get_token(dtro([ARM, ARM])))
 
-  // the chain: FakeProc answers every tool alike; the arguments are the
-  // credentials' own, checked above, so the dac sections compare results
+  // the chain: FakeProc answers every tool alike
   env.set("AZURE_TOKEN_CREDENTIALS", "dev")
   let dac = new_default_azure_credential_with_dev(env, os.fs, os.net, os.clock, os.rand, p)?
   answer("", "boom\n", 1)
-  shown(r, "dac1", dac.get_token(dtro([ARM])))
+  shown(r, p, "dac1", dac.get_token(dtro([ARM])))
+  r.found.with(fn(var f: Bool) { f = false })
   answer("", "/bin/sh: az: command not found\n", 127)
-  shown(r, "dac2", dac.get_token(dtro([ARM])))
+  shown(r, p, "dac2", dac.get_token(dtro([ARM])))
+  r.found.with(fn(var f: Bool) { f = true })
   answer("{\"accessToken\":\"dac-tok\",\"expires_on\":1700000010}", "", 0)
-  shown(r, "dac3", dac.get_token(dtro([ARM])))
+  shown(r, p, "dac3", dac.get_token(dtro([ARM])))
   env.set("AZURE_TOKEN_CREDENTIALS", "AzureDeveloperCLICredential")
   let d2 = new_default_azure_credential_with_dev(env, os.fs, os.net, os.clock, os.rand, p)?
   answer("", "plain failure\n", 1)
-  shown(r, "dac4", d2.get_token(dtro([ARM])))
+  shown(r, p, "dac4", d2.get_token(dtro([ARM])))
 
-  let want = GO_DEVCRED_LINES.filter(fn(l: Str) -> Bool { !(l.starts_with("dac") && l.contains(":   ARGV ")) })
+  let want = GO_DEVCRED_LINES
   let got = r.log.with_read(fn(l: List[Str]) -> List[Str] { l })
   var i = 0
   while i < want.len() || i < got.len() {
