@@ -15,6 +15,8 @@ xo=${XO_CLI:-xo}
 work=${2:-$(mktemp -d)}
 mkdir -p "$work"
 src=$(pwd)
+# the module cache is read-only, as Go's is
+[ -d "$work/modcache" ] && chmod -R u+w "$work/modcache"
 rm -rf "$work/remote.git" "$work/clone" "$work/app" "$work/modcache"
 git clone -q --bare "$src" "$work/remote.git"
 git clone -q "$work/remote.git" "$work/clone"
@@ -27,9 +29,13 @@ n=0
 for m in . $(cd "$work/clone" && git ls-files '*/xo.mod' | sed 's#/xo.mod$##' | grep -vx codegen); do
   d="$work/clone/$m"
   n=$((n + 1))
+  # the root has no .xo file at the top: its packages are the directories
+  # with .xo files outside every nested module (./... would load them all)
+  pkgs=.
+  [ "$m" = . ] && pkgs=$(cd "$d" && git ls-files '*.xo' | sed 's#/[^/]*$##' | sort -u | awk -v mods="$(git ls-files '*/xo.mod' | sed 's#/xo.mod$##' | tr '\n' ' ')" 'BEGIN { n = split(mods, a, " ") } { for (i = 1; i <= n; i++) if ($0 == a[i] || index($0, a[i] "/") == 1) next; print "./" $0 }')
   # tidy records the lock (no module carries one) and must not change the
   # requires: a change means a missing or extra require.
-  if ! (cd "$d" && "$xo" mod tidy > "$work/check.out" 2>&1 && git diff --quiet -- xo.mod && "$xo" check --workspace=off . >> "$work/check.out" 2>&1); then
+  if ! (cd "$d" && "$xo" mod tidy > "$work/check.out" 2>&1 && git diff --quiet -- xo.mod && "$xo" check --workspace=off $pkgs >> "$work/check.out" 2>&1); then
     echo "check-release: FAIL $m"
     (cd "$d" && git diff --stat -- xo.mod) | sed 's/^/  /'
     tail -5 "$work/check.out" | sed 's/^/  /'
