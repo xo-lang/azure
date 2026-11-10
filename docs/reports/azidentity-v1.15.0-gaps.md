@@ -26,6 +26,7 @@ Ranked by how many callers meet the gap first.
    charset=utf-8`, and the headers carry `client-request-id` (a UUID) and
    `return-client-request-id: false`. Ours sends the scopes alone and
    neither header. Cheap, and every confidential credential sends it.
+   Ported 2026-11-06 (ea82c296).
 2. **Instance discovery and the tenant's OpenID metadata.** Before its
    first token request, MSAL Go sends `GET
    https://login.microsoftonline.com/common/discovery/instance?api-version=1.1&authorization_endpoint=<authority>/<tenant>/oauth2/v2.0/authorize`
@@ -38,6 +39,7 @@ Ranked by how many callers meet the gap first.
    port the two lookups (and `disable_instance_discovery`), or record the
    shortcut as a divergence (fewer round trips; the same token for a
    valid authority; a different error for an invalid one).
+   Ported 2026-11-06 (855420a0), with `disable_instance_discovery`.
 3. **Error text.** Go's `AuthenticationFailedError` prints `<Credential>
    authentication failed.`, the request line, the `RESPONSE <code>` block
    with the body indented, and a troubleshooting link
@@ -48,6 +50,7 @@ Ranked by how many callers meet the gap first.
    tokens for this tenant add it to the AdditionallyAllowedTenants ...`).
    Ours are short messages of our own. azcore's ResponseError text is
    already Go's, so this reuses it.
+   Ported 2026-11-06 (ea82c296).
 4. **The IMDS probe inside DefaultAzureCredential.** Go first sends a
    malformed `GET http://169.254.169.254/metadata/identity/oauth2/token`
    (no query, no `Metadata` header, 1 s, no retries): any answer means
@@ -56,6 +59,7 @@ Ranked by how many callers meet the gap first.
    it sends the real request with normal retries. Ours sends the real
    request with a 1 s timeout and no retries. Also: an IMDS reply that is
    not JSON is "unavailable" inside a chain (something else listens there).
+   Ported 2026-11-06 (9dc336fd).
 5. **Service Fabric.** `IDENTITY_ENDPOINT`, `IDENTITY_HEADER` and
    `IDENTITY_SERVER_THUMBPRINT`: v1.15.0 pins the endpoint's certificate
    to that thumbprint and refuses redirects. Decision 0003 lists Service
@@ -67,6 +71,7 @@ Ranked by how many callers meet the gap first.
    std. std now has `x509.parse_pkcs12` (Go's pkcs12.Decode with chains),
    so `parse_certificates` can read a `.pfx` with a password
    (`AZURE_CLIENT_CERTIFICATE_PASSWORD`), as Go's `ParseCertificates`.
+   Ported 2026-11-06 (9f5da5a6).
 7. **DefaultAzureCredential's options and selection.**
    `RequireAzureTokenCredentials` (error text checked against Go),
    `TenantID`, and `AZURE_TOKEN_CREDENTIALS=dev`, which Go accepts and
@@ -75,6 +80,7 @@ Ranked by how many callers meet the gap first.
    with Go's message for an unknown value (`invalid
    AZURE_TOKEN_CREDENTIALS value "bogus". Valid values are "dev", "prod",
    or the name of any credential type in the default chain. See ...`).
+   Ported 2026-11-06 (5f13e32c).
 8. **ChainedTokenCredential `RetrySources`.** Go's chain keeps using the
    credential that worked unless `RetrySources` is set. Ours always
    keeps it. Ported 2026-11-06 (`retry_sources`), checked against a Go
@@ -111,6 +117,7 @@ grant code.
 
 12. **ClientAssertionCredential**: `client_assertion` from a callback.
     About 30 lines on top of `Confidential`.
+    Ported 2026-11-06 (3ed48786).
 13. **OnBehalfOfCredential** (secret, certificate, assertion callback):
     `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
     `assertion=<user token>`, `requested_token_use=on_behalf_of`, and a
@@ -157,6 +164,7 @@ refresh token by home account, environment and client, or family `1`).
     endpoint with `grant_type=device_code` and `device_code`, waiting
     `interval` seconds, continuing on `authorization_pending` and
     `slow_down`, stopping at `expires_in` or on any other error.
+    Ported 2026-11-08 (d748d183).
 16. **InteractiveBrowserCredential**: a loopback HTTP server on
     `RedirectURL` or `http://localhost:<free port>`, the authorize URL
     (`response_type=code`, `code_challenge` with
@@ -165,6 +173,7 @@ refresh token by home account, environment and client, or family `1`).
     `state` checked, then `grant_type=authorization_code` with
     `code_verifier`. Starting a browser is an outside-process effect
     this port has no decision for.
+    Ported 2026-11-08 (3cae2373).
 17. **UsernamePasswordCredential** (deprecated in Go, kept for ROPC):
     `GET https://<authority host>/common/UserRealm/<user>?api-version=1.0`;
     `account_type` `Managed` posts `grant_type=password` with
@@ -173,6 +182,7 @@ refresh token by home account, environment and client, or family `1`).
     request to its username endpoint, and exchanges the SAML assertion
     with `grant_type=urn:ietf:params:oauth:grant-type:saml1_1-bearer`
     or `saml2-bearer`.
+    Ported 2026-11-08 (0f189493).
 18. **AuthenticationRecord and AuthenticationRequiredError**: the record
     is MSAL's account (item 15's common part) serialized as Go's JSON
     (`authority`, `clientId`, `homeAccountId`, `tenantId`, `username`,
@@ -180,6 +190,7 @@ refresh token by home account, environment and client, or family `1`).
     it. `DisableAutomaticAuthentication` turns a failed silent request
     into `AuthenticationRequiredError` with its `TokenRequestOptions`
     instead of starting the flow.
+    Ported 2026-11-08 (d748d183), with the device code credential.
 
 Decision 0003's Amendment 2 (Accepted by the owner, 2026-11-07) allows
 15 to 18: it adds public clients and the account model by
@@ -253,7 +264,7 @@ so every name gets a vector.
 
 ## Proposed order
 
-(1) and (3) first, since every confidential credential shows them. Then
-(12), (6), (4), (7) to (9), (13), (14) and (10). (2) and (11) wait for
-the lead's and owner's calls. (5) is done. Each item
-gets its vectors from the Go program above, extended per item.
+Items 1 to 18 are ported (2026-11-06 to 2026-11-08), each checked against
+the Go program's lines. What is left is item 19's step b, the per-OS
+protected storage of azidentity/cache, which waits on std (a keyring,
+keychain and DPAPI capability; asked through the lead, 2026-11-09).
