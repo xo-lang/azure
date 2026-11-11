@@ -1,0 +1,263 @@
+// Container and service blob batches against a fake that answers as the
+// Go program's fake does (batchvectors_test.xo): a multipart answer with
+// a part per sub-request, a 404 for a blob named "missing", and a broken
+// answer picked by the first blob's name. A sub-request's headers are
+// sorted and its date and signature hidden, as the Go program logs them
+// (Go writes them in map order, signed at the wall clock).
+
+use std/http
+use std/testing
+use std/url
+use github.com/xo-lang/azure/azcore
+
+const RB: Str = "batchresponse_00000000-0000-0000-0000-000000000000"
+
+fn is_uuid_text(s: Str) -> Bool {
+  for c in s.runes() {
+    if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == '-') {
+      return false
+    }
+  }
+  true
+}
+
+/// `s` with each `batch_<uuid>` as `batch_ID`.
+fn hide_batch_id(s: Str) -> Str {
+  var out = ""
+  var rest = s
+  while {
+    let i = rest.find("batch_") ?? break
+    let tail = rest[i + 6..rest.len()]
+    if tail.len() >= 36 && is_uuid_text(tail[0..36]) {
+      out = out + rest[0..i] + "batch_ID"
+      rest = tail[36..tail.len()]
+    } else {
+      out = out + rest[0..i + 6]
+      rest = tail
+    }
+  }
+  out + rest
+}
+
+/// The batch body as the Go program logs it, and each sub-request's
+/// target.
+fn norm_batch(s: Str) -> (List[Str], List[Str]) {
+  let lines = hide_batch_id(s).split("\r\n")
+  var o: List[Str] = []
+  var targets: List[Str] = []
+  var i = 0
+  while i < lines.len() {
+    let l = lines[i]
+    o.push(l)
+    i = i + 1
+    let parts = l.split(" ")
+    if parts.len() != 3 || (parts[0] != "DELETE" && parts[0] != "PUT") || parts[2] != "HTTP/1.1" {
+      continue
+    }
+    targets.push(parts[1])
+    var hs: List[Str] = []
+    while i < lines.len() && lines[i] != "" {
+      let h = lines[i]
+      let (k0, v0) = match h.find(": ") {
+        Some(j) => (h[0..j], h[j + 2..h.len()])
+        None => (h, "")
+      }
+      let k = k0.to_lower()
+      let v = if k == "x-ms-date" { "DATE" } else if k == "authorization" { hide_sig(v0) } else { v0 }
+      hs.push("${k}: ${v}")
+      i = i + 1
+    }
+    o = o + hs.sort()
+  }
+  (o, targets)
+}
+
+fn hide_sig(v: Str) -> Str {
+  match v.find(":") {
+    Some(c) => "${v[0..c + 1]}SIG"
+    None => v
+  }
+}
+
+fn log_batch_request(req: http.Request, log: Mutex[List[Str]], body_lines: List[Str]) {
+  var hs: List[Str] = []
+  for (k, v) in req.headers {
+    let lk = k.to_lower()
+    if lk == "authorization" {
+      hs.push("${lk}=${hide_sig(v)}")
+    } else if lk == "content-type" {
+      hs.push("${lk}=${hide_batch_id(v)}")
+    } else if lk != "user-agent" && lk != "accept-encoding" && lk != "content-length" {
+      hs.push("${lk}=${v}")
+    }
+  }
+  hs.push("content-length=${req.body.len()}")
+  var qv = url.values()
+  for k in req.url.query.keys().sort() {
+    qv.add(k, req.url.query.get(k) ?? "")
+  }
+  let qs = qv.encode()
+  let uri = if qs == "" { req.escaped_path() } else { "${req.escaped_path()}?${qs}" }
+  let lines = ["REQ ${req.method} ${uri}"] + hs.sort().map(fn(h: Str) -> Str { "  ${h}" }) + body_lines.map(fn(l: Str) -> Str { "  | ${l}" })
+  log.with(fn(var l: List[Str]) { l = l + lines })
+}
+
+fn batch_answer(targets: List[Str]) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  let first = targets.first() ?? ""
+  var b = ""
+  let part = fn(cid: Str, status: Str, phs: List[Str]) -> Str {
+    var t = "--${RB}\r\nContent-Type: application/http\r\n"
+    if cid != "" {
+      t = t + "Content-ID: ${cid}\r\n"
+    }
+    t = t + "\r\nHTTP/1.1 ${status}\r\n"
+    for h in phs {
+      t = t + "${h}\r\n"
+    }
+    t + "\r\n"
+  }
+  let ct = ("Content-Type", "multipart/mixed; boundary=${RB}")
+  if first.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  } else if first.contains("parentfail") {
+    hs.push(ct)
+    b = part("", "400 One of the request inputs is not valid.", ["x-ms-error-code: InvalidInput", "x-ms-request-id: rp", "x-ms-version: 2026-12-06"])
+  } else if first.contains("noboundary") {
+    hs.push(("Content-Type", "multipart/mixed"))
+  } else if first.contains("noct") {
+  } else {
+    hs.push(ct)
+    let n = if first.contains("fewer") { targets.len() - 1 } else { targets.len() }
+    for i in 0..n {
+      if targets[i].contains("missing") {
+        b = b + part("${i}", "404 The specified blob does not exist.", ["x-ms-error-code: BlobNotFound", "x-ms-request-id: r-${i}", "x-ms-version: 2026-12-06", "Content-Length: 0"])
+      } else {
+        b = b + part(" ${i} ", "202 Accepted", ["x-ms-delete-type-permanent: false", "x-ms-request-id: r-${i}", "x-ms-version: 2026-12-06", "Server: Windows-Azure-Blob/1.0"])
+      }
+    }
+  }
+  b = b + "--${RB}--\r\n"
+  with_hs(http.Response{status: 202, headers: {}, body: b.bytes()}, hs)
+}
+
+fn serve_batch(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    let (lines, targets) = norm_batch(req.body.to_str_lossy())
+    log_batch_request(req, log, lines)
+    batch_answer(targets)
+  }
+  net.handle("POST ${BEP}/{rest...}", h)
+  // the service's own path: xo 0.48 and earlier match {rest...} natively
+  // only below the root
+  net.handle("POST ${BEP}/{$}", h)
+  log
+}
+
+fn batch_err_line(e: Str) -> Str {
+  "  error ${e.replace("\r", "\\r").replace("\n", "\\n")}"
+}
+
+fn opt_q(s: Str?) -> Str {
+  match s {
+    Some(x) => goq(x)
+    None => "nil"
+  }
+}
+
+fn batch_shown(name: Str, r: Result[SubmitBatchResponse, azcore.CallErr]) -> List[Str] {
+  match r {
+    Err(e) => {
+      let text = match e {
+        Response(x) => "status ${x.status_code} code ${x.error_code}"
+        Decode(m) => m
+        InvalidInput(m) => m
+        _ => e.display()
+      }
+      ["== ${name}", batch_err_line(text)]
+    }
+    Ok(x) => {
+      var o = ["== ${name}", "  ContentType=${opt_q(x.content_type)}", "  RequestID=${opt_q(x.request_id)}", "  Version=${opt_q(x.version)}", "  Responses.len=${x.responses.len()}"]
+      for (i, it) in x.responses.indexed() {
+        let cid = it.content_id.map(fn(n: Int) -> Str { "${n}" }) ?? "nil"
+        let e = it.error.map(fn(re: azcore.ResponseError) -> Str { "status ${re.status_code} code ${re.error_code}" }) ?? "nil"
+        o.push("  [${i}] ContentID=${cid} ContainerName=${opt_q(it.container_name)} BlobName=${opt_q(it.blob_name)} RequestID=${opt_q(it.request_id)} Version=${opt_q(it.version)} Error=${e}")
+      }
+      o
+    }
+  }
+}
+
+fn unit_shown(name: Str, r: Result[(), Str]) -> List[Str] {
+  match r {
+    Ok(_) => ["== ${name}"]
+    Err(e) => ["== ${name}", batch_err_line(e)]
+  }
+}
+
+fn batch_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_batch(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+
+  var bb = c.new_batch_builder()
+  bb.delete("a.txt")?
+  bb.delete("dir/b c.txt", BatchDeleteOptions{delete_snapshots: Some(DELETE_SNAPSHOTS_INCLUDE), conditions: ac, blob_delete_type: Some(DELETE_TYPE_PERMANENT), version_id: Some("v1"), snapshot: Some("2026-11-01T00:00:00.0000000Z")})?
+  bb.delete("missing")?
+  out = out + add(batch_shown("b1 container batch: three deletes, one missing", c.submit_batch(bb)))
+
+  bb = c.new_batch_builder()
+  bb.set_tier("a.txt", ACCESS_TIER_COOL)?
+  bb.set_tier("b.txt", ACCESS_TIER_ARCHIVE, BatchSetTierOptions{rehydrate_priority: Some(REHYDRATE_PRIORITY_HIGH), conditions: ac, version_id: Some("v2"), snapshot: Some("2026-11-01T00:00:00.0000000Z")})?
+  out = out + add(batch_shown("b2 container batch: two tier changes", c.submit_batch(bb)))
+
+  bb = c.new_batch_builder()
+  bb.delete("a.txt")?
+  out = out + add(unit_shown("b3 a tier change in a delete batch", bb.set_tier("b.txt", ACCESS_TIER_HOT)))
+  var bb2 = c.new_batch_builder()
+  bb2.set_tier("a.txt", ACCESS_TIER_HOT)?
+  out = out + add(unit_shown("b4 a delete in a tier batch", bb2.delete("b.txt")))
+
+  out = out + add(batch_shown("b5 an empty batch", c.submit_batch(c.new_batch_builder())))
+
+  for (i, name) in ["fewer", "parentfail", "noboundary", "noct", "denied"].indexed() {
+    bb = c.new_batch_builder()
+    bb.delete(name)?
+    bb.delete("z.txt")?
+    out = out + add(batch_shown("b${6 + i} answer: ${name}", c.submit_batch(bb)))
+  }
+
+  var sb = svc.new_batch_builder()
+  sb.delete("c1", "a.txt")?
+  sb.delete("c2", "dir/x y", BatchDeleteOptions{delete_snapshots: Some(DELETE_SNAPSHOTS_ONLY)})?
+  out = out + add(batch_shown("b11 service batch: deletes in two containers", svc.submit_batch(sb)))
+  sb = svc.new_batch_builder()
+  sb.set_tier("c1", "a.txt", ACCESS_TIER_HOT)?
+  sb.set_tier("c3", "missing", ACCESS_TIER_COLD)?
+  out = out + add(batch_shown("b12 service batch: tier changes, one missing", svc.submit_batch(sb)))
+
+  let anon = new_container_client_with_no_credential(net, clock, rand, "${BEP}/c1?sv=2026-12-06&sig=c2ln", go_options(BDATE))
+  var ab = anon.new_batch_builder()
+  ab.delete("a.txt")?
+  ab.delete("b.txt", BatchDeleteOptions{snapshot: Some("s1")})?
+  out = out + add(batch_shown("b13 container batch with a SAS, unsigned sub-requests", anon.submit_batch(ab)))
+  Ok(out + drain(log))
+}
+
+test "container and service batches send what Go sends and read what Go reads" {
+  let got = batch_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < BATCH_OUTPUT.len() && got[i] != BATCH_OUTPUT[i] {
+      expect(got[i]) == BATCH_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == BATCH_OUTPUT.len()
+}

@@ -1,0 +1,347 @@
+// Blob batch, as azblob v1.8.3's container and service BatchBuilder and
+// SubmitBatch and its internal/exported/blob_batch.go (MIT, Copyright (c)
+// Microsoft Corporation; NOTICE.md): up to 256 deletes or tier changes in
+// one multipart/mixed request, each sub-request signed by the client's
+// credential policy alone, and the multipart answer read back per
+// sub-request.
+
+use std/http
+use std/mime
+use std/multipart
+use std/url
+use std/uuid
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+
+/// The batch's operation (Go's BlobBatchOperationType).
+pub const BATCH_OPERATION_DELETE: Str = "delete"
+pub const BATCH_OPERATION_SET_TIER: Str = "set tier"
+
+/// A delete in a batch (container.BatchDeleteOptions).
+pub struct BatchDeleteOptions {
+  /// `DELETE_SNAPSHOTS_INCLUDE` or `..._ONLY`.
+  pub delete_snapshots: Str? = None
+  /// `permanent` (Go's DeleteType).
+  pub blob_delete_type: Str? = None
+  pub snapshot: Str? = None
+  pub version_id: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// A tier change in a batch (container.BatchSetTierOptions).
+pub struct BatchSetTierOptions {
+  pub rehydrate_priority: Str? = None
+  pub snapshot: Str? = None
+  pub version_id: Str? = None
+  /// Only `lease_id` and `if_tags` are sent, as Go sends them.
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// A batch of one container's blobs (container.BatchBuilder): from
+/// `ContainerClient.new_batch_builder`.
+pub struct ContainerBatchBuilder[fx: Effects] {
+  core: Core[fx]
+  subs: List[policy.Request] = []
+  operation: Str? = None
+}
+
+/// A batch of blobs in any containers (service.BatchBuilder): from
+/// `ServiceClient.new_batch_builder`.
+pub struct ServiceBatchBuilder[fx: Effects] {
+  core: Core[fx]
+  subs: List[policy.Request] = []
+  operation: Str? = None
+}
+
+/// One sub-request's answer (exported.BatchResponseItem): `error` is None
+/// when it succeeded.
+pub struct BatchResponseItem {
+  pub content_id: Int? = None
+  pub container_name: Str? = None
+  pub blob_name: Str? = None
+  pub request_id: Str? = None
+  pub version: Str? = None
+  pub error: azcore.ResponseError? = None
+}
+
+pub struct SubmitBatchResponse {
+  pub responses: List[BatchResponseItem]
+  pub content_type: Str? = None
+  pub request_id: Str? = None
+  pub version: Str? = None
+}
+
+pub fn (c: ContainerClient[fx]) new_batch_builder() -> ContainerBatchBuilder[fx] {
+  ContainerBatchBuilder{core: c.core}
+}
+
+pub fn (s: ServiceClient[fx]) new_batch_builder() -> ServiceBatchBuilder[fx] {
+  ServiceBatchBuilder{core: s.core}
+}
+
+/// The operation a batch takes next: the first sets it, another is an
+/// error (checkOperationType).
+fn batch_operation(current: Str?, next: Str) -> Str ! Str {
+  match current {
+    None => Ok(next)
+    Some(op) => if op == next { Ok(op) } else { Err("BlobBatch only supports one operation type per batch and is already being used for ${op} operations") }
+  }
+}
+
+fn batch_delete_request(blob_url: Str, o: BatchDeleteOptions) -> policy.Request {
+  var q: List[(Str, Str)] = []
+  if let Some(t) = o.blob_delete_type { q.push(("deletetype", t)) }
+  if let Some(t) = o.snapshot { q.push(("snapshot", t)) }
+  if let Some(t) = o.version_id { q.push(("versionid", t)) }
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-delete-snapshots", o.delete_snapshots)
+  policy.Request{method: "DELETE", url: with_query(blob_url, q), headers: hs}
+}
+
+fn batch_set_tier_request(blob_url: Str, tier: Str, o: BatchSetTierOptions) -> policy.Request {
+  var q: List[(Str, Str)] = [("comp", "tier")]
+  if let Some(t) = o.snapshot { q.push(("snapshot", t)) }
+  if let Some(t) = o.version_id { q.push(("versionid", t)) }
+  let hs = [("x-ms-access-tier", tier)] + h_str("x-ms-if-tags", o.conditions.if_tags) + h_str("x-ms-lease-id", o.conditions.lease_id) + h_str("x-ms-rehydrate-priority", o.rehydrate_priority)
+  policy.Request{method: "PUT", url: with_query(blob_url, q), headers: hs}
+}
+
+/// Adds a delete of `blob_name` (BatchBuilder.Delete).
+pub fn (var b: ContainerBatchBuilder) delete(blob_name: Str, options: BatchDeleteOptions = BatchDeleteOptions{}) -> () ! Str {
+  b.operation = Some(batch_operation(b.operation, BATCH_OPERATION_DELETE)?)
+  b.subs.push(batch_delete_request(join_paths(b.core.url, url.path_escape(blob_name)), options))
+  Ok(())
+}
+
+/// Adds a tier change of `blob_name` to `tier` (BatchBuilder.SetTier).
+pub fn (var b: ContainerBatchBuilder) set_tier(blob_name: Str, tier: Str, options: BatchSetTierOptions = BatchSetTierOptions{}) -> () ! Str {
+  b.operation = Some(batch_operation(b.operation, BATCH_OPERATION_SET_TIER)?)
+  b.subs.push(batch_set_tier_request(join_paths(b.core.url, url.path_escape(blob_name)), tier, options))
+  Ok(())
+}
+
+pub fn (var b: ServiceBatchBuilder) delete(container_name: Str, blob_name: Str, options: BatchDeleteOptions = BatchDeleteOptions{}) -> () ! Str {
+  b.operation = Some(batch_operation(b.operation, BATCH_OPERATION_DELETE)?)
+  b.subs.push(batch_delete_request(join_paths(b.core.url, "${container_name}/${url.path_escape(blob_name)}"), options))
+  Ok(())
+}
+
+pub fn (var b: ServiceBatchBuilder) set_tier(container_name: Str, blob_name: Str, tier: Str, options: BatchSetTierOptions = BatchSetTierOptions{}) -> () ! Str {
+  b.operation = Some(batch_operation(b.operation, BATCH_OPERATION_SET_TIER)?)
+  b.subs.push(batch_set_tier_request(join_paths(b.core.url, "${container_name}/${url.path_escape(blob_name)}"), tier, options))
+  Ok(())
+}
+
+/// Keeps the request the policies before it made, and answers in place
+/// of the transport, as Go's `AuthPolicy.Do` ends at "no more policies".
+struct CapturePolicy {
+  got: Mutex[List[policy.Request]]
+}
+
+fn (p: CapturePolicy) send(req: policy.Request, next: policy.Next) -> http.Response ! policy.SendErr uses (net.dial, clock, rand) {
+  p.got.with(fn(var l: List[policy.Request]) { l.push(req) })
+  Ok(http.empty(200))
+}
+
+/// `req` as the credential policy leaves it.
+fn authorize[fx: Effects](core: Core[fx], req: policy.Request) -> policy.Request ! policy.SendErr uses (net.dial, clock, rand, fx) {
+  if core.auth.is_empty() {
+    return Ok(req)
+  }
+  let got = Mutex[List[policy.Request]].new([])
+  let ps: List[policy.Policy[fx]] = core.auth + [CapturePolicy{got: got}]
+  policy.Next{policies: ps, transport: core.pipeline.transport}.send(req)?
+  Ok(got.with(fn(var l: List[policy.Request]) -> policy.Request { l.last() ?? req }))
+}
+
+/// The path of `u` as written, escapes kept (Go's EscapedPath of a path
+/// built from escaped names); "/" for none.
+fn raw_path(u: Str) -> Str {
+  let rest = match u.find("://") {
+    Some(i) => u[i + 3..u.len()]
+    None => u
+  }
+  match rest.find("/") {
+    Some(i) => rest[i..rest.len()]
+    None => "/"
+  }
+}
+
+/// The path and query a sub-request's request line carries.
+fn request_target(u: Str) -> Str {
+  let (base, q) = match u.find("?") {
+    Some(i) => (u[0..i], u[i + 1..u.len()])
+    None => (u, "")
+  }
+  let path = raw_path(base)
+  if q == "" { path } else { "${path}?${q}" }
+}
+
+/// One sub-request as the body carries it (buildSubRequest): its request
+/// line and headers. It has no `x-ms-version`, which Go adds and then
+/// removes (UpdateSubRequestHeaders).
+fn sub_request_text(req: policy.Request) -> Str ! Str {
+  var t = "${req.method} ${request_target(req.url)} HTTP/1.1\r\n"
+  for (k, v) in req.headers {
+    if k.contains("\r") || k.contains("\n") {
+      return Err("invalid CR/LF in batch subrequest header name ${batch_q(k)}")
+    }
+    if v.contains("\r") || v.contains("\n") {
+      return Err("invalid CR/LF in batch subrequest header value for ${batch_q(k)}")
+    }
+    t = t + "${k}: ${v}\r\n"
+  }
+  Ok(t + "\r\n")
+}
+
+/// Go's %q of a header name (no escapes in a name that passes the check
+/// above but quotes and backslashes).
+fn batch_q(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n")}\""
+}
+
+/// The batch's body and its ID (CreateBatchRequest): `batch_` and a
+/// random UUID as the boundary, each part's headers in Go's sorted order.
+fn batch_body[fx: Effects](core: Core[fx], subs: List[policy.Request]) -> (Bytes, Str) ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let id = "batch_${uuid.v4(core.rand).display()}"
+  var body = ""
+  for (i, req) in subs.indexed() {
+    let signed = authorize(core, req) ?? e => return Err(azcore.CallErr.Send(e))
+    let text = sub_request_text(signed) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+    let lead = if i == 0 { "" } else { "\r\n" }
+    body = body + "${lead}--${id}\r\nContent-ID: ${i}\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/http\r\n\r\n${text}"
+  }
+  Ok(((body + "\r\n--${id}--\r\n").bytes(), id))
+}
+
+fn submit_batch[fx: Effects](core: Core[fx], subs: List[policy.Request], query: List[(Str, Str)]) -> SubmitBatchResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  if subs.is_empty() {
+    return Err(azcore.CallErr.InvalidInput("batch builder is empty"))
+  }
+  let (body, id) = batch_body(core, subs)?
+  let resp = core.send(Call{method: "POST", query: query, body: Some(body), content_type: "multipart/mixed; boundary=${id}", accept: Some("multipart/mixed"), ok: [202]})?
+  let ct = r_str(resp, "Content-Type")
+  let items = parse_batch_response(resp.body, ct, subs) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(SubmitBatchResponse{responses: items, content_type: ct, request_id: r_str(resp, "x-ms-request-id"), version: r_str(resp, "x-ms-version")})
+}
+
+/// Sends the batch (container.Client.SubmitBatch): a 202 whose
+/// multipart body holds one answer per sub-request.
+pub fn (c: ContainerClient[fx]) submit_batch(b: ContainerBatchBuilder[fx]) -> SubmitBatchResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  submit_batch(c.core, b.subs, [("comp", "batch"), ("restype", "container")])
+}
+
+/// Sends the batch (service.Client.SubmitBatch).
+pub fn (s: ServiceClient[fx]) submit_batch(b: ServiceBatchBuilder[fx]) -> SubmitBatchResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  submit_batch(s.core, b.subs, [("comp", "batch")])
+}
+
+/// The boundary of a batch answer's Content-Type (getResponseBoundary).
+fn response_boundary(content_type: Str?) -> Str ! Str {
+  let ct = content_type ?? return Err("Content-Type returned in SubmitBatch response is nil")
+  let mt = mime.parse_media_type(ct) ?? e => return Err(e.display())
+  match mt.params.get("boundary") {
+    Some(b) => Ok(b)
+    None => Err("batch boundary not present in Content-Type header of the SubmitBatch response.\nContent-Type: ${ct}")
+  }
+}
+
+/// A sub-response (http.ReadResponse of the part, a newline added): its
+/// status line, headers and the rest as the body.
+fn read_sub_response(data: Bytes) -> http.Response ! Str {
+  let text = data.to_str_lossy() + "\n"
+  var lines: List[Str] = []
+  var rest = text
+  var body = ""
+  while {
+    let i = rest.find("\n") ?? {
+      body = rest
+      break
+    }
+    let line = rest[0..i].trim_end_chars("\r")
+    rest = rest[i + 1..rest.len()]
+    if line == "" && !lines.is_empty() {
+      body = rest
+      break
+    }
+    lines.push(line)
+  }
+  if lines.is_empty() {
+    return Err("unexpected EOF")
+  }
+  let status_line = lines[0]
+  let parts = status_line.split_n(" ", 3)
+  if parts.len() < 2 || !parts[0].starts_with("HTTP/") || parts[1].len() != 3 {
+    return Err("malformed HTTP response ${batch_q(status_line)}")
+  }
+  let code = Int.parse(parts[1]) ?? return Err("malformed HTTP status code ${batch_q(parts[1])}")
+  var r = http.Response{status: code, headers: {}, body: body.trim_end_chars("\n").bytes()}
+  for l in lines[1..lines.len()] {
+    let j = l.find(":") ?? return Err("malformed MIME header line: ${l}")
+    let k = l[0..j].trim()
+    // the first value, as Header.Get reads it
+    if r.header(k).is_none() {
+      r = r.with_header(k, l[j + 1..l.len()].trim())
+    }
+  }
+  Ok(r)
+}
+
+/// The container and blob of a sub-request's path: the first segment and
+/// the rest.
+fn sub_names(req: policy.Request) -> (Str, Str) {
+  let base = match req.url.find("?") {
+    Some(i) => req.url[0..i]
+    None => req.url
+  }
+  let raw = raw_path(base)
+  let p = (url.path_unescape(raw).ok() ?? raw).trim_chars("/")
+  match p.find("/") {
+    Some(i) => (p[0..i], p[i + 1..p.len()])
+    None => (p, "")
+  }
+}
+
+/// Every sub-request's answer (ParseBlobBatchResponse).
+fn parse_batch_response(body: Bytes, content_type: Str?, subs: List[policy.Request]) -> List[BatchResponseItem] ! Str {
+  let boundary = response_boundary(content_type)?
+  let parts = multipart.parse(body, boundary) ?? e => return Err(e.display())
+  var items: List[BatchResponseItem] = []
+  for part in parts {
+    var item = BatchResponseItem{}
+    var cid = ""
+    for (k, v) in part.headers {
+      if k.to_lower() == "content-id" {
+        cid = v
+      }
+    }
+    if cid != "" {
+      let n = Int.parse(cid.trim()) ?? return Err("strconv.Atoi: parsing ${batch_q(cid.trim())}: invalid syntax")
+      if n < 0 || n >= subs.len() {
+        return Err("batch answer for sub-request ${n} of ${subs.len()}")
+      }
+      item.content_id = Some(n)
+      let (cn, bn) = sub_names(subs[n])
+      item.container_name = Some(cn)
+      item.blob_name = Some(bn)
+    }
+    let resp = read_sub_response(part.data)?
+    item.request_id = r_str(resp, "x-ms-request-id")
+    item.version = r_str(resp, "x-ms-version")
+    if resp.status < 200 || resp.status >= 300 {
+      match item.content_id {
+        None => {
+          if items.is_empty() {
+            return Err("${part.data.to_str_lossy()}\n")
+          }
+          return Err("a failed batch answer without a Content-ID")
+        }
+        Some(n) => item.error = Some(azcore.response_error(subs[n].method, subs[n].url, resp))
+      }
+    }
+    items.push(item)
+  }
+  if items.len() != subs.len() {
+    return Err("expected ${subs.len()} responses, got ${items.len()} for the batch ID: ${boundary}")
+  }
+  Ok(items)
+}

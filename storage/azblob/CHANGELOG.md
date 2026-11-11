@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Blob batch (container and service BatchBuilder and SubmitBatch):
+  `new_batch_builder` on `ContainerClient` and `ServiceClient`,
+  `ContainerBatchBuilder` and `ServiceBatchBuilder` (`delete`,
+  `set_tier`; one operation per batch, as Go's), and `submit_batch`,
+  which builds Go's multipart/mixed body (a `batch_` UUID boundary, each
+  sub-request signed by the client's credential policy alone, none for a
+  SAS client) and reads the answer per sub-request as
+  `BatchResponseItem` (its container, blob, request ID and error).
+  Checked against Go v1.8.3 on a fake service (`batchvectors_test.xo`,
+  13 cases: a missing blob, a short answer, a failed batch, no boundary,
+  no Content-Type, a 403, a SAS client).
+
 - `BlobClient` (blob.Client): `set_tier`, `undelete`,
   `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url` (which,
   as Go's, drops `source_if_tags`), `create_snapshot`,

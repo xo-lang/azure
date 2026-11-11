@@ -27,6 +27,9 @@ What it does:
   `clear_pages`, `new_get_page_ranges_pager`,
   `new_get_page_ranges_diff_pager`, `resize`,
   `update_sequence_number`, `start_copy_incremental`),
+  blob batches (`new_batch_builder` and `submit_batch` on
+  `ContainerClient` and `ServiceClient`: deletes or tier changes, each
+  sub-request signed by the client's credential),
   and `BlobLeaseClient` and `ContainerLeaseClient`
   (acquire, break, change, release, renew). Each is built from a token,
   a Shared Key, no credential, or a connection string, as Go's are, and
