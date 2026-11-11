@@ -446,7 +446,7 @@ counted as ported until their Go vectors pass.
 
 | Go module | latest | kind | Go lines | our port | our lines | status |
 |---|---|---|---:|---|---:|---|
-| resourcemanager/videoanalyzer/armvideoanalyzer | v0.4.2 | v0, deprecated | 9238 | v0.4.2 | 5566 gen | compiled |
+| resourcemanager/videoanalyzer/armvideoanalyzer | v0.4.2 | v0, deprecated | 9238 | v0.4.2 | 5566 gen | compiled (retired service, pre-1.0 azcore vectors) |
 
 ## ARM modules not generated yet (0)
 

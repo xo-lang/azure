@@ -14,8 +14,8 @@ checked against Go's own code (full table:
   Every module is generated from the spec Go's own release pins, and
   every call of every client of a Go-verified module is checked against
   a local Go program's requests and results over a fake transport; the
-  other one, armvideoanalyzer, compiles (its Go release needs azcore
-  v0.23, which the vector program does not support yet).
+  other one, armvideoanalyzer, compiles (a service Microsoft retired on
+  2022-12-01, whose Go release needs pre-1.0 azcore for its vectors).
 - **Data plane: 28 of Go's 36 library modules ported** (the other 4
   of its 40 are support and sample modules), each at Go's latest
   release: azcore, azidentity, Storage (blob, Data Lake, files,
