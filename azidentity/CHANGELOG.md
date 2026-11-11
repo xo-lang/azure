@@ -5,6 +5,14 @@ azidentity v1.15.0 (with MSAL Go v1.10.1) item by item, as listed in
 `docs/reports/azidentity-v1.15.0-gaps.md`; each change is checked against
 the lines a Go program prints with v1.15.0 (`govectors_test.xo`).
 
+## Unreleased (branch azidentity-cache)
+
+- `Cache.store(cae)` is public, so a store module (azidentity/cache)
+  can test its stores through a Cache.
+- The new module `azidentity/cache` (Go's azidentity/cache v0.4.0):
+  `cache.new` makes a Cache over the user's secret store (keychain,
+  DPAPI or keyring, xo decision 0584).
+
 ## v0.1.0
 
 The first tagged release: every module of github.com/xo-lang/azure is

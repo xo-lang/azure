@@ -2,9 +2,11 @@
 
 Status: Option 1, step a (an optional store in MSAL's cache schema)
 Accepted and done (2026-11-09, at the credential: see the correction
-under 1a); step b (the per-OS protected file) Deferred (owner,
-2026-11-07, through the lead; drafted by Xo Azure 1 at the Xo Lead's
-request).
+under 1a); step b (the per-OS protected file) implemented on the branch
+`azidentity-cache` (2026-11-11) over std's secret stores (xo decision
+0584), to merge once a public xo release carries 0584 (the Xo Lead's
+order); first Deferred (owner, 2026-11-07, through the lead; drafted by
+Xo Azure 1 at the Xo Lead's request).
 
 ## Context
 
@@ -108,3 +110,33 @@ Three options, in the order the drafter recommends:
 - The user flows' remainder (gap list, "Waiting on MSAL behaviour")
   depends on this decision for refresh tokens and accounts surviving a
   restart; their in-process behaviour does not.
+
+## Step b (2026-11-11)
+
+The module `github.com/xo-lang/azure/azidentity/cache` (`cache.new(caps,
+Options{name})`) ports Go's azidentity/cache v0.4.0 and
+microsoft-authentication-extensions-for-go/cache v0.1.1 over
+`os.secrets` (xo decision 0584):
+
+- The store is the one `os.secrets` offers: the keychain (macOS:
+  service NAME, account `MSALCache`), DPAPI (Windows:
+  `%LOCALAPPDATA%/.IdentityService/NAME`), or the keyring (Linux:
+  `$XDG_CACHE_HOME` or `~/.cache`, `/.IdentityService/NAME` as compact
+  JWE, `dir` and `A128CBC-HS256`, with a random 32 byte key kept in the
+  persistent user keyring as Go's). The JWE is byte for byte Go's
+  (`jwe_test.xo`, vectors from Go's internal jwe and aescbc with a fixed
+  key and IV).
+- The extensions cache around it is Go's: the lock file `NAME.lockfile`
+  (tried every 10 ms for 5 s), the timestamp file `NAME` whose
+  modification time tells whether another process wrote, Replace's
+  retry of data that doesn't parse (1 s), the `.cae` store.
+- `new` writes, reads and deletes a test item first and fails with Go's
+  "persistent storage isn't available due to error ..." where no store
+  works. Go does this once per process; the port does it per call.
+- Differences: the lock file holds no "{pid} {argv0}" text (std's
+  FileLock writes none); a cache whose `Replace` keeps failing to parse
+  reports Go's "context deadline exceeded" after the same second.
+- Tests run on std/testing's fakes (an in-memory keyring, keychain and
+  DPAPI; `os.secrets.only` picks one), including a client secret
+  credential whose second instance reads the first one's token. No test
+  touches a real store.

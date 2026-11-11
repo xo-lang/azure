@@ -1,0 +1,526 @@
+// azidentity/cache: a credential's persistent token cache in the user's
+// secret store (decision 0012 step b; Go's azidentity/cache v0.4.0 and
+// microsoft-authentication-extensions-for-go/cache v0.1.1, both MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md).
+//
+// The store is the one `os.secrets` offers (std decision 0584):
+// - macOS: the login keychain, a generic password with service `NAME`
+//   and account `MSALCache`;
+// - Windows: the file `%LOCALAPPDATA%/.IdentityService/NAME`, its bytes
+//   protected with DPAPI for the current user;
+// - Linux: the file `$XDG_CACHE_HOME/.IdentityService/NAME` (else
+//   `~/.cache/...`) as compact JWE (`dir`, `A128CBC-HS256`), its key a
+//   random one kept in the kernel's persistent user keyring, so the file
+//   can't be read after a reboot.
+// There is no unencrypted fallback: `new` fails where no store works.
+// A test's `os.secrets` has all three fakes; `only` picks one.
+
+use std/json
+use std/base64
+use std/crypto
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/azidentity
+
+/// The effects a persistent cache performs: its file, lock and
+/// timestamp (fs), the secret store, the lock's waits (clock) and the
+/// Linux key and IVs (rand).
+pub struct Caps {
+  pub fs: Fs
+  pub env: Env
+  pub secrets: Secrets
+  pub clock: Clock
+  pub rand: Rand
+}
+
+/// Go's cache.Options.
+pub struct Options {
+  /// Separates caches: the keychain service or file name; "" is
+  /// "msal.cache". Requests with continuous access evaluation go to
+  /// NAME.cae.
+  pub name: Str = ""
+}
+
+/// The default name (Go's "msal.cache").
+pub const DEFAULT_NAME: Str = "msal.cache"
+
+/// The account of the keychain item (Go's accessor.WithAccount).
+const KEYCHAIN_ACCOUNT: Str = "MSALCache"
+
+/// Which store `secrets` offers, in the order a real OS can't confuse
+/// (each OS has one): the keychain, DPAPI, the keyring.
+enum Kind {
+  Keychain(c: Keychain)
+  Dpapi(d: Dpapi)
+  Keyring(k: Keyring)
+}
+
+fn kind_of(s: Secrets) -> Kind? {
+  if let Some(c) = s.keychain() {
+    return Some(Kind.Keychain(c))
+  }
+  if let Some(d) = s.dpapi() {
+    return Some(Kind.Dpapi(d))
+  }
+  if let Some(k) = s.keyring() {
+    return Some(Kind.Keyring(k))
+  }
+  None
+}
+
+/// A persistent cache for a credential's `cache` option (Go's
+/// cache.New). It first writes, reads and deletes a test item, so a
+/// store that doesn't work fails here, as Go's ("persistent storage
+/// isn't available due to error ..."). Go makes that check once per
+/// process; this makes it on each call.
+pub fn new(caps: Caps, opts: Options = Options{}) -> azidentity.Cache[(fs, secrets, clock, rand)] ! Str uses (fs, env, secrets, clock, rand) {
+  let kind = kind_of(caps.secrets) ?? return Err(unavailable("no secret store on this system"))
+  let dir = cache_dir(caps.env, kind)
+  let probe = "azidentity-test${caps.rand.int(0, 9223372036854775807)}"
+  let s = storage(caps, kind, dir, probe) ?? e => return Err(unavailable(e))
+  try_storage(s) ?? e => return Err(unavailable(e))
+  let name = if opts.name == "" { DEFAULT_NAME } else { opts.name }
+  Ok(azidentity.new_cache(fn(cae: Bool) -> azidentity.TokenStore[(fs, secrets, clock, rand)] ! Str uses (fs, secrets, clock, rand) {
+    let n = if cae { "${name}.cae" } else { name }
+    let p = file_path(dir, n)?
+    let a = storage(caps, kind, dir, n)?
+    file_store(caps, a, p)
+  }))
+}
+
+fn unavailable(why: Str) -> Str {
+  "persistent storage isn't available due to error ${azcore.go_quote(why)}"
+}
+
+/// Go's tryStorage: write, read back, compare, delete.
+fn try_storage(s: Accessor) -> () ! Str uses (fs, secrets, clock, rand) {
+  let content = b"test content"
+  (s.write)(content)?
+  let out = (s.read)()?
+  if out != content {
+    return Err("reading or writing cache data failed")
+  }
+  (s.delete)()
+}
+
+/// The directory `.IdentityService` goes in (Go's cacheDir): the home
+/// directory on macOS, the local app data folder on Windows, and
+/// $XDG_CACHE_HOME or ~/.cache on Linux.
+fn cache_dir(env: Env, kind: Kind) -> Result[Str, Str] uses env {
+  let r: Result[Str, EnvErr] = match kind {
+    Kind.Keychain(_) => env.home()
+    Kind.Dpapi(_) => env.local_app_data()
+    Kind.Keyring(_) => match env.get("XDG_CACHE_HOME") {
+      Some(d) if d != "" => Ok(d)
+      _ => env.home().map(fn(h: Str) -> Str { "${h}/.cache" })
+    }
+  }
+  r.map_err(fn(e: EnvErr) -> Str { e.display() })
+}
+
+/// Go's cacheFilePath.
+fn file_path(dir: Result[Str, Str], name: Str) -> Str ! Str {
+  match dir {
+    Ok(d) => Ok("${d.trim_end_chars("/")}/.IdentityService/${name}")
+    Err(e) => Err("couldn't create a cache file due to error ${azcore.go_quote(e)}")
+  }
+}
+
+/// Where a cache's bytes live (Go's accessor.Accessor).
+struct Accessor {
+  read: fn() -> Bytes ! Str uses (fs, secrets, clock, rand)
+  write: fn(Bytes) -> () ! Str uses (fs, secrets, clock, rand)
+  delete: fn() -> () ! Str uses (fs, secrets, clock, rand)
+}
+
+/// The store `kind` makes for `name` (Go's storage).
+fn storage(caps: Caps, kind: Kind, dir: Result[Str, Str], name: Str) -> Accessor ! Str {
+  match kind {
+    Kind.Keychain(c) => Ok(keychain_store(c, name))
+    Kind.Dpapi(d) => Ok(dpapi_store(caps.fs, d, file_path(dir, name)?))
+    Kind.Keyring(k) => keyring_store(caps, k, name, file_path(dir, name)?)
+  }
+}
+
+// ---- macOS: accessor/darwin.go
+
+fn keychain_store(c: Keychain, service: Str) -> Accessor {
+  let show = fn(e: KeychainErr) -> Str { e.display() }
+  Accessor{
+    read: fn() -> Bytes ! Str uses (fs, secrets, clock, rand) {
+      Ok(c.get_generic(service, KEYCHAIN_ACCOUNT).map_err(show)? ?? b"")
+    },
+    write: fn(data: Bytes) -> () ! Str uses (fs, secrets, clock, rand) {
+      c.set_generic(service, KEYCHAIN_ACCOUNT, data).map_err(show)
+    },
+    delete: fn() -> () ! Str uses (fs, secrets, clock, rand) {
+      c.delete_generic(service, KEYCHAIN_ACCOUNT).map_err(show)
+    },
+  }
+}
+
+// ---- Windows: accessor/windows.go
+
+fn dpapi_store(fs: Fs, d: Dpapi, path: Str) -> Accessor {
+  let show = fn(e: DpapiErr) -> Str { e.display() }
+  Accessor{
+    read: fn() -> Bytes ! Str uses (fs, secrets, clock, rand) {
+      let data = match fs.read(path) {
+        Ok(b) => b
+        Err(FsErr.NotFound(_)) => return Ok(b"")
+        Err(e) => return Err(e.display())
+      }
+      if data.is_empty() {
+        return Ok(data)
+      }
+      d.unprotect(data).map_err(show)
+    },
+    write: fn(data: Bytes) -> () ! Str uses (fs, secrets, clock, rand) {
+      let blob = d.protect(data).map_err(show)?
+      write_private(fs, path, blob)
+    },
+    delete: fn() -> () ! Str uses (fs, secrets, clock, rand) {
+      remove_missing_ok(fs, path)
+    },
+  }
+}
+
+/// Go's os.WriteFile(p, data, 0600), and when the directory is missing
+/// os.MkdirAll(dir, 0700) and the write again.
+fn write_private(fs: Fs, path: Str, data: Bytes) -> () ! Str uses fs {
+  match fs.write(path, data) {
+    Ok(_) => ()
+    Err(FsErr.NotFound(_)) => {
+      create_dir_all_mode(fs, parent(path), 0o700).map_err(fn(e: FsErr) -> Str { e.display() })?
+      fs.write(path, data).map_err(fn(e: FsErr) -> Str { e.display() })?
+    }
+    Err(e) => return Err(e.display())
+  }
+  fs.set_mode(path, 0o600).map_err(fn(e: FsErr) -> Str { e.display() })
+}
+
+fn remove_missing_ok(fs: Fs, path: Str) -> () ! Str uses fs {
+  match fs.remove(path) {
+    Ok(_) => Ok(())
+    Err(FsErr.NotFound(_)) => Ok(())
+    Err(e) => Err(e.display())
+  }
+}
+
+fn parent(path: Str) -> Str {
+  match path.rfind("/") {
+    Some(i) => path[0..i]
+    None => "."
+  }
+}
+
+// ---- Linux: cache_linux.go
+
+/// The key's size; its payload has one more byte, a 0 (Go's keySize).
+const KEY_SIZE: Int = 32
+
+/// The key type (Go's userKey).
+const USER_KEY: Str = "user"
+
+/// The key a Linux cache encrypts with: cached once read or made, as
+/// Go's keyring struct keeps it.
+struct LinuxKey {
+  ring: Int
+  id: Int
+  key: Bytes
+}
+
+fn keyring_store(caps: Caps, k: Keyring, desc: Str, path: Str) -> Accessor ! Str uses secrets {
+  let ring = k.user_persistent() ?? e => return Err("couldn't get the user keyring due to error ${azcore.go_quote(e.display())}")
+  let state = Mutex.new(LinuxKey{ring: ring, id: 0, key: b""})
+  let fs = caps.fs
+  let rand = caps.rand
+  Ok(Accessor{
+    read: fn() -> Bytes ! Str uses (fs, secrets, clock, rand) {
+      let b = match fs.read(path) {
+        Ok(b) => b
+        Err(FsErr.NotFound(_)) => return Ok(b"")
+        Err(e) => return Err("failed to read cache data due to error ${azcore.go_quote(e.display())}")
+      }
+      if b.is_empty() {
+        return Ok(b)
+      }
+      let j = parse_compact(b) ?? e => return Err("couldn't parse cache data due to error ${azcore.go_quote(e)}")
+      linux_decrypt(k, state, desc, j)
+    },
+    write: fn(data: Bytes) -> () ! Str uses (fs, secrets, clock, rand) {
+      if data.is_empty() {
+        return Ok(())
+      }
+      let content = linux_encrypt(k, state, desc, rand, data)?
+      write_private(fs, path, content.bytes())
+    },
+    delete: fn() -> () ! Str uses (fs, secrets, clock, rand) {
+      state.with_read(fn(x: LinuxKey) -> () ! Str uses secrets {
+        if x.id != 0 && x.ring != 0 {
+          match k.unlink(x.id, x.ring) {
+            Ok(_) => ()
+            Err(e) if key_gone(e) => ()
+            Err(e) => return Err("failed to delete cache data due to error ${azcore.go_quote(e.display())}")
+          }
+        }
+        Ok(())
+      })?
+      remove_missing_ok(fs, path)
+    },
+  })
+}
+
+/// Go's isKeyInvalidOrNotFound.
+fn key_gone(e: KeyErr) -> Bool {
+  e is KeyErr.NotFound | KeyErr.Expired | KeyErr.Revoked
+}
+
+/// Go's getKey on the held state: the cached key, else the key found
+/// by description.
+fn key_in(k: Keyring, var x: LinuxKey, desc: Str) -> Bytes ! KeyErr uses secrets {
+  if !x.key.is_empty() {
+    return Ok(x.key)
+  }
+  if x.id == 0 {
+    x.id = k.search(x.ring, USER_KEY, desc)?
+  }
+  let payload = k.read(x.id)?
+  x.key = if payload.len() > KEY_SIZE { payload[0..KEY_SIZE] } else { payload }
+  Ok(x.key)
+}
+
+/// Go's decrypt: two tries, the second with the key read again; a
+/// missing key or data that doesn't decrypt is an empty cache.
+fn linux_decrypt(k: Keyring, state: Mutex[LinuxKey], desc: Str, j: Jwe) -> Bytes ! Str uses secrets {
+  // the closure keeps its changes only when it returns Ok, so the
+  // outcome is its value (Go keeps a key id found before a failure)
+  let r = state.with(fn(var x: LinuxKey) -> Result[Bytes, Str] uses secrets {
+    for _ in 0..2 {
+      let key = match key_in(k, x, desc) {
+        Ok(key) => key
+        Err(KeyErr.NotFound) => return Ok(b"")
+        Err(e) => return Err(e.display())
+      }
+      if let Ok(p) = jwe_decrypt(j, key) {
+        return Ok(p)
+      }
+      x.key = b""
+      x.id = 0
+    }
+    Ok(b"")
+  })
+  r
+}
+
+/// Go's encrypt: the key (made when missing), then the compact JWE.
+fn linux_encrypt(k: Keyring, state: Mutex[LinuxKey], desc: Str, rand: Rand, data: Bytes) -> Str ! Str uses (secrets, rand) {
+  let iv = crypto.random_bytes(rand, 16)
+  let fresh = crypto.random_bytes(rand, KEY_SIZE)
+  let fail = fn(why: Str) -> Result[Str, Str] { Err("couldn't get cache encryption key due to error ${azcore.go_quote(why)}") }
+  let r = state.with(fn(var x: LinuxKey) -> Result[Str, Str] uses secrets {
+    let key = match key_in(k, x, desc) {
+      Ok(key) => key
+      Err(e) if key_gone(e) => {
+        // Go's createKey: 32 random bytes and a 0, added to the ring
+        x.id = match k.add(x.ring, USER_KEY, desc, fresh + b"\x00") {
+          Ok(id) => id
+          Err(e2) => return fail("couldn't store cache encryption key due to error ${azcore.go_quote(e2.display())}")
+        }
+        x.key = fresh
+        fresh
+      }
+      Err(e) => return fail(e.display())
+    }
+    Ok(jwe_encrypt(key, "${x.id}", iv, data))
+  })
+  r
+}
+
+// ---- internal/jwe
+
+/// The algorithm name (Go's aescbc Alg).
+const ENC: Str = "A128CBC-HS256"
+
+struct Jwe {
+  alg: Str
+  enc: Str
+  kid: Str
+  iv: Bytes
+  ciphertext: Bytes
+  tag: Bytes
+}
+
+/// Go's jwe.Encrypt and Serialize: `HEADER..IV.CIPHERTEXT.TAG`, each
+/// part raw URL base64, the header `{"alg":"dir","enc":ENC,"kid":KID}`;
+/// no additional data (Go passes nil).
+fn jwe_encrypt(key: Bytes, kid: Str, iv: Bytes, plaintext: Bytes) -> Str {
+  let k = crypto.aead_key(crypto.Aead.Aes128CbcHmacSha256, key) ?? e => fault(e.display())
+  let sealed = k.seal(iv, plaintext)
+  let n = sealed.len() - 16
+  let hdr = "{\"alg\":\"dir\",\"enc\":${json.encode_str(ENC)},\"kid\":${json.encode_str(kid)}}"
+  let b = fn(x: Bytes) -> Str { base64.encode(x, base64.Base64.RawUrl) }
+  "${b(hdr.bytes())}..${b(iv)}.${b(sealed[0..n])}.${b(sealed[n..sealed.len()])}"
+}
+
+/// Go's ParseCompactFormat.
+fn parse_compact(b: Bytes) -> Jwe ! Str {
+  let parts = b.to_str_lossy().split(".")
+  if parts.len() != 5 {
+    return Err("incorrectly formatted JWE")
+  }
+  let d = fn(s: Str) -> Bytes ! Str { base64.decode(s, base64.Base64.RawUrl).map_err(fn(e: base64.DecodeErr) -> Str { e.display() }) }
+  let hdr = json.parse_value(d(parts[0])?.to_str_lossy()).map_err(fn(e: json.DecodeErr) -> Str { e.display() })?
+  let field = fn(k: Str) -> Str {
+    match hdr.get(k) {
+      Some(json.Value.Str(s)) => s
+      _ => ""
+    }
+  }
+  Ok(Jwe{alg: field("alg"), enc: field("enc"), kid: field("kid"), iv: d(parts[2])?, ciphertext: d(parts[3])?, tag: d(parts[4])?})
+}
+
+/// Go's JWE.Decrypt.
+fn jwe_decrypt(j: Jwe, key: Bytes) -> Bytes ! Str {
+  if j.alg != "dir" {
+    return Err("unsupported content encryption algorithm ${azcore.go_quote(j.alg)}")
+  }
+  let k = crypto.aead_key(crypto.Aead.Aes128CbcHmacSha256, key).map_err(fn(e: crypto.AeadErr) -> Str { e.display() })?
+  if j.enc != ENC {
+    return Err("unsupported encryption algorithm ${azcore.go_quote(j.enc)}")
+  }
+  if j.iv.len() != 16 {
+    return Err("invalid IV")
+  }
+  k.open(j.iv, j.ciphertext + j.tag).map_err(fn(e: crypto.AeadErr) -> Str { e.display() })
+}
+
+// ---- the extensions cache: cache.go and internal/lock
+
+/// How long Replace retries data that doesn't parse, and how long the
+/// lock is waited for (Go's timeout values); the wait between tries.
+const REPLACE_TIMEOUT: Duration = 1s
+const LOCK_TIMEOUT: Duration = 5s
+const RETRY_DELAY: Duration = 10ms
+
+/// What the store last wrote or read, and the timestamp file's
+/// modification time then (Go's Cache.data and Cache.sync).
+struct Synced {
+  data: Bytes
+  sync: Time?
+}
+
+/// Go's extcache.New and its Export and Replace: the accessor `a`,
+/// guarded by the lock file `p.lockfile` across processes, with `p`'s
+/// modification time telling whether another process wrote since.
+fn file_store(caps: Caps, a: Accessor, p: Str) -> azidentity.TokenStore[(fs, secrets, clock, rand)] ! Str uses fs {
+  let fs = caps.fs
+  let clock = caps.clock
+  // lock.New: the lock file's directory
+  create_dir_all_mode(fs, parent(p), 0o777).map_err(fn(e: FsErr) -> Str { e.display() })?
+  let lock_path = "${p}.lockfile"
+  let st = Mutex.new(Synced{data: b"", sync: None})
+  Ok(azidentity.TokenStore{
+    // Go's Export and Replace hold the cache's mutex throughout
+    replace: fn(hint: Str) -> Str ! Str uses (fs, secrets, clock, rand) {
+      st.with(fn(var x: Synced) -> Str ! Str uses (fs, secrets, clock, rand) {
+        var read = true
+        if let Some(m) = mtime(fs, p) {
+          read = Some(m) != x.sync
+        }
+        var data = x.data
+        let start = clock.now()
+        while {
+          if read {
+            data = (a.read)()?
+          }
+          if parses(data) {
+            break
+          }
+          read = true
+          if clock.since(start) >= REPLACE_TIMEOUT {
+            return Err("context deadline exceeded")
+          }
+          clock.sleep(RETRY_DELAY)
+        }
+        if read {
+          x.data = data
+          if let Some(m) = mtime(fs, p) {
+            x.sync = Some(m)
+          }
+        }
+        Ok(data.to_str_lossy())
+      })
+    },
+    export: fn(hint: Str, text: Str) -> () ! Str uses (fs, secrets, clock, rand) {
+      st.with(fn(var x: Synced) -> Result[(), Str] ! Str uses (fs, secrets, clock, rand) {
+        let data = text.bytes()
+        let l = take_lock(fs, clock, lock_path)?
+        let r = (a.write)(data)
+        let u = release_lock(fs, l, lock_path)
+        r?
+        let now = clock.now()
+        match fs.set_modified(p, now) {
+          Err(FsErr.NotFound(_)) => {
+            if let Ok(_) = create_dir_all_mode(fs, parent(p), 0o700) {
+              let _ = fs.append(p, b"").ignore_err("Go ignores the timestamp file's creation")
+              let _ = fs.set_mode(p, 0o600).ignore_err("Go ignores the timestamp file's creation")
+            }
+          }
+          _ => ()
+        }
+        x.data = data
+        x.sync = Some(mtime(fs, p) ?? now)
+        Ok(u)
+      })?
+    },
+  })
+}
+
+/// The modification time of path, None when it can't be read.
+fn mtime(fs: Fs, path: Str) -> Time? uses fs {
+  match fs.stat(path) {
+    Ok(Some(f)) => Some(f.modified)
+    _ => None
+  }
+}
+
+/// Whether MSAL's Unmarshal takes `data`: nothing stored, or a JSON
+/// object (azidentity checks the entries).
+fn parses(data: Bytes) -> Bool {
+  if data.is_empty() {
+    return true
+  }
+  match json.parse_value(data.to_str_lossy()) {
+    Ok(json.Value.Object(_)) => true
+    _ => false
+  }
+}
+
+/// Go's Lock.Lock: tries every 10 ms for 5 seconds.
+fn take_lock(fs: Fs, clock: Clock, path: Str) -> FileLock ! Str uses (fs, clock) {
+  let start = clock.now()
+  while {
+    match fs.try_lock(path) {
+      Ok(Some(l)) => return Ok(l)
+      Ok(None) => ()
+      Err(FsErr.Denied(_)) => ()
+      Err(e) => return Err(e.display())
+    }
+    if clock.since(start) >= LOCK_TIMEOUT {
+      return Err("context deadline exceeded")
+    }
+    clock.sleep(RETRY_DELAY)
+  }
+}
+
+/// Go's Lock.Unlock: unlock, then remove the lock file (gone or denied
+/// is fine).
+fn release_lock(fs: Fs, l: FileLock, path: Str) -> () ! Str uses fs {
+  l.unlock()
+  match fs.remove(path) {
+    Ok(_) => Ok(())
+    Err(FsErr.NotFound(_)) => Ok(())
+    Err(FsErr.Denied(_)) => Ok(())
+    Err(e) => Err(e.display())
+  }
+}

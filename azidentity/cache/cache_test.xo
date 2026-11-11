@@ -1,0 +1,130 @@
+// Each store over the test fakes (std/testing's os.secrets: an
+// in-memory keyring, keychain and DPAPI; `only` picks one) and a MemFs.
+
+use github.com/xo-lang/azure/azidentity
+
+fn caps_for(os: testing.TestOs, store: Str) -> Caps {
+  os.env.set("HOME", "/home/u")
+  os.env.set("LOCALAPPDATA", "C:/Users/u/AppData/Local")
+  Caps{fs: os.fs, env: os.env, secrets: os.secrets.only([store]), clock: os.clock, rand: os.rand}
+}
+
+/// Export then Replace through a fresh cache's store.
+fn round_trip(c: azidentity.Cache[(fs, secrets, clock, rand)], cae: Bool, text: Str) -> Str ! Str uses (fs, secrets, clock, rand) {
+  let s = c.store(cae)?
+  (s.export)("hint", text)?
+  (s.replace)("hint")
+}
+
+const DOC: Str = "{\"AccessToken\":{},\"Account\":{},\"AppMetadata\":{},\"IdToken\":{},\"RefreshToken\":{}}"
+
+test "no store: Go's error" {
+  let caps = Caps{fs: os.fs, env: os.env, secrets: os.secrets.only([]), clock: os.clock, rand: os.rand}
+  expect(new(caps).is_err())
+  expect(new(caps).err()) == Some("persistent storage isn't available due to error \"no secret store on this system\"")
+}
+
+test "keyring: the file is JWE under ~/.cache/.IdentityService, its key in the keyring" {
+  let c = new(caps_for(os, "keyring"))?
+  expect(round_trip(c, false, DOC)?) == DOC
+  let raw = os.fs.read("/home/u/.cache/.IdentityService/msal.cache")?.to_str_lossy()
+  expect(raw.split(".").len()) == 5
+  expect(raw.starts_with("eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2Iiwia2lkIjoi"))
+  expect(!raw.contains("AccessToken"))
+  let k = os.secrets.keyring() ?? fault("keyring")
+  let ring = k.user_persistent()?
+  let id = k.search(ring, "user", "msal.cache")?
+  expect(k.read(id)?.len()) == 33
+  // the probe left nothing behind
+  expect(os.fs.exists("/home/u/.cache/.IdentityService/msal.cache.lockfile")?) == false
+  expect(k.search(ring, "user", "azidentity-test1").is_err())
+}
+
+test "keyring: XDG_CACHE_HOME wins" {
+  os.env.set("XDG_CACHE_HOME", "/xdg")
+  let caps = caps_for(os, "keyring")
+  os.env.set("XDG_CACHE_HOME", "/xdg")
+  let c = new(caps)?
+  expect(round_trip(c, false, DOC)?) == DOC
+  expect(os.fs.exists("/xdg/.IdentityService/msal.cache")?)
+}
+
+test "keyring: a new cache reads what another wrote (another process)" {
+  let a = new(caps_for(os, "keyring"))?
+  let _ = round_trip(a, false, DOC)?
+  let b = new(caps_for(os, "keyring"))?
+  let s = b.store(false)?
+  expect((s.replace)("hint")?) == DOC
+}
+
+test "keyring: a key gone from the ring is an empty cache, and the next write makes a new key" {
+  let c = new(caps_for(os, "keyring"))?
+  let _ = round_trip(c, false, DOC)?
+  let k = os.secrets.keyring() ?? fault("keyring")
+  let ring = k.user_persistent()?
+  k.unlink(k.search(ring, "user", "msal.cache")?, ring)?
+  let b = new(caps_for(os, "keyring"))?
+  let s = b.store(false)?
+  expect((s.replace)("hint")?) == ""
+  (s.export)("hint", DOC)?
+  expect(k.search(ring, "user", "msal.cache").is_ok())
+}
+
+test "keychain: service NAME, account MSALCache; the timestamp file in ~/.IdentityService" {
+  let c = new(caps_for(os, "keychain"), Options{name: "my.cache"})?
+  expect(round_trip(c, false, DOC)?) == DOC
+  let kc = os.secrets.keychain() ?? fault("keychain")
+  expect(kc.get_generic("my.cache", "MSALCache")?) == Some(DOC.bytes())
+  expect(os.fs.read("/home/u/.IdentityService/my.cache")?) == b""
+  // the probe's item is gone
+  expect(round_trip(c, true, "{}")?) == "{}"
+  expect(kc.get_generic("my.cache.cae", "MSALCache")?) == Some(b"{}")
+}
+
+test "dpapi: the file is protected under LOCALAPPDATA/.IdentityService" {
+  let c = new(caps_for(os, "dpapi"))?
+  expect(round_trip(c, false, DOC)?) == DOC
+  let blob = os.fs.read("C:/Users/u/AppData/Local/.IdentityService/msal.cache")?
+  expect(!blob.to_str_lossy().contains("AccessToken"))
+  let d = os.secrets.dpapi() ?? fault("dpapi")
+  expect(d.unprotect(blob)?) == DOC.bytes()
+}
+
+test "CAE requests use NAME.cae" {
+  let c = new(caps_for(os, "dpapi"))?
+  let _ = round_trip(c, true, DOC)?
+  expect(os.fs.exists("C:/Users/u/AppData/Local/.IdentityService/msal.cache.cae")?)
+  expect(os.fs.exists("C:/Users/u/AppData/Local/.IdentityService/msal.cache")?) == false
+}
+
+test "stored data that isn't a cache: Go's retry gives up after a second" {
+  let c = new(caps_for(os, "dpapi"))?
+  let s = c.store(false)?
+  let d = os.secrets.dpapi() ?? fault("dpapi")
+  os.fs.create_dir_all("C:/Users/u/AppData/Local/.IdentityService")?
+  os.fs.write("C:/Users/u/AppData/Local/.IdentityService/msal.cache", d.protect(b"not json")?)?
+  expect((s.replace)("hint")) == Err("context deadline exceeded")
+}
+
+test "a held lock times out after 5 seconds" {
+  let c = new(caps_for(os, "dpapi"))?
+  let s = c.store(false)?
+  let l = os.fs.lock("C:/Users/u/AppData/Local/.IdentityService/msal.cache.lockfile")?
+  expect((s.export)("hint", DOC)) == Err("context deadline exceeded")
+  l.unlock()
+  (s.export)("hint", DOC)?
+}
+
+test "the cached copy is used while the timestamp is unchanged" {
+  let c = new(caps_for(os, "keychain"))?
+  let s = c.store(false)?
+  (s.export)("hint", DOC)?
+  let kc = os.secrets.keychain() ?? fault("keychain")
+  // changed behind the cache's back without touching the timestamp
+  kc.set_generic("msal.cache", "MSALCache", b"{\"x\":1}")?
+  expect((s.replace)("hint")?) == DOC
+  // a newer timestamp: read again
+  os.clock.advance(2s)
+  os.fs.set_modified("/home/u/.IdentityService/msal.cache", os.clock.now())?
+  expect((s.replace)("hint")?) == "{\"x\":1}"
+}

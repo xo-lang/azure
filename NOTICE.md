@@ -167,3 +167,10 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+`azidentity/cache` ports Go's `sdk/azidentity/cache` v0.4.0 (MIT,
+Copyright (c) Microsoft Corporation) and
+github.com/AzureAD/microsoft-authentication-extensions-for-go `cache`
+v0.1.1 (MIT, Copyright (c) Microsoft Corporation): the per-OS stores,
+the compact JWE of the Linux store, and the cache's lock and timestamp
+files.

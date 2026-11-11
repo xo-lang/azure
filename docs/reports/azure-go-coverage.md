@@ -46,7 +46,7 @@ with a release Go has not retracted, and resourcemanager/internal).
 | ai/azopenaiextensions | v0.2.0 | v0, deprecated | 290 | 3840 | missing |  |  |
 | azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 | 2686 |  |
 | azidentity | v1.15.0 | stable | 4100 | 4100 | v1.15.0 (dev tools included) | 3616 |  |
-| azidentity/cache | v0.4.0 | v0 | 595 | 595 | missing |  |  |
+| azidentity/cache | v0.4.0 | v0 | 595 | 595 | v0.4.0 on branch azidentity-cache (needs xo with decision 0584) | 526 |  |
 | batch/azbatch | v0.1.0 | v0 | 66 | 24575 | v0.1.0 | 64 + 9385 gen |  |
 | cognitiveservices/azopenai | v0.1.2 | v0, deprecated | 619 | 3309 | missing |  |  |
 | containers/azcontainerregistry | v0.2.3 | v0 | 680 | 3753 | v0.2.3 | 454 + 1471 gen |  |

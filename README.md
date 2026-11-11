@@ -24,9 +24,10 @@ checked against Go's own code (full table:
   Container Registry, Batch, tracing/azotel and Azure OpenAI's Azure
   types. Each is checked against Go's vectors from the released code
   and local fakes.
-- **Not ported yet:** azidentity/cache's per-OS protected file (see
-  decision [0012](docs/decisions/0012-persistent-token-cache.md)); the
-  other 7 are modules Go marks deprecated.
+- **Not ported yet:** 7 modules Go marks deprecated. azidentity/cache's
+  per-OS protected file is ported on the branch `azidentity-cache`
+  (decision [0012](docs/decisions/0012-persistent-token-cache.md)) and
+  merges once a public xo release has std's secret stores.
 - No test calls Azure: every check runs against fakes and recorded Go
   output.
 

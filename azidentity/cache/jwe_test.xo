@@ -1,0 +1,53 @@
+// The Linux format against Go's internal jwe and aescbc (azidentity/cache
+// v0.4.0) with a fixed key and IV: ~/xo-lead/notes/aws-43/cachego, whose
+// output these lines are.
+
+fn seq(n: Int, start: Int) -> Bytes {
+  var b = BytesBuilder.with_capacity(n)
+  for i in 0..n {
+    b.write_byte(UInt8(start + i))
+  }
+  b.freeze()
+}
+
+const GO_JWE: List[(Str, Str)] = [
+  ("", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2Iiwia2lkIjoiMTIzNDU2Nzg5In0..ZGVmZ2hpamtsbW5vcHFycw.oxLxpYQ6GhDMSl1keD863A.wfye7auibJRlBJ5Db0EGtw"),
+  ("test content", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2Iiwia2lkIjoiMTIzNDU2NzkwIn0..ZGVmZ2hpamtsbW5vcHFycw.fvW6aK0NmtAkBUX83C6v_w.KlAkJ8hEFnNLOy5yyMqfrw"),
+  ("{\"AccessToken\":{},\"Account\":{},\"AppMetadata\":{},\"IdToken\":{},\"RefreshToken\":{}}", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2Iiwia2lkIjoiMTIzNDU2NzkxIn0..ZGVmZ2hpamtsbW5vcHFycw.wf0BnpljDCzc4ok0cViR8r7QDf12QIUWlXQA8J60MzY9ham_JN3MIbTM_6-nJl59KjRK3S7tUK0tduXc3oxp8ZFI4y_DwUGe7jvwStfGokw.dBPst-u3LJRGRjvrpn97Iw"),
+  ("exactly16bytes!!", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2Iiwia2lkIjoiMTIzNDU2NzkyIn0..ZGVmZ2hpamtsbW5vcHFycw.Sco_AFiDJC9SrocnqjWJ-4bbFIwTBNPrnTsNC4hYrf0.-nZ-z61qTiilSbhksS0ZHQ"),
+]
+
+test "the JWE is byte for byte Go's, and Go's decrypts" {
+  let key = seq(32, 1)
+  let iv = seq(16, 100)
+  var i = 0
+  for (pt, want) in GO_JWE {
+    expect(jwe_encrypt(key, "${123456789 + i}", iv, pt.bytes())) == want
+    let j = parse_compact(want.bytes())?
+    expect(jwe_decrypt(j, key)?) == pt.bytes()
+    i = i + 1
+  }
+}
+
+test "a wrong key doesn't decrypt" {
+  let j = parse_compact(GO_JWE[1].1.bytes())?
+  expect(jwe_decrypt(j, seq(32, 2)).is_err())
+}
+
+test "Go's parse and decrypt errors" {
+  let key = seq(32, 1)
+  expect(parse_compact(b"a.b.c")) == Err("incorrectly formatted JWE")
+  let dec = fn(s: Str) -> Str {
+    match parse_compact(s.bytes()) {
+      Err(e) => "parse: ${e}"
+      Ok(j) => match jwe_decrypt(j, key) {
+        Err(e) => e
+        Ok(_) => "ok"
+      }
+    }
+  }
+  expect(dec("e30..AAAA.AAAA.AAAA")) == "unsupported content encryption algorithm \"\""
+  expect(dec("eyJhbGciOiJSU0EiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..AAAA.AAAA.AAAA")) == "unsupported content encryption algorithm \"RSA\""
+  expect(dec("eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..AAAA.AAAA.AAAA")) == "unsupported encryption algorithm \"A256GCM\""
+  expect(dec("!!..AAAA.AAAA.AAAA")) == "parse: illegal base64 data at input byte 0"
+}
