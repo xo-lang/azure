@@ -17,7 +17,8 @@ What it does:
   search, statistics, user delegation credential),
   `ContainerClient` (create, delete, restore, properties, metadata,
   access policy, account info, SAS URL, the flat and hierarchy blob
-  listings in Go's default XML format, tag search), `BlobClient` (properties, HTTP
+  listings in Go's default XML format or Apache Arrow, tag search),
+  `BlobClient` (properties, HTTP
   headers, metadata, tags, delete, `download_stream`,
   `download_buffer`, `download_file`, `set_tier`, `undelete`,
   `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url`,

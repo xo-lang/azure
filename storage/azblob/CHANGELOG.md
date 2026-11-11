@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- The blob listings' Apache Arrow format: `response_format`
+  (`STORAGE_RESPONSE_FORMAT_AUTO`, `_XML`, `_ARROW`) and `end_before` on
+  `ListBlobsFlatOptions` and `ListBlobsHierarchyOptions`. With Arrow,
+  the Accept header names Arrow and XML, `endBefore` is sent, and an
+  Arrow answer is read from its IPC stream (`arrowipc.xo`, arrow-go
+  v18.7.0's reader: continuation and legacy framing, dictionary
+  batches skipped, every array layout loaded) as azblob's
+  internal/arrow reads it; an XML answer is read as XML. Not read: a
+  compressed record batch and a big-endian stream (Go reads both), a
+  timestamp outside Time's range; a metadata key with a null value is
+  left out (Go keeps it, nil), and tags are in key order (Go's are
+  random). Checked against Go v1.8.3 with arrow-go's streams
+  (`arrowlistvectors_test.xo`, 18 listings).
+
 - `BlockBlobClient.upload_stream` (`UploadStreamOptions`, `StreamErr`):
   uploads what a `fn(Int) -> Bytes? ! E` reader gives, in one Upload
   when shorter than a block, else block by block with Go's 64 byte

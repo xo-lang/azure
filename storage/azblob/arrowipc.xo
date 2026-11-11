@@ -1,0 +1,601 @@
+// Apache Arrow IPC streams, read as arrow-go v18.7.0's ipc.Reader reads
+// them (message.go's messageReader, reader.go's Reader, file_reader.go's
+// array loader; Apache-2.0), as far as azblob's Arrow listing needs: the
+// schema and its metadata, every record batch's arrays, and the values of
+// the types internal/arrow reads (Utf8, Bool, Int32, Int64, UInt64,
+// Timestamp, Map of Utf8 to Utf8). Not read: a compressed record batch
+// (arrow-go decompresses LZ4 and Zstandard; Xo's std has neither) and a
+// big-endian stream (arrow-go swaps it). A dictionary batch is skipped,
+// so a dictionary-encoded column reads as absent, as azblob reads it.
+
+use std/binary
+
+// Flatbuffers.
+
+/// A flatbuffer table at `pos` in `buf`.
+struct Fb {
+  buf: Bytes
+  pos: Int
+}
+
+fn need(b: Bytes, at: Int, n: Int) -> () ! Str {
+  if at < 0 || n < 0 || at > b.len() - n {
+    return Err("arrow/ipc: offset ${at} (${n} bytes) out of range")
+  }
+  Ok(())
+}
+
+fn rd_u16(b: Bytes, at: Int) -> Int ! Str {
+  need(b, at, 2)?
+  Ok(binary.get_u16_le(b, at))
+}
+
+fn rd_u32(b: Bytes, at: Int) -> Int ! Str {
+  need(b, at, 4)?
+  Ok(binary.get_u32_le(b, at))
+}
+
+fn rd_i32(b: Bytes, at: Int) -> Int ! Str {
+  need(b, at, 4)?
+  Ok(binary.get_i32_le(b, at))
+}
+
+/// 8 bytes as an Int's 64 bits (Go's int64 of them).
+fn rd_i64(b: Bytes, at: Int) -> Int ! Str {
+  need(b, at, 8)?
+  Ok(binary.get_u64_le(b, at))
+}
+
+fn fb_root(b: Bytes) -> Fb ! Str {
+  Ok(Fb{buf: b, pos: rd_u32(b, 0)?})
+}
+
+/// Field `i`'s offset in the table, 0 when it is absent.
+fn (t: Fb) slot(i: Int) -> Int ! Str {
+  let vt = t.pos - rd_i32(t.buf, t.pos)?
+  let size = rd_u16(t.buf, vt)?
+  let at = 4 + 2 * i
+  if at + 2 > size {
+    return Ok(0)
+  }
+  rd_u16(t.buf, vt + at)
+}
+
+fn (t: Fb) byte_field(i: Int, default: Int) -> Int ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(default)
+  }
+  need(t.buf, t.pos + o, 1)?
+  Ok(Int(t.buf[t.pos + o]))
+}
+
+fn (t: Fb) short_field(i: Int, default: Int) -> Int ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(default)
+  }
+  need(t.buf, t.pos + o, 2)?
+  Ok(binary.get_i16_le(t.buf, t.pos + o))
+}
+
+fn (t: Fb) int_field(i: Int, default: Int) -> Int ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(default)
+  }
+  rd_i32(t.buf, t.pos + o)
+}
+
+fn (t: Fb) long_field(i: Int, default: Int) -> Int ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(default)
+  }
+  rd_i64(t.buf, t.pos + o)
+}
+
+fn (t: Fb) table(i: Int) -> Fb? ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(None)
+  }
+  let p = t.pos + o
+  Ok(Some(Fb{buf: t.buf, pos: p + rd_u32(t.buf, p)?}))
+}
+
+/// A string field's bytes as text (flatbuffers' bytes, not checked as
+/// UTF-8 by Go; lossy here).
+fn (t: Fb) text(i: Int) -> Str? ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(None)
+  }
+  let p = t.pos + o
+  let s = p + rd_u32(t.buf, p)?
+  let n = rd_u32(t.buf, s)?
+  need(t.buf, s + 4, n)?
+  Ok(Some(t.buf[s + 4..s + 4 + n].to_str_lossy()))
+}
+
+/// A vector field: where its elements start and how many there are.
+fn (t: Fb) vector(i: Int) -> (Int, Int)? ! Str {
+  let o = t.slot(i)?
+  if o == 0 {
+    return Ok(None)
+  }
+  let p = t.pos + o
+  let s = p + rd_u32(t.buf, p)?
+  Ok(Some((s + 4, rd_u32(t.buf, s)?)))
+}
+
+fn (t: Fb) tables(i: Int) -> List[Fb] ! Str {
+  let (start, n) = t.vector(i)? ?? return Ok([])
+  var out: List[Fb] = []
+  for j in 0..n {
+    let e = start + 4 * j
+    out.push(Fb{buf: t.buf, pos: e + rd_u32(t.buf, e)?})
+  }
+  Ok(out)
+}
+
+// Schema.
+
+const T_NULL: Int = 1
+const T_INT: Int = 2
+const T_UTF8: Int = 5
+const T_BOOL: Int = 6
+const T_TIMESTAMP: Int = 10
+const T_STRUCT: Int = 13
+const T_UNION: Int = 14
+const T_MAP: Int = 17
+
+/// A schema field: its type's union tag and table, whether it is
+/// dictionary encoded (and its index type), its children.
+struct AField {
+  name: Str
+  type_id: Int
+  ty: Fb?
+  dict: Bool
+  dict_index: Fb?
+  children: List[AField]
+}
+
+fn field_of(t: Fb) -> AField ! Str {
+  let type_id = t.byte_field(2, 0)?
+  if type_id < 1 || type_id > 26 {
+    return Err("arrow/ipc: unknown type ${type_id}")
+  }
+  var children: List[AField] = []
+  for c in t.tables(5)? {
+    children.push(field_of(c)?)
+  }
+  let nested = type_id == 12 || type_id == 16 || type_id == T_MAP || type_id == 21 || type_id == 25 || type_id == 26
+  if nested && children.len() != 1 {
+    return Err("arrow/ipc: a list or map type needs one child, got ${children.len()}")
+  }
+  if type_id == T_MAP && (children[0].type_id != T_STRUCT || children[0].children.len() != 2) {
+    return Err("arrow/ipc: a map's child must be a struct of a key and a value")
+  }
+  let d = t.table(4)?
+  let ty = t.table(3)?
+  if type_id == T_INT {
+    let w = (ty ?? return Err("arrow/ipc: an Int type without its table")).int_field(0, 0)?
+    if w != 8 && w != 16 && w != 32 && w != 64 {
+      return Err("arrow/ipc: invalid integer bit width ${w}")
+    }
+  }
+  Ok(AField{
+    name: t.text(0)? ?? "",
+    type_id: type_id,
+    ty: ty,
+    dict: d.is_some(),
+    dict_index: match d {
+      Some(x) => x.table(1)?
+      None => None
+    },
+    children: children,
+  })
+}
+
+fn count_dicts(fs: List[AField]) -> Int {
+  var n = 0
+  for f in fs {
+    if f.dict {
+      n = n + 1
+    }
+    n = n + count_dicts(f.children)
+  }
+  n
+}
+
+// Messages.
+
+const H_SCHEMA: Int = 1
+const H_DICTIONARY: Int = 2
+const H_RECORD_BATCH: Int = 3
+
+/// One message, or the end of the stream: `Eos` an end marker (Go's bare
+/// io.EOF), `Eof` the stream's bytes ending where a read starts (Go's
+/// wrapped io.EOF, also an end for the batch loop, an error elsewhere).
+enum Msg {
+  Eos
+  Eof
+  Got(version: Int, header_type: Int, header: Fb?, body: Bytes)
+}
+
+struct Stream {
+  data: Bytes
+  pos: Int = 0
+}
+
+/// `n` bytes from the stream, or None when none are left (Go's
+/// io.ReadFull: io.EOF for none, ErrUnexpectedEOF for some).
+fn (var s: Stream) take(n: Int, what: Str) -> Bytes? ! Str {
+  if n == 0 {
+    return Ok(Some(b""))
+  }
+  let left = s.data.len() - s.pos
+  if left == 0 {
+    return Ok(None)
+  }
+  if left < n {
+    return Err("arrow/ipc: could not read ${what}: unexpected EOF")
+  }
+  let b = s.data[s.pos..s.pos + n]
+  s.pos = s.pos + n
+  Ok(Some(b))
+}
+
+fn (var s: Stream) message() -> Msg ! Str {
+  let first = s.take(4, "continuation indicator")? ?? return Ok(Msg.Eof)
+  let cid = binary.get_u32_le(first, 0)
+  var len = 0
+  if cid == 0 {
+    return Ok(Msg.Eos)
+  } else if cid == 0xffffffff {
+    let l = s.take(4, "message length")? ?? return Ok(Msg.Eof)
+    len = binary.get_i32_le(l, 0)
+    if len == 0 {
+      return Ok(Msg.Eos)
+    }
+  } else {
+    len = binary.get_i32_le(first, 0)
+  }
+  if len < 4 {
+    return Err("arrow/ipc: invalid message metadata length ${len}")
+  }
+  let meta = s.take(len, "message metadata")? ?? return Ok(Msg.Eof)
+  let m = fb_root(meta)?
+  let body_len = m.long_field(3, 0)?
+  if body_len < 0 {
+    return Err("arrow/ipc: invalid message body length ${body_len}")
+  }
+  let body = s.take(body_len, "message body")? ?? return Ok(Msg.Eof)
+  Ok(Msg.Got(version: m.short_field(0, 0)?, header_type: m.byte_field(1, 0)?, header: m.table(2)?, body: body))
+}
+
+// Arrays.
+
+/// A loaded array (Go's ArrayData): its node's length and null count,
+/// its buffers (None where Go keeps a nil one), its children.
+struct Arr {
+  field: AField
+  length: Int
+  nulls: Int
+  bufs: List[Bytes?]
+  children: List[Arr]
+}
+
+/// file_reader.go's arrayLoaderContext over one record batch.
+struct Loader {
+  body: Bytes
+  nodes: (Int, Int)
+  buffers: (Int, Int)
+  variadic: (Int, Int)?
+  meta: Bytes
+  version: Int
+  inode: Int = 0
+  ibuf: Int = 0
+  ivar: Int = 0
+}
+
+fn (var l: Loader) node() -> (Int, Int) ! Str {
+  let (start, n) = l.nodes
+  if l.inode >= n {
+    return Err("arrow/ipc: field metadata index out of bound")
+  }
+  let at = start + 16 * l.inode
+  l.inode = l.inode + 1
+  Ok((rd_i64(l.meta, at)?, rd_i64(l.meta, at + 8)?))
+}
+
+fn (var l: Loader) buffer() -> Bytes ! Str {
+  let (start, n) = l.buffers
+  if l.ibuf >= n {
+    return Err("arrow/ipc: buffer index out of bound")
+  }
+  let at = start + 16 * l.ibuf
+  l.ibuf = l.ibuf + 1
+  let off = rd_i64(l.meta, at)?
+  let len = rd_i64(l.meta, at + 8)?
+  if len == 0 {
+    return Ok(b"")
+  }
+  need(l.body, off, len)?
+  Ok(l.body[off..off + len])
+}
+
+/// loadCommon: the node, and the validity bitmap where the type has one
+/// (skipped, not read, when the node has no nulls).
+fn (var l: Loader) common(type_id: Int) -> (Int, Int, Bytes?) ! Str {
+  let (length, nulls) = l.node()?
+  let has_validity = if l.version < 4 { type_id != T_NULL } else { type_id != T_NULL && type_id != T_UNION && type_id != 22 }
+  var validity: Bytes? = None
+  if has_validity {
+    if nulls == 0 {
+      l.ibuf = l.ibuf + 1
+    } else {
+      validity = Some(l.buffer()?)
+    }
+  }
+  Ok((length, nulls, validity))
+}
+
+fn (var l: Loader) load(f: AField) -> Arr ! Str {
+  if f.dict {
+    // the indices, a primitive
+    let (length, nulls, v) = l.common(T_INT)?
+    let values = if length == 0 { l.ibuf = l.ibuf + 1; None } else { Some(l.buffer()?) }
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, values], children: []})
+  }
+  let id = f.type_id
+  if id == T_NULL {
+    let (length, nulls) = l.node()?
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [], children: []})
+  }
+  // primitives: Int, FloatingPoint, Decimal, Date, Time, Timestamp,
+  // Interval, Duration, Bool
+  if id == T_INT || id == 3 || id == 7 || id == 8 || id == 9 || id == T_TIMESTAMP || id == 11 || id == 18 || id == T_BOOL {
+    let (length, nulls, v) = l.common(id)?
+    let values = if length == 0 { l.ibuf = l.ibuf + 1; None } else { Some(l.buffer()?) }
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, values], children: []})
+  }
+  // Binary, Utf8, LargeBinary, LargeUtf8
+  if id == 4 || id == T_UTF8 || id == 19 || id == 20 {
+    let (length, nulls, v) = l.common(id)?
+    let offsets = l.buffer()?
+    let data = l.buffer()?
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, Some(offsets), Some(data)], children: []})
+  }
+  // BinaryView, Utf8View
+  if id == 23 || id == 24 {
+    let (vstart, vn) = l.variadic ?? return Err("arrow/ipc: variadic buffer count index out of bound")
+    if l.ivar >= vn {
+      return Err("arrow/ipc: variadic buffer count index out of bound")
+    }
+    let count = rd_i64(l.meta, vstart + 8 * l.ivar)?
+    l.ivar = l.ivar + 1
+    let (length, nulls, v) = l.common(id)?
+    var bufs = [v, Some(l.buffer()?)]
+    for _ in 0..count {
+      bufs.push(Some(l.buffer()?))
+    }
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: bufs, children: []})
+  }
+  // FixedSizeBinary
+  if id == 15 {
+    let (length, nulls, v) = l.common(id)?
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, Some(l.buffer()?)], children: []})
+  }
+  // List, LargeList, Map
+  if id == 12 || id == 21 || id == T_MAP {
+    let (length, nulls, v) = l.common(id)?
+    let offsets = l.buffer()?
+    let child = l.load(f.children[0])?
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, Some(offsets)], children: [child]})
+  }
+  // ListView, LargeListView
+  if id == 25 || id == 26 {
+    let (length, nulls, v) = l.common(id)?
+    let a = l.buffer()?
+    let b = l.buffer()?
+    let child = l.load(f.children[0])?
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v, Some(a), Some(b)], children: [child]})
+  }
+  // FixedSizeList, Struct
+  if id == 16 || id == T_STRUCT {
+    let (length, nulls, v) = l.common(id)?
+    var kids: List[Arr] = []
+    for c in f.children {
+      kids.push(l.load(c)?)
+    }
+    return Ok(Arr{field: f, length: length, nulls: nulls, bufs: [v], children: kids})
+  }
+  if id == T_UNION {
+    let dense = (f.ty ?? return Err("arrow/ipc: a Union type without its table")).short_field(0, 0)? == 1
+    let (length, nulls, v) = l.common(id)?
+    if nulls != 0 && v.is_some() {
+      return Err("arrow/ipc: cannot read pre-1.0.0 union array with top-level validity bitmap")
+    }
+    var bufs = [v]
+    if length == 0 {
+      l.ibuf = l.ibuf + (if dense { 2 } else { 1 })
+    } else {
+      bufs.push(Some(l.buffer()?))
+      if dense {
+        bufs.push(Some(l.buffer()?))
+      }
+    }
+    var kids: List[Arr] = []
+    for c in f.children {
+      kids.push(l.load(c)?)
+    }
+    return Ok(Arr{field: f, length: length, nulls: 0, bufs: bufs, children: kids})
+  }
+  // RunEndEncoded: no buffers of its own, its run ends and values
+  let (length, nulls, _) = l.common(id)?
+  var kids: List[Arr] = []
+  for c in f.children {
+    kids.push(l.load(c)?)
+  }
+  Ok(Arr{field: f, length: length, nulls: nulls, bufs: [None], children: kids})
+}
+
+/// One record batch: its row count and its columns' arrays.
+struct Batch {
+  rows: Int
+  cols: List[Arr]
+}
+
+fn batch_of(fields: List[AField], version: Int, header: Fb?, body: Bytes) -> Batch ! Str {
+  let h = header ?? return Err("arrow/ipc: a record batch message without its header")
+  if h.table(3)?.is_some() {
+    return Err("arrow/ipc: compressed record batches are not supported")
+  }
+  var l = Loader{
+    body: body,
+    nodes: h.vector(1)? ?? (0, 0),
+    buffers: h.vector(2)? ?? (0, 0),
+    variadic: h.vector(4)?,
+    meta: h.buf,
+    version: version,
+  }
+  var cols: List[Arr] = []
+  for f in fields {
+    cols.push(l.load(f)?)
+  }
+  Ok(Batch{rows: h.long_field(0, 0)?, cols: cols})
+}
+
+/// A stream's schema fields, schema metadata (in order) and record
+/// batches, read as ipc.NewReader and its Next loop read them.
+struct ArrowStream {
+  fields: List[AField]
+  metadata: List[(Str, Str)]
+  batches: List[Batch]
+}
+
+fn read_arrow_stream(data: Bytes) -> ArrowStream ! Str {
+  var s = Stream{data: data}
+  let (header_type, header) = match s.message()? {
+    Got(_, ht, h, _) => (ht, h)
+    Eos => return Err("arrow/ipc: could not read message schema: EOF")
+    Eof => return Err("arrow/ipc: could not read message schema: EOF")
+  }
+  if header_type != H_SCHEMA {
+    return Err("arrow/ipc: invalid message type (got=${header_type}, want=Schema)")
+  }
+  let sch = header ?? return Err("arrow/ipc: a schema message without its header")
+  if sch.short_field(0, 0)? != 0 {
+    return Err("arrow/ipc: big-endian streams are not supported")
+  }
+  var fields: List[AField] = []
+  for f in sch.tables(1)? {
+    fields.push(field_of(f)?)
+  }
+  var md: List[(Str, Str)] = []
+  for kv in sch.tables(2)? {
+    md.push((kv.text(0)? ?? "", kv.text(1)? ?? ""))
+  }
+  var batches: List[Batch] = []
+  // getInitialDicts: one dictionary batch for each dictionary field
+  let n = count_dicts(fields)
+  for i in 0..n {
+    match s.message()? {
+      Eos => {
+        if i == 0 {
+          return Ok(ArrowStream{fields: fields, metadata: md, batches: []})
+        }
+        return Err("arrow/ipc: IPC stream ended without reading the expected (${n}) dictionaries")
+      }
+      Eof => return Err("arrow/ipc: could not read message: EOF")
+      Got(_, ht, _, _) => {
+        if ht != H_DICTIONARY {
+          return Err("arrow/ipc: IPC stream did not have the expected (${n}) dictionaries at the start of the stream")
+        }
+      }
+    }
+  }
+  while {
+    match s.message()? {
+      Eos => break
+      Eof => break
+      Got(version, ht, h, body) => {
+        if ht == H_DICTIONARY {
+          continue
+        }
+        if ht != H_RECORD_BATCH {
+          return Err("arrow/ipc: invalid message type (got=${ht}, want=RecordBatch")
+        }
+        batches.push(batch_of(fields, version, h, body)?)
+      }
+    }
+  }
+  Ok(ArrowStream{fields: fields, metadata: md, batches: batches})
+}
+
+// Values.
+
+/// Go's IsNull: a null count and a bitmap whose bit is clear.
+fn (a: Arr) is_null(i: Int) -> Bool ! Str {
+  if a.nulls == 0 {
+    return Ok(false)
+  }
+  let v = a.bufs[0] ?? return Ok(false)
+  if v.is_empty() {
+    return Ok(false)
+  }
+  bit(v, i).map(fn(b: Bool) -> Bool { !b })
+}
+
+fn bit(b: Bytes, i: Int) -> Bool ! Str {
+  need(b, i / 8, 1)?
+  Ok(((Int(b[i / 8]) >> (i % 8)) & 1) == 1)
+}
+
+fn values(a: Arr) -> Bytes {
+  if a.bufs.len() > 1 {
+    a.bufs[1] ?? b""
+  } else {
+    b""
+  }
+}
+
+/// A Utf8 array's value `i`.
+fn (a: Arr) utf8(i: Int) -> Str ! Str {
+  let off = a.bufs[1] ?? b""
+  let lo = rd_i32(off, 4 * i)?
+  let hi = rd_i32(off, 4 * i + 4)?
+  let data = a.bufs[2] ?? b""
+  need(data, lo, hi - lo)?
+  Ok(data[lo..hi].to_str_lossy())
+}
+
+fn (a: Arr) is_utf8() -> Bool {
+  !a.field.dict && a.field.type_id == T_UTF8
+}
+
+fn (a: Arr) is_bool() -> Bool {
+  !a.field.dict && a.field.type_id == T_BOOL
+}
+
+/// The Int type's (bit width, signed), for a plain Int array.
+fn (a: Arr) int_kind() -> (Int, Bool)? ! Str {
+  if a.field.dict || a.field.type_id != T_INT {
+    return Ok(None)
+  }
+  let t = a.field.ty ?? return Ok(None)
+  Ok(Some((t.int_field(0, 0)?, t.byte_field(1, 0)? != 0)))
+}
+
+/// A Timestamp array's unit (0 seconds .. 3 nanoseconds).
+fn (a: Arr) ts_unit() -> Int? ! Str {
+  if a.field.dict || a.field.type_id != T_TIMESTAMP {
+    return Ok(None)
+  }
+  match a.field.ty {
+    Some(t) => Ok(Some(t.short_field(0, 0)?))
+    None => Ok(Some(0))
+  }
+}

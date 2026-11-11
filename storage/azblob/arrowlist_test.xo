@@ -1,0 +1,78 @@
+// The blob listings in the Arrow format against a fake that answers as
+// the Go program's fake does (arrowlistvectors_test.xo): by prefix and
+// marker, the content type and body in ARROW_LIST_BODIES (arrow-go's
+// streams), a 403 under "denied".
+
+use std/base64
+use std/http
+use std/testing
+
+fn serve_arrow_list(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    let hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+    if req.url.path.contains("denied") {
+      return with_hs(http.empty(403), hs + [("Content-Type", ARROW_CONTENT_TYPE), ("x-ms-error-code", "AuthorizationPermissionMismatch")])
+    }
+    let key = "${req.url.query.get("prefix") ?? ""}@${req.url.query.get("marker") ?? ""}"
+    var ctype = ""
+    var body = b""
+    for (k, t, b) in ARROW_LIST_BODIES {
+      if k == key {
+        ctype = t
+        body = base64.decode(b).ok() ?? b""
+      }
+    }
+    with_hs(http.empty(200) with {body: body}, hs + [("Content-Type", ctype)])
+  }
+  net.handle("GET ${BEP}/{c}", h)
+  log
+}
+
+fn arrow_list_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_arrow_list(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let a = STORAGE_RESPONSE_FORMAT_ARROW
+  let all = ListBlobsInclude{copy: true, metadata: true, snapshots: true, deleted: true, tags: true, versions: true, legal_hold: true, immutability_policy: true}
+  var out = list_pages("a1 arrow with every option", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{response_format: a, include: all, max_results: Some(3), prefix: Some("full"), start_from: Some("full/a"), end_before: Some("full/z")}), list_flat_dump, log)
+  let keys = ["types", "empty", "emptybatch", "noeos", "legacy", "truncated", "garbage", "nothing", "xmlfallback", "dict", "dup"]
+  for (i, k) in keys.indexed() {
+    out = out + list_pages("a${2 + i} arrow ${k}", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{response_format: a, prefix: Some(k)}), list_flat_dump, log)
+  }
+  let n = 2 + keys.len()
+  let hier = fn(prefix: Str, f: Str) -> ListBlobsHierarchyOptions { ListBlobsHierarchyOptions{prefix: Some(prefix), response_format: f, end_before: Some("dir/zzz")} }
+  out = out + list_pages("a${n} hierarchy arrow", c.new_list_blobs_hierarchy_pager("/", hier("dir/", a)), list_hier_dump, log)
+  out = out + list_pages("a${n + 1} hierarchy arrow answered in XML", c.new_list_blobs_hierarchy_pager("/", hier("dirxml", a)), list_hier_dump, log)
+  out = out + list_pages("a${n + 2} hierarchy xml with an end", c.new_list_blobs_hierarchy_pager("/", hier("dirxml", STORAGE_RESPONSE_FORMAT_XML)), list_hier_dump, log)
+  out = out + list_pages("a${n + 3} flat auto with an end", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{prefix: Some("xmlfallback"), end_before: Some("z")}), list_flat_dump, log)
+  out = out + list_pages("a${n + 4} arrow denied", svc.new_container_client("denied").new_list_blobs_flat_pager(ListBlobsFlatOptions{response_format: a}), list_flat_dump, log)
+  Ok(out)
+}
+
+test "the blob listings in the Arrow format send what Go sends and read what Go reads" {
+  let got = arrow_list_run(os.net, os.clock, os.rand)?
+  for i in 0..got.len() {
+    if i < ARROW_LIST_OUTPUT.len() && got[i] != ARROW_LIST_OUTPUT[i] {
+      expect(got[i]) == ARROW_LIST_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == ARROW_LIST_OUTPUT.len()
+}
+
+/// A compressed record batch, which Go reads (arrow-go decompresses
+/// LZ4): the port fails the page.
+test "an Arrow listing with a compressed record batch fails the page" {
+  let log = serve_arrow_list(os.net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let c = new_service_client_with_shared_key_credential(os.net, os.clock, os.rand, "${BEP}/", cred, go_options(BDATE)).new_container_client("c1")
+  var p = c.new_list_blobs_flat_pager(ListBlobsFlatOptions{response_format: STORAGE_RESPONSE_FORMAT_ARROW, prefix: Some("lz4")})
+  match p.next_page() {
+    Err(Decode(e)) => expect(e.contains("compressed")) == true
+    _ => expect("a decode error") == "something else"
+  }
+  drain(log)
+}

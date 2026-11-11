@@ -1,8 +1,8 @@
 // The container client's blob listings, as azblob v1.8.3's
 // container.Client.NewListBlobsFlatPager and NewListBlobsHierarchyPager
 // and the generated models they decode (MIT, Copyright (c) Microsoft
-// Corporation; NOTICE.md), in the XML response format (Go's default; its
-// Apache Arrow format is not ported). The XML is read as Go's
+// Corporation; NOTICE.md), in the XML response format (Go's default) or
+// Apache Arrow (arrowlist.xo). The XML is read as Go's
 // encoding/xml reads it into those models: a number, bool, time or MD5
 // that does not parse fails the page, an empty one is unset (a number or
 // bool 0 or false), a repeated element's last value wins, and repeated
@@ -55,6 +55,11 @@ pub struct ListBlobsFlatOptions {
   pub prefix: Str? = None
   /// The first blob name to list, inclusive.
   pub start_from: Str? = None
+  /// The last blob name to list, exclusive; sent only with the Arrow
+  /// format (as Go's).
+  pub end_before: Str? = None
+  /// `STORAGE_RESPONSE_FORMAT_AUTO` (XML), `_XML` or `_ARROW`.
+  pub response_format: Str = STORAGE_RESPONSE_FORMAT_AUTO
 }
 
 pub struct ListBlobsHierarchyOptions {
@@ -63,6 +68,11 @@ pub struct ListBlobsHierarchyOptions {
   pub max_results: Int? = None
   pub prefix: Str? = None
   pub start_from: Str? = None
+  /// The last blob name to list, exclusive; sent only with the Arrow
+  /// format (as Go's).
+  pub end_before: Str? = None
+  /// `STORAGE_RESPONSE_FORMAT_AUTO` (XML), `_XML` or `_ARROW`.
+  pub response_format: Str = STORAGE_RESPONSE_FORMAT_AUTO
 }
 
 /// A listed blob's properties (Go's container.BlobProperties).
@@ -488,16 +498,26 @@ fn next_by_marker(prev: policy.Request, marker: Str?) -> policy.Request? {
 /// (container.Client.NewListBlobsFlatPager).
 pub fn (c: ContainerClient[fx]) new_list_blobs_flat_pager(options: ListBlobsFlatOptions = ListBlobsFlatOptions{}) -> runtime.Pager[ListBlobsFlatResponse, fx] {
   let o = options
-  let q = [("comp", "list"), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from)
-  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
-  runtime.new_pager_with(c.core.pipeline, first, list_blobs_flat_of, fn(prev: policy.Request, page: ListBlobsFlatResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
+  let arrow = wants_arrow(o.response_format)
+  let end = if arrow { q_str("endBefore", o.end_before) } else { [] }
+  let q = [("comp", "list"), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from) + end
+  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", if arrow { ARROW_ACCEPT } else { "application/xml" }), ("x-ms-version", SERVICE_VERSION)]}
+  let decode = fn(resp: http.Response) -> ListBlobsFlatResponse ! Str {
+    if arrow && is_arrow_answer(resp) { arrow_flat_of(resp) } else { list_blobs_flat_of(resp) }
+  }
+  runtime.new_pager_with(c.core.pipeline, first, decode, fn(prev: policy.Request, page: ListBlobsFlatResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
 }
 
 /// The container's blobs and virtual directories under `delimiter`, a
 /// page at a time (container.Client.NewListBlobsHierarchyPager).
 pub fn (c: ContainerClient[fx]) new_list_blobs_hierarchy_pager(delimiter: Str, options: ListBlobsHierarchyOptions = ListBlobsHierarchyOptions{}) -> runtime.Pager[ListBlobsHierarchyResponse, fx] {
   let o = options
-  let q = [("comp", "list"), ("delimiter", delimiter), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from)
-  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
-  runtime.new_pager_with(c.core.pipeline, first, list_blobs_hierarchy_of, fn(prev: policy.Request, page: ListBlobsHierarchyResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
+  let arrow = wants_arrow(o.response_format)
+  let end = if arrow { q_str("endBefore", o.end_before) } else { [] }
+  let q = [("comp", "list"), ("delimiter", delimiter), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from) + end
+  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", if arrow { ARROW_ACCEPT } else { "application/xml" }), ("x-ms-version", SERVICE_VERSION)]}
+  let decode = fn(resp: http.Response) -> ListBlobsHierarchyResponse ! Str {
+    if arrow && is_arrow_answer(resp) { arrow_hierarchy_of(resp) } else { list_blobs_hierarchy_of(resp) }
+  }
+  runtime.new_pager_with(c.core.pipeline, first, decode, fn(prev: policy.Request, page: ListBlobsHierarchyResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
 }

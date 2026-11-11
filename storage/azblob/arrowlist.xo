@@ -1,0 +1,271 @@
+// The blob listings' Apache Arrow response format, as azblob v1.8.3's
+// internal/arrow (HandleFlatListResponse, HandleHierarchyListResponse;
+// MIT, Copyright (c) Microsoft Corporation; NOTICE.md) reads a listing
+// from arrowipc.xo's stream: one blob a row, each column found by name
+// and read when it has the type Go reads (else absent), the next marker
+// in the schema's metadata.
+
+use std/base64
+use std/http
+
+/// The listing format to ask for (Go's StorageResponseFormat).
+pub const STORAGE_RESPONSE_FORMAT_AUTO: Str = ""
+pub const STORAGE_RESPONSE_FORMAT_XML: Str = "xml"
+/// Arrow, with XML as the fallback in the Accept header; an answer in XML
+/// is read as XML. Only on accounts without a hierarchical namespace.
+pub const STORAGE_RESPONSE_FORMAT_ARROW: Str = "arrow"
+
+const ARROW_CONTENT_TYPE: Str = "application/vnd.apache.arrow.stream"
+const ARROW_ACCEPT: Str = "application/vnd.apache.arrow.stream,application/xml"
+
+/// Whether a listing asks for Arrow (Go's ResolveAutoFormat: Auto is XML
+/// in v1.8.3).
+fn wants_arrow(format: Str) -> Bool {
+  format == STORAGE_RESPONSE_FORMAT_ARROW
+}
+
+/// Whether `resp` is an Arrow answer to read as Arrow (a 200 whose
+/// Content-Type starts with Arrow's).
+fn is_arrow_answer(resp: http.Response) -> Bool {
+  resp.status == 200 && (r_str(resp, "Content-Type") ?? "").starts_with(ARROW_CONTENT_TYPE)
+}
+
+/// A batch's columns by name; a repeated name's last column wins.
+struct Columns {
+  batch: Batch
+  index: Map[Str, Int]
+}
+
+fn (c: Columns) get(name: Str) -> Arr? {
+  c.index.get(name).map(fn(i: Int) -> Arr { c.batch.cols[i] })
+}
+
+fn (c: Columns) str_at(name: Str, row: Int) -> Str? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  if !a.is_utf8() || a.is_null(row)? {
+    return Ok(None)
+  }
+  Ok(Some(a.utf8(row)?))
+}
+
+fn (c: Columns) bool_at(name: Str, row: Int) -> Bool? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  if !a.is_bool() || a.is_null(row)? {
+    return Ok(None)
+  }
+  Ok(Some(bit(values(a), row)?))
+}
+
+/// Go's Timestamp.ToTime(unit) in UTC; a time Xo's Time cannot hold
+/// (outside 1677 to 2262) fails the page.
+fn (c: Columns) time_at(name: Str, row: Int) -> Time? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  let unit = a.ts_unit()? ?? return Ok(None)
+  if a.is_null(row)? {
+    return Ok(None)
+  }
+  let v = rd_i64(values(a), 8 * row)?
+  let limit = match unit {
+    0 => 9223372036
+    1 => 9223372036854
+    2 => 9223372036854775
+    _ => 0
+  }
+  if limit != 0 && (v > limit || v < 0 - limit) {
+    return Err("arrow: timestamp ${v} in unit ${unit} is out of range")
+  }
+  Ok(Some(match unit {
+    0 => Time.from_unix(v)
+    1 => Time.from_unix_millis(v)
+    2 => Time.from_unix_micros(v)
+    _ => Time.from_unix_nanos(v)
+  }))
+}
+
+/// An Int64 or UInt64 column's value (a UInt64's bits as Go's int64).
+fn (c: Columns) int64_at(name: Str, row: Int) -> Int? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  let (w, _) = a.int_kind()? ?? return Ok(None)
+  if w != 64 || a.is_null(row)? {
+    return Ok(None)
+  }
+  Ok(Some(rd_i64(values(a), 8 * row)?))
+}
+
+/// An Int32 or UInt64 column's value (a UInt64's low 32 bits, as Go's
+/// int32 of it).
+fn (c: Columns) int32_at(name: Str, row: Int) -> Int? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  let (w, signed) = a.int_kind()? ?? return Ok(None)
+  if a.is_null(row)? {
+    return Ok(None)
+  }
+  if w == 64 && !signed {
+    return Ok(Some(Int(Int32.wrapping_from(rd_i64(values(a), 8 * row)?))))
+  }
+  if w == 32 && signed {
+    return Ok(Some(rd_i32(values(a), 4 * row)?))
+  }
+  Ok(None)
+}
+
+/// A Map of Utf8 to Utf8 column's entries for the row, in order (a
+/// value None where it is null); None for a null or empty map.
+fn (c: Columns) map_at(name: Str, row: Int) -> List[(Str, Str?)]? ! Str {
+  let a = c.get(name) ?? return Ok(None)
+  if a.field.dict || a.field.type_id != T_MAP {
+    return Ok(None)
+  }
+  let entries = a.children[0]
+  let keys = entries.children[0]
+  let items = entries.children[1]
+  if !keys.is_utf8() || !items.is_utf8() || a.is_null(row)? {
+    return Ok(None)
+  }
+  let off = values(a)
+  let start = rd_i32(off, 4 * row)?
+  let end = rd_i32(off, 4 * row + 4)?
+  if start == end {
+    return Ok(None)
+  }
+  var out: List[(Str, Str?)] = []
+  for i in start..end {
+    let v = if items.is_null(i)? { None } else { Some(items.utf8(i)?) }
+    out.push((keys.utf8(i)?, v))
+  }
+  Ok(Some(out))
+}
+
+/// A map column as metadata: a later key wins, as Go's map assignment;
+/// a key with a null value is left out (Go keeps it with a nil value,
+/// which Map[Str, Str] cannot hold).
+fn arrow_meta(entries: List[(Str, Str?)]?) -> Map[Str, Str]? {
+  let es = entries ?? return None
+  var m: Map[Str, Str] = {}
+  for (k, v) in es {
+    match v {
+      Some(x) => m.put(k, x)
+      None => m.remove(k)
+    }
+  }
+  Some(m)
+}
+
+/// A map column as tags, in key order (Go's is its map's, random); a
+/// repeated key's last value wins.
+fn tags_of_map(entries: List[(Str, Str?)]?) -> List[BlobTag]? {
+  let es = entries ?? return None
+  var m: Map[Str, Str?] = {}
+  for (k, v) in es {
+    m.put(k, v)
+  }
+  Some(m.keys().sort().map(fn(k: Str) -> BlobTag { BlobTag{key: Some(k), value: m.get(k) ?? None} }))
+}
+
+fn arrow_item(c: Columns, row: Int) -> BlobItemInfo ! Str {
+  let md5 = match c.str_at("Content-MD5", row)? {
+    Some(s) => base64.decode(s).ok()
+    None => None
+  }
+  Ok(BlobItemInfo{
+    name: c.str_at("Name", row)?,
+    deleted: c.bool_at("Deleted", row)?,
+    snapshot: c.str_at("Snapshot", row)?,
+    version_id: c.str_at("VersionId", row)?,
+    is_current_version: c.bool_at("IsCurrentVersion", row)?,
+    has_versions_only: c.bool_at("HasVersionsOnly", row)?,
+    metadata: arrow_meta(c.map_at("Metadata", row)?),
+    or_metadata: arrow_meta(c.map_at("OrMetadata", row)?),
+    tags: tags_of_map(c.map_at("Tags", row)?),
+    properties: Some(BlobItemProperties{
+      creation_time: c.time_at("Creation-Time", row)?,
+      last_modified: c.time_at("Last-Modified", row)?,
+      etag: c.str_at("Etag", row)?,
+      content_length: c.int64_at("Content-Length", row)?,
+      content_type: c.str_at("Content-Type", row)?,
+      content_encoding: c.str_at("Content-Encoding", row)?,
+      content_language: c.str_at("Content-Language", row)?,
+      content_disposition: c.str_at("Content-Disposition", row)?,
+      cache_control: c.str_at("Cache-Control", row)?,
+      content_md5: md5,
+      blob_type: c.str_at("BlobType", row)?,
+      access_tier: c.str_at("AccessTier", row)?,
+      access_tier_inferred: c.bool_at("AccessTierInferred", row)?,
+      access_tier_change_time: c.time_at("AccessTierChangeTime", row)?,
+      smart_access_tier: c.str_at("SmartAccessTier", row)?,
+      lease_state: c.str_at("LeaseState", row)?,
+      lease_status: c.str_at("LeaseStatus", row)?,
+      lease_duration: c.str_at("LeaseDuration", row)?,
+      server_encrypted: c.bool_at("ServerEncrypted", row)?,
+      customer_provided_key_sha256: c.str_at("CustomerProvidedKeySha256", row)?,
+      encryption_scope: c.str_at("EncryptionScope", row)?,
+      incremental_copy: c.bool_at("IncrementalCopy", row)?,
+      is_sealed: c.bool_at("Sealed", row)?,
+      archive_status: c.str_at("ArchiveStatus", row)?,
+      rehydrate_priority: c.str_at("RehydratePriority", row)?,
+      copy_id: c.str_at("CopyId", row)?,
+      copy_status: c.str_at("CopyStatus", row)?,
+      copy_source: c.str_at("CopySource", row)?,
+      copy_progress: c.str_at("CopyProgress", row)?,
+      copy_completion_time: c.time_at("CopyCompletionTime", row)?,
+      copy_status_description: c.str_at("CopyStatusDescription", row)?,
+      destination_snapshot: c.str_at("CopyDestinationSnapshot", row)?,
+      immutability_policy_expires_on: c.time_at("ImmutabilityPolicyUntilDate", row)?,
+      immutability_policy_mode: c.str_at("ImmutabilityPolicyMode", row)?,
+      legal_hold: c.bool_at("LegalHold", row)?,
+      deleted_time: c.time_at("DeletedTime", row)?,
+      remaining_retention_days: c.int32_at("RemainingRetentionDays", row)?,
+      last_accessed_on: c.time_at("LastAccessTime", row)?,
+      tag_count: c.int32_at("TagCount", row)?,
+      blob_sequence_number: c.int64_at("x-ms-blob-sequence-number", row)?,
+      resource_type: c.str_at("ResourceType", row)?,
+    }),
+  })
+}
+
+/// The listing's rows and next marker (parseArrowStream with
+/// readSchemaMetadata: the first NextMarker key, "" unset).
+fn arrow_listing(resp: http.Response) -> (List[BlobItemInfo], Str?) ! Str {
+  let s = read_arrow_stream(resp.body) ?? e => return Err("failed to parse Arrow IPC response: ${e}")
+  var next: Str? = None
+  for (k, v) in s.metadata {
+    if k == "NextMarker" {
+      next = if v == "" { None } else { Some(v) }
+      break
+    }
+  }
+  var index: Map[Str, Int] = {}
+  for (i, f) in s.fields.indexed() {
+    index.put(f.name, i)
+  }
+  var items: List[BlobItemInfo] = []
+  for b in s.batches {
+    let c = Columns{batch: b, index: index}
+    for row in 0..b.rows {
+      items.push(arrow_item(c, row) ?? e => return Err("failed to parse Arrow IPC response: ${e}"))
+    }
+  }
+  Ok((items, next))
+}
+
+fn arrow_flat_of(resp: http.Response) -> ListBlobsFlatResponse ! Str {
+  let (items, next) = arrow_listing(resp)?
+  Ok(ListBlobsFlatResponse{response: response_of(resp), content_type: r_str(resp, "Content-Type"), next_marker: next, blobs: Some(items)})
+}
+
+/// A hierarchy's rows: a row whose ResourceType is `blobprefix` is a
+/// prefix (with its properties), any other a blob.
+fn arrow_hierarchy_of(resp: http.Response) -> ListBlobsHierarchyResponse ! Str {
+  let (items, next) = arrow_listing(resp)?
+  var blobs: List[BlobItemInfo] = []
+  var prefixes: List[BlobPrefixInfo] = []
+  for it in items {
+    let rt = it.properties.and_then(fn(p: BlobItemProperties) -> Str? { p.resource_type })
+    if rt == Some("blobprefix") {
+      prefixes.push(BlobPrefixInfo{name: it.name, properties: it.properties})
+    } else {
+      blobs.push(it)
+    }
+  }
+  Ok(ListBlobsHierarchyResponse{response: response_of(resp), content_type: r_str(resp, "Content-Type"), next_marker: next, blobs: Some(blobs), prefixes: Some(prefixes)})
+}

@@ -167,3 +167,15 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+It also ports the reading of Apache Arrow IPC streams from Apache Arrow
+Go (github.com/apache/arrow-go v18.7.0, `arrow/ipc`: the message
+reader, the stream reader and the array loader), under the Apache
+License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0):
+`storage/azblob/arrowipc.xo`. Its NOTICE:
+
+    Apache Arrow Go
+    Copyright 2016-2025 The Apache Software Foundation
+
+    This product includes software developed at
+    The Apache Software Foundation (http://www.apache.org/).
