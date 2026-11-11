@@ -1,0 +1,258 @@
+// The blob client's other calls, as azblob v1.8.3's blob.Client (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): set_tier, undelete,
+// the copy calls, create_snapshot, the immutability policy and legal
+// hold, get_account_info and get_sas_url.
+
+use std/time
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob/sas
+
+/// A rehydration's priority (`x-ms-rehydrate-priority`; Go's
+/// RehydratePriority).
+pub const REHYDRATE_PRIORITY_HIGH: Str = "High"
+pub const REHYDRATE_PRIORITY_STANDARD: Str = "Standard"
+
+/// Go's blob.SnapshotTimeFormat.
+pub const SNAPSHOT_TIME_FORMAT: Str = "2006-01-02T15:04:05.0000000Z07:00"
+
+// Set tier.
+
+pub struct SetTierOptions {
+  /// `REHYDRATE_PRIORITY_HIGH` or `..._STANDARD`.
+  pub rehydrate_priority: Str? = None
+  /// Only `lease_id` and `if_tags` are sent, as Go sends them.
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// Sets the blob's access tier (an `ACCESS_TIER_` constant;
+/// blob.Client.SetTier). A 200 or a 202 (a rehydration started).
+pub fn (b: BlobClient) set_tier(tier: Str, options: SetTierOptions = SetTierOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = [("x-ms-access-tier", tier)] + h_str("x-ms-if-tags", o.conditions.if_tags) + h_str("x-ms-lease-id", o.conditions.lease_id) + h_str("x-ms-rehydrate-priority", o.rehydrate_priority)
+  Ok(response_of(b.core.send(Call{method: "PUT", query: [("comp", "tier")], headers: hs, ok: [200, 202]})?))
+}
+
+/// Restores a soft-deleted blob and its snapshots (blob.Client.Undelete).
+pub fn (b: BlobClient) undelete() -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(response_of(b.core.send(Call{method: "PUT", query: [("comp", "undelete")], ok: [200]})?))
+}
+
+// Start copy from URL.
+
+pub struct StartCopyFromURLOptions {
+  pub immutability_policy_expiry_time: Time? = None
+  /// `IMMUTABILITY_POLICY_SETTING_LOCKED` or `..._UNLOCKED`.
+  pub immutability_policy_mode: Str? = None
+  pub legal_hold: Bool? = None
+  pub tags: Map[Str, Str]? = None
+  pub metadata: Map[Str, Str]? = None
+  pub rehydrate_priority: Str? = None
+  /// Seals the destination (an append blob).
+  pub seal_blob: Bool? = None
+  pub tier: Str? = None
+  pub source_conditions: SourceModifiedAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+pub struct StartCopyFromURLResponse {
+  pub response: Response
+  pub copy_id: Str? = None
+  /// `pending` or `success` (Go's CopyStatusType).
+  pub copy_status: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+fn source_tags_header(c: SourceModifiedAccessConditions?) -> List[(Str, Str)] {
+  h_str("x-ms-source-if-tags", c.and_then(fn(x: SourceModifiedAccessConditions) -> Str? { x.source_if_tags }))
+}
+
+/// Starts an asynchronous copy of `copy_source` to this blob; the service
+/// answers before the copy ends (blob.Client.StartCopyFromURL).
+pub fn (b: BlobClient) start_copy_from_url(copy_source: Str, options: StartCopyFromURLOptions = StartCopyFromURLOptions{}) -> StartCopyFromURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + [("x-ms-copy-source", copy_source)] + h_str("x-ms-immutability-policy-mode", o.immutability_policy_mode) + h_time("x-ms-immutability-policy-until-date", o.immutability_policy_expiry_time) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + h_str("x-ms-rehydrate-priority", o.rehydrate_priority) + h_bool("x-ms-seal-blob", o.seal_blob) + source_conditions_headers(o.source_conditions) + source_tags_header(o.source_conditions) + tags_header(o.tags)
+  let resp = b.core.send(Call{method: "PUT", headers: hs, ok: [202]})?
+  Ok(StartCopyFromURLResponse{
+    response: response_of(resp),
+    copy_id: r_str(resp, "x-ms-copy-id"),
+    copy_status: r_str(resp, "x-ms-copy-status"),
+    etag: r_str(resp, "ETag"),
+    last_modified: r_time(resp, "Last-Modified"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+/// Stops a pending copy, leaving the blob empty with its metadata
+/// (blob.Client.AbortCopyFromURL).
+pub fn (b: BlobClient) abort_copy_from_url(copy_id: Str, lease_id: Str? = None) -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  let hs = [("x-ms-copy-action", "abort")] + h_str("x-ms-lease-id", lease_id)
+  Ok(response_of(b.core.send(Call{method: "PUT", query: [("comp", "copy"), ("copyid", copy_id)], headers: hs, ok: [204]})?))
+}
+
+// Copy from URL.
+
+pub struct CopyFromURLOptions {
+  pub tags: Map[Str, Str]? = None
+  /// The source's credential: `Bearer <token>`.
+  pub copy_source_authorization: Str? = None
+  /// `FILE_REQUEST_INTENT_BACKUP` for a source that is a file share.
+  pub file_request_intent: Str? = None
+  pub immutability_policy_expiry_time: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub legal_hold: Bool? = None
+  pub metadata: Map[Str, Str]? = None
+  /// The MD5 of the source's bytes, which the service checks.
+  pub source_content_md5: Bytes? = None
+  pub tier: Str? = None
+  /// `source_if_tags` is not sent, as Go's CopyFromURL drops it.
+  pub source_conditions: SourceModifiedAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub encryption_scope: Str? = None
+}
+
+pub struct CopyFromURLResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub copy_id: Str? = None
+  pub copy_status: Str? = None
+  pub etag: Str? = None
+  pub encryption_scope: Str? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// Copies `copy_source` (up to 256 MiB) to this blob before answering
+/// (`x-ms-requires-sync`; blob.Client.CopyFromURL).
+pub fn (b: BlobClient) copy_from_url(copy_source: Str, options: CopyFromURLOptions = CopyFromURLOptions{}) -> CopyFromURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + [("x-ms-copy-source", copy_source)] + h_str("x-ms-copy-source-authorization", o.copy_source_authorization) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-file-request-intent", o.file_request_intent) + h_str("x-ms-immutability-policy-mode", o.immutability_policy_mode) + h_time("x-ms-immutability-policy-until-date", o.immutability_policy_expiry_time) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + [("x-ms-requires-sync", "true")] + h_str("x-ms-source-content-md5", b64(o.source_content_md5)) + source_conditions_headers(o.source_conditions) + tags_header(o.tags)
+  let resp = b.core.send(Call{method: "PUT", headers: hs, ok: [202]})?
+  Ok(CopyFromURLResponse{
+    response: response_of(resp),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    copy_id: r_str(resp, "x-ms-copy-id"),
+    copy_status: r_str(resp, "x-ms-copy-status"),
+    etag: r_str(resp, "ETag"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    last_modified: r_time(resp, "Last-Modified"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Create snapshot.
+
+pub struct CreateSnapshotOptions {
+  pub metadata: Map[Str, Str]? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+}
+
+pub struct CreateSnapshotResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  /// The snapshot's time, for `with_snapshot`.
+  pub snapshot: Str? = None
+  pub version_id: Str? = None
+}
+
+/// A read-only snapshot of the blob (blob.Client.CreateSnapshot).
+pub fn (b: BlobClient) create_snapshot(options: CreateSnapshotOptions = CreateSnapshotOptions{}) -> CreateSnapshotResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_meta(o.metadata)
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "snapshot")], headers: hs, ok: [201]})?
+  Ok(CreateSnapshotResponse{
+    response: response_of(resp),
+    etag: r_str(resp, "ETag"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+    snapshot: r_str(resp, "x-ms-snapshot"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Immutability policy and legal hold.
+
+pub struct SetImmutabilityPolicyOptions {
+  /// `IMMUTABILITY_POLICY_SETTING_LOCKED` or `..._UNLOCKED`.
+  pub mode: Str? = None
+  /// Only `if_unmodified_since` is sent, as Go sends it.
+  pub if_unmodified_since: Time? = None
+}
+
+pub struct SetImmutabilityPolicyResponse {
+  pub response: Response
+  pub immutability_policy_expiry: Time? = None
+  pub immutability_policy_mode: Str? = None
+}
+
+/// Keeps the blob unchanged until `expiry` (blob.Client.SetImmutabilityPolicy).
+pub fn (b: BlobClient) set_immutability_policy(expiry: Time, options: SetImmutabilityPolicyOptions = SetImmutabilityPolicyOptions{}) -> SetImmutabilityPolicyResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = h_time("If-Unmodified-Since", o.if_unmodified_since) + h_str("x-ms-immutability-policy-mode", o.mode) + h_time("x-ms-immutability-policy-until-date", Some(expiry))
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "immutabilityPolicies")], headers: hs, ok: [200]})?
+  Ok(SetImmutabilityPolicyResponse{
+    response: response_of(resp),
+    immutability_policy_expiry: r_time(resp, "x-ms-immutability-policy-until-date"),
+    immutability_policy_mode: r_str(resp, "x-ms-immutability-policy-mode"),
+  })
+}
+
+/// Removes an unlocked immutability policy
+/// (blob.Client.DeleteImmutabilityPolicy).
+pub fn (b: BlobClient) delete_immutability_policy() -> Response ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(response_of(b.core.send(Call{method: "DELETE", query: [("comp", "immutabilityPolicies")], ok: [200]})?))
+}
+
+pub struct SetLegalHoldResponse {
+  pub response: Response
+  pub legal_hold: Bool? = None
+}
+
+/// Sets or clears the blob's legal hold (blob.Client.SetLegalHold).
+pub fn (b: BlobClient) set_legal_hold(legal_hold: Bool) -> SetLegalHoldResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let resp = b.core.send(Call{method: "PUT", query: [("comp", "legalhold")], headers: [("x-ms-legal-hold", "${legal_hold}")], ok: [200]})?
+  Ok(SetLegalHoldResponse{response: response_of(resp), legal_hold: r_bool(resp, "x-ms-legal-hold")})
+}
+
+/// The account's kind, SKU and namespace (blob.Client.GetAccountInfo).
+pub fn (b: BlobClient) get_account_info() -> AccountInfoResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  Ok(account_info_of(b.core.send(Call{method: "GET", query: [("comp", "properties"), ("restype", "account")], ok: [200]})?))
+}
+
+// SAS URL.
+
+/// `s` as Go's time.Parse(SnapshotTimeFormat, s) reads it: seven
+/// fraction digits, then `Z` or an offset; None where Go's parse fails.
+fn snapshot_time(s: Str) -> Time? {
+  let b = s.bytes()
+  if b.len() < 28 || b[19] != 46 {
+    return None
+  }
+  for i in 20..27 {
+    if b[i] < 48 || b[i] > 57 {
+      return None
+    }
+  }
+  let zone = s[27..]
+  if zone != "Z" && !(zone.len() == 6 && (zone.starts_with("+") || zone.starts_with("-")) && zone[3..4] == ":") {
+    return None
+  }
+  time.parse(s, time.RFC3339, time.utc()).ok()
+}
+
+/// A SAS URL for this blob, signed with the account key: `permissions`
+/// letters of `sas.BLOB_PERMISSIONS`; the URL's snapshot (in Go's
+/// snapshot format) and version ID are signed too (blob.Client.GetSASURL).
+pub fn (b: BlobClient) get_sas_url(permissions: Str, expiry: Time, start: Time? = None) -> Str ! Str {
+  let cred = b.core.cred ?? return Err(MISSING_SHARED_KEY_CREDENTIAL)
+  let up = parse_url(b.url)?
+  let qps = sas.BlobSignatureValues{version: sas.VERSION, container_name: up.container_name, blob_name: up.blob_name, snapshot: snapshot_time(up.snapshot), permissions: permissions, start: start, expiry: Some(expiry), blob_version: up.version_id}.sign_with_shared_key(cred)?
+  Ok(append_sas(b.url, qps.encode()))
+}

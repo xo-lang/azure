@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `BlobClient` (blob.Client): `set_tier`, `undelete`,
+  `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url` (which,
+  as Go's, drops `source_if_tags`), `create_snapshot`,
+  `set_immutability_policy`, `delete_immutability_policy`,
+  `set_legal_hold`, `get_account_info` and `get_sas_url` (a snapshot not
+  in Go's `SNAPSHOT_TIME_FORMAT` is kept on the URL but not signed, as
+  Go's), with the `REHYDRATE_PRIORITY_` constants. Checked against Go
+  v1.8.3 on a fake service (`blobcallsvectors_test.xo`, 21 calls and 6
+  SAS URLs).
+
 - `AppendBlobClient` (appendblob.Client): `create`, `append_block`,
   `append_block_from_url` (source conditions, source key, range, copy
   source authorization, file request intent) and `seal` (which, as Go's,

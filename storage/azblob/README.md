@@ -16,7 +16,10 @@ What it does:
   `ContainerClient` (create, delete, restore, properties, metadata,
   access policy, account info, SAS URL), `BlobClient` (properties, HTTP
   headers, metadata, tags, delete, `download_stream`,
-  `download_buffer`, `download_file`), `BlockBlobClient` (`upload`,
+  `download_buffer`, `download_file`, `set_tier`, `undelete`,
+  `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url`,
+  `create_snapshot`, the immutability policy, legal hold, account info,
+  SAS URL), `BlockBlobClient` (`upload`,
   `stage_block`, `commit_block_list`, `upload_buffer`, `upload_file`),
   `AppendBlobClient` (`create`, `append_block`, `append_block_from_url`,
   `seal`; the other blob calls through `blob_client()`),

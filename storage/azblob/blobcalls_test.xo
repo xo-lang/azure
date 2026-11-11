@@ -1,0 +1,173 @@
+// The blob client's set_tier, undelete, copy calls, create_snapshot,
+// immutability policy, legal hold, account info and SAS URLs against a
+// fake that answers as the Go program's fake does
+// (blobcallsvectors_test.xo): each call its status and headers; a blob
+// named "denied" a 403.
+
+use std/http
+use std/testing
+
+fn blob_call_answer(req: http.Request) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  let lm = [("ETag", "\"0x8D2\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  match req.url.query.get("comp") ?? "" {
+    "tier" => with_hs(http.empty(if req.url.path.contains("archived") { 202 } else { 200 }), hs)
+    "undelete" => with_hs(http.empty(200), hs)
+    "copy" => with_hs(http.empty(204), hs)
+    "snapshot" => with_hs(http.empty(201), hs + lm + [("x-ms-request-server-encrypted", "true"), ("x-ms-snapshot", "2026-11-05T03:04:05.1234567Z"), ("x-ms-version-id", "v2")])
+    "immutabilityPolicies" => {
+      if req.method == "PUT" {
+        hs = hs + [("x-ms-immutability-policy-until-date", "Mon, 30 Nov 2026 00:00:00 GMT"), ("x-ms-immutability-policy-mode", "Unlocked")]
+      }
+      with_hs(http.empty(200), hs)
+    }
+    "legalhold" => with_hs(http.empty(200), hs + [("x-ms-legal-hold", req.header("x-ms-legal-hold") ?? "")])
+    "properties" => with_hs(http.empty(200), hs + [("x-ms-account-kind", "StorageV2"), ("x-ms-is-hns-enabled", "false"), ("x-ms-sku-name", "Standard_LRS")])
+    _ => {
+      hs = hs + lm + [("x-ms-copy-id", "cp1"), ("x-ms-version-id", "v3")]
+      if (req.header("x-ms-requires-sync") ?? "") != "" {
+        hs = hs + [("x-ms-copy-status", "success"), ("x-ms-content-crc64", "CQk="), ("Content-MD5", "AQID"), ("x-ms-encryption-scope", "scope1")]
+      } else {
+        hs = hs + [("x-ms-copy-status", "pending")]
+      }
+      with_hs(http.empty(202), hs)
+    }
+  }
+}
+
+fn serve_blob_calls(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    blob_call_answer(req)
+  }
+  for m in ["GET", "PUT", "DELETE"] {
+    net.handle("${m} ${BEP}/{a}/{rest...}", h)
+  }
+  log
+}
+
+fn plain_dump(x: Response) -> Dump {
+  var d = Dump{}
+  d.r(x)
+  d
+}
+
+fn start_copy_dump(x: StartCopyFromURLResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyStatus", x.copy_status)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn copy_dump(x: CopyFromURLResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentCRC64", x.content_crc64)
+  d.q("ContentMD5", x.content_md5)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyStatus", x.copy_status)
+  d.s("ETag", x.etag)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn snapshot_dump(x: CreateSnapshotResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("Snapshot", x.snapshot)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn immutability_dump(x: SetImmutabilityPolicyResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.t("ImmutabilityPolicyExpiry", x.immutability_policy_expiry)
+  d.s("ImmutabilityPolicyMode", x.immutability_policy_mode)
+  d
+}
+
+fn legal_hold_dump(x: SetLegalHoldResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.b("LegalHold", x.legal_hold)
+  d
+}
+
+fn blob_calls_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_blob_calls(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let b = c.new_blob_client("dir/a b.txt")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let until = at("2026-11-30T00:00:00Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let src = SourceModifiedAccessConditions{source_if_match: Some("\"s1\""), source_if_none_match: Some("s2"), source_if_modified_since: Some(when), source_if_unmodified_since: Some(when), source_if_tags: Some("s='2'")}
+  let from = "https://src.example.test/c/s.bin?sv=2026-12-06&sr=b"
+
+  out = out + add(shown("c1 set tier with every option (lease and if-tags only)", b.set_tier(ACCESS_TIER_COOL, SetTierOptions{rehydrate_priority: Some(REHYDRATE_PRIORITY_HIGH), conditions: ac}), plain_dump))
+  out = out + add(shown("c2 set tier, rehydration (202)", c.new_blob_client("archived").set_tier(ACCESS_TIER_HOT), plain_dump))
+  out = out + add(shown("c3 undelete", b.undelete(), plain_dump))
+  out = out + add(shown("c4 start copy with every option", b.start_copy_from_url(from, StartCopyFromURLOptions{immutability_policy_expiry_time: Some(until), immutability_policy_mode: Some(IMMUTABILITY_POLICY_SETTING_UNLOCKED), legal_hold: Some(true), tags: Some({"team": "a&b c"}), metadata: Some({"color": "blue"}), rehydrate_priority: Some(REHYDRATE_PRIORITY_STANDARD), seal_blob: Some(false), tier: Some(ACCESS_TIER_ARCHIVE), source_conditions: Some(src), conditions: ac}), start_copy_dump))
+  out = out + add(shown("c5 start copy, no options", b.start_copy_from_url(from), start_copy_dump))
+  out = out + add(shown("c6 abort copy with a lease", b.abort_copy_from_url("cp1", lease_id: Some("l1")), plain_dump))
+  out = out + add(shown("c7 abort copy, an ID to escape", b.abort_copy_from_url("cp 2&x"), plain_dump))
+  out = out + add(shown("c8 copy from URL with every option (no source if-tags)", b.copy_from_url(from, CopyFromURLOptions{tags: Some({"team": "a&b c"}), copy_source_authorization: Some("Bearer tok1"), file_request_intent: Some(FILE_REQUEST_INTENT_BACKUP), immutability_policy_expiry_time: Some(until), immutability_policy_mode: Some(IMMUTABILITY_POLICY_SETTING_LOCKED), legal_hold: Some(false), metadata: Some({"color": "blue"}), source_content_md5: Some(b"\x04\x05\x06"), tier: Some(ACCESS_TIER_COLD), source_conditions: Some(src), conditions: ac, encryption_scope: Some("scope1")}), copy_dump))
+  out = out + add(shown("c9 copy from URL, no options", b.copy_from_url(from), copy_dump))
+  out = out + add(shown("c10 create snapshot with every option", b.create_snapshot(CreateSnapshotOptions{metadata: Some({"color": "blue"}), conditions: ac, cpk_info: Some(cpk), encryption_scope: Some("scope1")}), snapshot_dump))
+  out = out + add(shown("c11 create snapshot, no options", b.create_snapshot(), snapshot_dump))
+  out = out + add(shown("c12 set immutability policy (if-unmodified-since only)", b.set_immutability_policy(until, SetImmutabilityPolicyOptions{mode: Some(IMMUTABILITY_POLICY_SETTING_UNLOCKED), if_unmodified_since: Some(when)}), immutability_dump))
+  out = out + add(shown("c13 set immutability policy, no options", b.set_immutability_policy(until), immutability_dump))
+  let snap = b.with_snapshot("2026-11-05T03:04:05.1234567Z")?
+  out = out + add(shown("c14 delete immutability policy on a snapshot", snap.delete_immutability_policy(), plain_dump))
+  out = out + add(shown("c15 set legal hold", b.set_legal_hold(true), legal_hold_dump))
+  out = out + add(shown("c16 clear legal hold", b.set_legal_hold(false), legal_hold_dump))
+  let ver = b.with_version_id("v9")?
+  out = out + add(shown("c17 set tier on a version", ver.set_tier(ACCESS_TIER_HOT), plain_dump))
+  out = out + add(shown("c18 get account info", b.get_account_info(), account_dump))
+  let d = c.new_blob_client("denied")
+  out = out + add(quiet("c19 set tier, denied", d.set_tier(ACCESS_TIER_HOT)))
+  out = out + add(quiet("c20 start copy, denied", d.start_copy_from_url(from)))
+  out = out + add(quiet("c21 create snapshot, denied", d.create_snapshot()))
+  out = out + drain(log)
+
+  let exp = at("2026-12-01T00:00:00Z")
+  out = out + sas_line("s1 SAS URL", b.get_sas_url("rw", exp))
+  out = out + sas_line("s2 SAS URL with a start", b.get_sas_url("r", exp, start: Some(when)))
+  out = out + sas_line("s3 SAS URL of a snapshot", snap.get_sas_url("rd", exp))
+  out = out + sas_line("s4 SAS URL of a version", ver.get_sas_url("rx", exp))
+  let odd = b.with_snapshot("2026-11-05T03:04:05Z")?
+  out = out + sas_line("s5 SAS URL of a snapshot not in Go's format (not signed)", odd.get_sas_url("r", exp))
+  let anon = new_blob_client_with_no_credential(net, clock, rand, "${BEP}/c1/x", go_options(BDATE))
+  out = out + sas_line("s6 SAS URL without a key", anon.get_sas_url("r", exp))
+  Ok(out)
+}
+
+test "the blob client's tier, copy, snapshot, immutability and SAS calls send what Go sends and read what Go reads" {
+  let got = blob_calls_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < BLOB_CALLS_OUTPUT.len() && got[i] != BLOB_CALLS_OUTPUT[i] {
+      expect(got[i]) == BLOB_CALLS_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == BLOB_CALLS_OUTPUT.len()
+}
