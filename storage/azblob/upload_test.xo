@@ -14,7 +14,8 @@ use github.com/xo-lang/azure/azcore
 
 fn upload_answer(req: http.Request) -> http.Response {
   let common = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
-  if req.url.path.contains("denied") {
+  let denied = req.url.path.contains("denied") || (req.url.path.contains("nocommit") && req.url.query.get("comp") == Some("blocklist"))
+  if denied {
     return with_hs(http.empty(403), common + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
   }
   if req.method != "PUT" {
@@ -49,19 +50,51 @@ fn is_uuid4(raw: Str) -> Bool {
 
 /// The Go program's name for block ID `raw`, and a line on its form the
 /// first time it is seen.
+/// The map's counter `key`, plus one, kept.
+fn bump(var m: Map[Str, Str], key: Str) -> Int {
+  let n = (Int.parse(m.get(key) ?? "0") ?? 0) + 1
+  m.put(key, "${n}")
+  n
+}
+
+/// A 64 byte stream block ID's note (upload_stream's IDs): its prefix by
+/// order of first sight (p1, p2, ...), its number, whether the prefix is
+/// a version 4 UUID and the rest zeros; None for another ID.
+fn stream_note(var m: Map[Str, Str], raw: Str) -> Str? {
+  let b = Bytes.from_base64(raw) ?? return None
+  if b.len() != 64 {
+    return None
+  }
+  let key = "\x00p" + b[0..16].to_hex()
+  let p = match m.get(key) {
+    Some(x) => x
+    None => {
+      let x = "p${bump(m, "\x00prefixes")}"
+      m.put(key, x)
+      x
+    }
+  }
+  var zeros = true
+  for i in 20..64 {
+    if b[i] != 0 { zeros = false }
+  }
+  let v4 = (Int(b[6]) >> 4) == 4 && (Int(b[8]) & 0xc0) == 0x40
+  let num = (Int(b[16]) << 24) | (Int(b[17]) << 16) | (Int(b[18]) << 8) | Int(b[19])
+  Some(" prefix=${p} n=${num} v4=${v4} zeros=${zeros}")
+}
+
 fn block_name(ids: Mutex[Map[Str, Str]], raw: Str) -> (Str, Str?) {
   ids.with(fn(var m: Map[Str, Str]) -> (Str, Str?) {
     if let Some(n) = m.get(raw) {
       return (n, None)
     }
-    let n = "id${m.len() + 1}"
+    let n = "id${bump(m, "\x00ids")}"
     m.put(raw, n)
-    (n, Some("  ${n} len=${raw.len()} uuid4=${is_uuid4(raw)}"))
+    let tail = stream_note(m, raw) ?? " uuid4=${is_uuid4(raw)}"
+    (n, Some("  ${n} len=${raw.len()}${tail}"))
   })
 }
 
-/// Logs `req` as log_request does, but with block IDs named and a body
-/// over 64 bytes its length and a short sha256, as the Go program prints.
 fn upload_log(req: http.Request, log: Mutex[List[Str]], ids: Mutex[Map[Str, Str]]) {
   var notes: List[Str] = []
   var hs: List[Str] = []

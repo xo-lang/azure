@@ -24,7 +24,7 @@ What it does:
   `create_snapshot`, the immutability policy, legal hold, account info,
   SAS URL), `BlockBlobClient` (`upload`,
   `stage_block`, `commit_block_list`, `upload_buffer`, `upload_file`,
-  `set_expiry`),
+  `upload_stream`, `set_expiry`),
   `AppendBlobClient` (`create`, `append_block`, `append_block_from_url`,
   `seal`, `set_expiry`; the other blob calls through `blob_client()`),
   `PageBlobClient` (`create`, `upload_pages`, `upload_pages_from_url`,

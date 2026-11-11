@@ -1,0 +1,105 @@
+// upload_stream against upload_test.xo's fake, which answers and logs as
+// the Go program's fake does (uploadstreamvectors_test.xo).
+
+use std/testing
+
+struct Fire {}
+
+fn (f: Fire) display() -> Str {
+  "disk on fire"
+}
+
+/// A stream of `data` read `step` bytes at a time; with `fail`, the read
+/// after the data fails instead of ending.
+fn chunky(data: Bytes, step: Int, fail: Bool) -> fn(Int) -> Bytes? ! Fire {
+  let pos = Mutex[Int].new(0)
+  fn(n: Int) -> Bytes? ! Fire {
+    // the range to give, taken in one step
+    let (p, k) = pos.with(fn(var x: Int) -> (Int, Int) {
+      var k = step
+      if n < k { k = n }
+      if data.len() - x < k { k = data.len() - x }
+      let at = x
+      x = x + k
+      (at, k)
+    })
+    if k == 0 {
+      if fail {
+        return Err(Fire{})
+      }
+      return Ok(None)
+    }
+    Ok(Some(data[p..p + k]))
+  }
+}
+
+fn stream_dump(x: UploadStreamResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  if let Some(v) = x.content_crc64 { d.q("ContentCRC64", Some(v)) }
+  if let Some(v) = x.content_md5 { d.q("ContentMD5", Some(v)) }
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn upstream_lines(name: Str, r: Result[UploadStreamResponse, StreamErr[Fire]]) -> List[Str] {
+  match r {
+    Ok(x) => stream_dump(x).show(name)
+    Err(Call(e)) => err_lines(name, e)
+    Err(Read(e)) => ["== ${name}", "  error read: ${e.display()}"]
+  }
+}
+
+const MIB: Int = 1048576
+
+fn stream_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_upload(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let cc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE)).new_container_client("c1")
+  let every = UploadStreamOptions{
+    concurrency: 1,
+    http_headers: Some(HTTPHeaders{blob_content_type: Some("text/plain"), blob_cache_control: Some("no-cache")}),
+    metadata: Some({"k": "v"}),
+    tags: Some({"t": "1"}),
+    access_tier: Some("Cool"),
+    encryption_scope: Some("scope1"),
+    conditions: AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_unmodified_since: Some(at("2026-11-01T02:03:04Z")), if_tags: Some("\"a\"='b'")},
+  }
+  let one = UploadStreamOptions{concurrency: 1}
+  let cases = [
+    ("s1 empty with every option", "b1", chunky(b"", 7, false), every),
+    ("s2 small in 2-byte reads", "b2", chunky("hello stream".bytes(), 2, false), one),
+    ("s3 exactly one block", "b3", chunky(pattern(MIB), 65536, false), one),
+    ("s4 three blocks with every option", "b4", chunky(pattern(2 * MIB + 5), 300000, false), every),
+    ("s5 a block size over the data", "b5", chunky(pattern(2 * MIB + 5), 300000, false), UploadStreamOptions{concurrency: 1, block_size: 3 * MIB}),
+    ("s6 a block size under 1 MiB", "b6", chunky(pattern(MIB + 1), MIB, false), UploadStreamOptions{concurrency: 1, block_size: 1000}),
+    ("s7 a block size of 1 MiB and 1", "b7", chunky(pattern(2 * MIB + 3), MIB, false), UploadStreamOptions{concurrency: 1, block_size: MIB + 1}),
+    ("s8 a read error after one block", "b8", chunky(pattern(MIB), MIB, true), one),
+    ("s9 a read error at once", "b9", chunky(b"", 1, true), one),
+    ("s10 upload denied", "denied1", chunky(b"x", 1, false), one),
+    ("s11 commit denied", "nocommit", chunky(pattern(MIB + 2), MIB, false), one),
+    ("s12 stage denied", "denied2", chunky(pattern(3 * MIB + 2), MIB, false), one),
+  ]
+  var out: List[Str] = []
+  for (name, blob, read, o) in cases {
+    let r = cc.new_block_blob_client(blob).upload_stream(read, o)
+    out = out + drain(log) + upstream_lines(name, r)
+  }
+  Ok(out)
+}
+
+test "upload_stream sends what Go's UploadStream sends and reads what it reads" {
+  let got = stream_run(os.net, os.clock, os.rand)?
+  for i in 0..got.len() {
+    if i < UPLOAD_STREAM_OUTPUT.len() && got[i] != UPLOAD_STREAM_OUTPUT[i] {
+      expect(got[i]) == UPLOAD_STREAM_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == UPLOAD_STREAM_OUTPUT.len()
+}

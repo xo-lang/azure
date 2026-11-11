@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `BlockBlobClient.upload_stream` (`UploadStreamOptions`, `StreamErr`):
+  uploads what a `fn(Int) -> Bytes? ! E` reader gives, in one Upload
+  when shorter than a block, else block by block with Go's 64 byte
+  stream block IDs, then commits; blocks go one at a time, and a failed
+  read or stage ends the upload with nothing more sent (as Go's over a
+  real transport). Checked against Go v1.8.3 on a fake service
+  (`uploadstreamvectors_test.xo`, 12 cases); the Go program's fake
+  refuses a canceled request, as net/http does.
+
 - `BlockBlobClient.set_expiry` and `AppendBlobClient.set_expiry`
   (`ExpiryType`: `Absolute`, `RelativeToNow`, `RelativeToCreation` in
   whole milliseconds truncated as Go's, `Never`, the default as Go's nil).

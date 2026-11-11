@@ -1,0 +1,112 @@
+// Uploading a stream of unknown length as a block blob, as azblob
+// v1.8.3's blockblob.Client.UploadStream (chunkwriting.go's
+// copyFromReader; MIT, Copyright (c) Microsoft Corporation; NOTICE.md).
+
+use github.com/xo-lang/azure/azcore
+
+/// Options of upload_stream (Go's UploadStreamOptions).
+pub struct UploadStreamOptions {
+  /// Each block's size; under 1 MiB (and 0) is 1 MiB. A stream shorter
+  /// than one block goes in one Upload request.
+  pub block_size: Int = 0
+  /// Accepted for Go's shape; blocks go one at a time, as Go's with a
+  /// concurrency of 1.
+  pub concurrency: Int = 0
+  pub http_headers: HTTPHeaders? = None
+  pub metadata: Map[Str, Str]? = None
+  /// All of them go with the one Upload or with the commit; each block
+  /// carries the lease alone (as Go's).
+  pub conditions: AccessConditions = AccessConditions{}
+  pub access_tier: Str? = None
+  pub tags: Map[Str, Str]? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+}
+
+/// What upload_stream gives (Go's UploadStreamResponse, a
+/// CommitBlockListResponse): the commit's response, or the one Upload's
+/// without its content CRC64 (as Go copies it).
+pub type UploadStreamResponse = CommitBlockListResponse
+
+/// An upload_stream failure: the service's, or the stream's.
+pub enum StreamErr[E: Error] {
+  Call(e: azcore.CallErr)
+  Read(e: E)
+}
+
+pub fn (e: StreamErr[E]) display() -> Str {
+  match e {
+    Call(c) => c.display()
+    Read(r) => r.display()
+  }
+}
+
+const ONE_MIB: Int = 1048576
+
+/// Up to `size` bytes from `read`, reading until it has them or the
+/// stream ends (Go's shared.ReadAtLeast); true when it ended.
+fn read_block[E: Error, rx: Effects](read: fn(Int) -> Bytes? ! E uses rx, size: Int) -> (Bytes, Bool) ! E uses rx {
+  var b = BytesBuilder.with_capacity(size)
+  while b.len() < size {
+    match read(size - b.len())? {
+      Some(chunk) => b.write(chunk)
+      None => return Ok((b.freeze(), true))
+    }
+  }
+  Ok((b.freeze(), false))
+}
+
+/// Go's 64 byte block ID for a stream: a random version 4 UUID's 16
+/// bytes, the block number big endian in 4, zeros after; in base64.
+fn stream_block_id(prefix: Bytes, num: Int) -> Str {
+  var b = BytesBuilder.with_capacity(64)
+  b.write(prefix)
+  b.write_be(num, 4)
+  for _ in 0..44 {
+    b.write_byte(0)
+  }
+  b.freeze().to_base64()
+}
+
+/// 16 random bytes with azcore's uuid.New version and variant bits.
+fn uuid4_bytes(rand: Rand) -> Bytes {
+  let u = rand.bytes(16)
+  var b = BytesBuilder.with_capacity(16)
+  for i in 0..16 {
+    let x = Int(u[i])
+    let v = if i == 6 { (x & 0x0f) | 0x40 } else if i == 8 { (x | 0x40) & 0x7f } else { x }
+    b.write_byte(UInt8(v))
+  }
+  b.freeze()
+}
+
+/// Uploads what `read` gives, until it gives None, as the blob
+/// (blockblob.Client.UploadStream). `read(n)` returns up to `n` bytes.
+/// A stream shorter than one block goes in one Upload; else each block
+/// is staged as it is read, and the blocks are committed at the end. A
+/// read or stage failure ends the upload with nothing committed; a block
+/// read in part when the read fails is not staged.
+pub fn (b: BlockBlobClient) upload_stream[E: Error, rx: Effects](read: fn(Int) -> Bytes? ! E uses rx, options: UploadStreamOptions = UploadStreamOptions{}) -> UploadStreamResponse ! StreamErr[E] uses (net.dial, clock, rand, rx) {
+  let o = options
+  let size = if o.block_size < ONE_MIB { ONE_MIB } else { o.block_size }
+  let prefix = uuid4_bytes(b.core.rand)
+  let stage = StageBlockOptions{cpk_info: o.cpk_info, encryption_scope: o.encryption_scope, lease_id: o.conditions.lease_id}
+  var ids: List[Str] = []
+  while {
+    let (data, done) = read_block(read, size) ?? e => return Err(StreamErr.Read(e))
+    if ids.is_empty() && data.len() < size {
+      // one block that is not full: the whole blob in one Upload
+      let up = b.upload(data, UploadOptions{tags: o.tags, metadata: o.metadata, tier: o.access_tier, http_headers: o.http_headers, conditions: o.conditions, cpk_info: o.cpk_info, encryption_scope: o.encryption_scope}) ?? e => return Err(StreamErr.Call(e))
+      return Ok(UploadStreamResponse{response: up.response, content_md5: up.content_md5, etag: up.etag, encryption_key_sha256: up.encryption_key_sha256, encryption_scope: up.encryption_scope, is_server_encrypted: up.is_server_encrypted, last_modified: up.last_modified, version_id: up.version_id})
+    }
+    if data.len() > 0 {
+      let id = stream_block_id(prefix, ids.len())
+      b.stage_block(id, data, stage) ?? e => return Err(StreamErr.Call(e))
+      ids.push(id)
+    }
+    if done {
+      break
+    }
+  }
+  b.commit_block_list(ids, CommitBlockListOptions{tags: o.tags, metadata: o.metadata, tier: o.access_tier, http_headers: o.http_headers, cpk_info: o.cpk_info, encryption_scope: o.encryption_scope, conditions: o.conditions}) ?? e => Err(StreamErr.Call(e))
+}
