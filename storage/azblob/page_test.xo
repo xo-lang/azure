@@ -1,0 +1,200 @@
+// Page blob calls against a fake that answers as the Go program's fake
+// does (pagevectors_test.xo): a page write a 201 with a sequence number,
+// the checksums and the encryption headers; a resize or sequence number
+// update a 200 with a sequence number; an incremental copy a 202 with a
+// copy ID and status; a page list two pages (the second at marker
+// `m2`), or none for a blob named "empty"; a create a 201; a blob named
+// "denied" a 403.
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/runtime
+
+const PAGE_LIST_1: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><PageList><PageRange><Start>0</Start><End>511</End></PageRange><ClearRange><Start>512</Start><End>1023</End></ClearRange><PageRange><Start>2048</Start><End>4095</End></PageRange><NextMarker>m2</NextMarker></PageList>"
+const PAGE_LIST_2: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><PageList><PageRange><Start>8192</Start><End>8703</End></PageRange><NextMarker /></PageList>"
+const PAGE_LIST_EMPTY: Str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><PageList />"
+
+fn page_answer(req: http.Request) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  hs = hs + [("ETag", "\"0x8D2\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let enc = [("x-ms-request-server-encrypted", "true"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1")]
+  match req.url.query.get("comp") ?? "" {
+    "page" => with_hs(http.empty(201), hs + [("x-ms-blob-sequence-number", "7"), ("x-ms-content-crc64", "CQk="), ("Content-MD5", "AQID")] + enc + [("x-ms-structured-body", "XSM/1.0; properties=crc64")])
+    "properties" => with_hs(http.empty(200), hs + [("x-ms-blob-sequence-number", "9")])
+    "incrementalcopy" => with_hs(http.empty(202), hs + [("x-ms-copy-id", "cp1"), ("x-ms-copy-status", "pending")])
+    "pagelist" => {
+      let body = if req.url.path.contains("empty") { PAGE_LIST_EMPTY } else if req.url.query.get("marker") == Some("m2") { PAGE_LIST_2 } else { PAGE_LIST_1 }
+      with_hs(http.text(200, body), hs + [("x-ms-blob-content-length", "4096"), ("Content-Type", "application/xml")])
+    }
+    _ => with_hs(http.empty(201), hs + [("Content-MD5", "AQID"), ("x-ms-version-id", "v2")] + enc)
+  }
+}
+
+fn serve_page(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    page_answer(req)
+  }
+  for m in ["GET", "PUT"] {
+    net.handle("${m} ${BEP}/{a}/{b}", h)
+  }
+  log
+}
+
+fn page_create_dump(x: CreatePageBlobResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+/// A page write as Go dumps it: every field of the response, as each of
+/// Go's three types holds them (a nil byte slice printed as "").
+fn page_write_dump(x: PageWriteResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("BlobSequenceNumber", x.blob_sequence_number)
+  d.q("ContentCRC64", x.content_crc64)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("StructuredBodyType", x.structured_body_type)
+  d
+}
+
+fn ranges_dump(x: GetPageRangesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("BlobContentLength", x.blob_content_length)
+  d.s("ContentType", x.content_type)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d.s("NextMarker", x.next_marker)
+  for (i, r) in x.page_range.indexed() {
+    d.i("PageRange[${i}].End", r.end)
+    d.i("PageRange[${i}].Start", r.start)
+  }
+  for (i, r) in x.clear_range.indexed() {
+    d.i("ClearRange[${i}].End", r.end)
+    d.i("ClearRange[${i}].Start", r.start)
+  }
+  d
+}
+
+fn props_dump(x: PagePropertiesResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("BlobSequenceNumber", x.blob_sequence_number)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+fn incremental_dump(x: CopyIncrementalResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("CopyID", x.copy_id)
+  d.s("CopyStatus", x.copy_status)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+/// Each page as Go's loop over More and NextPage prints it, stopping at
+/// an error; `log` drained before each page's lines.
+fn pages_lines[fx: Effects](name: Str, pager: runtime.Pager[GetPageRangesResponse, fx], log: Mutex[List[Str]]) -> List[Str] uses (net.dial, clock, rand, fx) {
+  var p = pager
+  var out: List[Str] = []
+  var i = 0
+  while p.more() {
+    i += 1
+    let r = p.next_page()
+    out = out + drain(log) + shown("${name}, page ${i}", r, ranges_dump)
+    if r.is_err() {
+      break
+    }
+  }
+  out
+}
+
+fn page_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_page(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let pb = c.new_page_blob_client("disk.vhd")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let hh = HTTPHeaders{blob_cache_control: Some("no-cache"), blob_content_disposition: Some("inline"), blob_content_encoding: Some("identity"), blob_content_language: Some("en"), blob_content_md5: Some(b"\x01\x02\x03"), blob_content_type: Some("text/plain")}
+  let seq = SequenceNumberAccessConditions{if_sequence_number_equal_to: Some(3), if_sequence_number_less_than: Some(4), if_sequence_number_less_than_or_equal_to: Some(5)}
+  let page = "p".repeat(512).bytes()
+
+  out = out + add(shown("p1 create with every option (the immutability policy not sent)", pb.create(4096, CreatePageBlobOptions{sequence_number: Some(11), tags: Some({"team": "a&b c"}), metadata: Some({"color": "blue"}), tier: Some(PREMIUM_PAGE_BLOB_ACCESS_TIER_P10), http_headers: Some(hh), cpk_info: Some(cpk), encryption_scope: Some("scope1"), conditions: ac, legal_hold: Some(true)}), page_create_dump))
+  out = out + add(shown("p2 create, no options", pb.create(512), page_create_dump))
+  out = out + add(shown("p3 upload pages with every option", pb.upload_pages(page, HTTPRange{offset: 512, count: 512}, UploadPagesOptions{cpk_info: Some(cpk), encryption_scope: Some("scope1"), sequence_number_conditions: Some(seq), conditions: ac}), page_write_dump))
+  out = out + add(shown("p4 upload pages, from an offset to the end", pb.upload_pages(b"tail", HTTPRange{offset: 1024}), page_write_dump))
+  let every = UploadPagesFromURLOptions{
+    copy_source_authorization: Some("Bearer tok1"),
+    cpk_info: Some(cpk),
+    encryption_scope: Some("scope1"),
+    file_request_intent: Some(FILE_REQUEST_INTENT_BACKUP),
+    sequence_number_conditions: Some(seq),
+    source_conditions: Some(SourceModifiedAccessConditions{source_if_match: Some("\"s1\""), source_if_none_match: Some("s2"), source_if_modified_since: Some(when), source_if_unmodified_since: Some(when)}),
+    conditions: ac,
+    source_cpk_info: Some(SourceCPKInfo{source_encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), source_encryption_key: Some("c2tleQ=="), source_encryption_key_sha256: Some("c2hhc2g=")}),
+  }
+  out = out + add(shown("p5 upload pages from URL with every option", pb.upload_pages_from_url("https://src.example.test/c/s.vhd?sv=2026-12-06&sr=b", 1024, 2048, 512, every), page_write_dump))
+  out = out + add(shown("p6 upload pages from URL, no options", pb.upload_pages_from_url("https://src.example.test/c/s.vhd", 0, 0, 1024), page_write_dump))
+  out = out + add(shown("p7 clear pages with every option", pb.clear_pages(HTTPRange{offset: 0, count: 1024}, ClearPagesOptions{cpk_info: Some(cpk), encryption_scope: Some("scope1"), sequence_number_conditions: Some(seq), conditions: ac}), page_write_dump))
+  out = out + add(shown("p8 clear pages, no options", pb.clear_pages(HTTPRange{offset: 512, count: 512}), page_write_dump))
+  out = out + pages_lines("p9 page ranges with every option", pb.new_get_page_ranges_pager(GetPageRangesOptions{max_results: Some(2), range: HTTPRange{offset: 0, count: 8704}, snapshot: Some("2026-11-05T00:00:00.0000000Z"), conditions: ac}), log)
+  out = out + pages_lines("p10 page ranges from a marker", pb.new_get_page_ranges_pager(GetPageRangesOptions{marker: Some("m2")}), log)
+  out = out + pages_lines("p11 page ranges of an empty blob", c.new_page_blob_client("empty.vhd").new_get_page_ranges_pager(), log)
+  out = out + pages_lines("p12 page ranges diff with every option", pb.new_get_page_ranges_diff_pager(GetPageRangesDiffOptions{max_results: Some(5), prev_snapshot: Some("2026-11-01T00:00:00.0000000Z"), prev_snapshot_url: Some("https://acct1.blob.example.test/c1/disk.vhd?snapshot=x"), range: HTTPRange{offset: 512}, snapshot: Some("2026-11-05T00:00:00.0000000Z"), conditions: ac}), log)
+  out = out + pages_lines("p13 page ranges, denied", c.new_page_blob_client("denied").new_get_page_ranges_pager(), log)
+  out = out + add(shown("p14 resize with every option", pb.resize(8192, ResizeOptions{cpk_info: Some(cpk), encryption_scope: Some("scope1"), conditions: ac}), props_dump))
+  out = out + add(shown("p15 update sequence number", pb.update_sequence_number(UpdateSequenceNumberOptions{action_type: SEQUENCE_NUMBER_ACTION_TYPE_UPDATE, sequence_number: Some(42), conditions: ac}), props_dump))
+  out = out + add(shown("p16 increment sequence number (the number not sent)", pb.update_sequence_number(UpdateSequenceNumberOptions{action_type: SEQUENCE_NUMBER_ACTION_TYPE_INCREMENT, sequence_number: Some(42)}), props_dump))
+  out = out + add(shown("p17 max sequence number", pb.update_sequence_number(UpdateSequenceNumberOptions{action_type: SEQUENCE_NUMBER_ACTION_TYPE_MAX, sequence_number: Some(7)}), props_dump))
+  out = out + add(shown("p18 start copy incremental with conditions", pb.start_copy_incremental("https://src.example.test/c/s.vhd?sv=2026-12-06&sig=abc%2Bdef&a=1", "2026-11-01T00:00:00.0000000Z", CopyIncrementalOptions{conditions: ac}), incremental_dump))
+  out = out + add(shown("p19 start copy incremental, no options", pb.start_copy_incremental("https://src.example.test/c/s.vhd", "snap 1"), incremental_dump))
+  let d = c.new_page_blob_client("denied")
+  out = out + add(quiet("p20 create, denied", d.create(512)))
+  out = out + add(quiet("p21 upload pages, denied", d.upload_pages(page, HTTPRange{count: 512})))
+  out = out + add(quiet("p22 resize, denied", d.resize(0)))
+  Ok(out + drain(log))
+}
+
+test "page blob calls send what Go sends and read what Go reads" {
+  let got = page_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < PAGE_OUTPUT.len() && got[i] != PAGE_OUTPUT[i] {
+      expect(got[i]) == PAGE_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == PAGE_OUTPUT.len()
+}
+
+test "a page blob client shares its container's pipeline and names the blob as one segment" {
+  let c = new_container_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/c1?sv=x", go_options(""))
+  expect(c.new_page_blob_client("a b/c").url) == c.new_block_blob_client("a b/c").url
+  expect(c.new_page_blob_client("x").blob_client().url) == c.new_blob_client("x").url
+}

@@ -1,0 +1,420 @@
+// Page blobs, as azblob v1.8.3's pageblob/client.go, models.go and
+// constants.go (MIT, Copyright (c) Microsoft Corporation; NOTICE.md),
+// with the requests of its generated PageBlobClient: Create,
+// UploadPages, UploadPagesFromURL, ClearPages, GetPageRanges and
+// GetPageRangesDiff (as pagers), Resize, UpdateSequenceNumber and
+// CopyIncremental. The calls every blob has are on blob_client(), as
+// Go's forward to it. TransactionalValidation and
+// SourceContentValidation are not ported.
+
+use std/http
+use std/url
+use std/xml
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// The size of a page: a page blob's length, and each write's offset
+/// and length, are multiples of it (pageblob.PageBytes).
+pub const PAGE_BYTES: Int = 512
+
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P4: Str = "P4"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P6: Str = "P6"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P10: Str = "P10"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P15: Str = "P15"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P20: Str = "P20"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P30: Str = "P30"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P40: Str = "P40"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P50: Str = "P50"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P60: Str = "P60"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P70: Str = "P70"
+pub const PREMIUM_PAGE_BLOB_ACCESS_TIER_P80: Str = "P80"
+
+pub const SEQUENCE_NUMBER_ACTION_TYPE_INCREMENT: Str = "increment"
+pub const SEQUENCE_NUMBER_ACTION_TYPE_MAX: Str = "max"
+pub const SEQUENCE_NUMBER_ACTION_TYPE_UPDATE: Str = "update"
+
+/// A client of one page blob.
+pub struct PageBlobClient[fx: Effects] {
+  /// The blob's URL.
+  pub url: Str
+  core: Core[fx]
+}
+
+fn page_blob_of[fx: Effects](c: Core[fx]) -> PageBlobClient[fx] {
+  PageBlobClient{url: c.url, core: c}
+}
+
+/// A page blob client with Entra ID tokens (pageblob.NewClient).
+pub fn new_page_blob_client[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: azcore.TokenCredential[fx], options: ClientOptions[fx] = ClientOptions{}) -> PageBlobClient[fx] {
+  page_blob_of(core_with_token(net, clock, rand, blob_url, cred, options))
+}
+
+pub fn new_page_blob_client_with_shared_key_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: SharedKeyCredential, options: ClientOptions[fx] = ClientOptions{}) -> PageBlobClient[fx] {
+  page_blob_of(core_with_shared_key(net, clock, rand, blob_url, cred, options))
+}
+
+/// A page blob client with no credential: a SAS in `blob_url`, or
+/// public access.
+pub fn new_page_blob_client_with_no_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, options: ClientOptions[fx] = ClientOptions{}) -> PageBlobClient[fx] {
+  page_blob_of(core_with_no_credential(net, clock, rand, blob_url, options))
+}
+
+pub fn new_page_blob_client_from_connection_string[fx: Effects](net: Net, clock: Clock, rand: Rand, connection_string: Str, container_name: Str, blob_name: Str, options: ClientOptions[fx] = ClientOptions{}) -> PageBlobClient[fx] ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, container_name), blob_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_page_blob_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_page_blob_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The page blob `blob_name` in this container, on the same pipeline
+/// (ContainerClient.NewPageBlobClient; the name escaped as one segment).
+pub fn (c: ContainerClient[fx]) new_page_blob_client(blob_name: Str) -> PageBlobClient[fx] {
+  page_blob_of(c.core with {url: join_paths(c.url, url.path_escape(blob_name))})
+}
+
+/// The same blob as a BlobClient (pageblob.Client.BlobClient).
+pub fn (p: PageBlobClient[fx]) blob_client() -> BlobClient[fx] {
+  blob_of(p.core)
+}
+
+/// Conditions on a page blob's sequence number (Go's
+/// SequenceNumberAccessConditions).
+pub struct SequenceNumberAccessConditions {
+  pub if_sequence_number_equal_to: Int? = None
+  pub if_sequence_number_less_than: Int? = None
+  pub if_sequence_number_less_than_or_equal_to: Int? = None
+}
+
+fn sequence_headers(s: SequenceNumberAccessConditions?) -> List[(Str, Str)] {
+  match s {
+    Some(x) => h_int("x-ms-if-sequence-number-eq", x.if_sequence_number_equal_to) + h_int("x-ms-if-sequence-number-le", x.if_sequence_number_less_than_or_equal_to) + h_int("x-ms-if-sequence-number-lt", x.if_sequence_number_less_than)
+    None => []
+  }
+}
+
+/// `bytes=<offset>-<offset+count-1>` (shared.RangeToString).
+fn range_to_string(offset: Int, count: Int) -> Str {
+  "bytes=${offset}-${offset + count - 1}"
+}
+
+// Create.
+
+pub struct CreatePageBlobOptions {
+  /// The blob's first sequence number (0 to 2^63 - 1).
+  pub sequence_number: Int? = None
+  pub tags: Map[Str, Str]? = None
+  pub metadata: Map[Str, Str]? = None
+  /// A premium tier (`PREMIUM_PAGE_BLOB_ACCESS_TIER_P10`, ...).
+  pub tier: Str? = None
+  pub http_headers: HTTPHeaders? = None
+  pub cpk_info: CPKInfo? = None
+  /// An encryption scope (Go's CPKScopeInfo).
+  pub encryption_scope: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub legal_hold: Bool? = None
+}
+
+pub struct CreatePageBlobResponse {
+  pub response: Response
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// Creates a page blob of `size` bytes (a multiple of PAGE_BYTES), all
+/// zero, replacing any blob of that name (pageblob.Client.Create). Go's
+/// CreateOptions also has the immutability policy fields, which it does
+/// not send (Azure/azure-sdk-for-go#26857); they are left out here.
+pub fn (p: PageBlobClient) create(size: Int, options: CreatePageBlobOptions = CreatePageBlobOptions{}) -> CreatePageBlobResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + http_headers_headers(o.http_headers) + [("x-ms-blob-content-length", "${size}")] + h_int("x-ms-blob-sequence-number", o.sequence_number) + [("x-ms-blob-type", "PageBlob")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + tags_header(o.tags)
+  let resp = p.core.send(Call{method: "PUT", headers: hs, ok: [201]})?
+  Ok(CreatePageBlobResponse{
+    response: response_of(resp),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Upload pages.
+
+pub struct UploadPagesOptions {
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub sequence_number_conditions: SequenceNumberAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// What a page write returns (Go's UploadPagesResponse, and
+/// UploadPagesFromURLResponse and ClearPagesResponse, which hold fewer
+/// of these).
+pub struct PageWriteResponse {
+  pub response: Response
+  pub blob_sequence_number: Int? = None
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub structured_body_type: Str? = None
+}
+
+fn page_write_of(resp: http.Response, encrypted: Bool, structured: Bool) -> PageWriteResponse {
+  var r = PageWriteResponse{
+    response: response_of(resp),
+    blob_sequence_number: r_int(resp, "x-ms-blob-sequence-number"),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    last_modified: r_time(resp, "Last-Modified"),
+  }
+  if encrypted {
+    r = r with {encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"), encryption_scope: r_str(resp, "x-ms-encryption-scope"), is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted")}
+  }
+  if structured {
+    r = r with {structured_body_type: r_str(resp, "x-ms-structured-body")}
+  }
+  r
+}
+
+/// Writes `body` to the pages `content_range` names (its offset and
+/// length multiples of PAGE_BYTES; the default range sends an empty
+/// `Range`, as Go's) (pageblob.Client.UploadPages).
+pub fn (p: PageBlobClient) upload_pages(body: Bytes, content_range: HTTPRange, options: UploadPagesOptions = UploadPagesOptions{}) -> PageWriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + [("Range", format_http_range(content_range) ?? "")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + sequence_headers(o.sequence_number_conditions) + [("x-ms-page-write", "update")]
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "page")], headers: hs, body: Some(body), content_type: "application/octet-stream", ok: [201]})?
+  Ok(page_write_of(resp, true, true))
+}
+
+// Upload pages from URL.
+
+pub struct UploadPagesFromURLOptions {
+  /// The source's credential: `Bearer <token>`.
+  pub copy_source_authorization: Str? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  /// `FILE_REQUEST_INTENT_BACKUP` for a source that is a file share.
+  pub file_request_intent: Str? = None
+  pub sequence_number_conditions: SequenceNumberAccessConditions? = None
+  pub source_conditions: SourceModifiedAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub source_cpk_info: SourceCPKInfo? = None
+}
+
+/// Writes `count` bytes the service copies from `source` at
+/// `source_offset` to this blob's pages at `dest_offset`
+/// (pageblob.Client.UploadPagesFromURL).
+pub fn (p: PageBlobClient) upload_pages_from_url(source: Str, source_offset: Int, dest_offset: Int, count: Int, options: UploadPagesFromURLOptions = UploadPagesFromURLOptions{}) -> PageWriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + [("Range", range_to_string(dest_offset, count))] + [("x-ms-copy-source", source)] + h_str("x-ms-copy-source-authorization", o.copy_source_authorization) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-file-request-intent", o.file_request_intent) + sequence_headers(o.sequence_number_conditions) + [("x-ms-page-write", "update")] + source_cpk_headers(o.source_cpk_info) + source_conditions_headers(o.source_conditions) + [("x-ms-source-range", range_to_string(source_offset, count))]
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "page")], headers: hs, ok: [201]})?
+  Ok(page_write_of(resp, true, false))
+}
+
+// Clear pages.
+
+pub struct ClearPagesOptions {
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub sequence_number_conditions: SequenceNumberAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// Frees the pages `range` names (pageblob.Client.ClearPages).
+pub fn (p: PageBlobClient) clear_pages(range: HTTPRange, options: ClearPagesOptions = ClearPagesOptions{}) -> PageWriteResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + [("Range", format_http_range(range) ?? "")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + sequence_headers(o.sequence_number_conditions) + [("x-ms-page-write", "clear")]
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "page")], headers: hs, ok: [201]})?
+  Ok(page_write_of(resp, false, false))
+}
+
+// Page ranges.
+
+/// A range of written (or, in a diff, cleared) bytes, both ends
+/// included (Go's PageRange and ClearRange).
+pub struct PageRange {
+  pub start: Int? = None
+  pub end: Int? = None
+}
+
+pub struct GetPageRangesOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub range: HTTPRange = HTTPRange{}
+  /// A snapshot to list instead of the blob.
+  pub snapshot: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+pub struct GetPageRangesDiffOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  /// The URL of a snapshot of a managed disk to diff against
+  /// (`x-ms-previous-snapshot-url`).
+  pub prev_snapshot_url: Str? = None
+  /// The snapshot to diff against (`prevsnapshot`).
+  pub prev_snapshot: Str? = None
+  pub range: HTTPRange = HTTPRange{}
+  pub snapshot: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// One page of page ranges (Go's GetPageRangesResponse and
+/// GetPageRangesDiffResponse, with its PageList).
+pub struct GetPageRangesResponse {
+  pub response: Response
+  pub blob_content_length: Int? = None
+  pub content_type: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub page_range: List[PageRange] = []
+  pub clear_range: List[PageRange] = []
+  pub next_marker: Str? = None
+}
+
+fn ranges_named(doc: xml.Element, name: Str) -> List[PageRange] {
+  doc.children_named(name).map(fn(e: xml.Element) -> PageRange { PageRange{start: c_int(e, "Start"), end: c_int(e, "End")} })
+}
+
+fn page_ranges_of(resp: http.Response) -> GetPageRangesResponse ! Str {
+  let doc = xml.parse(resp.body.to_str_lossy()) ?? e => return Err("the page list is not XML: ${e.display()}")
+  Ok(GetPageRangesResponse{
+    response: response_of(resp),
+    blob_content_length: r_int(resp, "x-ms-blob-content-length"),
+    content_type: r_str(resp, "Content-Type"),
+    etag: r_str(resp, "ETag"),
+    last_modified: r_time(resp, "Last-Modified"),
+    page_range: ranges_named(doc, "PageRange"),
+    clear_range: ranges_named(doc, "ClearRange"),
+    next_marker: c_text(doc, "NextMarker"),
+  })
+}
+
+fn (p: PageBlobClient[fx]) page_list_pager(query: List[(Str, Str)], headers: List[(Str, Str)]) -> runtime.Pager[GetPageRangesResponse, fx] {
+  let first = policy.Request{method: "GET", url: with_query(p.url, [("comp", "pagelist")] + query), headers: [("Accept", "application/xml")] + headers + [("x-ms-version", SERVICE_VERSION)]}
+  runtime.new_pager_with(p.core.pipeline, first, page_ranges_of, fn(prev: policy.Request, page: GetPageRangesResponse) -> policy.Request? {
+    let m = page.next_marker ?? return None
+    if m == "" {
+      return None
+    }
+    Some(prev with {url: with_query(prev.url, [("marker", m)])})
+  })
+}
+
+fn q_str(name: Str, v: Str?) -> List[(Str, Str)] {
+  match v {
+    Some(x) => [(name, x)]
+    None => []
+  }
+}
+
+/// The blob's written pages, a page of them at a time
+/// (pageblob.Client.NewGetPageRangesPager).
+pub fn (p: PageBlobClient[fx]) new_get_page_ranges_pager(options: GetPageRangesOptions = GetPageRangesOptions{}) -> runtime.Pager[GetPageRangesResponse, fx] {
+  let o = options
+  let q = q_str("marker", o.marker) + q_str("maxresults", o.max_results.map(fn(n: Int) -> Str { "${n}" })) + q_str("snapshot", o.snapshot)
+  p.page_list_pager(q, conditions_headers(o.conditions) + h_str("Range", format_http_range(o.range)))
+}
+
+/// The pages written or cleared since a snapshot, a page of them at a
+/// time (pageblob.Client.NewGetPageRangesDiffPager).
+pub fn (p: PageBlobClient[fx]) new_get_page_ranges_diff_pager(options: GetPageRangesDiffOptions = GetPageRangesDiffOptions{}) -> runtime.Pager[GetPageRangesResponse, fx] {
+  let o = options
+  let q = q_str("marker", o.marker) + q_str("maxresults", o.max_results.map(fn(n: Int) -> Str { "${n}" })) + q_str("prevsnapshot", o.prev_snapshot) + q_str("snapshot", o.snapshot)
+  p.page_list_pager(q, conditions_headers(o.conditions) + h_str("Range", format_http_range(o.range)) + h_str("x-ms-previous-snapshot-url", o.prev_snapshot_url))
+}
+
+// Resize and sequence number.
+
+pub struct ResizeOptions {
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// What resize and update_sequence_number return.
+pub struct PagePropertiesResponse {
+  pub response: Response
+  pub blob_sequence_number: Int? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+fn page_properties_of(resp: http.Response) -> PagePropertiesResponse {
+  PagePropertiesResponse{response: response_of(resp), blob_sequence_number: r_int(resp, "x-ms-blob-sequence-number"), etag: r_str(resp, "ETag"), last_modified: r_time(resp, "Last-Modified")}
+}
+
+/// Makes the blob `size` bytes (a multiple of PAGE_BYTES)
+/// (pageblob.Client.Resize).
+pub fn (p: PageBlobClient) resize(size: Int, options: ResizeOptions = ResizeOptions{}) -> PagePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + [("x-ms-blob-content-length", "${size}")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope)
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "properties")], headers: hs, ok: [200]})?
+  Ok(page_properties_of(resp))
+}
+
+pub struct UpdateSequenceNumberOptions {
+  /// `SEQUENCE_NUMBER_ACTION_TYPE_UPDATE`, `..._MAX` or `..._INCREMENT`
+  /// (Go's ActionType, which it needs: Go panics without one).
+  pub action_type: Str
+  /// The new number; not sent with `..._INCREMENT`, as Go's.
+  pub sequence_number: Int? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// Sets the blob's sequence number (pageblob.Client.UpdateSequenceNumber).
+pub fn (p: PageBlobClient) update_sequence_number(options: UpdateSequenceNumberOptions) -> PagePropertiesResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let n = if o.action_type == SEQUENCE_NUMBER_ACTION_TYPE_INCREMENT { None } else { o.sequence_number }
+  let hs = conditions_headers(o.conditions) + h_int("x-ms-blob-sequence-number", n) + [("x-ms-sequence-number-action", o.action_type)]
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "properties")], headers: hs, ok: [200]})?
+  Ok(page_properties_of(resp))
+}
+
+// Incremental copy.
+
+pub struct CopyIncrementalOptions {
+  /// Conditions on this blob; a lease is not sent (Go's
+  /// ModifiedAccessConditions).
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+pub struct CopyIncrementalResponse {
+  pub response: Response
+  pub copy_id: Str? = None
+  pub copy_status: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+/// Starts copying the changes in snapshot `prev_snapshot` of the page
+/// blob at `copy_source` to this blob (pageblob.Client.StartCopyIncremental):
+/// `snapshot` is set in the source's query, which is encoded again,
+/// sorted, as Go's url.Values.
+pub fn (p: PageBlobClient) start_copy_incremental(copy_source: Str, prev_snapshot: Str, options: CopyIncrementalOptions = CopyIncrementalOptions{}) -> CopyIncrementalResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let src = runtime.set_query_sorted(copy_source, "snapshot", prev_snapshot)
+  let hs = conditions_headers(options.conditions with {lease_id: None}) + [("x-ms-copy-source", src)]
+  let resp = p.core.send(Call{method: "PUT", query: [("comp", "incrementalcopy")], headers: hs, ok: [202]})?
+  Ok(CopyIncrementalResponse{
+    response: response_of(resp),
+    copy_id: r_str(resp, "x-ms-copy-id"),
+    copy_status: r_str(resp, "x-ms-copy-status"),
+    etag: r_str(resp, "ETag"),
+    last_modified: r_time(resp, "Last-Modified"),
+  })
+}

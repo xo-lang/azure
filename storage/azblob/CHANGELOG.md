@@ -8,8 +8,17 @@
   sends neither `x-ms-if-tags` nor the max size), its four constructors
   and `ContainerClient.new_append_blob_client`. Checked against Go
   v1.8.3 on a fake service (`appendvectors_test.xo`, 13 cases).
+- `PageBlobClient` (pageblob.Client): `create`, `upload_pages`,
+  `upload_pages_from_url`, `clear_pages`, the page range and page range
+  diff pagers, `resize`, `update_sequence_number` and
+  `start_copy_incremental`, its four constructors and
+  `ContainerClient.new_page_blob_client`. Checked against Go v1.8.3 on a
+  fake service (`pagevectors_test.xo`, 22 cases, two pagers of two
+  pages).
 - `AppendPositionAccessConditions`, `SourceModifiedAccessConditions`,
-  `SourceCPKInfo` and `FILE_REQUEST_INTENT_BACKUP`.
+  `SourceCPKInfo`, `SequenceNumberAccessConditions`, `PAGE_BYTES`, the
+  premium page blob tiers, the sequence number actions and
+  `FILE_REQUEST_INTENT_BACKUP`.
 
 ## v0.1.0
 

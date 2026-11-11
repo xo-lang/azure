@@ -20,6 +20,10 @@ What it does:
   `stage_block`, `commit_block_list`, `upload_buffer`, `upload_file`),
   `AppendBlobClient` (`create`, `append_block`, `append_block_from_url`,
   `seal`; the other blob calls through `blob_client()`),
+  `PageBlobClient` (`create`, `upload_pages`, `upload_pages_from_url`,
+  `clear_pages`, `new_get_page_ranges_pager`,
+  `new_get_page_ranges_diff_pager`, `resize`,
+  `update_sequence_number`, `start_copy_incremental`),
   and `BlobLeaseClient` and `ContainerLeaseClient`
   (acquire, break, change, release, renew). Each is built from a token,
   a Shared Key, no credential, or a connection string, as Go's are, and
@@ -68,11 +72,16 @@ Where it differs from Go v1.8.3:
   `with_version_id`, a blob SAS URL, structured message (transactional CRC64) downloads,
   the container and blob pagers on the new clients, the block blob
   client's other calls (`get_block_list`, `upload_stream`,
-  `upload_blob_from_url`, `stage_block_from_url`, ...), the page blob
-  client, batch, and checksummed uploads and appends
+  `upload_blob_from_url`, `stage_block_from_url`, ...), batch, and checksummed uploads and appends
   (`TransactionalValidation`, `SourceContentValidation`). The append
-  blob client's forwarders to the blob calls (`delete`, `set_tags`,
+  and page blob clients' forwarders to the blob calls (`delete`, `set_tags`,
   ...) are reached through `blob_client()`.
+- Page blob `create` has no immutability policy options: Go's
+  CreateOptions has them but does not send them
+  (Azure/azure-sdk-for-go#26857). Go's GetPageRangesOptions takes
+  `PrevSnapshot` and `PrevSnapshotURL` and does not send them either;
+  here they are only on the diff pager's options. The three page write
+  responses are one type, `PageWriteResponse`.
 - Go names that are Xo keywords: none in what is ported (the lease
   calls are Go's `AcquireLease` to `RenewLease`, so `break_lease` is
   Go's own name).
