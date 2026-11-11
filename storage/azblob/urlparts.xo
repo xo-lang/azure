@@ -1,0 +1,161 @@
+// A blob URL's parts, as azblob v1.8.3's sas/url_parts.go (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md): azblob.ParseURL and
+// blob.ParseURL, and URLParts.String.
+
+use std/url
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/storage/azblob/exported
+use github.com/xo-lang/azure/storage/azblob/sas
+
+/// A container or blob URL's parts (sas.URLParts): with an IP host
+/// (Azurite's `127.0.0.1:10000/devstoreaccount1/c1/b`) the first path
+/// segment is the account. Changing a SAS field needs a new signature.
+pub struct URLParts {
+  pub scheme: Str = ""
+  pub host: Str = ""
+  /// The account of an IP endpoint style URL (Go's
+  /// IPEndpointStyleInfo.AccountName).
+  pub ip_account_name: Str = ""
+  pub container_name: Str = ""
+  /// The rest of the path, unescaped (`dir/a b.txt`).
+  pub blob_name: Str = ""
+  pub snapshot: Str = ""
+  pub sas: sas.QueryParameters = sas.QueryParameters{signature: Secret.new("")}
+  /// The rest of the query, encoded as Go's url.Values.Encode writes it.
+  pub unparsed_params: Str = ""
+  pub version_id: Str = ""
+}
+
+/// The first value of the first key equal to `key` without case, as
+/// Go's caseInsensitiveValues.Get (which walks a map: with two such
+/// keys, Go's pick varies from run to run; this takes the first in key
+/// order).
+fn get_fold(q: url.Values, key: Str) -> Str? {
+  for k in q.keys().sort() {
+    if k.to_lower() == key {
+      return Some(q.get(k) ?? "")
+    }
+  }
+  None
+}
+
+/// The parts of `u` (Go's sas.ParseURL), with url.Parse's error text.
+/// The snapshot and version ID are matched without case; only the keys
+/// `snapshot`, `versionid` and `versionId` are removed, as Go does, so a
+/// `Snapshot` key is then read into the SAS.
+pub fn parse_url(u: Str) -> URLParts ! Str {
+  let g = azcore.parse_go_url(u)?
+  var path = if g.path.starts_with("/") { g.path[1..g.path.len()] } else { g.path }
+  var account = ""
+  if exported.is_ip_endpoint(g.host) {
+    match path.find("/") {
+      Some(i) => {
+        account = path[0..i]
+        path = path[i + 1..path.len()]
+      }
+      None => {
+        account = path
+        path = ""
+      }
+    }
+  }
+  let (container, blob) = match path.find("/") {
+    Some(i) => (path[0..i], path[i + 1..path.len()])
+    None => (path, "")
+  }
+  var q = azcore.go_query(g.raw_query)
+  let snapshot = get_fold(q, "snapshot") ?? ""
+  q.remove("snapshot")
+  let found = get_fold(q, "versionid")
+  if found.is_some() {
+    q.remove("versionid")
+    q.remove("versionId")
+  }
+  let version = found ?? ""
+  let (qp, unparsed) = sas.new_query_parameters(q)
+  Ok(URLParts{scheme: g.scheme, host: g.host, ip_account_name: account, container_name: container, blob_name: blob, snapshot: snapshot, sas: qp, unparsed_params: unparsed.encode(), version_id: version})
+}
+
+/// The URL again (URLParts.String): the unparsed parameters, the
+/// version ID, the snapshot (from the SAS when unset), then the SAS.
+pub fn (up: URLParts) to_url() -> Str {
+  var path = ""
+  if exported.is_ip_endpoint(up.host) && up.ip_account_name != "" {
+    path = "/${up.ip_account_name}"
+  }
+  if up.container_name != "" {
+    path = "${path}/${up.container_name}"
+    if up.blob_name != "" {
+      path = "${path}/${up.blob_name}"
+    }
+  }
+  var query = up.unparsed_params
+  let add = fn(q: Str, part: Str) -> Str { if q == "" { part } else { "${q}&${part}" } }
+  if up.version_id != "" {
+    query = add(query, "versionid=${up.version_id}")
+  }
+  let snapshot = if up.snapshot == "" { up.sas.snapshot.map(fn(t: Time) -> Str { sas.format_snapshot(t) }) ?? "" } else { up.snapshot }
+  if snapshot != "" {
+    query = add(query, "snapshot=${snapshot}")
+  }
+  let encoded = up.sas.encode()
+  if encoded != "" {
+    query = add(query, encoded)
+  }
+  azcore.GoUrl{scheme: up.scheme, host: up.host, path: path, raw_query: query}.to_str()
+}
+
+/// `u` with its snapshot and version ID replaced (Go's WithSnapshot and
+/// WithVersionID: ParseURL, set the field, URLParts.String).
+fn url_with(u: Str, snapshot: Str?, version_id: Str?) -> Str ! Str {
+  var up = parse_url(u)?
+  if let Some(s) = snapshot {
+    up.snapshot = s
+  }
+  if let Some(v) = version_id {
+    up.version_id = v
+  }
+  Ok(up.to_url())
+}
+
+/// This blob at `snapshot` ("" for the base blob), on the same pipeline
+/// (blob.Client.WithSnapshot).
+pub fn (c: BlobClient[fx]) with_snapshot(snapshot: Str) -> BlobClient[fx] ! Str {
+  Ok(blob_of(c.core with {url: url_with(c.url, Some(snapshot), None)?}))
+}
+
+/// This blob at `version_id` ("" for the current version), on the same
+/// pipeline (blob.Client.WithVersionID).
+pub fn (c: BlobClient[fx]) with_version_id(version_id: Str) -> BlobClient[fx] ! Str {
+  Ok(blob_of(c.core with {url: url_with(c.url, None, Some(version_id))?}))
+}
+
+/// appendblob.Client.WithSnapshot.
+pub fn (c: AppendBlobClient[fx]) with_snapshot(snapshot: Str) -> AppendBlobClient[fx] ! Str {
+  Ok(append_blob_of(c.core with {url: url_with(c.url, Some(snapshot), None)?}))
+}
+
+/// appendblob.Client.WithVersionID.
+pub fn (c: AppendBlobClient[fx]) with_version_id(version_id: Str) -> AppendBlobClient[fx] ! Str {
+  Ok(append_blob_of(c.core with {url: url_with(c.url, None, Some(version_id))?}))
+}
+
+/// pageblob.Client.WithSnapshot.
+pub fn (c: PageBlobClient[fx]) with_snapshot(snapshot: Str) -> PageBlobClient[fx] ! Str {
+  Ok(page_blob_of(c.core with {url: url_with(c.url, Some(snapshot), None)?}))
+}
+
+/// pageblob.Client.WithVersionID.
+pub fn (c: PageBlobClient[fx]) with_version_id(version_id: Str) -> PageBlobClient[fx] ! Str {
+  Ok(page_blob_of(c.core with {url: url_with(c.url, None, Some(version_id))?}))
+}
+
+/// blockblob.Client.WithSnapshot.
+pub fn (c: BlockBlobClient[fx]) with_snapshot(snapshot: Str) -> BlockBlobClient[fx] ! Str {
+  Ok(block_blob_of(c.core with {url: url_with(c.url, Some(snapshot), None)?}))
+}
+
+/// blockblob.Client.WithVersionID.
+pub fn (c: BlockBlobClient[fx]) with_version_id(version_id: Str) -> BlockBlobClient[fx] ! Str {
+  Ok(block_blob_of(c.core with {url: url_with(c.url, None, Some(version_id))?}))
+}

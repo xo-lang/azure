@@ -295,6 +295,13 @@ pub struct QueryParameters {
   /// separated (`srh`, `srq`).
   pub signed_request_headers: Str = ""
   pub signed_request_query_parameters: Str = ""
+  /// `skdutid` read from a URL (new_query_parameters), written even
+  /// without a key, as Go's; a signed SAS takes it from `delegation`.
+  pub signed_delegated_user_tenant_id: Str = ""
+  /// The layouts `st` and `se` were read in ("" is TIME_FORMAT), so
+  /// `encode` writes them back the same way.
+  pub start_format: Str = ""
+  pub expiry_format: Str = ""
 }
 
 /// The query string, keys sorted, as azblob's QueryParameters.Encode.
@@ -304,19 +311,21 @@ pub fn (p: QueryParameters) encode() -> Str {
     ("ss", p.services),
     ("srt", p.resource_types),
     ("spr", p.protocol),
-    ("st", opt_time(p.start)),
-    ("se", opt_time(p.expiry)),
+    ("st", if p.start.is_none() { "" } else { format_time_layout(p.start, p.start_format) }),
+    ("se", if p.expiry.is_none() { "" } else { format_time_layout(p.expiry, p.expiry_format) }),
     ("sip", p.ip_range),
     ("si", p.identifier),
     ("sr", p.resource),
     ("sp", p.permissions),
   ]
+  // with a key, its six fields are written even when empty, as Go's
+  var keyed: List[(Str, Str)] = []
   if let Some(k) = p.delegation {
-    pairs = pairs + [
+    keyed = [
       ("skoid", k.signed_oid),
       ("sktid", k.signed_tid),
-      ("skt", format_time(k.signed_start)),
-      ("ske", format_time(k.signed_expiry)),
+      ("skt", key_time(k.signed_start)),
+      ("ske", key_time(k.signed_expiry)),
       ("sks", k.signed_service),
       ("skv", k.signed_version),
     ]
@@ -334,7 +343,7 @@ pub fn (p: QueryParameters) encode() -> Str {
     ("scid", p.correlation_id),
     ("ses", p.encryption_scope),
     ("sduoid", p.signed_delegated_user_object_id),
-    ("skdutid", p.delegation.map(fn(k: exported.UserDelegationKey) -> Str { k.signed_delegated_user_tenant_id }) ?? ""),
+    ("skdutid", if p.signed_delegated_user_tenant_id != "" { p.signed_delegated_user_tenant_id } else { p.delegation.map(fn(k: exported.UserDelegationKey) -> Str { k.signed_delegated_user_tenant_id }) ?? "" }),
     ("srh", p.signed_request_headers),
     ("srq", p.signed_request_query_parameters),
   ]
@@ -344,7 +353,94 @@ pub fn (p: QueryParameters) encode() -> Str {
       v.add(k, x)
     }
   }
+  for (k, x) in keyed {
+    v.add(k, x)
+  }
   v.encode()
+}
+
+/// Go's zero time (year 1), which Go writes for a key time it could not
+/// read.
+fn zero_time() -> Time {
+  let d = time.date(1, 1, 1).ok() ?? return Time.UNIX_EPOCH
+  time.instant(d, time.ClockTime{hour: 0, minute: 0, second: 0, nanos: 0}, time.utc()).ok() ?? Time.UNIX_EPOCH
+}
+
+/// A key time as Go writes it: its zero time as `0001-01-01T00:00:00Z`.
+fn key_time(t: Time) -> Str {
+  if t == zero_time() { format_time_layout(None) } else { format_time(t) }
+}
+
+/// The SAS in `values` (azblob's NewQueryParameters: keys matched
+/// without case, the first value of each), and `values` without its SAS
+/// keys (deleteSASParametersFromValues). A time no layout reads is no
+/// time; an address that is not one is "". The user delegation key
+/// fields make `delegation` when `skoid` is set (Go writes them only
+/// then), its value empty; a key time Go cannot read is its zero time.
+pub fn new_query_parameters(values: url.Values) -> (QueryParameters, url.Values) {
+  var p = QueryParameters{signature: Secret.new("")}
+  var rest = values
+  var oid = ""
+  var tid = ""
+  var kstart = zero_time()
+  var kexpiry = zero_time()
+  var ksvc = ""
+  var kver = ""
+  for k in values.keys() {
+    let val = values.get(k) ?? ""
+    var known = true
+    match k.to_lower() {
+      "sv" => { p.version = val }
+      "ss" => { p.services = val }
+      "srt" => { p.resource_types = val }
+      "spr" => { p.protocol = val }
+      "snapshot" => { p.snapshot = parse_layout(val, TIME_FORMAT_FRACTION) }
+      "st" => {
+        let (t, f) = parse_time(val)
+        p.start = t
+        p.start_format = f
+      }
+      "se" => {
+        let (t, f) = parse_time(val)
+        p.expiry = t
+        p.expiry_format = f
+      }
+      "sip" => { p.ip_range = ip_range(val) }
+      "si" => { p.identifier = val }
+      "sr" => { p.resource = val }
+      "sp" => { p.permissions = val }
+      "sig" => { p.signature = Secret.new(val) }
+      "rscc" => { p.cache_control = val }
+      "rscd" => { p.content_disposition = val }
+      "rsce" => { p.content_encoding = val }
+      "rscl" => { p.content_language = val }
+      "rsct" => { p.content_type = val }
+      "skoid" => { oid = val }
+      "sktid" => { tid = val }
+      // Go reads the key times in TIME_FORMAT only.
+      "skt" => { kstart = parse_layout(val, TIME_FORMAT) ?? zero_time() }
+      "ske" => { kexpiry = parse_layout(val, TIME_FORMAT) ?? zero_time() }
+      "sks" => { ksvc = val }
+      "skv" => { kver = val }
+      "sdd" => { p.directory_depth = val }
+      "saoid" => { p.authorized_object_id = val }
+      "suoid" => { p.unauthorized_object_id = val }
+      "scid" => { p.correlation_id = val }
+      "ses" => { p.encryption_scope = val }
+      "sduoid" => { p.signed_delegated_user_object_id = val }
+      "skdutid" => { p.signed_delegated_user_tenant_id = val }
+      "srh" => { p.signed_request_headers = val }
+      "srq" => { p.signed_request_query_parameters = val }
+      _ => { known = false }
+    }
+    if known {
+      rest.remove(k)
+    }
+  }
+  if oid != "" {
+    p.delegation = Some(exported.UserDelegationKey{signed_oid: oid, signed_tid: tid, signed_start: kstart, signed_expiry: kexpiry, signed_service: ksvc, signed_version: kver, value: Secret.new("")})
+  }
+  (p, rest)
 }
 
 // Reading and writing a SAS as Go's storage sas packages do

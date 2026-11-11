@@ -15,6 +15,16 @@
   `ContainerClient.new_page_blob_client`. Checked against Go v1.8.3 on a
   fake service (`pagevectors_test.xo`, 22 cases, two pagers of two
   pages).
+- `parse_url` and `URLParts` (blob.ParseURL, sas.URLParts and its
+  String as `to_url`), and `with_snapshot` and `with_version_id` on the
+  blob, append blob, page blob and block blob clients. Checked against
+  Go v1.8.3 on 92 URLs (`urlvectors_test.xo`, `withvectors_test.xo`).
+- sas: `new_query_parameters` (sas.NewQueryParameters, the SAS keys
+  taken out of a query), `QueryParameters.signed_delegated_user_tenant_id`,
+  `start_format` and `expiry_format`; `encode` writes `st` and `se` in
+  the layout they were read with and a user delegation key's six fields
+  even when empty (Go's zero time as `0001-01-01T00:00:00Z`), as Go's
+  Encode does.
 - `AppendPositionAccessConditions`, `SourceModifiedAccessConditions`,
   `SourceCPKInfo`, `SequenceNumberAccessConditions`, `PAGE_BYTES`, the
   premium page blob tiers, the sequence number actions and

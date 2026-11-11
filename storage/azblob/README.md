@@ -68,8 +68,11 @@ Where it differs from Go v1.8.3:
 - Container calls take `ContainerConditions` (the two dates), the ones
   Go's options pass on; container `set_metadata` sends only
   If-Modified-Since, as Go's does.
-- Not ported yet: `blob.ParseURL` and `URLParts`, `with_snapshot` and
-  `with_version_id`, a blob SAS URL, structured message (transactional CRC64) downloads,
+- `parse_url` and `URLParts` are Go's `blob.ParseURL` and
+  `sas.URLParts`, except that of two query keys equal without case
+  (`snapshot` and `Snapshot`) the first in key order is read, where
+  Go's pick varies from run to run.
+- Not ported yet: a blob SAS URL, structured message (transactional CRC64) downloads,
   the container and blob pagers on the new clients, the block blob
   client's other calls (`get_block_list`, `upload_stream`,
   `upload_blob_from_url`, `stage_block_from_url`, ...), batch, and checksummed uploads and appends
