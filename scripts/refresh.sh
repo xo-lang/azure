@@ -97,6 +97,15 @@ awk -F'"' '/"Path":/ { p = $4 } /"Version":/ { v = $4 } /"Dir":/ { print p, v, $
 (cd codegen/gorows && $genv $go build -o "$work/gorows" .)
 env -i HOME="$work/gohome" PATH=/usr/bin:/bin "$work/gorows" "$PWD/codegen/.specs" < "$work/modlines" > "$work/rows.toml" 2> "$work/rows.problems" || true
 changed=$($xo run ./codegen/cmd/rows -- "$work/rows.toml")
+# A new module's spec folder is fetched only once its row names it, and
+# gorows reads that folder's readme for the tag: fetch, then derive the
+# rows again (2026-11-11: 16 of 27 new ARM families had "no tag" from
+# the first pass and failed to generate)
+if grep -q ': no tag' "$work/rows.problems"; then
+  codegen/fetch-specs.sh > "$work/fetch0.out"
+  env -i HOME="$work/gohome" PATH=/usr/bin:/bin "$work/gorows" "$PWD/codegen/.specs" < "$work/modlines" > "$work/rows.toml" 2> "$work/rows.problems" || true
+  changed=$( (echo "$changed"; $xo run ./codegen/cmd/rows -- "$work/rows.toml") | grep . | sort -u)
+fi
 echo "refresh: rows changed: $(echo "$changed" | grep -c . || true)"
 if [ $verify -eq 1 ]; then
   # every module that has a release and a row
@@ -114,12 +123,16 @@ for d in $changed; do
       if grep -q '^// DO NOT EDIT\.$' "$f"; then rm -f "$f"; fi
     done
   fi
-  # a new module joins the workspace (the generator writes its xo.mod)
-  grep -qx "use ./$d" xo.work || echo "use ./$d" >> xo.work
+  # a new module joins the workspace (the generator writes its xo.mod);
+  # one that fails to generate leaves it again, or every later xo command
+  # of the batch stops on its missing xo.mod (XO1301)
+  added=0
+  grep -qx "use ./$d" xo.work || { echo "use ./$d" >> xo.work; added=1; }
   if "$work/gen" "$d" > "$work/$(echo "$d" | tr / _).gen" 2>&1; then
     echo "$d generated"
   else
     echo "$d GENERATE-FAILED"
+    if [ $added -eq 1 ]; then grep -vx "use ./$d" xo.work > "$work/xo.work.tmp"; cat "$work/xo.work.tmp" > xo.work; fi
   fi
 done > "$work/gen.out"
 

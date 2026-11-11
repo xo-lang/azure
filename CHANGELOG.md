@@ -5,6 +5,20 @@ Changes to the root module (`github.com/xo-lang/azure`: `azcore`,
 first. Each module under it (`storage/azblob`, `data/azcosmos`, ...) keeps
 its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
+## Unreleased
+
+ARM: a full index.golang.org scan counts 331 Go resourcemanager modules
+with a release Go has not retracted. New: 22 families whose specs left
+the specs repo after Go's release (armblockchain, armmysql,
+armstorsimple1200series, ...); refreshed: armaiinfraoptimization v0.1.1,
+armcommvaultcontentstore v2.0.0 and armhorizondb v0.4.0. 326 are
+Go-verified; armmachinelearningservices, armmobilenetwork and
+armstorsimple8000series compile, with Go vectors still failing;
+armmediaservices and armvideoanalyzer are not generated yet (Go renames
+their operations in readme.go.md). scripts/refresh.sh derives a new module's
+row again once its spec folder is fetched, and drops a module that fails
+to generate from xo.work.
+
 ## v0.1.0
 
 The first tagged release: every module of github.com/xo-lang/azure is
