@@ -41,7 +41,7 @@ with a release Go has not retracted, and resourcemanager/internal).
 
 | Go module | latest | kind | Go hand-written lines | Go lines | our port | our lines (hand + generated) | popularity |
 |---|---|---|---:|---:|---|---|---|
-| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | v0.9.0 Azure types; the openai half pending xo-lang/openai's first release | 315 + 952 gen |  |
+| ai/azopenai | v0.9.0 | v0 | 284 | 3931 | v0.9.0 Azure types; the client is github.com/xo-lang/openai v0.1.0 | 315 + 952 gen |  |
 | ai/azopenaiassistants | v0.4.0 | v0, deprecated | 1546 | 13412 | missing |  |  |
 | ai/azopenaiextensions | v0.2.0 | v0, deprecated | 290 | 3840 | missing |  |  |
 | azcore | v1.24.0 | stable | 8168 | 9190 | v1.24.0 | 2686 |  |
@@ -498,7 +498,8 @@ patches, and its challenge policy, chunk upload and digest helpers
 written by hand, with requests checked against Go's own. azcore's SSE
 streaming is done (the reader, SSEResponse, and a streamed response
 body in the pipeline). ai/azopenai v0.9.0 has no client (it extends
-openai-go v3, which is not an Azure module): its Azure models are
+openai-go v3, which is not an Azure module; its Xo port is
+github.com/xo-lang/openai v0.1.0): its Azure models are
 generated and its MongoDB embedding dependency, request options,
 response accessors and ExtractContentFilterError written by hand over
 JSON, every case checked against Go's own. messaging/eventgrid/
