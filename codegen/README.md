@@ -93,6 +93,11 @@ response type equal, except armkeyvault's `Secret`, which is
   `seal_single_value_enums` (a row's autorest.md
   `seal-single-value-enum-by-default`) adds those that leave it unset, and a required parameter
   of that kind is a constant (`blobServices/default`).
+- readme.go.md's operation renames are applied: `rename-operation`
+  (`OperationResults_Get` to `AssetTrackOperationResults_Get`,
+  armmediaservices), and a `where: $.paths.*[?(@.operationId.startsWith("X_"))]`
+  transform that sets `$["operationId"]` to its `.replace("X_", "Y_")`
+  (armvideoanalyzer's `PrivateEndpointConnectionsOperationResults_`).
 - readme.go.md directives that assign values under `$.definitions.X`
   are applied (armstorage's `CorsRuleAllowedMethodsItem`), scoped by
   `from:`, with `where:` paths into a definition and `delete $["k"]`

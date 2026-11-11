@@ -10,12 +10,12 @@ What this repo ports of Go's `github.com/Azure/azure-sdk-for-go/sdk`,
 checked against Go's own code (full table:
 [docs/reports/azure-go-coverage.md](docs/reports/azure-go-coverage.md)):
 
-- **ARM (resource manager): 326 of Go's 331 modules Go-verified.**
+- **ARM (resource manager): 327 of Go's 331 modules Go-verified.**
   Every module is generated from the spec Go's own release pins, and
   every call of every client of a Go-verified module is checked against
-  a local Go program's requests and results over a fake transport; 3
-  more compile with Go vectors still failing, and 2 are not generated
-  yet (the coverage report lists them).
+  a local Go program's requests and results over a fake transport; the
+  other 4 compile, with Go vectors still failing (the coverage report
+  lists them).
 - **Data plane: 28 of Go's 36 library modules ported** (the other 4
   of its 40 are support and sample modules), each at Go's latest
   release: azcore, azidentity, Storage (blob, Data Lake, files,

@@ -4,9 +4,12 @@
 // `$.definitions.X.properties.y`) with `transform: $['a']['b'] = 'v'`
 // and `delete $['a']` statements, `where: $.definitions` with `delete
 // $['X']` (the definition dropped), and autorest's `rename-model` and
-// `where-model` + `rename-property`. They rename types and fields for Go
-// (decision 0002, amendment 2). Any other directive is reported, not
-// applied.
+// `where-model` + `rename-property`, and operation renames: autorest's
+// `rename-operation` and an operationId prefix replaced (`where:
+// $.paths.*[?(@.operationId.startsWith("X_"))]` with `$["operationId"] =
+// $["operationId"].replace("X_", "Y_")`). They rename types, fields and
+// operations for Go (decision 0002, amendment 2). Any other directive is
+// reported, not applied.
 
 use std/json
 use std/regexp
@@ -36,9 +39,20 @@ pub struct Rename {
   pub to: Str
 }
 
+/// An operation renamed: `rename-operation` (the operationId `from`
+/// becomes `to`), or with `prefix`, every operationId that starts with
+/// `from` gets `to` in its place (armvideoanalyzer's `OperationResults_`
+/// to `PrivateEndpointConnectionsOperationResults_`).
+pub struct OpRename {
+  pub from: Str
+  pub to: Str
+  pub prefix: Bool = false
+}
+
 pub struct Directives {
   pub assigns: List[Assign] = []
   pub renames: List[Rename] = []
+  pub op_renames: List[OpRename] = []
   /// Directives not applied, as their `where` text.
   pub skipped: List[Str] = []
 }
@@ -62,6 +76,8 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
   let del = regexp.compile("delete\\s+\\$((?:\\[['\"][^'\"]+['\"]\\])+)") ?? e => return Err(e.display())
   let stmt = regexp.compile("\\$((?:\\[['\"][^'\"]+['\"]\\])+)\\s*=\\s*(?:'([^']*)'|\"([^\"]*)\"|(true|false))") ?? e => return Err(e.display())
   let key = regexp.compile("\\[['\"]([^'\"]+)['\"]\\]") ?? e => return Err(e.display())
+  let op_where = regexp.compile("^\\$\\.paths\\.\\*\\[\\?\\(@\\.operationId\\.startsWith\\(['\"]([^'\"]+)['\"]\\)\\)\\]$") ?? e => return Err(e.display())
+  let op_replace = regexp.compile("\\$\\[['\"]operationId['\"]\\]\\s*=\\s*\\$\\[['\"]operationId['\"]\\]\\.replace\\(['\"]([^'\"]+)['\"],\\s*['\"]([^'\"]+)['\"]\\)") ?? e => return Err(e.display())
   var out = Directives{}
   var block = ""
   var inside = false
@@ -104,6 +120,21 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
             if str_at(Some(rm), "from") != "" && str_at(Some(rm), "to") != "" {
               out.renames.push(Rename{from: str_at(Some(rm), "from"), to: str_at(Some(rm), "to")})
               n += 1
+            }
+          }
+          if let Some(ro) = d.get("rename-operation") {
+            if str_at(Some(ro), "from") != "" && str_at(Some(ro), "to") != "" {
+              out.op_renames.push(OpRename{from: str_at(Some(ro), "from"), to: str_at(Some(ro), "to")})
+              n += 1
+            }
+          }
+          if let Some(pw) = op_where.captures(w) {
+            if let Some(pr) = op_replace.captures(tr) {
+              let pre = pw[1] ?? ""
+              if pre != "" && pr[1] == Some(pre) {
+                out.op_renames.push(OpRename{from: pre, to: pr[2] ?? "", prefix: true})
+                n += 1
+              }
             }
           }
           let wm = str_at(Some(d), "where-model")
@@ -290,6 +321,56 @@ pub fn apply_renames(doc: json.Value, renames: List[Rename]) -> (json.Value, Int
     }
   }
   (d, n)
+}
+
+/// `doc` with its operations renamed, and how many operationIds changed.
+pub fn apply_op_renames(doc: json.Value, renames: List[OpRename]) -> (json.Value, Int) {
+  if renames.len() == 0 {
+    return (doc, 0)
+  }
+  var n = 0
+  let paths = match doc.get("paths") {
+    Some(json.Value.Object(ps)) => ps
+    _ => return (doc, 0)
+  }
+  let renamed = fn(id: Str) -> Str {
+    var out = id
+    for r in renames {
+      if r.prefix && out.starts_with(r.from) {
+        out = "${r.to}${out[r.from.len()..out.len()]}"
+      } else if !r.prefix && out == r.from {
+        out = r.to
+      }
+    }
+    out
+  }
+  var ps2: List[(Str, json.Value)] = []
+  for (path, item) in paths {
+    let ms = match item {
+      json.Value.Object(ms) => ms
+      other => {
+        ps2.push((path, other))
+        continue
+      }
+    }
+    var ms2: List[(Str, json.Value)] = []
+    for (method, op) in ms {
+      match op.get("operationId") {
+        Some(json.Value.Str(id)) => {
+          let to = renamed(id)
+          if to != id {
+            n += 1
+            ms2.push((method, set_at(op, ["operationId"], json.Value.Str(to))))
+          } else {
+            ms2.push((method, op))
+          }
+        }
+        _ => ms2.push((method, op))
+      }
+    }
+    ps2.push((path, json.Value.Object(ms2)))
+  }
+  (set_at(doc, ["paths"], json.Value.Object(ps2)), n)
 }
 
 /// One edit of a spec file, a structured form of an autorest.md

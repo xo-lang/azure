@@ -7,6 +7,12 @@ its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
 ## Unreleased
 
+Generator: readme.go.md's `rename-operation` and operationId prefix
+replaces (`$["operationId"].replace("X_", "Y_")`) are applied:
+armmediaservices v3.4.1 is generated and Go-verified (327), and
+armvideoanalyzer v0.4.2 is generated and compiles (its Go module needs
+azcore v0.23, which the Go vector program does not support yet).
+
 ARM: a full index.golang.org scan counts 331 Go resourcemanager modules
 with a release Go has not retracted. New: 22 families whose specs left
 the specs repo after Go's release (armblockchain, armmysql,
