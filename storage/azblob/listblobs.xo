@@ -1,0 +1,503 @@
+// The container client's blob listings, as azblob v1.8.3's
+// container.Client.NewListBlobsFlatPager and NewListBlobsHierarchyPager
+// and the generated models they decode (MIT, Copyright (c) Microsoft
+// Corporation; NOTICE.md), in the XML response format (Go's default; its
+// Apache Arrow format is not ported). The XML is read as Go's
+// encoding/xml reads it into those models: a number, bool, time or MD5
+// that does not parse fails the page, an empty one is unset (a number or
+// bool 0 or false), a repeated element's last value wins, and repeated
+// lists and properties merge.
+
+use std/base64
+use std/http
+use std/url
+use std/xml
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+
+/// What a listing includes beside the blobs (container.ListBlobsInclude).
+pub struct ListBlobsInclude {
+  pub copy: Bool = false
+  pub metadata: Bool = false
+  pub snapshots: Bool = false
+  pub uncommitted_blobs: Bool = false
+  pub deleted: Bool = false
+  pub tags: Bool = false
+  pub versions: Bool = false
+  pub legal_hold: Bool = false
+  pub immutability_policy: Bool = false
+  pub deleted_with_versions: Bool = false
+  pub permissions: Bool = false
+}
+
+/// The `include` query, in Go's order (ListBlobsInclude.format).
+fn include_query(i: ListBlobsInclude) -> List[(Str, Str)] {
+  var xs: List[Str] = []
+  if i.copy { xs.push("copy") }
+  if i.deleted { xs.push("deleted") }
+  if i.deleted_with_versions { xs.push("deletedwithversions") }
+  if i.immutability_policy { xs.push("immutabilitypolicy") }
+  if i.legal_hold { xs.push("legalhold") }
+  if i.metadata { xs.push("metadata") }
+  if i.snapshots { xs.push("snapshots") }
+  if i.tags { xs.push("tags") }
+  if i.uncommitted_blobs { xs.push("uncommittedblobs") }
+  if i.versions { xs.push("versions") }
+  if i.permissions { xs.push("permissions") }
+  if xs.is_empty() { [] } else { [("include", xs.join(","))] }
+}
+
+pub struct ListBlobsFlatOptions {
+  pub include: ListBlobsInclude = ListBlobsInclude{}
+  /// Where to start (a page's `next_marker`).
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+  /// The first blob name to list, inclusive.
+  pub start_from: Str? = None
+}
+
+pub struct ListBlobsHierarchyOptions {
+  pub include: ListBlobsInclude = ListBlobsInclude{}
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+  pub start_from: Str? = None
+}
+
+/// A listed blob's properties (Go's container.BlobProperties).
+pub struct BlobItemProperties {
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub acl: Str? = None
+  pub access_tier: Str? = None
+  pub access_tier_change_time: Time? = None
+  pub access_tier_inferred: Bool? = None
+  pub archive_status: Str? = None
+  pub blob_sequence_number: Int? = None
+  pub blob_type: Str? = None
+  pub cache_control: Str? = None
+  pub content_disposition: Str? = None
+  pub content_encoding: Str? = None
+  pub content_language: Str? = None
+  pub content_length: Int? = None
+  pub content_md5: Bytes? = None
+  pub content_type: Str? = None
+  pub copy_completion_time: Time? = None
+  pub copy_id: Str? = None
+  pub copy_progress: Str? = None
+  pub copy_source: Str? = None
+  pub copy_status: Str? = None
+  pub copy_status_description: Str? = None
+  pub creation_time: Time? = None
+  pub customer_provided_key_sha256: Str? = None
+  pub deleted_time: Time? = None
+  pub destination_snapshot: Str? = None
+  pub encryption_scope: Str? = None
+  pub expires_on: Time? = None
+  pub group: Str? = None
+  pub immutability_policy_expires_on: Time? = None
+  pub immutability_policy_mode: Str? = None
+  pub incremental_copy: Bool? = None
+  pub is_sealed: Bool? = None
+  pub last_accessed_on: Time? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub legal_hold: Bool? = None
+  pub owner: Str? = None
+  pub permissions: Str? = None
+  pub rehydrate_priority: Str? = None
+  pub remaining_retention_days: Int? = None
+  pub resource_type: Str? = None
+  pub server_encrypted: Bool? = None
+  pub smart_access_tier: Str? = None
+  pub tag_count: Int? = None
+}
+
+/// A listed blob (Go's container.BlobItem): `name` decoded when the
+/// service sent it encoded.
+pub struct BlobItemInfo {
+  pub deleted: Bool? = None
+  pub name: Str? = None
+  pub properties: BlobItemProperties? = None
+  pub snapshot: Str? = None
+  /// The blob's tags (Go's BlobTags.BlobTagSet).
+  pub tags: List[BlobTag]? = None
+  pub has_versions_only: Bool? = None
+  pub is_current_version: Bool? = None
+  /// Keys lowercased, as Go reads them.
+  pub metadata: Map[Str, Str]? = None
+  pub or_metadata: Map[Str, Str]? = None
+  pub version_id: Str? = None
+}
+
+/// A virtual directory of a hierarchy listing (Go's container.BlobPrefix).
+pub struct BlobPrefixInfo {
+  pub name: Str? = None
+  pub properties: BlobItemProperties? = None
+}
+
+/// One page of a flat listing (container.ListBlobsFlatResponse): `blobs`
+/// is None when the page has no `<Blobs>` (Go's nil Segment).
+pub struct ListBlobsFlatResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub container_name: Str? = None
+  pub service_endpoint: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+  pub blobs: List[BlobItemInfo]? = None
+}
+
+/// One page of a hierarchy listing (container.ListBlobsHierarchyResponse):
+/// `blobs` and `prefixes` are None when the page has no `<Blobs>`.
+pub struct ListBlobsHierarchyResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub container_name: Str? = None
+  pub service_endpoint: Str? = None
+  pub delimiter: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+  pub blobs: List[BlobItemInfo]? = None
+  pub prefixes: List[BlobPrefixInfo]? = None
+}
+
+// Go's encoding/xml rules.
+
+/// An element's own character data (a child element's is not its own).
+fn own_text(e: xml.Element) -> Str {
+  var t = ""
+  for n in e.children {
+    if let Text(s) = n {
+      t = t + s
+    }
+  }
+  t
+}
+
+fn child_elements(e: xml.Element) -> List[xml.Element] {
+  var out: List[xml.Element] = []
+  for n in e.children {
+    if let Elem(c) = n {
+      out.push(c)
+    }
+  }
+  out
+}
+
+/// The last child of that name: Go keeps a repeated field's last value.
+fn last_child(e: xml.Element, name: Str) -> xml.Element? {
+  e.children_named(name).last()
+}
+
+fn gx_str(e: xml.Element, name: Str, prev: Str?) -> Str? {
+  match last_child(e, name) {
+    Some(c) => Some(own_text(c))
+    None => prev
+  }
+}
+
+/// A signed integer of `bits` bits, as Go's copyValue reads one: empty
+/// is 0, else strconv.ParseInt of the trimmed text.
+fn gx_int(e: xml.Element, name: Str, bits: Int, prev: Int?) -> Int? ! Str {
+  let c = last_child(e, name) ?? return Ok(prev)
+  let raw = own_text(c)
+  if raw == "" {
+    return Ok(Some(0))
+  }
+  let t = raw.trim()
+  let n = Int.parse(t) ?? return Err("strconv.ParseInt: parsing ${go_quote(t)}: invalid syntax")
+  // Int is 64 bits, so Int.parse already holds a 64-bit field's range
+  if bits < 64 && (n < -(1 << (bits - 1)) || n >= 1 << (bits - 1)) {
+    return Err("strconv.ParseInt: parsing ${go_quote(t)}: value out of range")
+  }
+  Ok(Some(n))
+}
+
+fn gx_bool(e: xml.Element, name: Str, prev: Bool?) -> Bool? ! Str {
+  let c = last_child(e, name) ?? return Ok(prev)
+  let raw = own_text(c)
+  if raw == "" {
+    return Ok(Some(false))
+  }
+  match go_parse_bool(raw.trim()) {
+    Some(b) => Ok(Some(b))
+    None => Err("strconv.ParseBool: parsing ${go_quote(raw.trim())}: invalid syntax")
+  }
+}
+
+/// An RFC 1123 time (datetime.RFC7231): empty is unset, Go's zero time
+/// (year 1) is unset, any other text that does not parse fails.
+fn gx_time(e: xml.Element, name: Str, prev: Time?) -> Time? ! Str {
+  let c = last_child(e, name) ?? return Ok(prev)
+  let raw = own_text(c)
+  if raw == "" {
+    return Ok(prev)
+  }
+  if raw == "Mon, 01 Jan 0001 00:00:00 GMT" || raw == "Mon, 01 Jan 0001 00:00:00 UTC" {
+    return Ok(prev)
+  }
+  match rfc1123(raw) {
+    Some(t) => Ok(Some(t))
+    None => Err("parsing time ${go_quote(raw)} as \"Mon, 02 Jan 2006 15:04:05 MST\"")
+  }
+}
+
+/// Base64 bytes (runtime.DecodeByteArray): empty is unset, quotes are
+/// dropped.
+fn gx_md5(e: xml.Element, name: Str, prev: Bytes?) -> Bytes? ! Str {
+  let c = last_child(e, name) ?? return Ok(prev)
+  var p = own_text(c)
+  if p == "" {
+    return Ok(prev)
+  }
+  if p.len() >= 2 && p.starts_with("\"") && p.ends_with("\"") {
+    p = p[1..p.len() - 1]
+  }
+  match base64.decode(p) {
+    Ok(b) => Ok(Some(b))
+    Err(_) => Err("illegal base64 data")
+  }
+}
+
+fn go_quote(s: Str) -> Str {
+  "\"${s.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+}
+
+/// Metadata as Go's additionalProperties reads it: each element with no
+/// element inside it, its name lowercased, its last text; None when there
+/// is none.
+fn gx_meta(e: xml.Element, name: Str, prev: Map[Str, Str]?) -> Map[Str, Str]? {
+  var m = prev
+  for c in e.children_named(name) {
+    for (k, v) in leaves(c) {
+      var x = m ?? {}
+      x[k.to_lower()] = v
+      m = Some(x)
+    }
+  }
+  m
+}
+
+fn leaves(e: xml.Element) -> List[(Str, Str)] {
+  var out: List[(Str, Str)] = []
+  for c in child_elements(e) {
+    let kids = child_elements(c)
+    if kids.is_empty() {
+      // the last run of text Go saw before the end tag
+      var last = ""
+      for n in c.children {
+        if let Text(s) = n {
+          last = s
+        }
+      }
+      out.push((c.name.local, last))
+    } else {
+      out = out + leaves(c)
+    }
+  }
+  out
+}
+
+/// A name, decoded when `Encoded="true"` (url.QueryUnescape).
+fn gx_name(e: xml.Element, prev: Str?) -> Str? ! Str {
+  let c = last_child(e, "Name") ?? return Ok(prev)
+  let content = own_text(c)
+  let enc = match c.attr("Encoded") {
+    Some(v) => go_parse_bool(v.trim()) ?? return Err("strconv.ParseBool: parsing ${go_quote(v.trim())}: invalid syntax")
+    None => false
+  }
+  if !enc {
+    return Ok(Some(content))
+  }
+  match url.query_unescape(content) {
+    Ok(n) => Ok(Some(n))
+    Err(err) => Err(err.display())
+  }
+}
+
+fn properties_of(e: xml.Element, prev: BlobItemProperties?) -> BlobItemProperties? ! Str {
+  var p = prev
+  for c in e.children_named("Properties") {
+    let o = p ?? BlobItemProperties{}
+    p = Some(BlobItemProperties{
+      etag: gx_str(c, "Etag", o.etag),
+      last_modified: gx_time(c, "Last-Modified", o.last_modified)?,
+      acl: gx_str(c, "Acl", o.acl),
+      access_tier: gx_str(c, "AccessTier", o.access_tier),
+      access_tier_change_time: gx_time(c, "AccessTierChangeTime", o.access_tier_change_time)?,
+      access_tier_inferred: gx_bool(c, "AccessTierInferred", o.access_tier_inferred)?,
+      archive_status: gx_str(c, "ArchiveStatus", o.archive_status),
+      blob_sequence_number: gx_int(c, "x-ms-blob-sequence-number", 64, o.blob_sequence_number)?,
+      blob_type: gx_str(c, "BlobType", o.blob_type),
+      cache_control: gx_str(c, "Cache-Control", o.cache_control),
+      content_disposition: gx_str(c, "Content-Disposition", o.content_disposition),
+      content_encoding: gx_str(c, "Content-Encoding", o.content_encoding),
+      content_language: gx_str(c, "Content-Language", o.content_language),
+      content_length: gx_int(c, "Content-Length", 64, o.content_length)?,
+      content_md5: gx_md5(c, "Content-MD5", o.content_md5)?,
+      content_type: gx_str(c, "Content-Type", o.content_type),
+      copy_completion_time: gx_time(c, "CopyCompletionTime", o.copy_completion_time)?,
+      copy_id: gx_str(c, "CopyId", o.copy_id),
+      copy_progress: gx_str(c, "CopyProgress", o.copy_progress),
+      copy_source: gx_str(c, "CopySource", o.copy_source),
+      copy_status: gx_str(c, "CopyStatus", o.copy_status),
+      copy_status_description: gx_str(c, "CopyStatusDescription", o.copy_status_description),
+      creation_time: gx_time(c, "Creation-Time", o.creation_time)?,
+      customer_provided_key_sha256: gx_str(c, "CustomerProvidedKeySha256", o.customer_provided_key_sha256),
+      deleted_time: gx_time(c, "DeletedTime", o.deleted_time)?,
+      destination_snapshot: gx_str(c, "DestinationSnapshot", o.destination_snapshot),
+      encryption_scope: gx_str(c, "EncryptionScope", o.encryption_scope),
+      expires_on: gx_time(c, "Expiry-Time", o.expires_on)?,
+      group: gx_str(c, "Group", o.group),
+      immutability_policy_expires_on: gx_time(c, "ImmutabilityPolicyUntilDate", o.immutability_policy_expires_on)?,
+      immutability_policy_mode: gx_str(c, "ImmutabilityPolicyMode", o.immutability_policy_mode),
+      incremental_copy: gx_bool(c, "IncrementalCopy", o.incremental_copy)?,
+      is_sealed: gx_bool(c, "Sealed", o.is_sealed)?,
+      last_accessed_on: gx_time(c, "LastAccessTime", o.last_accessed_on)?,
+      lease_duration: gx_str(c, "LeaseDuration", o.lease_duration),
+      lease_state: gx_str(c, "LeaseState", o.lease_state),
+      lease_status: gx_str(c, "LeaseStatus", o.lease_status),
+      legal_hold: gx_bool(c, "LegalHold", o.legal_hold)?,
+      owner: gx_str(c, "Owner", o.owner),
+      permissions: gx_str(c, "Permissions", o.permissions),
+      rehydrate_priority: gx_str(c, "RehydratePriority", o.rehydrate_priority),
+      remaining_retention_days: gx_int(c, "RemainingRetentionDays", 32, o.remaining_retention_days)?,
+      resource_type: gx_str(c, "ResourceType", o.resource_type),
+      server_encrypted: gx_bool(c, "ServerEncrypted", o.server_encrypted)?,
+      smart_access_tier: gx_str(c, "SmartAccessTier", o.smart_access_tier),
+      tag_count: gx_int(c, "TagCount", 32, o.tag_count)?,
+    })
+  }
+  Ok(p)
+}
+
+fn tags_of(e: xml.Element) -> List[BlobTag]? {
+  let ts = e.children_named("Tags")
+  if ts.is_empty() {
+    return None
+  }
+  var out: List[BlobTag] = []
+  for t in ts {
+    for set in t.children_named("TagSet") {
+      for tag in set.children_named("Tag") {
+        out.push(BlobTag{key: gx_str(tag, "Key", None), value: gx_str(tag, "Value", None)})
+      }
+    }
+  }
+  Some(out)
+}
+
+fn blob_item_of(e: xml.Element) -> BlobItemInfo ! Str {
+  Ok(BlobItemInfo{
+    deleted: gx_bool(e, "Deleted", None)?,
+    name: gx_name(e, None)?,
+    properties: properties_of(e, None)?,
+    snapshot: gx_str(e, "Snapshot", None),
+    tags: tags_of(e),
+    has_versions_only: gx_bool(e, "HasVersionsOnly", None)?,
+    is_current_version: gx_bool(e, "IsCurrentVersion", None)?,
+    metadata: gx_meta(e, "Metadata", None),
+    or_metadata: gx_meta(e, "OrMetadata", None),
+    version_id: gx_str(e, "VersionId", None),
+  })
+}
+
+fn blob_prefix_of(e: xml.Element) -> BlobPrefixInfo ! Str {
+  Ok(BlobPrefixInfo{name: gx_name(e, None)?, properties: properties_of(e, None)?})
+}
+
+/// The `<Blobs>` of a page: None without one; every `<Blobs>`'s items
+/// and prefixes, in order.
+fn segment_of(doc: xml.Element) -> (List[BlobItemInfo], List[BlobPrefixInfo])? ! Str {
+  let segs = doc.children_named("Blobs")
+  if segs.is_empty() {
+    return Ok(None)
+  }
+  var items: List[BlobItemInfo] = []
+  var prefixes: List[BlobPrefixInfo] = []
+  for s in segs {
+    for b in s.children_named("Blob") {
+      items.push(blob_item_of(b)?)
+    }
+    for p in s.children_named("BlobPrefix") {
+      prefixes.push(blob_prefix_of(p)?)
+    }
+  }
+  Ok(Some((items, prefixes)))
+}
+
+fn list_doc(resp: http.Response) -> xml.Element ! Str {
+  xml.parse(resp.body.to_str_lossy()) ?? e => Err(e.display())
+}
+
+fn list_blobs_flat_of(resp: http.Response) -> ListBlobsFlatResponse ! Str {
+  let doc = list_doc(resp)?
+  let seg = segment_of(doc)?
+  Ok(ListBlobsFlatResponse{
+    response: response_of(resp),
+    content_type: r_str(resp, "Content-Type"),
+    container_name: doc.attr("ContainerName"),
+    service_endpoint: doc.attr("ServiceEndpoint"),
+    marker: gx_str(doc, "Marker", None),
+    max_results: gx_int(doc, "MaxResults", 32, None)?,
+    next_marker: gx_str(doc, "NextMarker", None),
+    prefix: gx_str(doc, "Prefix", None),
+    blobs: seg.map(fn(s: (List[BlobItemInfo], List[BlobPrefixInfo])) -> List[BlobItemInfo] { s.0 }),
+  })
+}
+
+fn list_blobs_hierarchy_of(resp: http.Response) -> ListBlobsHierarchyResponse ! Str {
+  let doc = list_doc(resp)?
+  let seg = segment_of(doc)?
+  Ok(ListBlobsHierarchyResponse{
+    response: response_of(resp),
+    content_type: r_str(resp, "Content-Type"),
+    container_name: doc.attr("ContainerName"),
+    service_endpoint: doc.attr("ServiceEndpoint"),
+    delimiter: gx_str(doc, "Delimiter", None),
+    marker: gx_str(doc, "Marker", None),
+    max_results: gx_int(doc, "MaxResults", 32, None)?,
+    next_marker: gx_str(doc, "NextMarker", None),
+    prefix: gx_str(doc, "Prefix", None),
+    blobs: seg.map(fn(s: (List[BlobItemInfo], List[BlobPrefixInfo])) -> List[BlobItemInfo] { s.0 }),
+    prefixes: seg.map(fn(s: (List[BlobItemInfo], List[BlobPrefixInfo])) -> List[BlobPrefixInfo] { s.1 }),
+  })
+}
+
+fn list_query(include: ListBlobsInclude, marker: Str?, max_results: Int?, prefix: Str?, start_from: Str?) -> List[(Str, Str)] {
+  include_query(include) + q_str("marker", marker) + q_str("maxresults", max_results.map(fn(n: Int) -> Str { "${n}" })) + q_str("prefix", prefix) + q_str("startFrom", start_from)
+}
+
+/// The next page's request: the marker set, until a page has none.
+fn next_by_marker(prev: policy.Request, marker: Str?) -> policy.Request? {
+  let m = marker ?? return None
+  if m == "" {
+    return None
+  }
+  Some(prev with {url: with_query(prev.url, [("marker", m)])})
+}
+
+/// The container's blobs, a page at a time
+/// (container.Client.NewListBlobsFlatPager).
+pub fn (c: ContainerClient[fx]) new_list_blobs_flat_pager(options: ListBlobsFlatOptions = ListBlobsFlatOptions{}) -> runtime.Pager[ListBlobsFlatResponse, fx] {
+  let o = options
+  let q = [("comp", "list"), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from)
+  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
+  runtime.new_pager_with(c.core.pipeline, first, list_blobs_flat_of, fn(prev: policy.Request, page: ListBlobsFlatResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
+}
+
+/// The container's blobs and virtual directories under `delimiter`, a
+/// page at a time (container.Client.NewListBlobsHierarchyPager).
+pub fn (c: ContainerClient[fx]) new_list_blobs_hierarchy_pager(delimiter: Str, options: ListBlobsHierarchyOptions = ListBlobsHierarchyOptions{}) -> runtime.Pager[ListBlobsHierarchyResponse, fx] {
+  let o = options
+  let q = [("comp", "list"), ("delimiter", delimiter), ("restype", "container")] + list_query(o.include, o.marker, o.max_results, o.prefix, o.start_from)
+  let first = policy.Request{method: "GET", url: with_query(c.url, q), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
+  runtime.new_pager_with(c.core.pipeline, first, list_blobs_hierarchy_of, fn(prev: policy.Request, page: ListBlobsHierarchyResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
+}

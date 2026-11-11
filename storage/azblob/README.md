@@ -14,7 +14,8 @@ What it does:
 - Go's clients, beside `Client` (which keeps its shape):
   `ServiceClient` (properties, account info, account SAS URL),
   `ContainerClient` (create, delete, restore, properties, metadata,
-  access policy, account info, SAS URL), `BlobClient` (properties, HTTP
+  access policy, account info, SAS URL, the flat and hierarchy blob
+  listings in Go's default XML format), `BlobClient` (properties, HTTP
   headers, metadata, tags, delete, `download_stream`,
   `download_buffer`, `download_file`, `set_tier`, `undelete`,
   `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url`,

@@ -1,0 +1,186 @@
+// The container client's flat and hierarchy blob listings against a fake
+// that answers as the Go program's fake does (listblobsvectors_test.xo):
+// the listing for the request's prefix and marker (LIST_BLOBS_BODIES), a
+// 403 for the container "denied".
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/runtime
+
+fn serve_list_blobs(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    let hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+    if req.url.path.contains("denied") {
+      return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+    }
+    let key = "${req.url.query.get("prefix") ?? ""}@${req.url.query.get("marker") ?? ""}"
+    var body = ""
+    for (k, b) in LIST_BLOBS_BODIES {
+      if k == key {
+        body = b
+      }
+    }
+    with_hs(http.text(200, body), hs + [("Content-Type", "application/xml")])
+  }
+  net.handle("GET ${BEP}/{c}", h)
+  log
+}
+
+fn (var d: Dump) props(p: Str, x: BlobItemProperties?) {
+  let o = x ?? return
+  d.s("${p}.ACL", o.acl)
+  d.s("${p}.AccessTier", o.access_tier)
+  d.t("${p}.AccessTierChangeTime", o.access_tier_change_time)
+  d.b("${p}.AccessTierInferred", o.access_tier_inferred)
+  d.s("${p}.ArchiveStatus", o.archive_status)
+  d.i("${p}.BlobSequenceNumber", o.blob_sequence_number)
+  d.s("${p}.BlobType", o.blob_type)
+  d.s("${p}.CacheControl", o.cache_control)
+  d.s("${p}.ContentDisposition", o.content_disposition)
+  d.s("${p}.ContentEncoding", o.content_encoding)
+  d.s("${p}.ContentLanguage", o.content_language)
+  d.i("${p}.ContentLength", o.content_length)
+  if let Some(m) = o.content_md5 { d.q("${p}.ContentMD5", Some(m)) }
+  d.s("${p}.ContentType", o.content_type)
+  d.t("${p}.CopyCompletionTime", o.copy_completion_time)
+  d.s("${p}.CopyID", o.copy_id)
+  d.s("${p}.CopyProgress", o.copy_progress)
+  d.s("${p}.CopySource", o.copy_source)
+  d.s("${p}.CopyStatus", o.copy_status)
+  d.s("${p}.CopyStatusDescription", o.copy_status_description)
+  d.t("${p}.CreationTime", o.creation_time)
+  d.s("${p}.CustomerProvidedKeySHA256", o.customer_provided_key_sha256)
+  d.t("${p}.DeletedTime", o.deleted_time)
+  d.s("${p}.DestinationSnapshot", o.destination_snapshot)
+  d.s("${p}.ETag", o.etag)
+  d.s("${p}.EncryptionScope", o.encryption_scope)
+  d.t("${p}.ExpiresOn", o.expires_on)
+  d.s("${p}.Group", o.group)
+  d.t("${p}.ImmutabilityPolicyExpiresOn", o.immutability_policy_expires_on)
+  d.s("${p}.ImmutabilityPolicyMode", o.immutability_policy_mode)
+  d.b("${p}.IncrementalCopy", o.incremental_copy)
+  d.b("${p}.IsSealed", o.is_sealed)
+  d.t("${p}.LastAccessedOn", o.last_accessed_on)
+  d.t("${p}.LastModified", o.last_modified)
+  d.s("${p}.LeaseDuration", o.lease_duration)
+  d.s("${p}.LeaseState", o.lease_state)
+  d.s("${p}.LeaseStatus", o.lease_status)
+  d.b("${p}.LegalHold", o.legal_hold)
+  d.s("${p}.Owner", o.owner)
+  d.s("${p}.Permissions", o.permissions)
+  d.s("${p}.RehydratePriority", o.rehydrate_priority)
+  d.i("${p}.RemainingRetentionDays", o.remaining_retention_days)
+  d.s("${p}.ResourceType", o.resource_type)
+  d.b("${p}.ServerEncrypted", o.server_encrypted)
+  d.s("${p}.SmartAccessTier", o.smart_access_tier)
+  d.i("${p}.TagCount", o.tag_count)
+}
+
+fn (var d: Dump) items(p: Str, xs: List[BlobItemInfo]) {
+  d.lines.push("${p}.len=${xs.len()}")
+  for (i, b) in xs.indexed() {
+    let q = "${p}[${i}]"
+    if let Some(ts) = b.tags {
+      d.lines.push("${q}.BlobTags.BlobTagSet.len=${ts.len()}")
+      for (j, t) in ts.indexed() {
+        d.s("${q}.BlobTags.BlobTagSet[${j}].Key", t.key)
+        d.s("${q}.BlobTags.BlobTagSet[${j}].Value", t.value)
+      }
+    }
+    d.b("${q}.Deleted", b.deleted)
+    d.b("${q}.HasVersionsOnly", b.has_versions_only)
+    d.b("${q}.IsCurrentVersion", b.is_current_version)
+    d.m("${q}.Metadata", b.metadata)
+    d.s("${q}.Name", b.name)
+    d.m("${q}.OrMetadata", b.or_metadata)
+    d.props("${q}.Properties", b.properties)
+    d.s("${q}.Snapshot", b.snapshot)
+    d.s("${q}.VersionID", b.version_id)
+  }
+}
+
+fn list_flat_dump(x: ListBlobsFlatResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContainerName", x.container_name)
+  d.s("ContentType", x.content_type)
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  d.s("Prefix", x.prefix)
+  if let Some(bs) = x.blobs { d.items("Segment.BlobItems", bs) }
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d
+}
+
+fn list_hier_dump(x: ListBlobsHierarchyResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContainerName", x.container_name)
+  d.s("ContentType", x.content_type)
+  d.s("Delimiter", x.delimiter)
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  d.s("Prefix", x.prefix)
+  if let Some(bs) = x.blobs { d.items("Segment.BlobItems", bs) }
+  if let Some(ps) = x.prefixes {
+    d.lines.push("Segment.BlobPrefixes.len=${ps.len()}")
+    for (i, p) in ps.indexed() {
+      d.s("Segment.BlobPrefixes[${i}].Name", p.name)
+      d.props("Segment.BlobPrefixes[${i}].Properties", p.properties)
+    }
+  }
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d
+}
+
+fn list_pages[T, fx: Effects](name: Str, pager: runtime.Pager[T, fx], dump: fn(T) -> Dump, log: Mutex[List[Str]]) -> List[Str] uses (net.dial, clock, rand, fx) {
+  var p = pager
+  var out: List[Str] = []
+  var i = 0
+  while p.more() {
+    i += 1
+    let r = p.next_page()
+    out = out + drain(log) + decode_shown("${name}, page ${i}", r, dump)
+    if r.is_err() {
+      break
+    }
+  }
+  out
+}
+
+fn list_blobs_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_list_blobs(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  var out: List[Str] = []
+  let all = ListBlobsInclude{copy: true, metadata: true, snapshots: true, uncommitted_blobs: true, deleted: true, tags: true, versions: true, legal_hold: true, immutability_policy: true, deleted_with_versions: true, permissions: true}
+  out = out + list_pages("l1 flat with every option", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{include: all, max_results: Some(2), prefix: Some("full"), start_from: Some("full/a")}), list_flat_dump, log)
+  out = out + list_pages("l2 flat from a marker", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{include: ListBlobsInclude{metadata: true, tags: true}, marker: Some("m2"), prefix: Some("full")}), list_flat_dump, log)
+  out = out + list_pages("l3 hierarchy", c.new_list_blobs_hierarchy_pager("/", ListBlobsHierarchyOptions{prefix: Some("dir/"), include: ListBlobsInclude{versions: true}}), list_hier_dump, log)
+  var hp = c.new_list_blobs_hierarchy_pager("|", ListBlobsHierarchyOptions{prefix: Some("empty")})
+  let r4 = hp.next_page()
+  out = out + drain(log) + decode_shown("l4 hierarchy, no <Blobs>", r4, list_hier_dump)
+  let keys = ["empty", "emptyblobs", "edge", "md5twice", "badint", "badbool", "badtime", "badmd5", "badname", "badenc", "bigmax", "spaceint", "notxml"]
+  for (i, k) in keys.indexed() {
+    out = out + list_pages("l${5 + i} flat ${k}", c.new_list_blobs_flat_pager(ListBlobsFlatOptions{prefix: Some(k)}), list_flat_dump, log)
+  }
+  out = out + list_pages("l${5 + keys.len()} flat, denied", svc.new_container_client("denied").new_list_blobs_flat_pager(), list_flat_dump, log)
+  Ok(out)
+}
+
+test "the container client's blob listings send what Go sends and read what Go reads" {
+  let got = list_blobs_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < LIST_BLOBS_OUTPUT.len() && got[i] != LIST_BLOBS_OUTPUT[i] {
+      expect(got[i]) == LIST_BLOBS_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == LIST_BLOBS_OUTPUT.len()
+}

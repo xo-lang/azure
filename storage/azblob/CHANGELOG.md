@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `ContainerClient.new_list_blobs_flat_pager` and
+  `new_list_blobs_hierarchy_pager` (container.Client's, in Go's default
+  XML response format; its Apache Arrow format is not ported), with
+  `ListBlobsInclude`, `BlobItemInfo`, `BlobItemProperties` (all 46 of
+  Go's BlobProperties) and `BlobPrefixInfo`. The XML is read as Go's
+  encoding/xml reads it: an encoded name is decoded, metadata keys are
+  lowercased, a bad number, bool, time or MD5 fails the page, an empty
+  one is unset (a number or bool 0 or false), Go's zero time is unset,
+  and repeated `<Blobs>` and `<Properties>` merge. Checked against Go
+  v1.8.3 on a fake service (`listblobsvectors_test.xo`, 18 listings).
+
 - Blob batch (container and service BatchBuilder and SubmitBatch):
   `new_batch_builder` on `ContainerClient` and `ServiceClient`,
   `ContainerBatchBuilder` and `ServiceBatchBuilder` (`delete`,
