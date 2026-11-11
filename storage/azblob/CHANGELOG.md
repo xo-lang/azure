@@ -15,6 +15,15 @@
   `ContainerClient.new_page_blob_client`. Checked against Go v1.8.3 on a
   fake service (`pagevectors_test.xo`, 22 cases, two pagers of two
   pages).
+- `BlockBlobClient.stage_block_from_url`, `upload_blob_from_url` and
+  `get_block_list` (blockblob.Client.StageBlockFromURL,
+  UploadBlobFromURL and GetBlockList), with `BlockListInfo`,
+  `BlockInfo`, the `BLOCK_LIST_TYPE_` and `BLOB_COPY_SOURCE_TAGS_`
+  constants and `SourceModifiedAccessConditions.source_if_tags` (sent
+  only by `upload_blob_from_url`, as Go sends it). Checked against Go
+  v1.8.3 on a fake service (`blocklistvectors_test.xo`, 16 cases: an
+  empty body is an empty list, an empty `<Size>` is 0, a name is not
+  trimmed).
 - `parse_url` and `URLParts` (blob.ParseURL, sas.URLParts and its
   String as `to_url`), and `with_snapshot` and `with_version_id` on the
   blob, append blob, page blob and block blob clients. Checked against

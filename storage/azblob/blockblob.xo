@@ -410,3 +410,199 @@ pub fn (b: BlockBlobClient) upload_file(file: File, options: UploadFileOptions =
   let r = b.commit_block_list(ids, commit_options_of(options)) ?? e => return Err(TransferErr.Call(e))
   Ok(from_commit(r))
 }
+
+// Stage block from URL.
+
+pub struct StageBlockFromURLOptions {
+  /// The source's credential: `Bearer <token>` (Go's
+  /// CopySourceAuthorization).
+  pub copy_source_authorization: Str? = None
+  /// The blob's lease (Go's LeaseAccessConditions).
+  pub lease_id: Str? = None
+  /// The source's conditions; `source_if_tags` is not sent, as Go's
+  /// StageBlockFromURL drops it.
+  pub source_conditions: SourceModifiedAccessConditions? = None
+  /// `FILE_REQUEST_INTENT_BACKUP` for a source that is a file share.
+  pub file_request_intent: Str? = None
+  /// The source's bytes to copy (`x-ms-source-range`); all of it when
+  /// unset.
+  pub range: HTTPRange = HTTPRange{}
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub source_cpk_info: SourceCPKInfo? = None
+}
+
+pub struct StageBlockFromURLResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+}
+
+/// Copies an uncommitted block from `source_url` (a public or SAS URL,
+/// or one `copy_source_authorization` admits), `base64_block_id` naming
+/// it (blockblob.Client.StageBlockFromURL).
+pub fn (b: BlockBlobClient) stage_block_from_url(base64_block_id: Str, source_url: Str, options: StageBlockFromURLOptions = StageBlockFromURLOptions{}) -> StageBlockFromURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = [("x-ms-copy-source", source_url)] + h_str("x-ms-copy-source-authorization", o.copy_source_authorization) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-file-request-intent", o.file_request_intent) + h_str("x-ms-lease-id", o.lease_id) + source_cpk_headers(o.source_cpk_info) + source_conditions_headers(o.source_conditions) + h_str("x-ms-source-range", format_http_range(o.range))
+  let resp = b.core.send(Call{method: "PUT", query: [("blockid", base64_block_id), ("comp", "block")], headers: hs, ok: [201]})?
+  Ok(StageBlockFromURLResponse{
+    response: response_of(resp),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+  })
+}
+
+// Upload blob from URL.
+
+/// Copy the source blob's tags (`x-ms-copy-source-tag-option`).
+pub const BLOB_COPY_SOURCE_TAGS_COPY: Str = "COPY"
+/// Set the tags given (the default).
+pub const BLOB_COPY_SOURCE_TAGS_REPLACE: Str = "REPLACE"
+
+pub struct UploadBlobFromURLOptions {
+  pub tags: Map[Str, Str]? = None
+  /// The source's credential: `Bearer <token>`.
+  pub copy_source_authorization: Str? = None
+  /// `FILE_REQUEST_INTENT_BACKUP` for a source that is a file share.
+  pub file_request_intent: Str? = None
+  /// Whether the source's properties are copied (the service's default
+  /// is true).
+  pub copy_source_blob_properties: Bool? = None
+  /// `BLOB_COPY_SOURCE_TAGS_COPY` or `..._REPLACE`.
+  pub copy_source_tags: Str? = None
+  pub metadata: Map[Str, Str]? = None
+  /// The MD5 of the source's bytes, which the service checks.
+  pub source_content_md5: Bytes? = None
+  pub tier: Str? = None
+  pub source_cpk_info: SourceCPKInfo? = None
+  pub http_headers: HTTPHeaders? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub source_conditions: SourceModifiedAccessConditions? = None
+}
+
+pub struct UploadBlobFromURLResponse {
+  pub response: Response
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// Writes the whole blob from `copy_source`, replacing it, in one
+/// request the service serves (blockblob.Client.UploadBlobFromURL).
+pub fn (b: BlockBlobClient) upload_blob_from_url(copy_source: Str, options: UploadBlobFromURLOptions = UploadBlobFromURLOptions{}) -> UploadBlobFromURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let tags_src = o.source_conditions.and_then(fn(c: SourceModifiedAccessConditions) -> Str? { c.source_if_tags })
+  let hs = conditions_headers(o.conditions) + h_str("x-ms-access-tier", o.tier) + http_headers_headers(o.http_headers) + [("x-ms-blob-type", "BlockBlob"), ("x-ms-copy-source", copy_source)] + h_str("x-ms-copy-source-authorization", o.copy_source_authorization) + h_bool("x-ms-copy-source-blob-properties", o.copy_source_blob_properties) + h_str("x-ms-copy-source-tag-option", o.copy_source_tags) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-file-request-intent", o.file_request_intent) + h_meta(o.metadata) + h_str("x-ms-source-content-md5", b64(o.source_content_md5)) + source_cpk_headers(o.source_cpk_info) + source_conditions_headers(o.source_conditions) + h_str("x-ms-source-if-tags", tags_src) + tags_header(o.tags)
+  let resp = b.core.send(Call{method: "PUT", headers: hs, ok: [201]})?
+  Ok(UploadBlobFromURLResponse{
+    response: response_of(resp),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Get block list.
+
+/// Which blocks `get_block_list` lists (Go's BlockListType).
+pub const BLOCK_LIST_TYPE_COMMITTED: Str = "committed"
+pub const BLOCK_LIST_TYPE_UNCOMMITTED: Str = "uncommitted"
+pub const BLOCK_LIST_TYPE_ALL: Str = "all"
+
+pub struct GetBlockListOptions {
+  pub snapshot: Str? = None
+  /// Only `lease_id` and `if_tags` are sent, as Go sends them.
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+/// One block: its base64 ID and size (blockblob.Block; `Block` is the
+/// older `Client.get_block_list`'s).
+pub struct BlockInfo {
+  pub name: Str? = None
+  pub size: Int? = None
+}
+
+/// A blob's blocks (blockblob.BlockList; `BlockList` is the older
+/// `Client.get_block_list`'s): an absent list is empty.
+pub struct BlockListInfo {
+  pub committed_blocks: List[BlockInfo] = []
+  pub uncommitted_blocks: List[BlockInfo] = []
+}
+
+pub struct GetBlockListResponse {
+  pub response: Response
+  pub block_list: BlockListInfo = BlockListInfo{}
+  pub blob_content_length: Int? = None
+  pub content_type: Str? = None
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+}
+
+/// A block's `Size` as Go's encoding/xml reads an int64: empty is 0,
+/// else the trimmed text in base 10.
+fn xml_int64(e: xml.Element, name: Str) -> Int? ! Str {
+  let t = c_text(e, name) ?? return Ok(None)
+  if t.is_empty() {
+    return Ok(Some(0))
+  }
+  match Int.parse(t.trim()) {
+    Some(n) => Ok(Some(n))
+    None => Err("strconv.ParseInt: parsing ${azcore.go_quote(t.trim())}: invalid syntax")
+  }
+}
+
+fn blocks_in(doc: xml.Element, list: Str) -> List[BlockInfo] ! Str {
+  var out: List[BlockInfo] = []
+  for l in doc.children_named(list) {
+    for e in l.children_named("Block") {
+      out.push(BlockInfo{name: c_text(e, "Name"), size: xml_int64(e, "Size")?})
+    }
+  }
+  Ok(out)
+}
+
+/// The block list body as Go's runtime.UnmarshalAsXML reads it: an empty
+/// body is an empty list.
+fn block_list_info(body: Str) -> BlockListInfo ! Str {
+  if body.is_empty() {
+    return Ok(BlockListInfo{})
+  }
+  let doc = xml.parse(body) ?? e => return Err("the block list is not XML: ${e.display()}")
+  Ok(BlockListInfo{committed_blocks: blocks_in(doc, "CommittedBlocks")?, uncommitted_blocks: blocks_in(doc, "UncommittedBlocks")?})
+}
+
+/// The blob's committed or uncommitted blocks, or both (`list_type`, a
+/// `BLOCK_LIST_TYPE_` constant; blockblob.Client.GetBlockList).
+pub fn (b: BlockBlobClient) get_block_list(list_type: Str, options: GetBlockListOptions = GetBlockListOptions{}) -> GetBlockListResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  var q = [("blocklisttype", list_type), ("comp", "blocklist")]
+  if let Some(s) = o.snapshot { q.push(("snapshot", s)) }
+  let hs = h_str("x-ms-if-tags", o.conditions.if_tags) + h_str("x-ms-lease-id", o.conditions.lease_id)
+  let resp = b.core.send(Call{method: "GET", query: q, headers: hs, ok: [200], accept: Some("application/xml")})?
+  Ok(GetBlockListResponse{
+    response: response_of(resp),
+    block_list: decode_body(resp, block_list_info)?,
+    blob_content_length: r_int(resp, "x-ms-blob-content-length"),
+    content_type: r_str(resp, "Content-Type"),
+    etag: r_str(resp, "ETag"),
+    last_modified: r_time(resp, "Last-Modified"),
+  })
+}

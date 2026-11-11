@@ -72,10 +72,13 @@ Where it differs from Go v1.8.3:
   `sas.URLParts`, except that of two query keys equal without case
   (`snapshot` and `Snapshot`) the first in key order is read, where
   Go's pick varies from run to run.
+- `BlockBlobClient.get_block_list` returns `BlockListInfo` and
+  `BlockInfo` (Go's blockblob.BlockList and Block): `BlockList` and
+  `Block` are the older `Client.get_block_list`'s, which stay as they
+  were.
 - Not ported yet: a blob SAS URL, structured message (transactional CRC64) downloads,
   the container and blob pagers on the new clients, the block blob
-  client's other calls (`get_block_list`, `upload_stream`,
-  `upload_blob_from_url`, `stage_block_from_url`, ...), batch, and checksummed uploads and appends
+  client's `upload_stream`, batch, and checksummed uploads and appends
   (`TransactionalValidation`, `SourceContentValidation`). The append
   and page blob clients' forwarders to the blob calls (`delete`, `set_tags`,
   ...) are reached through `blob_client()`.

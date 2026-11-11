@@ -1,0 +1,150 @@
+// Block blob stage_block_from_url, upload_blob_from_url and
+// get_block_list against a fake that answers as the Go program's fake
+// does (blocklistvectors_test.xo): a block list a 200 with the XML of
+// the blob's name, the other calls a 201 with checksums, a version ID
+// and the encryption headers; a blob named "denied" a 403.
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/azcore
+
+const BLOCK_LISTS: List[(Str, Str)] = [
+  ("list.txt", "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><CommittedBlocks><Block><Name>YmxrMQ==</Name><Size>4</Size></Block><Block><Name>YmxrMg==</Name><Size>6</Size></Block></CommittedBlocks><UncommittedBlocks><Block><Name>YmxrMw==</Name><Size>1</Size></Block></UncommittedBlocks></BlockList>"),
+  ("empty.txt", "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList />"),
+  ("lists.txt", "<BlockList><CommittedBlocks /><UncommittedBlocks></UncommittedBlocks></BlockList>"),
+  ("spaces.txt", "<BlockList><CommittedBlocks><Block><Name> a b </Name><Size> 7 </Size></Block><Block><Name></Name><Size></Size></Block><Block></Block></CommittedBlocks><CommittedBlocks><Block><Name>c2Vjb25k</Name><Size>-3</Size></Block></CommittedBlocks></BlockList>"),
+  ("bad.txt", "<BlockList><CommittedBlocks><Block><Name>x</Name><Size>x</Size></Block></CommittedBlocks></BlockList>"),
+  ("notxml.txt", "not xml"),
+]
+
+fn block_url_answer(req: http.Request) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  hs = hs + [("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let enc = [("x-ms-request-server-encrypted", "true"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1")]
+  match req.url.query.get("comp") ?? "" {
+    "blocklist" => {
+      let name = req.url.path.split("/").last() ?? ""
+      var body = ""
+      for (n, b) in BLOCK_LISTS {
+        if n == name {
+          body = b
+        }
+      }
+      with_hs(http.text(200, body), hs + [("Etag", "\"0x8D3\""), ("x-ms-blob-content-length", "10"), ("Content-Type", "application/xml")])
+    }
+    "block" => with_hs(http.empty(201), hs + [("ETag", "\"0x8D2\""), ("x-ms-content-crc64", "CQk="), ("Content-MD5", "AQID")] + enc)
+    _ => with_hs(http.empty(201), hs + [("ETag", "\"0x8D2\""), ("Content-MD5", "AQID"), ("x-ms-content-crc64", "CQk="), ("x-ms-version-id", "v2")] + enc)
+  }
+}
+
+fn serve_block_url(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    block_url_answer(req)
+  }
+  for m in ["GET", "PUT"] {
+    net.handle("${m} ${BEP}/{a}/{b}", h)
+  }
+  log
+}
+
+fn decode_shown[T](name: Str, r: Result[T, azcore.CallErr], dump: fn(T) -> Dump) -> List[Str] {
+  match r {
+    Err(Decode(_)) => ["== ${name}", "  error decode"]
+    _ => shown(name, r, dump)
+  }
+}
+
+fn stage_url_dump(x: StageBlockFromURLResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentCRC64", x.content_crc64)
+  d.q("ContentMD5", x.content_md5)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d
+}
+
+fn upload_url_dump(x: UploadBlobFromURLResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentCRC64", x.content_crc64)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn blocks_dump(var d: Dump, name: Str, bs: List[BlockInfo]) {
+  d.lines.push("${name}.len=${bs.len()}")
+  for (i, b) in bs.indexed() {
+    d.s("${name}[${i}].Name", b.name)
+    d.i("${name}[${i}].Size", b.size)
+  }
+}
+
+fn block_list_dump(x: GetBlockListResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.i("BlobContentLength", x.blob_content_length)
+  blocks_dump(d, "CommittedBlocks", x.block_list.committed_blocks)
+  d.s("ContentType", x.content_type)
+  d.s("ETag", x.etag)
+  d.t("LastModified", x.last_modified)
+  blocks_dump(d, "UncommittedBlocks", x.block_list.uncommitted_blocks)
+  d
+}
+
+fn block_url_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_block_url(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let bb = c.new_block_blob_client("big.bin")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let hh = HTTPHeaders{blob_cache_control: Some("no-cache"), blob_content_disposition: Some("inline"), blob_content_encoding: Some("identity"), blob_content_language: Some("en"), blob_content_md5: Some(b"\x01\x02\x03"), blob_content_type: Some("text/plain")}
+  let src = SourceModifiedAccessConditions{source_if_match: Some("\"s1\""), source_if_none_match: Some("s2"), source_if_modified_since: Some(when), source_if_unmodified_since: Some(when), source_if_tags: Some("s='2'")}
+  let skey = SourceCPKInfo{source_encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), source_encryption_key: Some("c2tleQ=="), source_encryption_key_sha256: Some("c2hhc2g=")}
+
+  out = out + add(shown("k1 stage block from URL with every option (no source if-tags)", bb.stage_block_from_url("YmxrMQ==", "https://src.example.test/c/s.bin?sv=2026-12-06&sr=b", StageBlockFromURLOptions{copy_source_authorization: Some("Bearer tok1"), lease_id: Some("l1"), source_conditions: Some(src), file_request_intent: Some(FILE_REQUEST_INTENT_BACKUP), range: HTTPRange{offset: 2, count: 10}, cpk_info: Some(cpk), encryption_scope: Some("scope1"), source_cpk_info: Some(skey)}), stage_url_dump))
+  out = out + add(shown("k2 stage block from URL, from an offset", bb.stage_block_from_url("YmxrMg==", "https://src.example.test/c/s.bin", StageBlockFromURLOptions{range: HTTPRange{offset: 7}}), stage_url_dump))
+  out = out + add(shown("k3 stage block from URL, no options", bb.stage_block_from_url("YmxrMw==", "https://src.example.test/c/s.bin"), stage_url_dump))
+  out = out + add(shown("k4 upload blob from URL with every option", bb.upload_blob_from_url("https://src.example.test/c/s.bin?sv=2026-12-06&sr=b", UploadBlobFromURLOptions{tags: Some({"team": "a&b c"}), copy_source_authorization: Some("Bearer tok1"), file_request_intent: Some(FILE_REQUEST_INTENT_BACKUP), copy_source_blob_properties: Some(false), copy_source_tags: Some(BLOB_COPY_SOURCE_TAGS_COPY), metadata: Some({"color": "blue"}), source_content_md5: Some(b"\x04\x05\x06"), tier: Some(ACCESS_TIER_COOL), source_cpk_info: Some(skey), http_headers: Some(hh), conditions: ac, cpk_info: Some(cpk), encryption_scope: Some("scope1"), source_conditions: Some(src)}), upload_url_dump))
+  out = out + add(shown("k5 upload blob from URL, no options", bb.upload_blob_from_url("https://src.example.test/c/s.bin"), upload_url_dump))
+  out = out + add(shown("k6 upload blob from URL, replace tags, empty tag map", bb.upload_blob_from_url("https://src.example.test/c/s.bin", UploadBlobFromURLOptions{copy_source_tags: Some(BLOB_COPY_SOURCE_TAGS_REPLACE), copy_source_blob_properties: Some(true), tags: Some({})}), upload_url_dump))
+  let types = [BLOCK_LIST_TYPE_ALL, BLOCK_LIST_TYPE_COMMITTED, BLOCK_LIST_TYPE_UNCOMMITTED, BLOCK_LIST_TYPE_ALL, BLOCK_LIST_TYPE_ALL, BLOCK_LIST_TYPE_ALL]
+  for (i, (name, _)) in BLOCK_LISTS.indexed() {
+    out = out + add(decode_shown("k${7 + i} get block list ${types[i]} ${name}", c.new_block_blob_client(name).get_block_list(types[i]), block_list_dump))
+  }
+  out = out + add(shown("k13 get block list with every option (lease and if-tags only)", bb.get_block_list(BLOCK_LIST_TYPE_COMMITTED, GetBlockListOptions{snapshot: Some("2026-11-01T00:00:00.0000000Z"), conditions: ac}), block_list_dump))
+  let d = c.new_block_blob_client("denied")
+  out = out + add(quiet("k14 stage block from URL, denied", d.stage_block_from_url("YQ==", "https://src.example.test/c/s.bin")))
+  out = out + add(quiet("k15 upload blob from URL, denied", d.upload_blob_from_url("https://src.example.test/c/s.bin")))
+  out = out + add(quiet("k16 get block list, denied", d.get_block_list(BLOCK_LIST_TYPE_ALL)))
+  Ok(out + drain(log))
+}
+
+test "block blob calls from a URL and the block list send what Go sends and read what Go reads" {
+  let got = block_url_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < BLOCK_URL_OUTPUT.len() && got[i] != BLOCK_URL_OUTPUT[i] {
+      expect(got[i]) == BLOCK_URL_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == BLOCK_URL_OUTPUT.len()
+}
