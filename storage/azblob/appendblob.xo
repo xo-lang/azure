@@ -1,0 +1,277 @@
+// Append blobs, as azblob v1.8.3's appendblob/client.go and models.go
+// (MIT, Copyright (c) Microsoft Corporation; NOTICE.md), with the
+// requests of its generated AppendBlobClient: Create, AppendBlock,
+// AppendBlockFromURL and Seal. The calls every blob has (delete, tags,
+// properties, ...) are on blob_client(), as Go's forward to it.
+// TransactionalValidation and SourceContentValidation are not ported.
+
+use std/url
+use github.com/xo-lang/azure/azcore
+
+/// `x-ms-file-request-intent` (blob.FileRequestIntentTypeBackup).
+pub const FILE_REQUEST_INTENT_BACKUP: Str = "backup"
+
+/// A client of one append blob.
+pub struct AppendBlobClient[fx: Effects] {
+  /// The blob's URL.
+  pub url: Str
+  core: Core[fx]
+}
+
+fn append_blob_of[fx: Effects](c: Core[fx]) -> AppendBlobClient[fx] {
+  AppendBlobClient{url: c.url, core: c}
+}
+
+/// An append blob client with Entra ID tokens (appendblob.NewClient).
+pub fn new_append_blob_client[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: azcore.TokenCredential[fx], options: ClientOptions[fx] = ClientOptions{}) -> AppendBlobClient[fx] {
+  append_blob_of(core_with_token(net, clock, rand, blob_url, cred, options))
+}
+
+pub fn new_append_blob_client_with_shared_key_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, cred: SharedKeyCredential, options: ClientOptions[fx] = ClientOptions{}) -> AppendBlobClient[fx] {
+  append_blob_of(core_with_shared_key(net, clock, rand, blob_url, cred, options))
+}
+
+/// An append blob client with no credential: a SAS in `blob_url`, or
+/// public access.
+pub fn new_append_blob_client_with_no_credential[fx: Effects](net: Net, clock: Clock, rand: Rand, blob_url: Str, options: ClientOptions[fx] = ClientOptions{}) -> AppendBlobClient[fx] {
+  append_blob_of(core_with_no_credential(net, clock, rand, blob_url, options))
+}
+
+pub fn new_append_blob_client_from_connection_string[fx: Effects](net: Net, clock: Clock, rand: Rand, connection_string: Str, container_name: Str, blob_name: Str, options: ClientOptions[fx] = ClientOptions{}) -> AppendBlobClient[fx] ! Str {
+  let p = parse_connection_string(connection_string)?
+  let u = join_paths(join_paths(p.service_url, container_name), blob_name)
+  if p.account_key != "" && p.account_name != "" {
+    return Ok(new_append_blob_client_with_shared_key_credential(net, clock, rand, u, new_shared_key_credential(p.account_name, p.account_key)?, options))
+  }
+  Ok(new_append_blob_client_with_no_credential(net, clock, rand, u, options))
+}
+
+/// The append blob `blob_name` in this container, on the same pipeline
+/// (ContainerClient.NewAppendBlobClient; the name escaped as one
+/// segment).
+pub fn (c: ContainerClient[fx]) new_append_blob_client(blob_name: Str) -> AppendBlobClient[fx] {
+  append_blob_of(c.core with {url: join_paths(c.url, url.path_escape(blob_name))})
+}
+
+/// The same blob as a BlobClient (appendblob.Client.BlobClient).
+pub fn (a: AppendBlobClient[fx]) blob_client() -> BlobClient[fx] {
+  blob_of(a.core)
+}
+
+/// Conditions on an append blob's length (Go's
+/// AppendPositionAccessConditions): `append_position`, the offset the
+/// block must start at; `max_size`, the length the blob must not pass.
+pub struct AppendPositionAccessConditions {
+  pub append_position: Int? = None
+  pub max_size: Int? = None
+}
+
+fn append_position_headers(a: AppendPositionAccessConditions?) -> List[(Str, Str)] {
+  match a {
+    Some(x) => h_int("x-ms-blob-condition-appendpos", x.append_position) + h_int("x-ms-blob-condition-maxsize", x.max_size)
+    None => []
+  }
+}
+
+/// Conditions on a copy's source (Go's SourceModifiedAccessConditions).
+pub struct SourceModifiedAccessConditions {
+  pub source_if_match: Str? = None
+  pub source_if_none_match: Str? = None
+  pub source_if_modified_since: Time? = None
+  pub source_if_unmodified_since: Time? = None
+}
+
+fn source_conditions_headers(a: SourceModifiedAccessConditions?) -> List[(Str, Str)] {
+  match a {
+    Some(x) => h_str("x-ms-source-if-match", x.source_if_match) + h_time("x-ms-source-if-modified-since", x.source_if_modified_since) + h_str("x-ms-source-if-none-match", x.source_if_none_match) + h_time("x-ms-source-if-unmodified-since", x.source_if_unmodified_since)
+    None => []
+  }
+}
+
+/// The customer-provided key of a copy's source (Go's SourceCPKInfo).
+pub struct SourceCPKInfo {
+  pub source_encryption_algorithm: Str? = None
+  pub source_encryption_key: Str? = None
+  pub source_encryption_key_sha256: Str? = None
+}
+
+fn source_cpk_headers(c: SourceCPKInfo?) -> List[(Str, Str)] {
+  match c {
+    Some(k) => h_str("x-ms-source-encryption-algorithm", k.source_encryption_algorithm) + h_str("x-ms-source-encryption-key", k.source_encryption_key) + h_str("x-ms-source-encryption-key-sha256", k.source_encryption_key_sha256)
+    None => []
+  }
+}
+
+// Create.
+
+pub struct CreateAppendBlobOptions {
+  pub immutability_policy_expiry_time: Time? = None
+  /// `IMMUTABILITY_POLICY_SETTING_LOCKED` or `..._UNLOCKED`.
+  pub immutability_policy_mode: Str? = None
+  pub legal_hold: Bool? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  pub http_headers: HTTPHeaders? = None
+  pub cpk_info: CPKInfo? = None
+  /// An encryption scope (Go's CPKScopeInfo).
+  pub encryption_scope: Str? = None
+  pub tags: Map[Str, Str]? = None
+  pub metadata: Map[Str, Str]? = None
+}
+
+pub struct CreateAppendBlobResponse {
+  pub response: Response
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub version_id: Str? = None
+}
+
+/// Creates an empty append blob, replacing any blob of that name
+/// (appendblob.Client.Create).
+pub fn (a: AppendBlobClient) create(options: CreateAppendBlobOptions = CreateAppendBlobOptions{}) -> CreateAppendBlobResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + http_headers_headers(o.http_headers) + [("x-ms-blob-type", "AppendBlob")] + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-immutability-policy-mode", o.immutability_policy_mode) + h_time("x-ms-immutability-policy-until-date", o.immutability_policy_expiry_time) + h_bool("x-ms-legal-hold", o.legal_hold) + h_meta(o.metadata) + tags_header(o.tags)
+  let resp = a.core.send(Call{method: "PUT", headers: hs, ok: [201]})?
+  Ok(CreateAppendBlobResponse{
+    response: response_of(resp),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+    version_id: r_str(resp, "x-ms-version-id"),
+  })
+}
+
+// Append block.
+
+pub struct AppendBlockOptions {
+  pub append_position_conditions: AppendPositionAccessConditions? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  pub conditions: AccessConditions = AccessConditions{}
+}
+
+pub struct AppendBlockResponse {
+  pub response: Response
+  /// The offset the block was written at.
+  pub blob_append_offset: Str? = None
+  pub blob_committed_block_count: Int? = None
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+  pub structured_body_type: Str? = None
+}
+
+/// Writes `body` as a new block at the end of the blob
+/// (appendblob.Client.AppendBlock).
+pub fn (a: AppendBlobClient) append_block(body: Bytes, options: AppendBlockOptions = AppendBlockOptions{}) -> AppendBlockResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + append_position_headers(o.append_position_conditions) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope)
+  let resp = a.core.send(Call{method: "PUT", query: [("comp", "appendblock")], headers: hs, body: Some(body), content_type: "application/octet-stream", ok: [201]})?
+  Ok(AppendBlockResponse{
+    response: response_of(resp),
+    blob_append_offset: r_str(resp, "x-ms-blob-append-offset"),
+    blob_committed_block_count: r_int(resp, "x-ms-blob-committed-block-count"),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+    structured_body_type: r_str(resp, "x-ms-structured-body"),
+  })
+}
+
+// Append block from URL.
+
+pub struct AppendBlockFromURLOptions {
+  /// The source's credential: `Bearer <token>` (Go's
+  /// CopySourceAuthorization).
+  pub copy_source_authorization: Str? = None
+  pub append_position_conditions: AppendPositionAccessConditions? = None
+  pub cpk_info: CPKInfo? = None
+  pub encryption_scope: Str? = None
+  /// `FILE_REQUEST_INTENT_BACKUP` for a source that is a file share.
+  pub file_request_intent: Str? = None
+  pub source_conditions: SourceModifiedAccessConditions? = None
+  pub conditions: AccessConditions = AccessConditions{}
+  /// The source's bytes to copy (`x-ms-source-range`); all of it when
+  /// unset.
+  pub range: HTTPRange = HTTPRange{}
+  pub source_cpk_info: SourceCPKInfo? = None
+}
+
+pub struct AppendBlockFromURLResponse {
+  pub response: Response
+  pub blob_append_offset: Str? = None
+  pub blob_committed_block_count: Int? = None
+  pub content_crc64: Bytes? = None
+  pub content_md5: Bytes? = None
+  pub etag: Str? = None
+  pub encryption_key_sha256: Str? = None
+  pub encryption_scope: Str? = None
+  pub is_server_encrypted: Bool? = None
+  pub last_modified: Time? = None
+}
+
+/// Appends a block the service copies from `source`, a URL it can read
+/// (public, or with a SAS or `copy_source_authorization`)
+/// (appendblob.Client.AppendBlockFromURL).
+pub fn (a: AppendBlobClient) append_block_from_url(source: Str, options: AppendBlockFromURLOptions = AppendBlockFromURLOptions{}) -> AppendBlockFromURLResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let hs = conditions_headers(o.conditions) + append_position_headers(o.append_position_conditions) + [("x-ms-copy-source", source)] + h_str("x-ms-copy-source-authorization", o.copy_source_authorization) + cpk_headers(o.cpk_info) + h_str("x-ms-encryption-scope", o.encryption_scope) + h_str("x-ms-file-request-intent", o.file_request_intent) + source_cpk_headers(o.source_cpk_info) + source_conditions_headers(o.source_conditions) + h_str("x-ms-source-range", format_http_range(o.range))
+  let resp = a.core.send(Call{method: "PUT", query: [("comp", "appendblock")], headers: hs, ok: [201]})?
+  Ok(AppendBlockFromURLResponse{
+    response: response_of(resp),
+    blob_append_offset: r_str(resp, "x-ms-blob-append-offset"),
+    blob_committed_block_count: r_int(resp, "x-ms-blob-committed-block-count"),
+    content_crc64: r_b64(resp, "x-ms-content-crc64"),
+    content_md5: r_b64(resp, "Content-MD5"),
+    etag: r_str(resp, "ETag"),
+    encryption_key_sha256: r_str(resp, "x-ms-encryption-key-sha256"),
+    encryption_scope: r_str(resp, "x-ms-encryption-scope"),
+    is_server_encrypted: r_bool(resp, "x-ms-request-server-encrypted"),
+    last_modified: r_time(resp, "Last-Modified"),
+  })
+}
+
+// Seal.
+
+pub struct SealAppendBlobOptions {
+  /// The lease and conditions; `if_tags` is not sent (Go's Seal drops it).
+  pub conditions: AccessConditions = AccessConditions{}
+  /// Only `append_position` is sent.
+  pub append_position_conditions: AppendPositionAccessConditions? = None
+}
+
+pub struct SealAppendBlobResponse {
+  pub response: Response
+  pub etag: Str? = None
+  pub is_sealed: Bool? = None
+  pub last_modified: Time? = None
+}
+
+/// Makes the blob read only: no block can be appended after
+/// (appendblob.Client.Seal).
+pub fn (a: AppendBlobClient) seal(options: SealAppendBlobOptions = SealAppendBlobOptions{}) -> SealAppendBlobResponse ! azcore.CallErr uses (net.dial, clock, rand) {
+  let o = options
+  let pos = o.append_position_conditions.and_then(fn(p: AppendPositionAccessConditions) -> Int? { p.append_position })
+  let hs = conditions_headers(o.conditions with {if_tags: None}) + h_int("x-ms-blob-condition-appendpos", pos)
+  let resp = a.core.send(Call{method: "PUT", query: [("comp", "seal")], headers: hs, ok: [200]})?
+  Ok(SealAppendBlobResponse{
+    response: response_of(resp),
+    etag: r_str(resp, "ETag"),
+    is_sealed: r_bool(resp, "x-ms-blob-sealed"),
+    last_modified: r_time(resp, "Last-Modified"),
+  })
+}

@@ -1,5 +1,16 @@
 # azblob changes
 
+## Unreleased
+
+- `AppendBlobClient` (appendblob.Client): `create`, `append_block`,
+  `append_block_from_url` (source conditions, source key, range, copy
+  source authorization, file request intent) and `seal` (which, as Go's,
+  sends neither `x-ms-if-tags` nor the max size), its four constructors
+  and `ContainerClient.new_append_blob_client`. Checked against Go
+  v1.8.3 on a fake service (`appendvectors_test.xo`, 13 cases).
+- `AppendPositionAccessConditions`, `SourceModifiedAccessConditions`,
+  `SourceCPKInfo` and `FILE_REQUEST_INTENT_BACKUP`.
+
 ## v0.1.0
 
 The first tagged release: every module of github.com/xo-lang/azure is

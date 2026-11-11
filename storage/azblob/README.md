@@ -18,6 +18,8 @@ What it does:
   headers, metadata, tags, delete, `download_stream`,
   `download_buffer`, `download_file`), `BlockBlobClient` (`upload`,
   `stage_block`, `commit_block_list`, `upload_buffer`, `upload_file`),
+  `AppendBlobClient` (`create`, `append_block`, `append_block_from_url`,
+  `seal`; the other blob calls through `blob_client()`),
   and `BlobLeaseClient` and `ContainerLeaseClient`
   (acquire, break, change, release, renew). Each is built from a token,
   a Shared Key, no credential, or a connection string, as Go's are, and
@@ -66,8 +68,11 @@ Where it differs from Go v1.8.3:
   `with_version_id`, a blob SAS URL, structured message (transactional CRC64) downloads,
   the container and blob pagers on the new clients, the block blob
   client's other calls (`get_block_list`, `upload_stream`,
-  `upload_blob_from_url`, `stage_block_from_url`, ...), the append blob
-  and page blob clients, batch, and checksummed uploads.
+  `upload_blob_from_url`, `stage_block_from_url`, ...), the page blob
+  client, batch, and checksummed uploads and appends
+  (`TransactionalValidation`, `SourceContentValidation`). The append
+  blob client's forwarders to the blob calls (`delete`, `set_tags`,
+  ...) are reached through `blob_client()`.
 - Go names that are Xo keywords: none in what is ported (the lease
   calls are Go's `AcquireLease` to `RenewLease`, so `break_lease` is
   Go's own name).

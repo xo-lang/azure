@@ -1,0 +1,144 @@
+// Append blob calls against a fake that answers as the Go program's fake
+// does (appendvectors_test.xo): a create a 201 with a Content-MD5, an
+// ETag, a Last-Modified, a version ID and the encryption headers; an
+// append block a 201 with its offset, the committed block count, the
+// checksums and the encryption headers; a seal a 200 with
+// `x-ms-blob-sealed`; a blob named "denied" a 403.
+
+use std/http
+use std/testing
+
+fn append_answer(req: http.Request) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  hs = hs + [("ETag", "\"0x8D2\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")]
+  let enc = [("x-ms-request-server-encrypted", "true"), ("x-ms-encryption-key-sha256", "k256"), ("x-ms-encryption-scope", "scope1")]
+  match req.url.query.get("comp") ?? "" {
+    "seal" => with_hs(http.empty(200), hs + [("x-ms-blob-sealed", "true")])
+    "appendblock" => with_hs(http.empty(201), hs + enc + [("x-ms-blob-append-offset", "5"), ("x-ms-blob-committed-block-count", "3"), ("x-ms-content-crc64", "CQk="), ("Content-MD5", "AQID"), ("x-ms-structured-body", "XSM/1.0; properties=crc64")])
+    _ => with_hs(http.empty(201), hs + enc + [("Content-MD5", "AQID"), ("x-ms-version-id", "v2")])
+  }
+}
+
+fn serve_append(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    log_request(req, log)
+    append_answer(req)
+  }
+  for p in ["/{a}/{b}", "/{a}/{b}/{c}"] {
+    net.handle("PUT ${BEP}${p}", h)
+  }
+  log
+}
+
+fn create_dump(x: CreateAppendBlobResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.q("ContentMD5", x.content_md5)
+  d.s("ETag", x.etag)
+  d.s("EncryptionKeySHA256", x.encryption_key_sha256)
+  d.s("EncryptionScope", x.encryption_scope)
+  d.b("IsServerEncrypted", x.is_server_encrypted)
+  d.t("LastModified", x.last_modified)
+  d.s("VersionID", x.version_id)
+  d
+}
+
+fn append_dump(r: Response, offset: Str?, count: Int?, crc: Bytes?, md5: Bytes?, etag: Str?, key: Str?, scope: Str?, enc: Bool?, lm: Time?) -> Dump {
+  var d = Dump{}
+  d.r(r)
+  d.s("BlobAppendOffset", offset)
+  d.i("BlobCommittedBlockCount", count)
+  d.q("ContentCRC64", crc)
+  d.q("ContentMD5", md5)
+  d.s("ETag", etag)
+  d.s("EncryptionKeySHA256", key)
+  d.s("EncryptionScope", scope)
+  d.b("IsServerEncrypted", enc)
+  d.t("LastModified", lm)
+  d
+}
+
+fn block_dump(x: AppendBlockResponse) -> Dump {
+  var d = append_dump(x.response, x.blob_append_offset, x.blob_committed_block_count, x.content_crc64, x.content_md5, x.etag, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, x.last_modified)
+  d.s("StructuredBodyType", x.structured_body_type)
+  d
+}
+
+fn from_url_dump(x: AppendBlockFromURLResponse) -> Dump {
+  append_dump(x.response, x.blob_append_offset, x.blob_committed_block_count, x.content_crc64, x.content_md5, x.etag, x.encryption_key_sha256, x.encryption_scope, x.is_server_encrypted, x.last_modified)
+}
+
+fn seal_dump(x: SealAppendBlobResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ETag", x.etag)
+  d.b("IsSealed", x.is_sealed)
+  d.t("LastModified", x.last_modified)
+  d
+}
+
+fn append_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_append(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let svc = new_service_client_with_shared_key_credential(net, clock, rand, "${BEP}/", cred, go_options(BDATE))
+  let c = svc.new_container_client("c1")
+  let ab = c.new_append_blob_client("log.txt")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  let when = at("2026-11-01T02:03:04.5Z")
+  let ac = AccessConditions{lease_id: Some("l1"), if_match: Some("\"e1\""), if_none_match: Some("e2"), if_modified_since: Some(when), if_unmodified_since: Some(when), if_tags: Some("t='1'")}
+  let cpk = CPKInfo{encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), encryption_key: Some("a2V5"), encryption_key_sha256: Some("aGFzaA==")}
+  let hh = HTTPHeaders{blob_cache_control: Some("no-cache"), blob_content_disposition: Some("inline"), blob_content_encoding: Some("identity"), blob_content_language: Some("en"), blob_content_md5: Some(b"\x01\x02\x03"), blob_content_type: Some("text/plain")}
+  let pos = AppendPositionAccessConditions{append_position: Some(5), max_size: Some(1024)}
+
+  out = out + add(shown("a1 create with every option", ab.create(CreateAppendBlobOptions{immutability_policy_expiry_time: Some(when), immutability_policy_mode: Some(IMMUTABILITY_POLICY_SETTING_UNLOCKED), legal_hold: Some(true), conditions: ac, http_headers: Some(hh), cpk_info: Some(cpk), encryption_scope: Some("scope1"), tags: Some({"team": "a&b c"}), metadata: Some({"color": "blue"})}), create_dump))
+  out = out + add(shown("a2 create, no options", ab.create(), create_dump))
+  out = out + add(shown("a3 append block with every option", ab.append_block(b"hello", AppendBlockOptions{append_position_conditions: Some(pos), cpk_info: Some(cpk), encryption_scope: Some("scope1"), conditions: ac}), block_dump))
+  out = out + add(shown("a4 append block, empty", ab.append_block(b""), block_dump))
+  let every = AppendBlockFromURLOptions{
+    copy_source_authorization: Some("Bearer tok1"),
+    append_position_conditions: Some(pos),
+    cpk_info: Some(cpk),
+    encryption_scope: Some("scope1"),
+    file_request_intent: Some(FILE_REQUEST_INTENT_BACKUP),
+    source_conditions: Some(SourceModifiedAccessConditions{source_if_match: Some("\"s1\""), source_if_none_match: Some("s2"), source_if_modified_since: Some(when), source_if_unmodified_since: Some(when)}),
+    conditions: ac,
+    range: HTTPRange{offset: 2, count: 10},
+    source_cpk_info: Some(SourceCPKInfo{source_encryption_algorithm: Some(ENCRYPTION_ALGORITHM_AES256), source_encryption_key: Some("c2tleQ=="), source_encryption_key_sha256: Some("c2hhc2g=")}),
+  }
+  out = out + add(shown("a5 append block from URL with every option", ab.append_block_from_url("https://src.example.test/c/s.txt?sv=2026-12-06&sr=b", every), from_url_dump))
+  out = out + add(shown("a6 append block from URL, from an offset", ab.append_block_from_url("https://src.example.test/c/s.txt", AppendBlockFromURLOptions{range: HTTPRange{offset: 7}}), from_url_dump))
+  out = out + add(shown("a7 append block from URL, no options", ab.append_block_from_url("https://src.example.test/c/s.txt"), from_url_dump))
+  out = out + add(shown("a8 seal with every option (no if-tags, no max size)", ab.seal(SealAppendBlobOptions{conditions: ac, append_position_conditions: Some(pos)}), seal_dump))
+  out = out + add(shown("a9 seal, no options", ab.seal(), seal_dump))
+  let d = c.new_append_blob_client("denied")
+  out = out + add(quiet("a10 create, denied", d.create()))
+  out = out + add(quiet("a11 append block, denied", d.append_block(b"x")))
+  out = out + add(quiet("a12 seal, denied", d.seal()))
+  let cs = new_append_blob_client_from_connection_string(net, clock, rand, "DefaultEndpointsProtocol=http;AccountName=acct1;AccountKey=${BKEY};BlobEndpoint=${BEP}/;", "c2", "dir/a b.txt", go_options(BDATE))?
+  out = out + add(shown("a13 append block, from a connection string", cs.append_block(b"line\n"), block_dump))
+  Ok(out + drain(log))
+}
+
+test "append blob calls send what Go sends and read what Go reads" {
+  let got = append_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < APPEND_OUTPUT.len() && got[i] != APPEND_OUTPUT[i] {
+      expect(got[i]) == APPEND_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == APPEND_OUTPUT.len()
+}
+
+test "an append blob client shares its container's pipeline and names the blob as one segment" {
+  let c = new_container_client_with_no_credential(os.net, os.clock, os.rand, "${BEP}/c1?sv=x", go_options(""))
+  // as the block blob client's, whose URLs are checked against Go's
+  expect(c.new_append_blob_client("a b/c").url) == c.new_block_blob_client("a b/c").url
+  expect(c.new_append_blob_client("x").blob_client().url) == c.new_blob_client("x").url
+}
