@@ -7,6 +7,12 @@ its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
 ## Unreleased
 
+Generator: a Go module of autorest.go's zz_generated_ era writes a
+MarshalJSON for some models only (the row's `json_marshal_models`, from
+Go's code by codegen/gorows); the others encode in Go's struct order,
+REQUIRED fields, then the others, then READ-ONLY ones, each by Go name.
+armmachinelearningservices v1.0.1 is Go-verified (330 of 331).
+
 Generator: readme.go.md's `where-operation` with `$.parameters[N] =
 {...}` replaces that operation's parameter, and an autorest module's
 inline subscriptionId (not a $ref to a file's parameters) is the

@@ -30,6 +30,8 @@ import (
 
 const prefix = "github.com/Azure/azure-sdk-for-go/sdk/"
 
+var reMarshal = regexp.MustCompile(`(?m)^func \(\w+ \*?(\w+)\) MarshalJSON\(`)
+
 var (
 	reMajor   = regexp.MustCompile(`/v\d+$`)
 	reConst   = regexp.MustCompile(`(?m)^\s*(\w+)(?:\s+string)?\s*=\s*"([^"]*)"`)
@@ -52,6 +54,7 @@ var (
 type row struct {
 	Dir, Spec, ReadmeTag, OpenAPI, Commit, GoModule, GoVersion                  string
 	OpenAPIMore                                                                 []string
+	JSONMarshalModels                                                           []string
 	UTC, Seal, AcceptAll, QueryPlus, PutBodyInOptions, RawNextLink, StructOrder bool
 	SpanErrors                                                                  string
 }
@@ -130,6 +133,17 @@ func derive(modPath, version, dir string) row {
 	// autorest.go before models_serde.go wrote no MarshalJSON: a model's
 	// JSON is encoding/json's, in struct order (armworkloadmonitor 0.5.1)
 	r.StructOrder = strings.HasPrefix(rel, "resourcemanager/") && s != "" && !strings.Contains(s, "MarshalJSON")
+	// autorest.go of the zz_generated_ files (about 2021 to mid 2022)
+	// wrote MarshalJSON for some models only; the others are
+	// encoding/json's, in struct order (armmachinelearningservices
+	// 1.0.1): the row names the ones with a MarshalJSON
+	if strings.HasPrefix(rel, "resourcemanager/") && exists(filepath.Join(dir, "zz_generated_models_serde.go")) {
+		for _, m := range reMarshal.FindAllStringSubmatch(read(filepath.Join(dir, "zz_generated_models_serde.go")), -1) {
+			r.JSONMarshalModels = append(r.JSONMarshalModels, m[1])
+		}
+		sort.Strings(r.JSONMarshalModels)
+		r.StructOrder = true
+	}
 	// which errors a method's span records (decision 0013): none
 	// without spans; "all" when the generated code assigns a status or
 	// decode error to the deferred span's err (autorest.go and
@@ -553,6 +567,13 @@ func format(r row) string {
 	}
 	if r.StructOrder {
 		out = append(out, "struct_order_json = true")
+	}
+	if len(r.JSONMarshalModels) > 0 {
+		var qs []string
+		for _, m := range r.JSONMarshalModels {
+			qs = append(qs, fmt.Sprintf("%q", m))
+		}
+		out = append(out, "json_marshal_models = ["+strings.Join(qs, ", ")+"]")
 	}
 	if r.SpanErrors != "" {
 		out = append(out, q("span_errors", r.SpanErrors))

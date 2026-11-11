@@ -198,6 +198,13 @@ response type equal, except armkeyvault's `Secret`, which is
   v2; armresources v4 came from an older emitter that keeps the
   offset), so they are `azcore.DateTimeUTC`, which reads as
   `azcore.DateTime` and writes UTC.
+- `struct_order_json` in a services.toml row: Go's models have no
+  MarshalJSON, so encoding/json writes them in struct order: REQUIRED
+  fields, then the others, then READ-ONLY ones, each by Go name. With
+  `json_marshal_models` (gorows, for a Go module of autorest.go's
+  `zz_generated_` era: armmachinelearningservices 1.0.1) only the models
+  not in that list are; the listed ones are in wire-name order, as
+  their MarshalJSON's populate calls are.
 - `span_errors` in a services.toml row (codegen/gorows, decision 0013):
   each method opens Go's `<Client>.<Method>` span, each pager and
   poller Go's own; "all" records every error a method returns in its
