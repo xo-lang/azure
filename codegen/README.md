@@ -301,6 +301,9 @@ response type equal, except armkeyvault's `Secret`, which is
   only a binary type sends no `Accept` for its error schema alone.
 - Query parameters are set with `runtime.with_query`, so a query the
   joined URL already has is kept, as Go's `URL.Query()` keeps it.
+  api-version is one of them even when the spec marks it
+  `x-ms-skip-url-encoding` (armstorsimple8000series): autorest.go sets
+  it through `reqQP.Set` whatever the extension says.
 - A name Xo predeclares gets `Model` (`Secret` is `SecretModel`); a
   response's field keeps Go's embedded name (`.secret`).
 - A Go type with a lower case name (a TypeSpec `@@clientName` to

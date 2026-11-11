@@ -7,6 +7,11 @@ its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
 ## Unreleased
 
+Generator: api-version is always set through the encoded query, as
+autorest.go sets it, even when the spec marks it x-ms-skip-url-encoding
+(armstorsimple8000series sent `?&api-version=`); armstorsimple8000series
+v1.2.0 is Go-verified (328 of 331).
+
 Generator: readme.go.md's `rename-operation` and operationId prefix
 replaces (`$["operationId"].replace("X_", "Y_")`) are applied:
 armmediaservices v3.4.1 is generated and Go-verified (327), and
