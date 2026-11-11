@@ -1,0 +1,320 @@
+// The service client's container listing and calls, and blob search by
+// tags on the service and container clients, as azblob v1.8.3's
+// service.Client (NewListContainersPager, CreateContainer,
+// DeleteContainer, RestoreContainer, FilterBlobs, GetStatistics,
+// GetUserDelegationCredential) and container.Client.FilterBlobs (MIT,
+// Copyright (c) Microsoft Corporation; NOTICE.md). The XML is read by
+// listblobs.xo's rules (Go's encoding/xml).
+
+use std/http
+use std/xml
+use github.com/xo-lang/azure/azcore
+use github.com/xo-lang/azure/policy
+use github.com/xo-lang/azure/runtime
+use github.com/xo-lang/azure/storage/azblob/exported
+
+// List containers.
+
+/// What a container listing includes (service.ListContainersInclude).
+pub struct ListContainersInclude {
+  pub metadata: Bool = false
+  pub deleted: Bool = false
+  pub system: Bool = false
+}
+
+pub struct ListContainersOptions {
+  pub include: ListContainersInclude = ListContainersInclude{}
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub prefix: Str? = None
+}
+
+/// A listed container's properties (Go's service.ContainerProperties).
+pub struct ContainerItemProperties {
+  pub etag: Str? = None
+  pub last_modified: Time? = None
+  pub default_encryption_scope: Str? = None
+  pub deleted_time: Time? = None
+  pub has_immutability_policy: Bool? = None
+  pub has_legal_hold: Bool? = None
+  pub is_immutable_storage_with_versioning_enabled: Bool? = None
+  pub lease_duration: Str? = None
+  pub lease_state: Str? = None
+  pub lease_status: Str? = None
+  pub prevent_encryption_scope_override: Bool? = None
+  pub public_access: Str? = None
+  pub remaining_retention_days: Int? = None
+}
+
+/// A listed container (Go's service.ContainerItem).
+pub struct ContainerItemInfo {
+  pub name: Str? = None
+  pub properties: ContainerItemProperties? = None
+  pub deleted: Bool? = None
+  /// Keys lowercased, as Go reads them.
+  pub metadata: Map[Str, Str]? = None
+  pub version: Str? = None
+}
+
+/// One page of containers (service.ListContainersResponse).
+pub struct ListContainersResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub service_endpoint: Str? = None
+  pub marker: Str? = None
+  pub max_results: Int? = None
+  pub next_marker: Str? = None
+  pub prefix: Str? = None
+  /// Every `<Containers>`'s containers (Go's ContainerItems, never nil
+  /// in its dump: an empty list when there are none).
+  pub containers: List[ContainerItemInfo] = []
+}
+
+fn container_properties_of(e: xml.Element, prev: ContainerItemProperties?) -> ContainerItemProperties? ! Str {
+  var p = prev
+  for c in e.children_named("Properties") {
+    let o = p ?? ContainerItemProperties{}
+    p = Some(ContainerItemProperties{
+      etag: gx_str(c, "Etag", o.etag),
+      last_modified: gx_time(c, "Last-Modified", o.last_modified)?,
+      default_encryption_scope: gx_str(c, "DefaultEncryptionScope", o.default_encryption_scope),
+      deleted_time: gx_time(c, "DeletedTime", o.deleted_time)?,
+      has_immutability_policy: gx_bool(c, "HasImmutabilityPolicy", o.has_immutability_policy)?,
+      has_legal_hold: gx_bool(c, "HasLegalHold", o.has_legal_hold)?,
+      is_immutable_storage_with_versioning_enabled: gx_bool(c, "ImmutableStorageWithVersioningEnabled", o.is_immutable_storage_with_versioning_enabled)?,
+      lease_duration: gx_str(c, "LeaseDuration", o.lease_duration),
+      lease_state: gx_str(c, "LeaseState", o.lease_state),
+      lease_status: gx_str(c, "LeaseStatus", o.lease_status),
+      prevent_encryption_scope_override: gx_bool(c, "DenyEncryptionScopeOverride", o.prevent_encryption_scope_override)?,
+      public_access: gx_str(c, "PublicAccess", o.public_access),
+      remaining_retention_days: gx_int(c, "RemainingRetentionDays", 32, o.remaining_retention_days)?,
+    })
+  }
+  Ok(p)
+}
+
+fn container_item_of(e: xml.Element) -> ContainerItemInfo ! Str {
+  Ok(ContainerItemInfo{
+    name: gx_str(e, "Name", None),
+    properties: container_properties_of(e, None)?,
+    deleted: gx_bool(e, "Deleted", None)?,
+    metadata: gx_meta(e, "Metadata", None),
+    version: gx_str(e, "Version", None),
+  })
+}
+
+fn list_containers_of(resp: http.Response) -> ListContainersResponse ! Str {
+  let doc = list_doc(resp)?
+  var items: List[ContainerItemInfo] = []
+  for cs in doc.children_named("Containers") {
+    for c in cs.children_named("Container") {
+      items.push(container_item_of(c)?)
+    }
+  }
+  Ok(ListContainersResponse{
+    response: response_of(resp),
+    content_type: r_str(resp, "Content-Type"),
+    service_endpoint: doc.attr("ServiceEndpoint"),
+    marker: gx_str(doc, "Marker", None),
+    max_results: gx_int(doc, "MaxResults", 32, None)?,
+    next_marker: gx_str(doc, "NextMarker", None),
+    prefix: gx_str(doc, "Prefix", None),
+    containers: items,
+  })
+}
+
+/// The account's containers, a page at a time
+/// (service.Client.NewListContainersPager).
+pub fn (s: ServiceClient[fx]) new_list_containers_pager(options: ListContainersOptions = ListContainersOptions{}) -> runtime.Pager[ListContainersResponse, fx] {
+  let o = options
+  var inc: List[Str] = []
+  if o.include.deleted { inc.push("deleted") }
+  if o.include.metadata { inc.push("metadata") }
+  if o.include.system { inc.push("system") }
+  let iq = if inc.is_empty() { [] } else { [("include", inc.join(","))] }
+  let q = [("comp", "list")] + iq + q_str("marker", o.marker) + q_str("maxresults", o.max_results.map(fn(n: Int) -> Str { "${n}" })) + q_str("prefix", o.prefix)
+  let first = policy.Request{method: "GET", url: with_query(s.url, q), headers: [("Accept", "application/xml"), ("x-ms-version", SERVICE_VERSION)]}
+  runtime.new_pager_with(s.core.pipeline, first, list_containers_of, fn(prev: policy.Request, page: ListContainersResponse) -> policy.Request? { next_by_marker(prev, page.next_marker) })
+}
+
+// Container calls by name.
+
+/// Creates the container `container_name` (service.Client.CreateContainer).
+pub fn (s: ServiceClient[fx]) create_container(container_name: Str, options: CreateContainerOptions = CreateContainerOptions{}) -> ETagResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  s.new_container_client(container_name).create(options)
+}
+
+/// Deletes the container `container_name` (service.Client.DeleteContainer).
+pub fn (s: ServiceClient[fx]) delete_container(container_name: Str, options: DeleteContainerOptions = DeleteContainerOptions{}) -> Response ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  s.new_container_client(container_name).delete(options)
+}
+
+/// Restores a soft-deleted container (service.Client.RestoreContainer).
+pub fn (s: ServiceClient[fx]) restore_container(deleted_container_name: Str, deleted_container_version: Str) -> Response ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  s.new_container_client(deleted_container_name).restore(deleted_container_version)
+}
+
+// Filter blobs.
+
+pub struct FilterBlobsOptions {
+  pub marker: Str? = None
+  pub max_results: Int? = None
+}
+
+/// A blob a tag search found (Go's FilterBlobItem).
+pub struct FilterBlobItem {
+  pub container_name: Str? = None
+  pub name: Str? = None
+  pub is_current_version: Bool? = None
+  pub tags: List[BlobTag]? = None
+  pub version_id: Str? = None
+}
+
+/// A tag search's answer (Go's FilterBlobsResponse with its
+/// FilterBlobSegment).
+pub struct FilterBlobsResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub service_endpoint: Str? = None
+  pub where: Str? = None
+  pub next_marker: Str? = None
+  pub blobs: List[FilterBlobItem] = []
+}
+
+fn filter_blobs_of(resp: http.Response) -> FilterBlobsResponse ! Str {
+  let doc = list_doc(resp)?
+  var items: List[FilterBlobItem] = []
+  for bs in doc.children_named("Blobs") {
+    for b in bs.children_named("Blob") {
+      items.push(FilterBlobItem{container_name: gx_str(b, "ContainerName", None), name: gx_str(b, "Name", None), is_current_version: gx_bool(b, "IsCurrentVersion", None)?, tags: tags_of(b), version_id: gx_str(b, "VersionId", None)})
+    }
+  }
+  Ok(FilterBlobsResponse{
+    response: response_of(resp),
+    content_type: r_str(resp, "Content-Type"),
+    service_endpoint: doc.attr("ServiceEndpoint"),
+    where: gx_str(doc, "Where", None),
+    next_marker: gx_str(doc, "NextMarker", None),
+    blobs: items,
+  })
+}
+
+fn filter_blobs_call[fx: Effects](core: Core[fx], query: List[(Str, Str)], where: Str, o: FilterBlobsOptions) -> FilterBlobsResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let q = query + q_str("marker", o.marker) + q_str("maxresults", o.max_results.map(fn(n: Int) -> Str { "${n}" })) + [("where", where)]
+  let resp = core.send(Call{method: "GET", query: q, accept: Some("application/xml"), ok: [200]})?
+  filter_blobs_of(resp) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+/// The account's blobs whose tags match `where`, such as
+/// `"team"='a' AND "env"='dev'` (service.Client.FilterBlobs).
+pub fn (s: ServiceClient[fx]) filter_blobs(where: Str, options: FilterBlobsOptions = FilterBlobsOptions{}) -> FilterBlobsResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  filter_blobs_call(s.core, [("comp", "blobs")], where, options)
+}
+
+/// The container's blobs whose tags match `where`
+/// (container.Client.FilterBlobs).
+pub fn (c: ContainerClient[fx]) filter_blobs(where: Str, options: FilterBlobsOptions = FilterBlobsOptions{}) -> FilterBlobsResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  filter_blobs_call(c.core, [("comp", "blobs"), ("restype", "container")], where, options)
+}
+
+// Statistics.
+
+/// The secondary's replication state (service.GetStatisticsResponse with
+/// its GeoReplication): `geo_replication` None when the answer has none.
+pub struct GetStatisticsResponse {
+  pub response: Response
+  pub content_type: Str? = None
+  pub geo_replication: GeoReplication? = None
+}
+
+pub struct GeoReplication {
+  pub last_sync_time: Time? = None
+  /// `live`, `bootstrap` or `unavailable`.
+  pub status: Str? = None
+}
+
+fn statistics_of(resp: http.Response) -> GetStatisticsResponse ! Str {
+  let doc = list_doc(resp)?
+  var geo: GeoReplication? = None
+  for g in doc.children_named("GeoReplication") {
+    let o = geo ?? GeoReplication{}
+    geo = Some(GeoReplication{last_sync_time: gx_time(g, "LastSyncTime", o.last_sync_time)?, status: gx_str(g, "Status", o.status)})
+  }
+  Ok(GetStatisticsResponse{response: response_of(resp), content_type: r_str(resp, "Content-Type"), geo_replication: geo})
+}
+
+/// The replication to the secondary, asked of the account's secondary
+/// endpoint (service.Client.GetStatistics).
+pub fn (s: ServiceClient[fx]) get_statistics() -> GetStatisticsResponse ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let resp = s.core.send(Call{method: "GET", query: [("comp", "stats"), ("restype", "service")], accept: Some("application/xml"), ok: [200]})?
+  statistics_of(resp) ?? e => Err(azcore.CallErr.Decode(e))
+}
+
+// User delegation key.
+
+/// The key's validity (Go's KeyInfo): times in ISO 8601, such as
+/// `2026-11-05T00:00:00Z`.
+pub struct KeyInfo {
+  pub expiry: Str? = None
+  pub start: Str? = None
+  /// The tenant of the user the key is for (`DelegatedUserTid`).
+  pub delegated_user_tenant_id: Str? = None
+}
+
+fn key_info_xml(k: KeyInfo) -> Str {
+  var b = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<KeyInfo>"
+  if let Some(v) = k.expiry { b = b + "<Expiry>${xml.escape(v)}</Expiry>" }
+  if let Some(v) = k.start { b = b + "<Start>${xml.escape(v)}</Start>" }
+  if let Some(v) = k.delegated_user_tenant_id { b = b + "<DelegatedUserTid>${xml.escape(v)}</DelegatedUserTid>" }
+  b + "</KeyInfo>"
+}
+
+/// An ISO 8601 time as datetime.RFC3339 reads one: a time without a zone
+/// is UTC; empty is unset.
+fn gx_3339(e: xml.Element, name: Str) -> Time? ! Str {
+  let c = last_child(e, name) ?? return Ok(None)
+  let raw = own_text(c)
+  if raw == "" {
+    return Ok(None)
+  }
+  let up = raw.to_upper().replace(" ", "T")
+  let has_zone = up.ends_with("Z") || {
+    let tail = if up.len() > 6 { up[up.len() - 6..up.len()] } else { "" }
+    (tail.starts_with("+") || tail.starts_with("-")) && tail[3..4] == ":"
+  }
+  let text = if has_zone { up } else { "${up}Z" }
+  // Go's zero time, which Go leaves unset (and Time cannot hold)
+  if text.starts_with("0001-01-01T00:00:00") && text[19..].trim_start_chars(".0") == "Z" {
+    return Ok(None)
+  }
+  match rfc3339(text) {
+    Some(t) => Ok(Some(t))
+    None => Err("parsing time ${go_quote(raw)}")
+  }
+}
+
+fn user_delegation_key_of(resp: http.Response) -> exported.UserDelegationKey ! Str {
+  let doc = list_doc(resp)?
+  Ok(exported.UserDelegationKey{
+    signed_oid: gx_str(doc, "SignedOid", None) ?? "",
+    signed_tid: gx_str(doc, "SignedTid", None) ?? "",
+    signed_start: gx_3339(doc, "SignedStart")? ?? Time.UNIX_EPOCH,
+    signed_expiry: gx_3339(doc, "SignedExpiry")? ?? Time.UNIX_EPOCH,
+    signed_service: gx_str(doc, "SignedService", None) ?? "",
+    signed_version: gx_str(doc, "SignedVersion", None) ?? "",
+    value: Secret.new(gx_str(doc, "Value", None) ?? ""),
+    signed_delegated_user_tenant_id: gx_str(doc, "SignedDelegatedUserTid", None) ?? "",
+  })
+}
+
+/// A credential for user delegation SAS (`sas` values'
+/// sign_with_user_delegation): the service's key for the token's user,
+/// with the account named by the URL's first host label
+/// (service.Client.GetUserDelegationCredential). The client must use a
+/// token credential.
+pub fn (s: ServiceClient[fx]) get_user_delegation_credential(info: KeyInfo) -> exported.UserDelegationCredential ! azcore.CallErr uses (net.dial, clock, rand, fx) {
+  let up = parse_url(s.url) ?? e => return Err(azcore.CallErr.InvalidInput(e))
+  let resp = s.core.send(Call{method: "POST", query: [("comp", "userdelegationkey"), ("restype", "service")], accept: Some("application/xml"), body: Some(key_info_xml(info).bytes()), ok: [200]})?
+  let key = user_delegation_key_of(resp) ?? e => return Err(azcore.CallErr.Decode(e))
+  Ok(exported.new_user_delegation_credential(up.host.split(".")[0], key))
+}

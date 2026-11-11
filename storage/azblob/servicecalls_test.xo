@@ -1,0 +1,193 @@
+// The service client's container listing, container calls, tag search
+// (also the container client's), statistics and user delegation
+// credential against a fake that answers as the Go program's fake does
+// (servicecallsvectors_test.xo): the XML in SERVICE_CALLS_BODIES by the
+// host's first label, the call and its key, a 403 under "denied".
+
+use std/http
+use std/testing
+use github.com/xo-lang/azure/storage/azblob/sas
+
+const SVC_HOSTS: List[Str] = ["acct1", "stats1", "stats2", "stats3", "stats4", "stats5", "key1", "key2", "key3"]
+
+fn svc_calls_answer(req: http.Request) -> http.Response {
+  var hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+  if req.url.path.contains("denied") {
+    return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+  }
+  let comp = req.url.query.get("comp") ?? ""
+  let host = req.url.host.split(".")[0]
+  if comp == "list" || comp == "blobs" || comp == "stats" || comp == "userdelegationkey" {
+    var key = ""
+    if comp == "list" {
+      key = "${req.url.query.get("prefix") ?? ""}@${req.url.query.get("marker") ?? ""}"
+    } else if comp == "blobs" {
+      let parts = (req.url.query.get("where") ?? "").split_n("=", 2)
+      key = (parts.last() ?? "").trim_chars("'")
+    }
+    var body = ""
+    for (k, b) in SERVICE_CALLS_BODIES {
+      if k == "${host}:${comp}:${key}" {
+        body = b
+      }
+    }
+    return with_hs(http.text(200, body), hs + [("Content-Type", "application/xml")])
+  }
+  if req.method == "PUT" && comp == "undelete" {
+    return with_hs(http.empty(201), hs)
+  }
+  if req.method == "PUT" {
+    return with_hs(http.empty(201), hs + [("ETag", "\"0x8D9\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")])
+  }
+  with_hs(http.empty(202), hs)
+}
+
+fn serve_svc_calls(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  let h = fn(req: http.Request) -> http.Response {
+    // the Go program logs the host before the path
+    let one = Mutex[List[Str]].new([])
+    log_request(req, one)
+    let lines = drain(one)
+    let first = lines[0].replace("REQ ${req.method} ", "REQ ${req.method} ${req.url.host}")
+    log.with(fn(var l: List[Str]) { l = l + [first] + lines[1..lines.len()] })
+    svc_calls_answer(req)
+  }
+  for host in SVC_HOSTS {
+    for m in ["GET", "POST"] {
+      net.handle("${m} http://${host}.blob.example.test/{$}", h)
+    }
+  }
+  for m in ["GET", "PUT", "DELETE"] {
+    net.handle("${m} http://acct1.blob.example.test/{c}", h)
+  }
+  log
+}
+
+fn (var d: Dump) cprops(p: Str, x: ContainerItemProperties?) {
+  let o = x ?? return
+  d.s("${p}.DefaultEncryptionScope", o.default_encryption_scope)
+  d.t("${p}.DeletedTime", o.deleted_time)
+  d.s("${p}.ETag", o.etag)
+  d.b("${p}.HasImmutabilityPolicy", o.has_immutability_policy)
+  d.b("${p}.HasLegalHold", o.has_legal_hold)
+  d.b("${p}.IsImmutableStorageWithVersioningEnabled", o.is_immutable_storage_with_versioning_enabled)
+  d.t("${p}.LastModified", o.last_modified)
+  d.s("${p}.LeaseDuration", o.lease_duration)
+  d.s("${p}.LeaseState", o.lease_state)
+  d.s("${p}.LeaseStatus", o.lease_status)
+  d.b("${p}.PreventEncryptionScopeOverride", o.prevent_encryption_scope_override)
+  d.s("${p}.PublicAccess", o.public_access)
+  d.i("${p}.RemainingRetentionDays", o.remaining_retention_days)
+}
+
+fn list_containers_dump(x: ListContainersResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.lines.push("ContainerItems.len=${x.containers.len()}")
+  for (i, c) in x.containers.indexed() {
+    let p = "ContainerItems[${i}]"
+    d.b("${p}.Deleted", c.deleted)
+    d.m("${p}.Metadata", c.metadata)
+    d.s("${p}.Name", c.name)
+    d.cprops("${p}.Properties", c.properties)
+    d.s("${p}.Version", c.version)
+  }
+  d.s("ContentType", x.content_type)
+  d.s("Marker", x.marker)
+  d.i("MaxResults", x.max_results)
+  d.s("NextMarker", x.next_marker)
+  d.s("Prefix", x.prefix)
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d
+}
+
+fn filter_dump(x: FilterBlobsResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.lines.push("Blobs.len=${x.blobs.len()}")
+  for (i, b) in x.blobs.indexed() {
+    let p = "Blobs[${i}]"
+    d.s("${p}.ContainerName", b.container_name)
+    d.b("${p}.IsCurrentVersion", b.is_current_version)
+    d.s("${p}.Name", b.name)
+    if let Some(ts) = b.tags {
+      d.lines.push("${p}.Tags.BlobTagSet.len=${ts.len()}")
+      for (j, t) in ts.indexed() {
+        d.s("${p}.Tags.BlobTagSet[${j}].Key", t.key)
+        d.s("${p}.Tags.BlobTagSet[${j}].Value", t.value)
+      }
+    }
+    d.s("${p}.VersionID", b.version_id)
+  }
+  d.s("ContentType", x.content_type)
+  d.s("NextMarker", x.next_marker)
+  d.s("ServiceEndpoint", x.service_endpoint)
+  d.s("Where", x.where)
+  d
+}
+
+fn stats_dump(x: GetStatisticsResponse) -> Dump {
+  var d = Dump{}
+  d.r(x.response)
+  d.s("ContentType", x.content_type)
+  if let Some(g) = x.geo_replication {
+    d.t("GeoReplication.LastSyncTime", g.last_sync_time)
+    d.s("GeoReplication.Status", g.status)
+  }
+  d
+}
+
+fn svc_calls_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_svc_calls(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let client = fn(host: Str) -> ServiceClient { new_service_client_with_shared_key_credential(net, clock, rand, "http://${host}.blob.example.test/", cred, go_options(BDATE)) }
+  let s = client("acct1")
+  var out: List[Str] = []
+  let add = fn(lines: List[Str]) -> List[Str] { drain(log) + lines }
+  out = out + list_pages("v1 containers with every option", s.new_list_containers_pager(ListContainersOptions{include: ListContainersInclude{metadata: true, deleted: true, system: true}, max_results: Some(2)}), list_containers_dump, log)
+  out = out + list_pages("v2 containers, none", s.new_list_containers_pager(ListContainersOptions{prefix: Some("none"), include: ListContainersInclude{metadata: true}}), list_containers_dump, log)
+  out = out + list_pages("v3 containers, a bad bool", s.new_list_containers_pager(ListContainersOptions{prefix: Some("bad")}), list_containers_dump, log)
+  out = out + add(shown("v4 create container", s.create_container("made", CreateContainerOptions{metadata: Some({"k": "v"})}), etag_dump))
+  out = out + add(shown("v5 delete container", s.delete_container("gone"), resp_dump))
+  out = out + add(shown("v6 restore container", s.restore_container("gone", "01D6"), resp_dump))
+  out = out + add(decode_shown("v7 service filter blobs with every option", s.filter_blobs("\"team\"='a'", FilterBlobsOptions{marker: Some("n1"), max_results: Some(5)}), filter_dump))
+  out = out + add(decode_shown("v8 container filter blobs, none", s.new_container_client("c1").filter_blobs("x='none'"), filter_dump))
+  out = out + add(decode_shown("v9 filter blobs, a bad bool", s.filter_blobs("x='bad'").map(fn(_: FilterBlobsResponse) -> () { () }), fn(_: ()) -> Dump { Dump{} }))
+  out = out + add(quiet("v10 container filter blobs, denied", s.new_container_client("denied").filter_blobs("x='a'")))
+  for i in 1..6 {
+    let r = client("stats${i}").get_statistics()
+    out = out + add(decode_shown("v${10 + i} statistics ${i}", r, stats_dump))
+    if let Ok(x) = r {
+      out.push("  GeoReplication set: ${x.geo_replication.is_some()}")
+    }
+  }
+  let infos = [KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-06T00:00:00Z")}, KeyInfo{start: Some("2026-11-05T00:00:00Z"), expiry: Some("2026-11-06T00:00:00Z"), delegated_user_tenant_id: Some("t<1>")}, KeyInfo{expiry: Some("2026-11-06T00:00:00Z")}]
+  let exp = at("2026-11-05T12:00:00Z")
+  for (i, ki) in infos.indexed() {
+    let name = "v${16 + i} user delegation credential ${i + 1}"
+    let r = client("key${i + 1}").get_user_delegation_credential(ki)
+    out = out + drain(log)
+    match r {
+      Err(Decode(_)) => out = out + ["== ${name}", "  error decode"]
+      Err(e) => out = out + err_lines(name, e)
+      Ok(udc) => {
+        let qp = sas.BlobSignatureValues{version: sas.VERSION, protocol: "https", expiry: Some(exp), permissions: "r", container_name: "c1", blob_name: "b"}.sign_with_user_delegation(udc)?
+        out = out + ["== ${name}", "  sas=${hide_sas("?${qp.encode()}")[1..]}"]
+      }
+    }
+  }
+  Ok(out)
+}
+
+test "the service client's listing, container calls, tag search, statistics and delegation key send what Go sends and read what Go reads" {
+  let got = svc_calls_run(os.net, os.clock, os.rand)?
+  // the first difference, for a readable failure
+  for i in 0..got.len() {
+    if i < SERVICE_CALLS_OUTPUT.len() && got[i] != SERVICE_CALLS_OUTPUT[i] {
+      expect(got[i]) == SERVICE_CALLS_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == SERVICE_CALLS_OUTPUT.len()
+}

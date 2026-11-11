@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `ServiceClient`: `new_list_containers_pager` (`ListContainersInclude`,
+  `ContainerItemInfo`, `ContainerItemProperties`), `create_container`,
+  `delete_container`, `restore_container`, `filter_blobs`,
+  `get_statistics` (`GeoReplication`) and
+  `get_user_delegation_credential` (`KeyInfo`; the account is the URL's
+  first host label, and its key's times are read as Go's
+  datetime.RFC3339, a time without a zone in UTC), and
+  `ContainerClient.filter_blobs` (`FilterBlobItem`). Checked against Go
+  v1.8.3 on a fake service (`servicecallsvectors_test.xo`, 18 cases;
+  the delegation credentials checked by the SAS they sign).
+
 - `ContainerClient.new_list_blobs_flat_pager` and
   `new_list_blobs_hierarchy_pager` (container.Client's, in Go's default
   XML response format; its Apache Arrow format is not ported), with

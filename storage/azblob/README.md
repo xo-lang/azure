@@ -12,10 +12,12 @@ What it does:
   convenience shape, not yet Go's container, blob and block blob
   clients.
 - Go's clients, beside `Client` (which keeps its shape):
-  `ServiceClient` (properties, account info, account SAS URL),
+  `ServiceClient` (properties, account info, account SAS URL, the
+  container listing, container create, delete and restore by name, tag
+  search, statistics, user delegation credential),
   `ContainerClient` (create, delete, restore, properties, metadata,
   access policy, account info, SAS URL, the flat and hierarchy blob
-  listings in Go's default XML format), `BlobClient` (properties, HTTP
+  listings in Go's default XML format, tag search), `BlobClient` (properties, HTTP
   headers, metadata, tags, delete, `download_stream`,
   `download_buffer`, `download_file`, `set_tier`, `undelete`,
   `start_copy_from_url`, `abort_copy_from_url`, `copy_from_url`,
