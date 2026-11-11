@@ -7,6 +7,14 @@ its own CHANGELOG. Release notes: [docs/releases](docs/releases).
 
 ## Unreleased
 
+Generator: readme.go.md's `where-operation` with `$.parameters[N] =
+{...}` replaces that operation's parameter, and an autorest module's
+inline subscriptionId (not a $ref to a file's parameters) is the
+method's, as modelerfour places it: armmobilenetwork v4.1.1's
+PacketCoreControlPlaneVersionsClient.GetBySubscription and
+NewListBySubscriptionPager take it, and the module is Go-verified (329
+of 331).
+
 Generator: api-version is always set through the encoded query, as
 autorest.go sets it, even when the spec marks it x-ms-skip-url-encoding
 (armstorsimple8000series sent `?&api-version=`); armstorsimple8000series

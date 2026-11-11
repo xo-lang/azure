@@ -49,8 +49,18 @@ pub struct OpRename {
   pub prefix: Bool = false
 }
 
+/// `where-operation: OP` with `$.parameters[N] = {...}`: the operation's
+/// N-th parameter replaced (armmobilenetwork's subscriptionId made a
+/// method parameter of two operations).
+pub struct OpParamSet {
+  pub op: Str
+  pub index: Int
+  pub value: json.Value
+}
+
 pub struct Directives {
   pub assigns: List[Assign] = []
+  pub op_params: List[OpParamSet] = []
   pub renames: List[Rename] = []
   pub op_renames: List[OpRename] = []
   /// Directives not applied, as their `where` text.
@@ -78,6 +88,7 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
   let key = regexp.compile("\\[['\"]([^'\"]+)['\"]\\]") ?? e => return Err(e.display())
   let op_where = regexp.compile("^\\$\\.paths\\.\\*\\[\\?\\(@\\.operationId\\.startsWith\\(['\"]([^'\"]+)['\"]\\)\\)\\]$") ?? e => return Err(e.display())
   let op_replace = regexp.compile("\\$\\[['\"]operationId['\"]\\]\\s*=\\s*\\$\\[['\"]operationId['\"]\\]\\.replace\\(['\"]([^'\"]+)['\"],\\s*['\"]([^'\"]+)['\"]\\)") ?? e => return Err(e.display())
+  let op_param = regexp.compile("(?s)^\\s*\\$\\.parameters\\[(\\d+)\\]\\s*=\\s*(\\{.*\\})\\s*;?\\s*$") ?? e => return Err(e.display())
   var out = Directives{}
   var block = ""
   var inside = false
@@ -134,6 +145,18 @@ fn directives(readme_go: Str, tag: Str, go: Bool) -> Directives ! Str {
               if pre != "" && pr[1] == Some(pre) {
                 out.op_renames.push(OpRename{from: pre, to: pr[2] ?? "", prefix: true})
                 n += 1
+              }
+            }
+          }
+          let wo = str_at(Some(d), "where-operation")
+          if wo != "" {
+            if let Some(m) = op_param.captures(tr) {
+              let i = Int.parse(m[1] ?? "") ?? -1
+              if let Ok(v) = json.parse_value(m[2] ?? "") {
+                if i >= 0 {
+                  out.op_params.push(OpParamSet{op: wo, index: i, value: v})
+                  n += 1
+                }
               }
             }
           }
@@ -367,6 +390,52 @@ pub fn apply_op_renames(doc: json.Value, renames: List[OpRename]) -> (json.Value
         }
         _ => ms2.push((method, op))
       }
+    }
+    ps2.push((path, json.Value.Object(ms2)))
+  }
+  (set_at(doc, ["paths"], json.Value.Object(ps2)), n)
+}
+
+/// `doc` with each `where-operation` parameter replacement applied, and
+/// how many it made.
+pub fn apply_op_params(doc: json.Value, sets: List[OpParamSet]) -> (json.Value, Int) {
+  if sets.len() == 0 {
+    return (doc, 0)
+  }
+  let paths = match doc.get("paths") {
+    Some(json.Value.Object(ps)) => ps
+    _ => return (doc, 0)
+  }
+  var n = 0
+  var ps2: List[(Str, json.Value)] = []
+  for (path, item) in paths {
+    let ms = match item {
+      json.Value.Object(ms) => ms
+      other => {
+        ps2.push((path, other))
+        continue
+      }
+    }
+    var ms2: List[(Str, json.Value)] = []
+    for (method, op) in ms {
+      var o = op
+      let id = match op.get("operationId") {
+        Some(json.Value.Str(s)) => s
+        _ => ""
+      }
+      for st in sets {
+        if st.op == id {
+          if let Some(json.Value.List(xs)) = o.get("parameters") {
+            if st.index < xs.len() {
+              var ys = xs
+              ys[st.index] = st.value
+              o = set_at(o, ["parameters"], json.Value.List(ys))
+              n += 1
+            }
+          }
+        }
+      }
+      ms2.push((method, o))
     }
     ps2.push((path, json.Value.Object(ms2)))
   }

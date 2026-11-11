@@ -98,6 +98,13 @@ response type equal, except armkeyvault's `Secret`, which is
   armmediaservices), and a `where: $.paths.*[?(@.operationId.startsWith("X_"))]`
   transform that sets `$["operationId"]` to its `.replace("X_", "Y_")`
   (armvideoanalyzer's `PrivateEndpointConnectionsOperationResults_`).
+- `where-operation: OP` with `$.parameters[N] = {...}` replaces that
+  operation's N-th parameter. In an autorest module a subscriptionId
+  written in the operation itself (not a `$ref` to the file's
+  parameters) is a method parameter, as modelerfour places an inline
+  parameter (armmobilenetwork's `GetBySubscription(ctx, versionName,
+  subscriptionID, ...)`); TypeSpec modules keep it on the client, as
+  Go's emitter does.
 - readme.go.md directives that assign values under `$.definitions.X`
   are applied (armstorage's `CorsRuleAllowedMethodsItem`), scoped by
   `from:`, with `where:` paths into a definition and `delete $["k"]`
