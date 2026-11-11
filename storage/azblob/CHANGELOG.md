@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `BlockBlobClient.set_expiry` and `AppendBlobClient.set_expiry`
+  (`ExpiryType`: `Absolute`, `RelativeToNow`, `RelativeToCreation` in
+  whole milliseconds truncated as Go's, `Never`, the default as Go's nil).
+  Checked against Go v1.8.3 on a fake service (`expiryvectors_test.xo`,
+  10 cases).
+
 - `ServiceClient`: `new_list_containers_pager` (`ListContainersInclude`,
   `ContainerItemInfo`, `ContainerItemProperties`), `create_container`,
   `delete_container`, `restore_container`, `filter_blobs`,

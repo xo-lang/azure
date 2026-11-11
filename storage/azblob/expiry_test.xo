@@ -1,0 +1,67 @@
+// set_expiry on block and append blobs against a fake that answers as
+// the Go program's fake does (expiryvectors_test.xo).
+
+use std/http
+use std/testing
+
+fn serve_expiry(net: testing.FakeNet) -> Mutex[List[Str]] {
+  let log = Mutex[List[Str]].new([])
+  net.handle("PUT http://acct1.blob.example.test/c1/{b}", fn(req: http.Request) -> http.Response {
+    let one = Mutex[List[Str]].new([])
+    log_request(req, one)
+    let lines = drain(one)
+    let first = lines[0].replace("REQ PUT ", "REQ PUT ${req.url.host}")
+    log.with(fn(var l: List[Str]) { l = l + [first] + lines[1..lines.len()] })
+    let hs = [("x-ms-request-id", "r1"), ("x-ms-version", "2026-12-06"), ("Date", BDATE), ("x-ms-client-request-id", "echo-1")]
+    if req.url.path.contains("denied") {
+      return with_hs(http.empty(403), hs + [("x-ms-error-code", "AuthorizationPermissionMismatch")])
+    }
+    if req.url.path.contains("created") {
+      return with_hs(http.empty(201), hs)
+    }
+    with_hs(http.empty(200), hs + [("ETag", "\"0x8DA\""), ("Last-Modified", "Thu, 05 Nov 2026 03:00:00 GMT")])
+  })
+  log
+}
+
+fn expiry_run(net: testing.FakeNet, clock: Clock, rand: Rand) -> List[Str] ! Str uses (net.dial, clock, rand) {
+  let log = serve_expiry(net)
+  let cred = new_shared_key_credential("acct1", BKEY)?
+  let cc = new_service_client_with_shared_key_credential(net, clock, rand, "http://acct1.blob.example.test/", cred, go_options(BDATE)).new_container_client("c1")
+  let bb = cc.new_block_blob_client("b")
+  let ab = cc.new_append_blob_client("a")
+  let cases = [
+    ("absolute in another zone with a fraction", ExpiryType.Absolute(at("2026-12-01T12:08:09Z") + 999999999ns)),
+    ("relative to now", ExpiryType.RelativeToNow(90s)),
+    ("relative to now, a fraction of a millisecond", ExpiryType.RelativeToNow(1500ms + 999999ns)),
+    ("relative to creation, negative", ExpiryType.RelativeToCreation(0s - 1500us)),
+    ("never", ExpiryType.Never),
+  ]
+  var out: List[Str] = []
+  for (i, (name, e)) in cases.indexed() {
+    let r = bb.set_expiry(e)
+    out = out + drain(log) + shown("v${i + 1} block ${name}", r, etag_dump)
+  }
+  let r6 = bb.set_expiry()
+  out = out + drain(log) + shown("v6 block nil", r6, etag_dump)
+  let r7 = ab.set_expiry(ExpiryType.RelativeToCreation(1h))
+  out = out + drain(log) + shown("v7 append relative to creation", r7, etag_dump)
+  let r8 = ab.set_expiry()
+  out = out + drain(log) + shown("v8 append nil", r8, etag_dump)
+  let r9 = cc.new_block_blob_client("denied").set_expiry()
+  out = out + drain(log) + quiet("v9 block denied", r9)
+  let r10 = cc.new_block_blob_client("created").set_expiry()
+  out = out + drain(log) + quiet("v10 block answered 201", r10)
+  Ok(out)
+}
+
+test "set_expiry sends what Go sends and reads what Go reads" {
+  let got = expiry_run(os.net, os.clock, os.rand)?
+  for i in 0..got.len() {
+    if i < EXPIRY_OUTPUT.len() && got[i] != EXPIRY_OUTPUT[i] {
+      expect(got[i]) == EXPIRY_OUTPUT[i]
+      break
+    }
+  }
+  expect(got.len()) == EXPIRY_OUTPUT.len()
+}
